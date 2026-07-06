@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment / secrets
+.env
+.env.local
+*.env
+!*.env.example
+**/.env
+**/.env.local
+**/*.env
+!**/*.env.example
+
+# Personal finance config and runtime state
+**/personal-config.json
+**/owes-config.json
+**/splitwise-groups.json
+**/owes-truth*.json
+**/venmo-truth.json
+**/events.json
+**/reimb-links.json
+**/reimb-suggest.json
+**/recurring-overrides.json
+**/goals.json
+**/bills-paid.json
+**/phantom-seen.json
+**/phantom-log.json
+**/receipts.json
+**/rules.json
+**/account-overrides.json
+**/manual-assets.json
+**/reconciliation.json
+**/receipts/
+
+# Expo / native artifacts
+**/.expo/
+**/dist/
+**/web-build/
+**/expo-env.d.ts
+**/build/
+**/ios/
+**/android/
+
+# Imported statements and logs
+*.csv
+*.log
+.DS_Store
+*.tsbuildinfo

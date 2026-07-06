@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Environment / secrets
+.env
+.env.local
+*.env
+!*.env.example
+
+# Personal config (copy the *.example.json templates and fill in your own)
+personal-config.json
+owes-config.json
+splitwise-groups.json
+
+# Runtime data & snapshots (generated at runtime; never commit)
+owes-truth.json
+venmo-truth.json
+events.json
+reimb-links.json
+reimb-suggest.json
+recurring-overrides.json
+goals.json
+bills-paid.json
+phantom-seen.json
+phantom-log.json
+receipts.json
+rules.json
+account-overrides.json
+manual-assets.json
+reconciliation.json
+receipts/
+
+# Personal reference scripts (not part of the app)
+.reference/
+
+# Imported statements
+*.csv
+
+# Logs & OS cruft
+*.log
+.DS_Store

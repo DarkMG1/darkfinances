@@ -1,0 +1,22 @@
+{
+  "name": "finance-dashboard",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check dataModule.js && node --check server.js",
+    "test": "npm run check"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@actual-app/api": "^26.7.0",
+    "@simplewebauthn/server": "^13.3.2",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "node-cache": "^5.1.2"
+  }
+}

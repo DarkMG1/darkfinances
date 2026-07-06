@@ -1,0 +1,15 @@
+{
+  "name": "darkfinances",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "finance-dashboard",
+    "finance-app"
+  ],
+  "scripts": {
+    "check": "npm run check:dashboard && npm run check:app && npm run check:tools",
+    "check:dashboard": "npm --prefix finance-dashboard test",
+    "check:app": "npm --prefix finance-app run typecheck",
+    "check:tools": "node --check actual-tools/owes-snapshot.js && node --check actual-tools/splitwise-lib.js"
+  }
+}

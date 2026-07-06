@@ -1,0 +1,75 @@
+// Endpoint catalog for the DarkFinances API. Mirrors seanime-tenji's API_ENDPOINTS
+// pattern: each entry carries its path, HTTP method, and a react-query key.
+
+export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE' | 'PUT';
+
+export interface EndpointDef {
+  endpoint: string;
+  method: HttpMethod;
+  key: string;
+}
+
+const def = (endpoint: string, method: HttpMethod, key: string): EndpointDef => ({ endpoint, method, key });
+
+export const API_ENDPOINTS = {
+  ping: def('/api/v1/ping', 'GET', 'ping'),
+  accounts: def('/api/v1/accounts', 'GET', 'accounts'),
+  transactions: def('/api/v1/transactions', 'GET', 'transactions'),
+  spending: def('/api/v1/spending', 'GET', 'spending'),
+  trends: def('/api/v1/trends', 'GET', 'trends'),
+  budgets: def('/api/v1/budgets', 'GET', 'budgets'),
+  setBudget: def('/api/v1/budgets', 'POST', 'setBudget'),
+  reimbursement: def('/api/v1/reimbursement', 'GET', 'reimbursement'),
+  insights: def('/api/v1/insights', 'GET', 'insights'),
+  categories: def('/api/v1/categories', 'GET', 'categories'),
+  recurring: def('/api/v1/recurring', 'GET', 'recurring'),
+  bills: def('/api/v1/bills', 'GET', 'bills'),
+  income: def('/api/v1/income', 'GET', 'income'),
+  search: def('/api/v1/search', 'GET', 'search'),
+  tags: def('/api/v1/tags', 'GET', 'tags'),
+  rules: def('/api/v1/rules', 'GET', 'rules'),
+  manualAssets: def('/api/v1/manual-assets', 'GET', 'manualAssets'),
+  reportCsv: def('/api/v1/report.csv', 'GET', 'reportCsv'),
+  goals: def('/api/v1/goals', 'GET', 'goals'),
+  reimbLinks: def('/api/v1/reimb-links', 'GET', 'reimbLinks'),
+  transactionById: def('/api/v1/transactions/:id', 'GET', 'transactionById'),
+  setCategory: def('/api/v1/transactions/:id/category', 'POST', 'setCategory'),
+  setNotes: def('/api/v1/transactions/:id/notes', 'POST', 'setNotes'),
+  setDate: def('/api/v1/transactions/:id/date', 'POST', 'setDate'),
+  setPayee: def('/api/v1/transactions/:id/payee', 'POST', 'setPayee'),
+  splitTransaction: def('/api/v1/transactions/:id/split', 'POST', 'splitTransaction'),
+  unsplitTransaction: def('/api/v1/transactions/:id/unsplit', 'POST', 'unsplitTransaction'),
+  deleteTransaction: def('/api/v1/transactions/:id', 'DELETE', 'deleteTransaction'),
+  bankSync: def('/api/v1/bank-sync', 'POST', 'bankSync'),
+  merchantHistory: def('/api/v1/merchant-history', 'GET', 'merchantHistory'),
+  saveRule: def('/api/v1/rules', 'POST', 'saveRule'),
+  applyRules: def('/api/v1/rules/apply', 'POST', 'applyRules'),
+  deleteRule: def('/api/v1/rules/:id', 'DELETE', 'deleteRule'),
+  setRecurringOverride: def('/api/v1/recurring/:key/override', 'POST', 'setRecurringOverride'),
+  markRecurring: def('/api/v1/recurring/mark', 'POST', 'markRecurring'),
+  markBillPaid: def('/api/v1/bills/paid', 'POST', 'markBillPaid'),
+  addReimbLink: def('/api/v1/reimb-links', 'POST', 'addReimbLink'),
+  deleteReimbLink: def('/api/v1/reimb-links', 'DELETE', 'deleteReimbLink'),
+  repaymentSuggestions: def('/api/v1/repayments/suggestions', 'GET', 'repaymentSuggestions'),
+  confirmRepayment: def('/api/v1/repayments/:id/confirm', 'POST', 'confirmRepayment'),
+  dismissRepayment: def('/api/v1/repayments/:id/dismiss', 'POST', 'dismissRepayment'),
+  reimbursementLedger: def('/api/v1/reimbursement-ledger', 'GET', 'reimbursementLedger'),
+  reconciliation: def('/api/v1/reconciliation', 'GET', 'reconciliation'),
+  reconcilePending: def('/api/v1/reconciliation/pending', 'GET', 'reconcilePending'),
+  setReconcileItem: def('/api/v1/reconciliation/item', 'POST', 'setReconcileItem'),
+  setReconcileMonth: def('/api/v1/reconciliation/month', 'POST', 'setReconcileMonth'),
+  setReconcileEnabled: def('/api/v1/reconciliation/enabled', 'POST', 'setReconcileEnabled'),
+  receipts: def('/api/v1/receipts', 'GET', 'receipts'),
+  addReceipt: def('/api/v1/receipts', 'POST', 'addReceipt'),
+  deleteReceipt: def('/api/v1/receipts/:id', 'DELETE', 'deleteReceipt'),
+  createTransaction: def('/api/v1/transactions', 'POST', 'createTransaction'),
+  saveGoal: def('/api/v1/goals', 'POST', 'saveGoal'),
+  deleteGoal: def('/api/v1/goals/:id', 'DELETE', 'deleteGoal'),
+  setAccountOverride: def('/api/v1/accounts/:id/override', 'POST', 'setAccountOverride'),
+  saveManualAsset: def('/api/v1/manual-assets', 'POST', 'saveManualAsset'),
+  deleteManualAsset: def('/api/v1/manual-assets/:id', 'DELETE', 'deleteManualAsset'),
+  refresh: def('/api/v1/refresh', 'POST', 'refresh'),
+  events: def('/api/v1/events', 'GET', 'events'),
+  saveEvent: def('/api/v1/events', 'POST', 'saveEvent'),
+  deleteEvent: def('/api/v1/events/:slug', 'DELETE', 'deleteEvent'),
+} as const;

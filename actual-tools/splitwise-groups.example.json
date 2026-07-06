@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to splitwise-groups.json (gitignored). eventToGroup maps a trip tag (#ev-<slug>) to the exact Splitwise group name (case-insensitive substring match). surname maps a person's surname/alias to their slug so name matching works.",
+  "eventToGroup": {
+    "trip-2026": "My Trip Group Name",
+    "apartment": "Apartment Splits"
+  },
+  "surname": [
+    ["lastname", "alex"],
+    ["othername", "sam"]
+  ]
+}

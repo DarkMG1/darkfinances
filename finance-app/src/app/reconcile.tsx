@@ -1,0 +1,146 @@
+import React, { useMemo, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { SymbolView } from 'expo-symbols';
+import { useReconciliation, useSetReconcileItem, useSetReconcileMonth } from '@/api/hooks/finance.hooks';
+import { PushScreen } from '@/components/screen';
+import { Card, EmptyState, ErrorState } from '@/components/ui';
+import { SkeletonList } from '@/components/skeleton';
+import { ReconItem } from '@/api/generated/types';
+import { haptics } from '@/lib/haptics';
+import { currentMonthKey } from '@/lib/selectedMonth';
+import { colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
+
+const stepMonth = (key: string, delta: number) => {
+  const [y, m] = key.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
+export default function Reconcile() {
+  const router = useRouter();
+  const params = useLocalSearchParams<{ month?: string }>();
+  const curKey = useMemo(() => currentMonthKey(), []);
+  // Deep-link (from the nag banner) wins; otherwise default to last month.
+  const [month, setMonth] = useState(() => params.month || stepMonth(currentMonthKey(), -1));
+
+  const recon = useReconciliation(month);
+  const setItem = useSetReconcileItem();
+  const closeMonth = useSetReconcileMonth();
+
+  const data = recon.data;
+  const items = data?.items ?? [];
+  const total = data?.total ?? 0;
+  const done = data?.reconciledCount ?? 0;
+  const allDone = total > 0 && done >= total;
+  const monthClosed = !!data?.done;
+  const pct = total > 0 ? (done / total) * 100 : 0;
+  const canNext = month < curKey;
+
+  const toggle = (it: ReconItem) => { haptics.tap(); setItem.mutate({ month, id: it.id, reconciled: !it.reconciled }); };
+  const openTxn = (it: ReconItem) => {
+    haptics.tap();
+    router.push({
+      pathname: '/transaction/[id]',
+      params: { id: it.id, payee: it.payee, amount: String(it.amount), date: it.date, account: it.account, accountId: it.accountId, category: it.category, imported: '1', cleared: '1' },
+    });
+  };
+  const doClose = () => {
+    if (!allDone || monthClosed) return;
+    closeMonth.mutate({ month, done: true }, {
+      onSuccess: () => Alert.alert('Month reconciled', `${monthLabel(month)} is all checked off. Nice work.`),
+    });
+  };
+
+  return (
+    <PushScreen refreshing={recon.isFetching} onRefresh={recon.refetch}>
+      <View style={styles.nav}>
+        <Pressable onPress={() => { haptics.tap(); setMonth(stepMonth(month, -1)); }} hitSlop={12} style={({ pressed }) => [styles.navBtn, pressed && { opacity: 0.5 }]}>
+          <Text style={styles.navArrow}>‹</Text>
+        </Pressable>
+        <Text style={styles.navTitle}>{monthLabel(month)}</Text>
+        <Pressable disabled={!canNext} onPress={() => { haptics.tap(); setMonth(stepMonth(month, 1)); }} hitSlop={12} style={({ pressed }) => [styles.navBtn, pressed && canNext && { opacity: 0.5 }]}>
+          <Text style={[styles.navArrow, !canNext && styles.navArrowOff]}>›</Text>
+        </Pressable>
+      </View>
+
+      {recon.isLoading && !data ? (
+        <SkeletonList rows={8} />
+      ) : recon.isError && !data ? (
+        <ErrorState error={recon.error?.error} onRetry={recon.refetch} />
+      ) : total === 0 ? (
+        <EmptyState icon="checkmark.circle">No expenses to reconcile in {monthLabel(month)}</EmptyState>
+      ) : (
+        <>
+          <Card style={styles.head}>
+            {monthClosed ? (
+              <View style={styles.closedRow}>
+                <SymbolView name="checkmark.seal.fill" tintColor={colors.green} size={22} resizeMode="scaleAspectFit" />
+                <Text style={styles.closedText}>{monthLabel(month)} reconciled</Text>
+              </View>
+            ) : (
+              <>
+                <Text style={styles.headTitle}>{done} of {total} reviewed</Text>
+                <View style={styles.track}><View style={[styles.fill, { width: `${pct}%` }]} /></View>
+                <Text style={styles.headSub}>{allDone ? 'All expenses reviewed — close the month below.' : `${total - done} left to review`}</Text>
+              </>
+            )}
+          </Card>
+
+          <Card style={styles.list}>
+            {items.map((it, i) => (
+              <View key={it.id} style={[styles.row, i > 0 && styles.rowDiv]}>
+                <Pressable onPress={() => toggle(it)} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+                  <SymbolView name={it.reconciled ? 'checkmark.circle.fill' : 'circle'} tintColor={it.reconciled ? colors.green : colors.muted} size={26} resizeMode="scaleAspectFit" />
+                </Pressable>
+                <Pressable style={styles.rowBody} onPress={() => openTxn(it)}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={[styles.rowPayee, it.reconciled && styles.rowPayeeDone]} numberOfLines={1}>{it.payee}</Text>
+                    <Text style={styles.rowSub} numberOfLines={1}>{fmtDate(it.date)} · {it.category}</Text>
+                  </View>
+                  <Text style={styles.rowAmt}>{fmtPos(it.amount)}</Text>
+                </Pressable>
+              </View>
+            ))}
+          </Card>
+
+          {!monthClosed ? (
+            <Pressable onPress={doClose} disabled={!allDone || closeMonth.isPending} style={({ pressed }) => [styles.closeBtn, (!allDone || closeMonth.isPending) && styles.closeBtnOff, pressed && allDone && { opacity: 0.8 }]}>
+              {closeMonth.isPending ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.closeBtnText}>{allDone ? `Reconcile ${monthLabel(month)}` : `${total - done} left to review`}</Text>
+              )}
+            </Pressable>
+          ) : null}
+        </>
+      )}
+    </PushScreen>
+  );
+}
+
+const styles = StyleSheet.create({
+  nav: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, paddingHorizontal: 4 },
+  navBtn: { width: 44, height: 32, alignItems: 'center', justifyContent: 'center' },
+  navArrow: { color: colors.accentLight, fontSize: 26, fontWeight: '700' },
+  navArrowOff: { color: colors.border },
+  navTitle: { color: colors.text, fontSize: 17, fontWeight: '700' },
+  head: { marginBottom: 0 },
+  headTitle: { color: colors.text, fontSize: 18, fontWeight: '800' },
+  track: { height: 8, borderRadius: 4, backgroundColor: colors.surface2, marginTop: 10, overflow: 'hidden' },
+  fill: { height: '100%', borderRadius: 4, backgroundColor: colors.green },
+  headSub: { color: colors.muted, fontSize: 12, marginTop: 8 },
+  closedRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  closedText: { color: colors.green, fontSize: 16, fontWeight: '700' },
+  list: { paddingVertical: 2, marginTop: 12 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
+  rowDiv: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  rowBody: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  rowPayee: { color: colors.text, fontSize: 14, fontWeight: '600' },
+  rowPayeeDone: { color: colors.muted, textDecorationLine: 'line-through' },
+  rowSub: { color: colors.muted, fontSize: 11, marginTop: 2 },
+  rowAmt: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  closeBtn: { backgroundColor: colors.green, borderRadius: 12, paddingVertical: 15, alignItems: 'center', marginTop: 16 },
+  closeBtnOff: { backgroundColor: colors.surface2 },
+  closeBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+});

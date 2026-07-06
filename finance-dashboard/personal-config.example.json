@@ -1,0 +1,13 @@
+{
+  "_comment": "Copy to personal-config.json (gitignored) and fill in your own people. This maps names/aliases seen in transaction memos to a stable person 'slug' used across Who-Owes-Me. Order matters: more specific aliases (surnames) should precede bare first names.",
+  "people": ["alex", "sam", "jordan", "taylor"],
+  "nameMap": [
+    ["alex", "alex"],
+    ["alexander", "alex"],
+    ["sam", "sam"],
+    ["samantha", "sam"],
+    ["jordan", "jordan"],
+    ["taylor", "taylor"]
+  ],
+  "settledPrepaid": "SOME MERCHANT - (Alex|Sam)"
+}

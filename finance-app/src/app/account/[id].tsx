@@ -1,0 +1,204 @@
+import React, { useMemo, useState } from 'react';
+import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, SectionList, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useSetAccountOverride, useTransactions } from '@/api/hooks/finance.hooks';
+import { DemoRibbon } from '@/components/screen';
+import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/components/ui';
+import { SkeletonList } from '@/components/skeleton';
+import { Transaction } from '@/api/generated/types';
+import { haptics } from '@/lib/haptics';
+import { colors, fmtDay, fmtMoney } from '@/theme/colors';
+
+const pad = (n: number) => String(n).padStart(2, '0');
+
+// Last ~3 calendar months of activity for this account.
+function windowStart(): string {
+  const n = new Date();
+  const d = new Date(n.getFullYear(), n.getMonth() - 2, 1);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`;
+}
+
+export default function AccountDetail() {
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const p = useLocalSearchParams<{ id: string; name?: string; balance?: string; hidden?: string }>();
+  const balance = p.balance != null && p.balance !== '' ? Number(p.balance) : null;
+
+  const txns = useTransactions({ accountId: p.id, start: windowStart(), collapse: true });
+  const override = useSetAccountOverride();
+
+  const [title, setTitle] = useState(p.name || 'Account');
+  const [editing, setEditing] = useState(false);
+  const [nameText, setNameText] = useState(p.name || '');
+  const [hidden, setHidden] = useState(p.hidden === '1');
+
+  const saveOverride = () => {
+    override.mutate(
+      { id: p.id, name: nameText, hidden },
+      {
+        onSuccess: () => {
+          setTitle(nameText.trim() || p.name || 'Account');
+          setEditing(false);
+        },
+        onError: (e) => Alert.alert('Could not save', e.error || 'Please try again.'),
+      }
+    );
+  };
+
+  const sections = useMemo(() => {
+    const list = (txns.data ?? []).slice().sort((a, b) => b.date.localeCompare(a.date));
+    const out: { title: string; data: Transaction[] }[] = [];
+    const byDate: Record<string, Transaction[]> = {};
+    for (const t of list) {
+      if (!byDate[t.date]) {
+        byDate[t.date] = [];
+        out.push({ title: fmtDay(t.date), data: byDate[t.date] });
+      }
+      byDate[t.date].push(t);
+    }
+    return out;
+  }, [txns.data]);
+
+  const openDetail = (t: Transaction) =>
+    router.push({
+      pathname: '/transaction/[id]',
+      params: {
+        id: t.id,
+        payee: t.payee || '',
+        amount: String(t.amount),
+        date: t.date,
+        account: t.account,
+        accountId: t.accountId,
+        category: t.category || '',
+        categoryId: t.categoryId || '',
+        notes: t.notes || '',
+        isLeg: t.isLeg ? '1' : '',
+        parentId: t.parentId || '',
+        cleared: t.cleared === false ? '0' : '1',
+        isSplit: t.isSplit ? '1' : '',
+        splitCount: t.splitCount ? String(t.splitCount) : '',
+        imported: t.imported ? '1' : '',
+      },
+    });
+
+  const renderItem = ({ item }: { item: Transaction }) => {
+    const income = item.amount > 0;
+    return (
+      <Pressable style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]} onPress={() => openDetail(item)}>
+        <Avatar label={item.payee} category={item.isSplit ? undefined : item.category ?? undefined} size={38} />
+        <View style={styles.mid}>
+          <View style={styles.payeeLine}>
+            <Text style={[styles.payee, { flexShrink: 1 }]} numberOfLines={1}>{item.payee || '—'}</Text>
+            {item.cleared === false ? <PendingPill /> : null}
+            {item.isSplit ? <SplitPill count={item.splitCount} /> : null}
+          </View>
+          <Text style={styles.sub} numberOfLines={1}>{item.isSplit ? `Split into ${item.splitCount ?? 2}` : item.category || 'uncategorized'}</Text>
+        </View>
+        <Text style={[styles.amt, { color: income ? colors.green : colors.text }]}>
+          {income ? '+' : ''}{fmtMoney(item.amount)}
+        </Text>
+      </Pressable>
+    );
+  };
+
+  return (
+    <View style={styles.root}>
+      <Stack.Screen
+        options={{
+          title,
+          headerRight: () => (
+            <Pressable onPress={() => { haptics.tap(); setNameText(title); setEditing(true); }} hitSlop={8}>
+              <Text style={styles.editBtn}>Edit</Text>
+            </Pressable>
+          ),
+        }}
+      />
+      <DemoRibbon />
+      {txns.isLoading && !txns.data ? (
+        <View style={{ padding: 16 }}>
+          <SkeletonList hero rows={7} />
+        </View>
+      ) : txns.isError && !txns.data ? (
+        <ErrorState error={txns.error?.error} onRetry={txns.refetch} />
+      ) : (
+        <SectionList
+          sections={sections}
+          keyExtractor={(t) => t.id}
+          renderItem={renderItem}
+          renderSectionHeader={({ section }) => <Text style={styles.sectionHeader}>{section.title}</Text>}
+          stickySectionHeadersEnabled={false}
+          contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}
+          refreshing={txns.isFetching}
+          onRefresh={() => { haptics.light(); txns.refetch(); }}
+          ListHeaderComponent={
+            balance != null ? (
+              <View style={styles.hero}>
+                <Text style={styles.heroLabel}>BALANCE</Text>
+                <Text style={[styles.heroValue, { color: balance < 0 ? colors.red : colors.text }]}>{fmtMoney(balance)}</Text>
+                <Text style={styles.heroSub}>Last 3 months</Text>
+              </View>
+            ) : null
+          }
+          ListEmptyComponent={<Card><EmptyState icon="tray">No recent transactions</EmptyState></Card>}
+        />
+      )}
+
+      <Modal visible={editing} animationType="slide" transparent onRequestClose={() => setEditing(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+          <Pressable style={styles.modalBg} onPress={() => setEditing(false)}>
+            <Pressable style={[styles.sheet, { paddingBottom: insets.bottom + 24 }]} onPress={() => {}}>
+              <Text style={styles.sheetTitle}>Edit account</Text>
+              <Text style={styles.label}>Display name</Text>
+              <TextInput
+                style={styles.input}
+                value={nameText}
+                onChangeText={setNameText}
+                placeholder="Account name"
+                placeholderTextColor={colors.muted}
+                autoFocus
+              />
+              <Text style={styles.hintText}>Only changes how it shows here — your bank name is untouched. Clear it to reset.</Text>
+              <View style={styles.hideRow}>
+                <View style={{ flex: 1, paddingRight: 12 }}>
+                  <Text style={styles.hideLabel}>Hide account</Text>
+                  <Text style={styles.hintText}>Removes it from lists and net worth.</Text>
+                </View>
+                <Switch value={hidden} onValueChange={setHidden} trackColor={{ true: colors.accent }} />
+              </View>
+              <Pressable style={({ pressed }) => [styles.saveBtn, override.isPending && { opacity: 0.5 }, pressed && { opacity: 0.85 }]} onPress={saveOverride} disabled={override.isPending}>
+                <Text style={styles.saveText}>{override.isPending ? 'Saving…' : 'Save'}</Text>
+              </Pressable>
+            </Pressable>
+          </Pressable>
+        </KeyboardAvoidingView>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: colors.bg },
+  hero: { marginBottom: 12, marginTop: 4 },
+  heroLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  heroValue: { fontSize: 38, fontWeight: '800', letterSpacing: -1.5, marginTop: 4 },
+  heroSub: { color: colors.muted, fontSize: 13, marginTop: 4 },
+  sectionHeader: { color: colors.muted, fontSize: 12, fontWeight: '700', paddingTop: 14, paddingBottom: 4 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  mid: { flex: 1, minWidth: 0 },
+  payeeLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  payee: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  sub: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  amt: { fontSize: 15, fontWeight: '700' },
+  editBtn: { color: colors.accentLight, fontSize: 16, fontWeight: '600' },
+  modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
+  sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 },
+  sheetTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 12 },
+  label: { color: colors.muted, fontSize: 12, fontWeight: '600', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
+  input: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15 },
+  hintText: { color: colors.muted, fontSize: 11, marginTop: 8, lineHeight: 16 },
+  hideRow: { flexDirection: 'row', alignItems: 'center', marginTop: 18, paddingTop: 14, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  hideLabel: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  saveBtn: { backgroundColor: colors.accent, borderRadius: 10, paddingVertical: 13, alignItems: 'center', marginTop: 20 },
+  saveText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+});

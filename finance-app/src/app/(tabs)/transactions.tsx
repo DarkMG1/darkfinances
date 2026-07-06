@@ -1,0 +1,332 @@
+import React, { useMemo, useState } from 'react';
+import { Alert, FlatList, Modal, Pressable, RefreshControl, ScrollView, SectionList, Share, StyleSheet, Text, TextInput, View } from 'react-native';
+import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable';
+import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useAccounts, useCategories, useSearch, useSetCategory, useTransactions } from '@/api/hooks/finance.hooks';
+import { buildQuery } from '@/api/client/requests';
+import { useServerConfig } from '@/state/server';
+import { Transaction } from '@/api/generated/types';
+import { Avatar, ErrorState, PendingPill, SplitPill } from '@/components/ui';
+import { SkeletonList } from '@/components/skeleton';
+import { haptics } from '@/lib/haptics';
+import { colors, fmtMoney, fmtDay } from '@/theme/colors';
+
+type Filter = 'all' | 'expense' | 'income';
+
+const RANGES: { label: string; m: number }[] = [
+  { label: '1M', m: 1 },
+  { label: '3M', m: 3 },
+  { label: '6M', m: 6 },
+  { label: '1Y', m: 12 },
+];
+
+function startMonthsAgo(months: number): string {
+  const n = new Date();
+  const d = new Date(n.getFullYear(), n.getMonth() - (months - 1), 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+}
+
+export default function Transactions() {
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { serverUrl, token, demo } = useServerConfig();
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState<Filter>('all');
+  const [rangeM, setRangeM] = useState(3);
+  const [accountId, setAccountId] = useState<string | null>(null);
+  const [uncatOnly, setUncatOnly] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [categorizing, setCategorizing] = useState<Transaction | null>(null);
+
+  const accounts = useAccounts();
+  const categories = useCategories();
+  const setCategory = useSetCategory();
+
+  // 2+ chars switches from the recent (month-bound) list to an all-time server search.
+  const searching = search.trim().length >= 2;
+  const txns = useTransactions({ start: startMonthsAgo(rangeM), accountId: accountId ?? undefined, collapse: true });
+  const searchRes = useSearch(search);
+
+  const base = searching ? (searchRes.data?.transactions ?? []) : (txns.data ?? []);
+  const loading = searching ? searchRes.isLoading : txns.isLoading;
+  const errored = searching ? searchRes.isError : txns.isError;
+  const fetching = searching ? searchRes.isFetching : txns.isFetching;
+  const onRefresh = () => {
+    haptics.light();
+    return searching ? searchRes.refetch() : txns.refetch();
+  };
+
+  const sections = useMemo(() => {
+    const q = search.toLowerCase();
+    const filtered = base.filter((t) => {
+      if (filter === 'expense' && t.amount >= 0) return false;
+      if (filter === 'income' && t.amount <= 0) return false;
+      if (uncatOnly && t.category && t.category.trim()) return false;
+      if (accountId && t.accountId !== accountId) return false;
+      // When searching, the server already matched the query; only filter locally for the recent list.
+      if (!searching && q && !t.payee.toLowerCase().includes(q) && !(t.category || '').toLowerCase().includes(q) && !t.account.toLowerCase().includes(q)) return false;
+      return true;
+    });
+    const out: { title: string; date: string; data: Transaction[] }[] = [];
+    const byDate: Record<string, Transaction[]> = {};
+    for (const t of filtered) {
+      if (!byDate[t.date]) {
+        byDate[t.date] = [];
+        out.push({ title: fmtDay(t.date), date: t.date, data: byDate[t.date] });
+      }
+      byDate[t.date].push(t);
+    }
+    return out;
+  }, [base, search, filter, searching, accountId, uncatOnly]);
+
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      const month = new Date().toISOString().slice(0, 7);
+      const csv = await buildQuery<string>({ serverUrl, token, demo, endpoint: '/api/v1/report.csv', method: 'GET', params: { month } });
+      if (csv) await Share.share({ message: csv as unknown as string });
+      else Alert.alert('Export', 'Nothing to export for this month.');
+    } catch (e: any) {
+      haptics.warning();
+      Alert.alert('Export failed', e?.error || e?.message || 'Could not build the report.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const openDetail = (t: Transaction) => {
+    router.push({
+      pathname: '/transaction/[id]',
+      params: {
+        id: t.id,
+        payee: t.payee || '',
+        amount: String(t.amount),
+        date: t.date,
+        account: t.account,
+        accountId: t.accountId,
+        category: t.category || '',
+        categoryId: t.categoryId || '',
+        notes: t.notes || '',
+        isLeg: t.isLeg ? '1' : '',
+        parentId: t.parentId || '',
+        cleared: t.cleared === false ? '0' : '1',
+        isSplit: t.isSplit ? '1' : '',
+        splitCount: t.splitCount ? String(t.splitCount) : '',
+        imported: t.imported ? '1' : '',
+      },
+    });
+  };
+
+  const applyCategory = (categoryId: string) => {
+    if (!categorizing) return;
+    setCategory.mutate(
+      {
+        id: categorizing.id,
+        categoryId,
+        isLeg: !!categorizing.isLeg,
+        parentId: categorizing.parentId || null,
+        accountId: categorizing.accountId,
+        date: categorizing.date,
+      },
+      { onSuccess: () => setCategorizing(null) }
+    );
+  };
+
+  const renderItem = ({ item }: { item: Transaction }) => {
+    const income = item.amount > 0;
+    const row = (
+      <Pressable style={({ pressed }) => [styles.row, pressed && styles.rowPressed]} onPress={() => openDetail(item)}>
+        <Avatar label={item.payee} category={item.isSplit ? undefined : item.category ?? undefined} size={38} />
+        <View style={styles.mid}>
+          <View style={styles.payeeLine}>
+            <Text style={[styles.payee, { flexShrink: 1 }]} numberOfLines={1}>{item.payee || '—'}</Text>
+            {item.cleared === false ? <PendingPill /> : null}
+            {item.isSplit ? <SplitPill count={item.splitCount} /> : null}
+          </View>
+          <Text style={styles.account} numberOfLines={1}>
+            {item.account}
+            {item.isSplit ? ` · Split into ${item.splitCount ?? 2}` : item.category ? ` · ${item.category}` : ' · uncategorized'}
+          </Text>
+        </View>
+        <Text style={[styles.amt, { color: income ? colors.green : colors.text }]}>
+          {income ? '+' : ''}{fmtMoney(item.amount)}
+        </Text>
+      </Pressable>
+    );
+    // Splits carry per-leg categories, so the quick single-category swipe doesn't apply.
+    if (item.isSplit) return row;
+    return (
+      <Swipeable
+        renderRightActions={(_prog, _drag, swipeable) => (
+          <Pressable
+            style={styles.swipeCat}
+            onPress={() => { swipeable?.close(); haptics.tap(); setCategorizing(item); }}
+          >
+            <Text style={styles.swipeCatText}>{item.category ? 'Recategorize' : 'Categorize'}</Text>
+          </Pressable>
+        )}
+        overshootRight={false}
+        friction={2}
+        rightThreshold={36}
+      >
+        {row}
+      </Swipeable>
+    );
+  };
+
+  return (
+    <View style={styles.root}>
+      <View style={[styles.header, { paddingTop: insets.top + 6 }]}>
+        <Text style={styles.title}>Activity</Text>
+        <Pressable onPress={exportCsv} disabled={exporting} style={({ pressed }) => [styles.exportBtn, pressed && { opacity: 0.7 }]}>
+          <Text style={styles.exportText}>{exporting ? 'Exporting…' : 'Export'}</Text>
+        </Pressable>
+      </View>
+      <View style={styles.controls}>
+        <TextInput
+          style={styles.search}
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Search all transactions…"
+          placeholderTextColor={colors.muted}
+          autoCapitalize="none"
+        />
+        <View style={styles.filters}>
+          {(['all', 'expense', 'income'] as Filter[]).map((f) => (
+            <Pressable key={f} onPress={() => { haptics.tap(); setFilter(f); }} style={[styles.fbtn, filter === f && styles.fbtnActive]}>
+              <Text style={[styles.fbtnText, filter === f && styles.fbtnTextActive]}>{f === 'all' ? 'All' : f === 'expense' ? 'Out' : 'In'}</Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
+
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipsScroll} contentContainerStyle={styles.chipsRow}>
+        {!searching ? (
+          <>
+            {RANGES.map((r) => (
+              <Pressable key={r.label} onPress={() => { haptics.tap(); setRangeM(r.m); }} style={[styles.chip, rangeM === r.m && styles.chipActive]}>
+                <Text style={[styles.chipText, rangeM === r.m && styles.chipTextActive]}>{r.label}</Text>
+              </Pressable>
+            ))}
+            <View style={styles.chipDivider} />
+          </>
+        ) : null}
+        <Pressable onPress={() => { haptics.tap(); setUncatOnly((v) => !v); }} style={[styles.chip, uncatOnly && styles.chipActive]}>
+          <Text style={[styles.chipText, uncatOnly && styles.chipTextActive]}>Uncategorized</Text>
+        </Pressable>
+        <View style={styles.chipDivider} />
+        <Pressable onPress={() => { haptics.tap(); setAccountId(null); }} style={[styles.chip, accountId === null && styles.chipActive]}>
+          <Text style={[styles.chipText, accountId === null && styles.chipTextActive]}>All accounts</Text>
+        </Pressable>
+        {(accounts.data ?? []).map((a) => (
+          <Pressable key={a.id} onPress={() => { haptics.tap(); setAccountId(a.id); }} style={[styles.chip, accountId === a.id && styles.chipActive]}>
+            <Text style={[styles.chipText, accountId === a.id && styles.chipTextActive]} numberOfLines={1}>{a.name}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+
+      {searching ? (
+        <Text style={styles.searchHint}>
+          {searchRes.isLoading
+            ? 'Searching all time…'
+            : `${searchRes.data?.total ?? 0} match${(searchRes.data?.total ?? 0) === 1 ? '' : 'es'} all-time${searchRes.data?.truncated ? ' · showing first 200' : ''}`}
+        </Text>
+      ) : null}
+
+      {loading ? (
+        <View style={{ padding: 16 }}>
+          <SkeletonList rows={8} />
+        </View>
+      ) : errored ? (
+        <ErrorState onRetry={onRefresh} />
+      ) : (
+        <SectionList
+          style={styles.list}
+          sections={sections}
+          keyExtractor={(t) => t.id}
+          renderItem={renderItem}
+          renderSectionHeader={({ section }) => <Text style={styles.sectionHeader}>{section.title}</Text>}
+          stickySectionHeadersEnabled={false}
+          contentContainerStyle={{ paddingBottom: 96 }}
+          ListEmptyComponent={<Text style={styles.empty}>{searching ? 'No matches' : 'No transactions in range'}</Text>}
+          refreshControl={<RefreshControl tintColor={colors.accent} refreshing={fetching} onRefresh={onRefresh} />}
+        />
+      )}
+
+      <Pressable
+        style={({ pressed }) => [styles.fab, pressed && styles.fabPressed]}
+        onPress={() => { haptics.tap(); router.push('/add-transaction'); }}
+        accessibilityLabel="Add transaction"
+      >
+        <Text style={styles.fabPlus}>+</Text>
+      </Pressable>
+
+      <Modal visible={!!categorizing} animationType="slide" transparent onRequestClose={() => setCategorizing(null)}>
+        <Pressable style={styles.modalBg} onPress={() => setCategorizing(null)}>
+          <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
+            <Text style={styles.sheetTitle}>Categorize</Text>
+            <Text style={styles.sheetSub} numberOfLines={1}>{categorizing?.payee || '—'} · {categorizing ? fmtMoney(categorizing.amount) : ''}</Text>
+            <FlatList
+              data={categories.data ?? []}
+              keyExtractor={(c) => c.id}
+              style={{ maxHeight: 420 }}
+              keyboardShouldPersistTaps="handled"
+              renderItem={({ item }) => (
+                <Pressable style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => applyCategory(item.id)} disabled={setCategory.isPending}>
+                  <Text style={styles.catOptionText}>{item.name}</Text>
+                  <Text style={styles.catOptionGroup}>{item.group}</Text>
+                </Pressable>
+              )}
+            />
+          </View>
+        </Pressable>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: colors.bg },
+  header: { paddingHorizontal: 16, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  title: { color: colors.text, fontSize: 17, fontWeight: '700' },
+  exportBtn: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 },
+  exportText: { color: colors.accentLight, fontSize: 13, fontWeight: '600' },
+  searchHint: { color: colors.muted, fontSize: 12, paddingHorizontal: 16, paddingBottom: 8 },
+  controls: { padding: 12, gap: 10, flexDirection: 'row', alignItems: 'center' },
+  search: { flex: 1, backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, color: colors.text, paddingHorizontal: 12, paddingVertical: 8, fontSize: 14 },
+  filters: { flexDirection: 'row', gap: 4 },
+  fbtn: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 7, borderWidth: 1, borderColor: colors.border },
+  fbtnActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+  fbtnText: { color: colors.muted, fontSize: 12, fontWeight: '600' },
+  fbtnTextActive: { color: '#fff' },
+  chipsScroll: { flexGrow: 0, flexShrink: 0 },
+  chipsRow: { gap: 8, paddingHorizontal: 12, paddingBottom: 10, alignItems: 'center' },
+  list: { flex: 1 },
+  chip: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, maxWidth: 180 },
+  chipActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+  chipText: { color: colors.muted, fontSize: 12, fontWeight: '600' },
+  chipTextActive: { color: '#fff' },
+  chipDivider: { width: 1, height: 22, backgroundColor: colors.border, marginHorizontal: 2 },
+  sectionHeader: { color: colors.muted, fontSize: 12, fontWeight: '700', paddingHorizontal: 16, paddingTop: 16, paddingBottom: 6, backgroundColor: colors.bg },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, paddingHorizontal: 16, backgroundColor: colors.bg, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  rowPressed: { backgroundColor: colors.surface2 },
+  mid: { flex: 1, minWidth: 0 },
+  payeeLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  payee: { color: colors.text, fontSize: 14, fontWeight: '500' },
+  account: { color: colors.muted, fontSize: 11, marginTop: 1 },
+  amt: { fontSize: 14, fontWeight: '700', minWidth: 92, textAlign: 'right' },
+  swipeCat: { backgroundColor: colors.accent, justifyContent: 'center', alignItems: 'center', width: 124, paddingHorizontal: 12 },
+  swipeCatText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  empty: { color: colors.muted, textAlign: 'center', padding: 40 },
+  fab: { position: 'absolute', right: 18, bottom: 24, width: 56, height: 56, borderRadius: 28, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 6 },
+  fabPressed: { opacity: 0.85, transform: [{ scale: 0.96 }] },
+  fabPlus: { color: '#fff', fontSize: 30, fontWeight: '700', marginTop: -2 },
+  modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
+  sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 },
+  sheetTitle: { color: colors.text, fontSize: 16, fontWeight: '700' },
+  sheetSub: { color: colors.muted, fontSize: 12, marginTop: 4, marginBottom: 10 },
+  catOption: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  catOptionText: { color: colors.text, fontSize: 15 },
+  catOptionGroup: { color: colors.muted, fontSize: 12 },
+});

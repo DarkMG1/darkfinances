@@ -1,0 +1,365 @@
+import React, { useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import Animated, { FadeInDown } from 'react-native-reanimated';
+import { useRouter } from 'expo-router';
+import { SymbolView, SymbolViewProps } from 'expo-symbols';
+import { useAccounts, useBankSync, useBills, useIncome, useManualAssets, useReconcilePending, useRecurring, useRepaymentSuggestions, useSpending, useTrends } from '@/api/hooks/finance.hooks';
+import { Screen } from '@/components/screen';
+import { Avatar, Card, CardTitle, EmptyState, ErrorState, ListRow, SectionLabel, StatCard } from '@/components/ui';
+import { SkeletonList } from '@/components/skeleton';
+import { AreaChart } from '@/components/charts';
+import { Account } from '@/api/generated/types';
+import { haptics } from '@/lib/haptics';
+import { colors, dueLabel, fmtMoney, fmtPos, monthLabel } from '@/theme/colors';
+
+const RANGES: { label: string; v: number }[] = [
+  { label: '3M', v: 3 },
+  { label: '6M', v: 6 },
+  { label: '1Y', v: 12 },
+  { label: '2Y', v: 24 },
+  { label: 'ALL', v: 36 },
+];
+
+const ACTIONS: { label: string; route: string; symbol: SymbolViewProps['name']; color: string }[] = [
+  { label: 'Budgets', route: '/budgets', symbol: 'chart.pie.fill', color: colors.accentLight },
+  { label: 'Cash Flow', route: '/cashflow', symbol: 'arrow.left.arrow.right', color: '#06b6d4' },
+  { label: 'Goals', route: '/goals', symbol: 'target', color: '#f59e0b' },
+  { label: 'Who Owes Me', route: '/reimbursement', symbol: 'person.2.fill', color: '#22c55e' },
+];
+
+export default function Overview() {
+  const { width } = useWindowDimensions();
+  const router = useRouter();
+  const [months, setMonths] = useState(12);
+
+  const accounts = useAccounts();
+  const spending = useSpending();
+  const trends = useTrends(months);
+  const bills = useBills();
+  const recurring = useRecurring();
+  const income = useIncome();
+  const manual = useManualAssets();
+  const repayments = useRepaymentSuggestions();
+  const reconcile = useReconcilePending();
+  const bankSync = useBankSync();
+  const suggestCount = repayments.data?.count ?? 0;
+  const reconPending = reconcile.data?.pending ?? null;
+  const reconRemaining = reconcile.data?.remaining ?? 0;
+  const reconTotal = reconcile.data?.total ?? 0;
+
+  const doBankSync = () => {
+    if (bankSync.isPending) return;
+    haptics.tap();
+    bankSync.mutate(undefined, {
+      onSuccess: (r) => {
+        haptics.success();
+        const cleared = r?.phantom?.deletedCount ?? 0;
+        if (r?.warning) Alert.alert('Synced with a warning', `Your ledger was refreshed, but the bank fetch reported: ${r.warning}`);
+        else if (cleared > 0) Alert.alert('Synced', `Removed ${cleared} stale pending charge${cleared === 1 ? '' : 's'} that fell off your card.`);
+      },
+      onError: (e) => { haptics.warning(); Alert.alert('Sync failed', e.error || 'Please try again.'); },
+    });
+  };
+
+  const refreshing = accounts.isFetching || spending.isFetching || trends.isFetching;
+  const onRefresh = () => {
+    accounts.refetch();
+    spending.refetch();
+    trends.refetch();
+    bills.refetch();
+    recurring.refetch();
+    income.refetch();
+    manual.refetch();
+  };
+
+  const accts = (accounts.data ?? []).filter((a) => !a.hidden);
+  const acctAssets = accts.filter((a) => a.balance > 0).reduce((s, a) => s + a.balance, 0);
+  const acctLiab = accts.filter((a) => a.balance < 0).reduce((s, a) => s + a.balance, 0);
+  const assets = acctAssets + (manual.data?.assets ?? 0);
+  const liabilities = acctLiab - (manual.data?.liabilities ?? 0);
+  const netWorth = assets + liabilities;
+
+  const now = new Date();
+  const curMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const cur = spending.data?.current;
+  const prev = spending.data?.prev;
+  const net = cur ? cur.totalIncome - cur.totalSpend : 0;
+  const spendDelta = cur && prev && prev.totalSpend > 0 ? ((cur.totalSpend - prev.totalSpend) / prev.totalSpend) * 100 : null;
+
+  const nwPoints = (trends.data?.months ?? []).map((m) => ({ value: m.netWorth, label: m.month }));
+  // "This month" net-worth change ≈ now vs the previous monthly snapshot. Based on
+  // synced accounts only, since manual assets have no monthly history.
+  const nwHist = trends.data?.months ?? [];
+  const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
+  const nwDelta = prevNW != null ? acctAssets + acctLiab - prevNW : null;
+
+  const cash = accts.filter((a) => !a.offbudget && a.balance >= 0);
+  const credit = accts.filter((a) => a.balance < 0);
+  const invest = accts.filter((a) => a.offbudget && a.balance >= 0);
+  const groups: { title: string; items: Account[] }[] = [
+    { title: 'Cash', items: cash },
+    { title: 'Credit & Loans', items: credit },
+    { title: 'Investments & Other', items: invest },
+  ].filter((g) => g.items.length);
+
+  // Safe to Spend = on-hand cash minus the bills still due in the window.
+  const cashOnHand = cash.reduce((s, a) => s + a.balance, 0);
+  const upcomingBillsTotal = bills.data?.total ?? 0;
+  const safeToSpend = cashOnHand - upcomingBillsTotal;
+
+  const upcoming = (bills.data?.bills ?? []).slice(0, 3);
+
+  return (
+    <Screen title="dark" accent="finances" refreshing={refreshing} onRefresh={onRefresh}>
+      {!accounts.data && accounts.isLoading ? (
+        <SkeletonList hero rows={4} />
+      ) : !accounts.data && accounts.isError ? (
+        <ErrorState error={accounts.error?.error} onRetry={onRefresh} />
+      ) : (
+        <>
+          <Pressable onPress={() => { haptics.tap(); router.push('/networth' as never); }} style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}>
+            <Text style={styles.heroLabel}>NET WORTH</Text>
+            <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>{fmtMoney(netWorth)}</Text>
+            <View style={styles.heroMetaRow}>
+              {nwDelta != null ? (
+                <Text style={[styles.heroDelta, { color: nwDelta >= 0 ? colors.green : colors.red }]}>
+                  {nwDelta >= 0 ? '▲' : '▼'} {fmtPos(Math.abs(nwDelta))} this month
+                </Text>
+              ) : null}
+              <Text style={styles.heroSub}>{fmtPos(assets)} assets · {fmtPos(Math.abs(liabilities))} liabilities · details ›</Text>
+            </View>
+          </Pressable>
+
+          {nwPoints.length > 1 ? (
+            <Card style={{ marginBottom: 16 }}>
+              <View style={styles.chartHead}>
+                <CardTitle>Net Worth</CardTitle>
+                <Text style={styles.chartHint}>Touch & drag</Text>
+              </View>
+              <AreaChart width={width - 64} points={nwPoints} />
+              <View style={styles.rangeRow}>
+                {RANGES.map((r) => (
+                  <Pressable
+                    key={r.label}
+                    onPress={() => { haptics.tap(); setMonths(r.v); }}
+                    style={({ pressed }) => [styles.range, months === r.v && styles.rangeActive, pressed && { opacity: 0.7 }]}
+                  >
+                    <Text style={[styles.rangeText, months === r.v && styles.rangeTextActive]}>{r.label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </Card>
+          ) : null}
+
+          {accts.length ? (
+            <Animated.View entering={FadeInDown.duration(240)}>
+              <Card style={styles.safeCard}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.safeLabel}>SAFE TO SPEND</Text>
+                  <Text style={[styles.safeValue, { color: safeToSpend >= 0 ? colors.text : colors.red }]}>{fmtMoney(safeToSpend)}</Text>
+                  <Text style={styles.safeSub}>{fmtPos(cashOnHand)} cash − {fmtPos(upcomingBillsTotal)} bills due</Text>
+                </View>
+                <SymbolView name="wallet.pass.fill" tintColor={colors.accentLight} size={30} resizeMode="scaleAspectFit" />
+              </Card>
+            </Animated.View>
+          ) : null}
+
+          <View style={styles.tiles}>
+            {ACTIONS.map((a) => (
+              <Pressable
+                key={a.route}
+                style={({ pressed }) => [styles.tile, pressed && { opacity: 0.6, transform: [{ scale: 0.97 }] }]}
+                onPress={() => { haptics.tap(); router.push(a.route as never); }}
+              >
+                <View style={[styles.tileIcon, { backgroundColor: a.color + '22' }]}>
+                  <SymbolView name={a.symbol} tintColor={a.color} size={22} resizeMode="scaleAspectFit" />
+                </View>
+                <Text style={styles.tileLabel} numberOfLines={2}>{a.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+
+          {reconPending ? (
+            <Pressable onPress={() => { haptics.tap(); router.push({ pathname: '/reconcile', params: { month: reconPending } }); }} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+              <Card style={{ ...styles.bannerCard, ...styles.reconBanner }}>
+                <View style={[styles.bannerIcon, { backgroundColor: colors.yellow + '22' }]}>
+                  <SymbolView name="checklist" tintColor={colors.yellow} size={22} resizeMode="scaleAspectFit" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.bannerLabel}>Reconcile {monthLabel(reconPending)}</Text>
+                  <Text style={styles.bannerSub}>{reconRemaining > 0 ? `${reconRemaining} of ${reconTotal} expenses left to review` : 'All reviewed — close the month'}</Text>
+                </View>
+                <Text style={[styles.bannerValue, { color: colors.yellow }]}>Review ›</Text>
+              </Card>
+            </Pressable>
+          ) : null}
+
+          {suggestCount > 0 ? (
+            <Pressable onPress={() => { haptics.tap(); router.push('/reimbursement' as never); }} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+              <Card style={styles.bannerCard}>
+                <View style={[styles.bannerIcon, { backgroundColor: '#22c55e22' }]}>
+                  <SymbolView name="arrow.left.arrow.right.circle.fill" tintColor="#22c55e" size={22} resizeMode="scaleAspectFit" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.bannerLabel}>Repayments to review</Text>
+                  <Text style={styles.bannerSub}>{suggestCount} incoming payment{suggestCount === 1 ? '' : 's'} may settle what you're owed</Text>
+                </View>
+                <Text style={[styles.bannerValue, { color: '#22c55e' }]}>Review ›</Text>
+              </Card>
+            </Pressable>
+          ) : null}
+
+          <SectionLabel>This Month</SectionLabel>
+          <View style={styles.statsRow}>
+            <StatCard
+              label="Spent"
+              value={cur ? fmtPos(cur.totalSpend) : '—'}
+              sub={spendDelta != null ? `${spendDelta > 0 ? '▲' : '▼'} ${Math.abs(spendDelta).toFixed(0)}% vs prev` : undefined}
+              subColor={spendDelta != null ? (spendDelta > 0 ? colors.red : colors.green) : undefined}
+            />
+            <StatCard
+              label="Income"
+              value={cur ? fmtPos(cur.totalIncome) : '—'}
+              sub="sources ›"
+              onPress={() => router.push(`/category/${encodeURIComponent('Income')}?month=${curMonth}` as never)}
+            />
+            <StatCard label="Net" value={cur ? fmtMoney(net) : '—'} valueColor={net >= 0 ? colors.green : colors.red} />
+          </View>
+
+          {income.data?.primaryNextPay ?? income.data?.nextPayday ? (
+            <Pressable onPress={() => router.push('/income' as never)} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+              <Card style={styles.bannerCard}>
+                <View style={[styles.bannerIcon, { backgroundColor: colors.green + '22' }]}>
+                  <SymbolView name="dollarsign.circle.fill" tintColor={colors.green} size={22} resizeMode="scaleAspectFit" />
+                </View>
+                <View style={{ flex: 1, paddingRight: 12 }}>
+                  <Text style={styles.bannerLabel}>Next income</Text>
+                  <Text style={styles.bannerSub} numberOfLines={1}>{(income.data.primaryPayee ?? income.data.nextPaydayPayee) ?? 'Income'} · {dueLabel((income.data.primaryNextPay ?? income.data.nextPayday)!)}</Text>
+                </View>
+                <Text style={[styles.bannerValue, { color: colors.green }]}>+{fmtPos((income.data.primaryAmount ?? income.data.nextPaydayAmount) ?? 0)} ›</Text>
+              </Card>
+            </Pressable>
+          ) : null}
+
+          {recurring.data && (recurring.data.subMonthlyTotal ?? recurring.data.monthlyTotal) > 0 ? (
+            <Pressable onPress={() => router.push('/subscriptions' as never)} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+              <Card style={styles.bannerCard}>
+                <View style={[styles.bannerIcon, { backgroundColor: colors.accentLight + '22' }]}>
+                  <SymbolView name="repeat" tintColor={colors.accentLight} size={20} resizeMode="scaleAspectFit" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.bannerLabel}>Subscriptions</Text>
+                  <Text style={styles.bannerSub}>{recurring.data.subActiveCount ?? recurring.data.activeCount} active</Text>
+                </View>
+                <Text style={styles.bannerValue}>{fmtMoney(recurring.data.subMonthlyTotal ?? recurring.data.monthlyTotal)}/mo ›</Text>
+              </Card>
+            </Pressable>
+          ) : null}
+
+          {upcoming.length ? (
+            <View style={{ marginTop: 4 }}>
+              <SectionLabel right={<Text style={styles.seeAll} onPress={() => router.push('/bills' as never)}>See all</Text>}>Upcoming Bills</SectionLabel>
+              <Card style={styles.list}>
+                {upcoming.map((b, i) => (
+                  <ListRow
+                    key={`${b.key}-${i}`}
+                    avatar={<Avatar label={b.payee} category={b.category} size={34} />}
+                    title={b.payee}
+                    subtitle={dueLabel(b.dueDate)}
+                    value={fmtPos(b.amount)}
+                    chevron={false}
+                  />
+                ))}
+              </Card>
+            </View>
+          ) : null}
+
+          <SectionLabel>Accounts</SectionLabel>
+          {accts.length === 0 ? (
+            <EmptyState icon="building.columns">No accounts</EmptyState>
+          ) : (
+            groups.map((g) => (
+              <View key={g.title} style={{ marginBottom: 14 }}>
+                <View style={styles.groupHead}>
+                  <Text style={styles.groupTitle}>{g.title}</Text>
+                  <Text style={styles.groupTotal}>{fmtMoney(g.items.reduce((s, a) => s + a.balance, 0))}</Text>
+                </View>
+                <View style={styles.accountsGrid}>
+                  {g.items.map((a) => (
+                    <Pressable
+                      key={a.id}
+                      style={({ pressed }) => [styles.accountCard, pressed && { opacity: 0.6 }]}
+                      onPress={() => router.push({ pathname: '/account/[id]', params: { id: a.id, name: a.name, balance: String(a.balance) } })}
+                    >
+                      <Card>
+                        <Text style={styles.accountName} numberOfLines={1}>{a.name}</Text>
+                        <Text style={[styles.accountBalance, { color: a.balance < 0 ? colors.red : colors.text }]}>{fmtMoney(a.balance)}</Text>
+                      </Card>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+            ))
+          )}
+
+          {accts.length ? (
+            <Pressable
+              onPress={doBankSync}
+              disabled={bankSync.isPending}
+              style={({ pressed }) => [styles.syncBtn, pressed && { opacity: 0.6 }]}
+            >
+              {bankSync.isPending ? (
+                <ActivityIndicator color={colors.accentLight} size="small" />
+              ) : (
+                <SymbolView name="arrow.triangle.2.circlepath" tintColor={colors.accentLight} size={18} resizeMode="scaleAspectFit" />
+              )}
+              <Text style={styles.syncText}>{bankSync.isPending ? 'Syncing…' : 'Sync with bank'}</Text>
+            </Pressable>
+          ) : null}
+        </>
+      )}
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  chartHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  chartHint: { color: colors.muted, fontSize: 10, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 },
+  rangeRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, gap: 6 },
+  range: { flex: 1, paddingVertical: 6, borderRadius: 8, alignItems: 'center', backgroundColor: colors.surface2 },
+  rangeActive: { backgroundColor: colors.accent },
+  rangeText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
+  rangeTextActive: { color: '#fff' },
+  hero: { marginBottom: 18, marginTop: 8 },
+  heroLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  heroValue: { fontSize: 42, fontWeight: '800', letterSpacing: -1.5, marginTop: 4 },
+  heroMetaRow: { marginTop: 6, gap: 2 },
+  heroDelta: { fontSize: 13, fontWeight: '700' },
+  heroSub: { color: colors.muted, fontSize: 13 },
+  safeCard: { flexDirection: 'row', alignItems: 'center', marginBottom: 18 },
+  safeLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  safeValue: { fontSize: 28, fontWeight: '800', letterSpacing: -1, marginTop: 4 },
+  safeSub: { color: colors.muted, fontSize: 12, marginTop: 4 },
+  tiles: { flexDirection: 'row', gap: 8, marginBottom: 20 },
+  tile: { flex: 1, alignItems: 'center', gap: 8, paddingVertical: 14, backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: 14 },
+  tileIcon: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  tileLabel: { color: colors.text, fontSize: 11, fontWeight: '600', textAlign: 'center', paddingHorizontal: 2 },
+  statsRow: { flexDirection: 'row', gap: 10, marginBottom: 16 },
+  bannerCard: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 },
+  reconBanner: { borderColor: colors.yellow + '55', borderWidth: 1 },
+  bannerIcon: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
+  bannerLabel: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  bannerSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  bannerValue: { color: colors.accentLight, fontSize: 15, fontWeight: '700' },
+  seeAll: { color: colors.accentLight, fontSize: 12, fontWeight: '600' },
+  list: { paddingVertical: 2 },
+  groupHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  groupTitle: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  groupTotal: { color: colors.muted, fontSize: 13, fontWeight: '600' },
+  accountsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  accountCard: { width: '47.5%', flexGrow: 1 },
+  accountName: { color: colors.muted, fontSize: 12, marginBottom: 6 },
+  accountBalance: { fontSize: 20, fontWeight: '700', letterSpacing: -0.5 },
+  syncBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 13, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, marginTop: 2, marginBottom: 8 },
+  syncText: { color: colors.accentLight, fontSize: 14, fontWeight: '700' },
+});
