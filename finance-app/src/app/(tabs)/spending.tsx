@@ -292,10 +292,10 @@ function SummaryRow({ icon, label, value, onPress, expanded, inset, muted, info,
 }) {
   const body = (
     <>
-      <SymbolView name={icon} tintColor={muted ? colors.muted : colors.text} size={22} resizeMode="scaleAspectFit" />
+      <SymbolView name={icon} tintColor={muted ? colors.muted : colors.text} size={20} resizeMode="scaleAspectFit" />
       <Text style={[styles.summaryLabel, inset && styles.summaryInset, muted && { color: colors.muted }]}>{label}</Text>
       <Text style={[styles.summaryValue, muted && { color: colors.muted }]}>{value}</Text>
-      {info ? <SymbolView name="info.circle" tintColor={colors.muted} size={18} resizeMode="scaleAspectFit" /> : <Text style={styles.chevron}>{expanded ? '⌃' : '›'}</Text>}
+      {info ? <SymbolView name="info.circle" tintColor={colors.muted} size={16} resizeMode="scaleAspectFit" /> : <Text style={styles.chevron}>{expanded ? '⌃' : '›'}</Text>}
     </>
   );
   if (onPress) {
@@ -362,8 +362,8 @@ function PurchaseRow({ payee, category, date, pending, amount, onPress, last }: 
 function PlainRow({ icon, label, value, onPress, last }: { icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; last?: boolean }) {
   const inner = (
     <>
-      <SymbolView name={icon} tintColor={colors.text} size={22} resizeMode="scaleAspectFit" style={styles.plainIcon} />
-      <Text style={styles.rowTitle}>{label}</Text>
+      <SymbolView name={icon} tintColor={colors.text} size={20} resizeMode="scaleAspectFit" style={styles.plainIcon} />
+      <Text style={[styles.rowTitle, { flex: 1 }]}>{label}</Text>
       <Text style={styles.rowValue}>{value}</Text>
     </>
   );
@@ -381,13 +381,13 @@ function OutlineButton({ label, onPress }: { label: string; onPress: () => void 
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  header: { paddingHorizontal: 28, paddingBottom: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  title: { color: colors.text, fontSize: 20, fontWeight: '800', letterSpacing: -0.4 },
+  header: { paddingHorizontal: 28, paddingBottom: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  title: { color: colors.text, fontSize: 19, fontWeight: '700', letterSpacing: -0.3 },
   scroll: { flex: 1 },
-  periodRow: { flexDirection: 'row', justifyContent: 'center', gap: 10, marginBottom: 18 },
-  periodChip: { backgroundColor: '#3a3a3d', borderRadius: 18, paddingHorizontal: 17, paddingVertical: 9 },
+  periodRow: { flexDirection: 'row', justifyContent: 'center', gap: 9, marginBottom: 17 },
+  periodChip: { backgroundColor: '#3a3a3d', borderRadius: 18, paddingHorizontal: 16, paddingVertical: 8 },
   periodChipOn: { backgroundColor: '#fff' },
-  periodText: { color: colors.text, fontSize: 15, fontWeight: '800' },
+  periodText: { color: colors.text, fontSize: 14, fontWeight: '700' },
   periodTextOn: { color: '#19191d' },
   monthWrap: { marginHorizontal: -12, marginBottom: 18 },
   monthBars: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 },
@@ -401,46 +401,46 @@ const styles = StyleSheet.create({
   legendRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, marginTop: 10 },
   legendDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#6f8df7' },
   spendDot: { backgroundColor: 'rgba(255,255,255,0.55)' },
-  legendText: { color: colors.text, fontSize: 13, opacity: 0.9 },
+  legendText: { color: colors.text, fontSize: 13, opacity: 0.82 },
   summaryCard: { paddingVertical: 0, overflow: 'hidden', marginBottom: 26 },
-  summaryRow: { minHeight: 66, flexDirection: 'row', alignItems: 'center', gap: 17, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)', paddingHorizontal: 22 },
-  summaryLabel: { color: colors.text, fontSize: 18, fontWeight: '700', flex: 1 },
-  summaryInset: { paddingLeft: 34, fontSize: 16, color: colors.muted },
-  summaryValue: { color: colors.text, fontSize: 18, fontWeight: '800' },
-  section: { color: colors.text, textTransform: 'uppercase', letterSpacing: 1.1, fontSize: 13, fontWeight: '900', marginBottom: 10, marginLeft: 8 },
+  summaryRow: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)', paddingHorizontal: 22 },
+  summaryLabel: { color: colors.text, fontSize: 16, fontWeight: '600', flex: 1 },
+  summaryInset: { fontSize: 15, color: colors.muted },
+  summaryValue: { color: colors.text, fontSize: 16, fontWeight: '700' },
+  section: { color: colors.text, textTransform: 'uppercase', letterSpacing: 1.1, fontSize: 12, fontWeight: '800', marginBottom: 10, marginLeft: 8 },
   budgetCard: { padding: 0, overflow: 'hidden', marginBottom: 26 },
-  budgetHead: { flexDirection: 'row', alignItems: 'center', gap: 18, minHeight: 66, paddingHorizontal: 22, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
-  budgetTitle: { color: colors.text, fontSize: 18, fontWeight: '700', flex: 1 },
-  budgetBody: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 22, paddingTop: 18 },
-  mutedLabel: { color: colors.muted, fontSize: 13, fontWeight: '700' },
-  budgetValue: { color: colors.text, fontSize: 29, fontWeight: '900', marginTop: 4 },
-  ringRow: { flexDirection: 'row', gap: 10 },
-  ring: { width: 48, height: 48, borderRadius: 24, borderWidth: 3, alignItems: 'center', justifyContent: 'center' },
-  ringText: { color: colors.accentLight, fontSize: 16, fontWeight: '900' },
-  progressTrack: { height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.17)', margin: 22, marginTop: 16, overflow: 'hidden' },
+  budgetHead: { flexDirection: 'row', alignItems: 'center', gap: 16, minHeight: 60, paddingHorizontal: 22, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  budgetTitle: { color: colors.text, fontSize: 17, fontWeight: '600', flex: 1 },
+  budgetBody: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 22, paddingTop: 16 },
+  mutedLabel: { color: colors.muted, fontSize: 12, fontWeight: '600' },
+  budgetValue: { color: colors.text, fontSize: 26, fontWeight: '800', marginTop: 4 },
+  ringRow: { flexDirection: 'row', gap: 9 },
+  ring: { width: 44, height: 44, borderRadius: 22, borderWidth: 3, alignItems: 'center', justifyContent: 'center' },
+  ringText: { color: colors.accentLight, fontSize: 15, fontWeight: '800' },
+  progressTrack: { height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.17)', margin: 22, marginTop: 14, overflow: 'hidden' },
   progressFill: { height: 6, borderRadius: 3, backgroundColor: '#8aa0ff' },
   breakdownCard: { padding: 0, overflow: 'hidden', marginBottom: 26 },
   segmented: { flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
-  segmentText: { flex: 1, textAlign: 'center', color: colors.muted, fontSize: 16, fontWeight: '800', paddingVertical: 16 },
+  segmentText: { flex: 1, textAlign: 'center', color: colors.muted, fontSize: 15, fontWeight: '700', paddingVertical: 15 },
   segmentOn: { color: colors.text },
-  categoryRow: { minHeight: 86, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  categoryRow: { minHeight: 74, flexDirection: 'row', alignItems: 'center', gap: 13, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
   rowMid: { flex: 1, minWidth: 0 },
-  rowTitle: { color: colors.text, fontSize: 18, fontWeight: '700' },
-  rowSub: { color: colors.text, opacity: 0.62, fontSize: 15, marginTop: 5 },
-  rowValue: { color: colors.text, fontSize: 18, fontWeight: '800' },
-  categoryColor: { width: 4, height: 38, borderRadius: 2 },
+  rowTitle: { color: colors.text, fontSize: 16, fontWeight: '600' },
+  rowSub: { color: colors.text, opacity: 0.56, fontSize: 14, marginTop: 4 },
+  rowValue: { color: colors.text, fontSize: 16, fontWeight: '700' },
+  categoryColor: { width: 4, height: 36, borderRadius: 2 },
   groupCard: { padding: 0, overflow: 'hidden', marginBottom: 26 },
-  listRow: { minHeight: 84, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  listRow: { minHeight: 76, flexDirection: 'row', alignItems: 'center', gap: 13, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
   lastRow: { borderBottomWidth: 0 },
-  countBubble: { width: 42, height: 42, borderRadius: 21, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
-  countText: { color: colors.text, fontSize: 16, fontWeight: '800', opacity: 0.75 },
+  countBubble: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
+  countText: { color: colors.text, fontSize: 15, fontWeight: '700', opacity: 0.72 },
   nameLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  cardCopy: { color: colors.text, opacity: 0.72, fontSize: 15, lineHeight: 21, padding: 22, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
-  plainIcon: { width: 42 },
-  outlineBtn: { borderWidth: 1.2, borderColor: colors.text, borderRadius: 999, alignItems: 'center', paddingVertical: 14, marginHorizontal: 22, marginVertical: 18 },
-  outlineText: { color: colors.text, fontSize: 17, fontWeight: '800' },
+  cardCopy: { color: colors.text, opacity: 0.68, fontSize: 14, lineHeight: 20, padding: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  plainIcon: { width: 38 },
+  outlineBtn: { borderWidth: 1.2, borderColor: colors.text, borderRadius: 999, alignItems: 'center', paddingVertical: 13, marginHorizontal: 22, marginVertical: 17 },
+  outlineText: { color: colors.text, fontSize: 16, fontWeight: '700' },
   problemCard: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 24, padding: 22, marginBottom: 26 },
-  problemTitle: { color: colors.text, fontSize: 20, fontWeight: '900' },
-  problemText: { color: colors.text, opacity: 0.72, fontSize: 16, lineHeight: 23, marginTop: 12, marginBottom: 10 },
-  chevron: { color: colors.text, opacity: 0.9, fontSize: 20, fontWeight: '800' },
+  problemTitle: { color: colors.text, fontSize: 18, fontWeight: '800' },
+  problemText: { color: colors.text, opacity: 0.68, fontSize: 15, lineHeight: 22, marginTop: 12, marginBottom: 10 },
+  chevron: { color: colors.text, opacity: 0.82, fontSize: 18, fontWeight: '700' },
 });
