@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useRouter } from 'expo-router';
 import { useBills } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
 import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
@@ -64,6 +65,7 @@ function CalendarMonth({ year, month, dueByDay, selected, onSelect }: {
 }
 
 export default function Bills() {
+  const router = useRouter();
   const bills = useBills();
   const data = bills.data;
   const [selected, setSelected] = useState<string | null>(null);
@@ -107,17 +109,19 @@ export default function Bills() {
   // there's no manual "mark paid" (you can't fake a payment that didn't happen).
   const renderRow = (b: Bill) => {
     const paidLabel = b.paid ? (b.matched ? `paid ${fmtDay(b.matched.date)}` : 'paid') : dueLabel(b.dueDate);
+    const variance = b.variance ?? null;
+    const varianceText = variance != null && Math.abs(variance) >= 0.01 ? ` · ${variance > 0 ? '+' : ''}${fmtMoney(variance)} vs expected` : '';
     return (
-      <View key={b.id} style={styles.row}>
+      <Pressable key={b.id} style={({ pressed }) => [styles.row, pressed && { opacity: 0.65 }]} onPress={() => { haptics.tap(); router.push(`/recurring/${encodeURIComponent(b.key)}`); }}>
         <Avatar label={cap(b.payee)} category={b.category} size={36} />
         <View style={styles.mid}>
           <Text style={[styles.payee, b.paid && styles.paidText]} numberOfLines={1}>{cap(b.payee)}</Text>
           <Text style={styles.sub} numberOfLines={1}>
-            {paidLabel} · {b.category} · {cadenceLabel(b.cadence)}
+            {paidLabel} · {b.category} · {cadenceLabel(b.cadence)}{varianceText}
           </Text>
         </View>
         <Text style={[styles.amt, b.paid && styles.paidText]}>{fmtPos(b.amount)}</Text>
-      </View>
+      </Pressable>
     );
   };
 

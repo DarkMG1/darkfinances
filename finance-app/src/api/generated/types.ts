@@ -337,7 +337,21 @@ export interface RecurringItem {
   firstCharged: string;
   lastCharged: string;
   nextRenewal: string;
+  renewalWindow: { start: string; end: string };
   priceChange: { from: number; to: number; pct: number } | null;
+  confidence: number;
+  firstSeen: string;
+  lastAmount: number;
+  previousAmount: number | null;
+  providerUrl: string;
+  cancellation: {
+    status?: string | null;
+    notes?: string | null;
+    confirmationDate?: string | null;
+    refundRequested?: boolean;
+    retentionOffer?: string | null;
+    watchNextRenewal?: boolean;
+  } | null;
   status: RecurringStatus;
   hidden: boolean;
   forced?: boolean; // user manually marked this recurring
@@ -368,6 +382,7 @@ export interface Bill {
   paidDate: string | null;
   // Set when paid was auto-derived from a real recorded transaction.
   matched?: { date: string; amount: number } | null;
+  variance?: number | null;
 }
 export interface Bills {
   bills: Bill[];

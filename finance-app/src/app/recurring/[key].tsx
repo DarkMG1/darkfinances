@@ -74,7 +74,10 @@ export default function RecurringDetail() {
       <Card style={styles.statsCard}>
         <Stat label="Status" value={cancelled ? 'Cancelled' : item.status === 'active' ? 'Active' : 'Inactive'} />
         <Stat label="Next renewal" value={item.status === 'active' ? fmtDay(item.nextRenewal) : '—'} />
+        <Stat label="Renewal window" value={`${fmtDay(item.renewalWindow?.start ?? item.nextRenewal)} - ${fmtDay(item.renewalWindow?.end ?? item.nextRenewal)}`} />
         <Stat label="Last charged" value={fmtDay(item.lastCharged)} />
+        <Stat label="Last amount" value={item.previousAmount ? `${fmtPos(item.previousAmount)} -> ${fmtPos(item.lastAmount)}` : fmtPos(item.lastAmount ?? item.amount)} />
+        <Stat label="Confidence" value={`${item.confidence ?? 0}%`} />
         <Stat label="Seen" value={`${item.occurrences}× since ${fmtDay(item.firstCharged)}`} />
         <Stat label="Yearly cost" value={fmtMoney(item.monthlyEquivalent * 12)} last />
       </Card>
@@ -96,6 +99,32 @@ export default function RecurringDetail() {
         </Pressable>
       </View>
       <Text style={styles.segHint}>Bills show in Upcoming Bills; subscriptions in the Subscriptions list.</Text>
+
+      {!item.isBill ? (
+        <>
+          <CardTitle style={{ marginTop: 16 }}>Cancellation Workflow</CardTitle>
+          <Card style={styles.statsCard}>
+            <Stat label="Workflow" value={item.cancellation?.status || (cancelled ? 'cancelled' : 'not started')} />
+            <Stat label="Refund requested" value={item.cancellation?.refundRequested ? 'Yes' : 'No'} />
+            <Stat label="Watch next renewal" value={item.cancellation?.watchNextRenewal ? 'Yes' : 'No'} />
+            <Stat label="Confirmation" value={item.cancellation?.confirmationDate ? fmtDay(item.cancellation.confirmationDate) : '—'} last />
+          </Card>
+          <View style={styles.workflowGrid}>
+            <Pressable style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, cancellation: { status: 'in_progress' } })} disabled={override.isPending}>
+              <Text style={styles.workflowText}>Start cancellation</Text>
+            </Pressable>
+            <Pressable style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, cancellation: { refundRequested: !item.cancellation?.refundRequested } })} disabled={override.isPending}>
+              <Text style={styles.workflowText}>{item.cancellation?.refundRequested ? 'Clear refund' : 'Request refund'}</Text>
+            </Pressable>
+            <Pressable style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, cancellation: { watchNextRenewal: !item.cancellation?.watchNextRenewal } })} disabled={override.isPending}>
+              <Text style={styles.workflowText}>{item.cancellation?.watchNextRenewal ? 'Stop watching' : 'Watch renewal'}</Text>
+            </Pressable>
+            <Pressable style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, status: 'cancelled', cancellation: { status: 'confirmed', confirmationDate: new Date().toISOString().slice(0, 10) } })} disabled={override.isPending}>
+              <Text style={styles.workflowText}>Confirm cancelled</Text>
+            </Pressable>
+          </View>
+        </>
+      ) : null}
 
       <View style={styles.actions}>
         {item.forced ? (
@@ -150,6 +179,9 @@ const styles = StyleSheet.create({
   segTextActive: { color: colors.accentLight },
   segHint: { color: colors.muted, fontSize: 11, marginTop: 8 },
   actions: { marginTop: 20, gap: 10 },
+  workflowGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  workflowBtn: { width: '48%', flexGrow: 1, paddingVertical: 11, paddingHorizontal: 10, borderRadius: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  workflowText: { color: colors.accentLight, fontSize: 12, fontWeight: '700', textAlign: 'center' },
   btn: { paddingVertical: 14, borderRadius: 12, alignItems: 'center', borderWidth: 1 },
   btnPrimary: { backgroundColor: colors.accent, borderColor: colors.accent },
   btnDanger: { borderColor: colors.red, backgroundColor: 'rgba(239,68,68,0.08)' },

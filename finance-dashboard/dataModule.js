@@ -2341,6 +2341,7 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
       const lastCharged = dates[dates.length - 1];
       const nextRenewal = addDays(lastCharged, Math.round(effPeriod));
       const monthlyEquivalent = amount * (30.44 / effPeriod);
+      const confidence = Math.max(35, Math.min(99, Math.round(100 - cv * 45 + Math.min(10, dates.length) * 2 + (forced ? -15 : 0))));
 
       const lastAmt = amounts[amounts.length - 1];
       const prevAmt = amounts[amounts.length - 2];
@@ -2364,7 +2365,14 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
         firstCharged: dates[0],
         lastCharged,
         nextRenewal,
+        renewalWindow: { start: addDays(nextRenewal, -3), end: addDays(nextRenewal, 3) },
         priceChange,
+        confidence,
+        firstSeen: dates[0],
+        lastAmount: round2(lastAmt || amount),
+        previousAmount: prevAmt ? round2(prevAmt) : null,
+        providerUrl: `https://www.google.com/search?q=${encodeURIComponent(`${rec.payee} cancel subscription`)}`,
+        cancellation: (ov && ov.cancellation) || null,
         status,
         hidden: !!(ov && ov.hidden),
         forced: !!(ov && ov.forced), // user manually marked this recurring
@@ -2401,7 +2409,7 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
   });
 }
 
-function setRecurringOverride({ key, status, hidden, forced, isBill } = {}) {
+function setRecurringOverride({ key, status, hidden, forced, isBill, cancellation } = {}) {
   if (!key) throw new Error('key required');
   const overrides = readJsonSafe(OVERRIDES_PATH, {});
   const cur = overrides[key] || {};
@@ -2420,6 +2428,15 @@ function setRecurringOverride({ key, status, hidden, forced, isBill } = {}) {
   if (hidden !== undefined) {
     if (hidden) cur.hidden = true;
     else delete cur.hidden;
+  }
+  if (cancellation !== undefined) {
+    const prev = cur.cancellation || {};
+    const next = { ...prev, ...cancellation };
+    for (const k of Object.keys(next)) {
+      if (next[k] === null || next[k] === undefined || next[k] === '') delete next[k];
+    }
+    if (Object.keys(next).length) cur.cancellation = next;
+    else delete cur.cancellation;
   }
   if (Object.keys(cur).length) overrides[key] = cur;
   else delete overrides[key];
@@ -2559,6 +2576,7 @@ async function getBills({ days = 45 } = {}) {
         paidDate: match ? match.date : (manual ? manual.paidDate : null),
         // Present only when linked to a real transaction (vs a manual flag).
         matched: match ? { date: match.date, amount: match.amount } : null,
+        variance: match ? round2(Math.abs(match.amount) - Math.abs(it.amount)) : null,
       });
       due = addDays(due, period);
       guard++;

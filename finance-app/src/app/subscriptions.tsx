@@ -38,6 +38,8 @@ export default function Subscriptions() {
           <Text style={styles.sub} numberOfLines={1}>
             {cadenceLabel(item.cadence)}
             {item.status === 'active' ? ` · ${dueLabel(item.nextRenewal)}` : item.status === 'cancelled' ? ' · cancelled' : ' · inactive'}
+            {item.confidence ? ` · ${item.confidence}% confidence` : ''}
+            {item.cancellation?.watchNextRenewal ? ' · watching renewal' : ''}
           </Text>
         </View>
         <View style={styles.rightCol}>

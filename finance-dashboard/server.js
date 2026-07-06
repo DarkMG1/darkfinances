@@ -347,8 +347,8 @@ const resolvers = {
 
 async function setRecurring(req) {
   const { key } = req.params;
-  const { status, hidden, forced, isBill } = req.body || {};
-  const result = data.setRecurringOverride({ key, status, hidden, forced, isBill });
+  const { status, hidden, forced, isBill, cancellation } = req.body || {};
+  const result = data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation });
   cache.flushAll();
   return result;
 }

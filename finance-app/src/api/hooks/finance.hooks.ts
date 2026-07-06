@@ -370,6 +370,14 @@ export interface SetRecurringVars {
   hidden?: boolean;
   forced?: boolean;
   isBill?: boolean | null;
+  cancellation?: {
+    status?: string | null;
+    notes?: string | null;
+    confirmationDate?: string | null;
+    refundRequested?: boolean | null;
+    retentionOffer?: string | null;
+    watchNextRenewal?: boolean | null;
+  };
 }
 
 export function useSetRecurringOverride() {
