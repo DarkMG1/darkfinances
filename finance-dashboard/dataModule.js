@@ -2575,6 +2575,82 @@ async function getBills({ days = 45 } = {}) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Forecast — forward cash balance from known inflows/outflows.
+// ---------------------------------------------------------------------------
+async function getForecast({ days = 90 } = {}) {
+  const horizonDays = Math.min(180, Math.max(30, Number(days) || 90));
+  const today = todayYMD();
+  const horizon = addDays(today, horizonDays);
+  const [accounts, income, bills, budgets, reimb] = await Promise.all([
+    getAccounts(),
+    getIncome({}),
+    getBills({ days: horizonDays }),
+    getBudgets({}),
+    getReimbursement({}),
+  ]);
+  const startBalance = round2(accounts.filter((a) => !a.hidden && !a.offbudget && a.balance > 0).reduce((s, a) => s + a.balance, 0));
+  const events = [];
+  const pushEvent = (date, label, amount, kind) => {
+    if (!date || date < today || date > horizon || !Number.isFinite(Number(amount)) || Math.abs(Number(amount)) < 0.005) return;
+    events.push({ date, label, amount: round2(Number(amount)), kind });
+  };
+
+  for (const s of income.streams || []) {
+    if (!s.active) continue;
+    let due = s.nextPay;
+    const period = Math.round(CADENCE_DAYS[s.cadence] || 30.44);
+    let guard = 0;
+    while (due < today && guard < 64) { due = addDays(due, period); guard++; }
+    while (due <= horizon && guard < 128) {
+      pushEvent(due, s.payee || 'Income', Math.abs(s.amount), 'income');
+      due = addDays(due, period);
+      guard++;
+    }
+  }
+  for (const b of bills.bills || []) if (!b.paid) pushEvent(b.dueDate, b.payee || 'Bill', -Math.abs(b.amount), 'bill');
+  if (budgets.totalRemaining > 0) {
+    const dailyBudget = round2(budgets.totalRemaining / Math.max(1, budgets.daysInMonth - budgets.daysElapsed + 1));
+    for (let i = 0; i <= Math.min(horizonDays, budgets.daysInMonth - budgets.daysElapsed); i++) pushEvent(addDays(today, i), 'Planned budget spend', -dailyBudget, 'budget');
+  }
+  if (reimb.totalOwed > 0.5) pushEvent(addDays(today, 14), 'Expected reimbursements', reimb.totalOwed, 'reimbursement');
+
+  events.sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
+  const byDate = new Map();
+  for (const e of events) {
+    const cur = byDate.get(e.date) || { date: e.date, inflow: 0, outflow: 0, events: [] };
+    if (e.amount >= 0) cur.inflow = round2(cur.inflow + e.amount);
+    else cur.outflow = round2(cur.outflow + Math.abs(e.amount));
+    cur.events.push(e);
+    byDate.set(e.date, cur);
+  }
+  const points = [];
+  let balance = startBalance;
+  let lowest = { date: today, balance };
+  for (let i = 0; i <= horizonDays; i++) {
+    const date = addDays(today, i);
+    const day = byDate.get(date);
+    if (day) balance = round2(balance + day.inflow - day.outflow);
+    const p = { date, balance, inflow: day ? day.inflow : 0, outflow: day ? day.outflow : 0 };
+    points.push(p);
+    if (p.balance < lowest.balance) lowest = { date, balance: p.balance };
+  }
+  return {
+    generatedAt: new Date().toISOString(),
+    range: { start: today, end: horizon, days: horizonDays },
+    startBalance,
+    endingBalance: points[points.length - 1].balance,
+    lowest,
+    totals: {
+      inflow: round2(events.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)),
+      outflow: round2(events.filter((e) => e.amount < 0).reduce((s, e) => s + Math.abs(e.amount), 0)),
+    },
+    points,
+    events: events.slice(0, 200),
+    warnings: lowest.balance < 0 ? [`Projected cash drops below $0 on ${lowest.date}`] : [],
+  };
+}
+
 // Toggle a bill occurrence's paid state. Identified by `${recurringKey}|${dueDate}`.
 function setBillPaid({ id, key, dueDate, paid } = {}) {
   const billId = id || (key && dueDate ? `${key}|${dueDate}` : null);
@@ -3580,6 +3656,7 @@ module.exports = {
   markRecurring,
   getIncome,
   getBills,
+  getForecast,
   setBillPaid,
   searchTransactions,
   getTags,

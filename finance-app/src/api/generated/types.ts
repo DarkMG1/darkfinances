@@ -377,6 +377,30 @@ export interface Bills {
   horizonDays: number;
 }
 
+export interface ForecastEvent {
+  date: string;
+  label: string;
+  amount: number;
+  kind: 'income' | 'bill' | 'budget' | 'reimbursement';
+}
+export interface ForecastPoint {
+  date: string;
+  balance: number;
+  inflow: number;
+  outflow: number;
+}
+export interface Forecast {
+  generatedAt: string;
+  range: { start: string; end: string; days: number };
+  startBalance: number;
+  endingBalance: number;
+  lowest: { date: string; balance: number };
+  totals: { inflow: number; outflow: number };
+  points: ForecastPoint[];
+  events: ForecastEvent[];
+  warnings: string[];
+}
+
 export interface IncomeStream {
   key: string;
   payee: string;

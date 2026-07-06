@@ -25,6 +25,7 @@ export const API_ENDPOINTS = {
   categories: def('/api/v1/categories', 'GET', 'categories'),
   recurring: def('/api/v1/recurring', 'GET', 'recurring'),
   bills: def('/api/v1/bills', 'GET', 'bills'),
+  forecast: def('/api/v1/forecast', 'GET', 'forecast'),
   income: def('/api/v1/income', 'GET', 'income'),
   search: def('/api/v1/search', 'GET', 'search'),
   tags: def('/api/v1/tags', 'GET', 'tags'),

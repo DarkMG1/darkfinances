@@ -92,6 +92,7 @@ function RootNav() {
         <Stack.Screen name="networth" options={{ ...pushHeader, title: 'Net Worth' }} />
         <Stack.Screen name="budgets" options={{ ...pushHeader, title: 'Budgets' }} />
         <Stack.Screen name="cashflow" options={{ ...pushHeader, title: 'Cash Flow' }} />
+        <Stack.Screen name="forecast" options={{ ...pushHeader, title: 'Forecast' }} />
         <Stack.Screen name="bills" options={{ ...pushHeader, title: 'Upcoming Bills' }} />
         <Stack.Screen name="income" options={{ ...pushHeader, title: 'Income' }} />
         <Stack.Screen name="subscriptions" options={{ ...pushHeader, title: 'Subscriptions' }} />

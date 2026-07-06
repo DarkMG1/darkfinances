@@ -11,6 +11,7 @@ import {
   CategorizeResult,
   Category,
   CreateTransactionInput,
+  Forecast,
   Goal,
   GoalInput,
   Income,
@@ -265,6 +266,16 @@ export function useBills(days?: number) {
     params: days ? { days } : undefined,
     queryKey: [API_ENDPOINTS.bills.key, days ?? 'default'],
     staleTime: 300_000,
+  });
+}
+
+export function useForecast(days = 90) {
+  return useFinanceQuery<Forecast>({
+    endpoint: API_ENDPOINTS.forecast.endpoint,
+    method: API_ENDPOINTS.forecast.method,
+    params: { days },
+    queryKey: [API_ENDPOINTS.forecast.key, days],
+    staleTime: 120_000,
   });
 }
 

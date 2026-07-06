@@ -1,13 +1,17 @@
 import React from 'react';
-import { StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { useRouter } from 'expo-router';
+import { SymbolView } from 'expo-symbols';
 import { useTrends } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
 import { Card, CardTitle, EmptyState, ErrorState, Loading, StatCard } from '@/components/ui';
 import { GroupedBars } from '@/components/charts';
 import { colors, fmtMoney, fmtPos, monthLabel } from '@/theme/colors';
+import { haptics } from '@/lib/haptics';
 
 export default function CashFlow() {
   const { width } = useWindowDimensions();
+  const router = useRouter();
   const trends = useTrends(12);
   const months = trends.data?.months ?? [];
   const cur = months[months.length - 1];
@@ -31,6 +35,17 @@ export default function CashFlow() {
             <StatCard label="Money Out" value={cur ? fmtPos(cur.spend) : '—'} valueColor={colors.red} />
             <StatCard label="Net" value={cur ? fmtMoney(cur.net) : '—'} valueColor={cur && cur.net >= 0 ? colors.green : colors.red} />
           </View>
+
+          <Pressable onPress={() => { haptics.tap(); router.push('/forecast' as never); }} style={({ pressed }) => [styles.forecastCard, pressed && { opacity: 0.65 }]}>
+            <View style={[styles.forecastIcon, { backgroundColor: colors.accentLight + '22' }]}>
+              <SymbolView name="chart.line.uptrend.xyaxis" tintColor={colors.accentLight} size={22} resizeMode="scaleAspectFit" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.forecastTitle}>Forward forecast</Text>
+              <Text style={styles.forecastSub}>Project cash for the next 30, 60, or 90 days</Text>
+            </View>
+            <Text style={styles.forecastValue}>Open ›</Text>
+          </Pressable>
 
           {months.length > 1 ? (
             <Card style={{ marginTop: 12 }}>
@@ -62,6 +77,11 @@ export default function CashFlow() {
 
 const styles = StyleSheet.create({
   statsRow: { flexDirection: 'row', gap: 10 },
+  forecastCard: { marginTop: 12, flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: 14 },
+  forecastIcon: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  forecastTitle: { color: colors.text, fontSize: 15, fontWeight: '800' },
+  forecastSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  forecastValue: { color: colors.accentLight, fontSize: 13, fontWeight: '800' },
   legend: { flexDirection: 'row', gap: 16, marginTop: 8, justifyContent: 'center' },
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   legendDot: { width: 8, height: 8, borderRadius: 4 },

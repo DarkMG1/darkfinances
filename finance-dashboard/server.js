@@ -208,6 +208,7 @@ function demoMiddleware(v1mode) {
       case 'categories': return send(demo.categories());
       case 'recurring': return send(demo.recurring());
       case 'bills': return send(demo.bills());
+      case 'forecast': return send({ generatedAt: new Date().toISOString(), range: { start: new Date().toISOString().slice(0, 10), end: new Date().toISOString().slice(0, 10), days: 30 }, startBalance: 0, endingBalance: 0, lowest: { date: new Date().toISOString().slice(0, 10), balance: 0 }, totals: { inflow: 0, outflow: 0 }, points: [], events: [], warnings: [] });
       case 'income': return send(demo.income());
       case 'search': {
         const needle = (req.query.q || '').toLowerCase().trim();
@@ -323,6 +324,10 @@ const resolvers = {
   bills: (req) => {
     const days = Math.min(120, Math.max(7, parseInt(req.query.days, 10) || 45));
     return cached(`bills-${days}`, () => data.getBills({ days }), 600);
+  },
+  forecast: (req) => {
+    const days = Math.min(180, Math.max(30, parseInt(req.query.days, 10) || 90));
+    return cached(`forecast-${days}`, () => data.getForecast({ days }), 300);
   },
   income: (req) => {
     const window = Math.min(24, Math.max(6, parseInt(req.query.window, 10) || 12));
@@ -715,6 +720,7 @@ v1.get('/merchant-history', env(resolvers.merchantHistory));
 v1.get('/categories', env(resolvers.categories));
 v1.get('/recurring', env(resolvers.recurring));
 v1.get('/bills', env(resolvers.bills));
+v1.get('/forecast', env(resolvers.forecast));
 v1.get('/income', env(resolvers.income));
 v1.get('/search', env(resolvers.search));
 v1.get('/tags', env(resolvers.tags));
