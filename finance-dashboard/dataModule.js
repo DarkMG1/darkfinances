@@ -72,6 +72,8 @@ const ACCOUNT_OVERRIDES_PATH = process.env.ACCOUNT_OVERRIDES_PATH || path.join(_
 // User-entered assets/liabilities that live outside Actual (car, home, cash,
 // crypto) and roll into net worth.
 const MANUAL_ASSETS_PATH = process.env.MANUAL_ASSETS_PATH || path.join(__dirname, 'manual-assets.json');
+const INVESTMENT_HOLDINGS_PATH = process.env.INVESTMENT_HOLDINGS_PATH || path.join(__dirname, 'investment-holdings.json');
+const DEBT_PLANNER_PATH = process.env.DEBT_PLANNER_PATH || path.join(__dirname, 'debt-planner.json');
 // Monthly reconciliation: opt-in month-end review where each expense is checked
 // off and then the whole month is closed. Stores the enabled flag + per-month,
 // per-transaction reconcile marks so the app can nag until a month is cleared.
@@ -398,6 +400,86 @@ function deleteManualAsset({ id } = {}) {
   store.items = (store.items || []).filter((i) => i.id !== id);
   writeJsonSafe(MANUAL_ASSETS_PATH, store);
   return { ok: true, removed: before - store.items.length };
+}
+
+function payoffProjection(debt) {
+  const balance = Math.max(0, Number(debt.balance) || 0);
+  const apr = Math.max(0, Number(debt.apr) || 0);
+  const payment = Math.max(0, Number(debt.minPayment) || 0);
+  if (!balance || !payment) return { months: null, totalInterest: null, payoffDate: null };
+  let bal = balance;
+  let interest = 0;
+  let months = 0;
+  const monthlyRate = apr / 100 / 12;
+  while (bal > 0.005 && months < 600) {
+    const charge = bal * monthlyRate;
+    if (payment <= charge && monthlyRate > 0) return { months: null, totalInterest: null, payoffDate: null };
+    interest += charge;
+    bal = Math.max(0, bal + charge - payment);
+    months++;
+  }
+  return { months, totalInterest: round2(interest), payoffDate: addDays(todayYMD(), Math.round(months * 30.44)) };
+}
+
+function getInvestments() {
+  const hStore = readJsonSafe(INVESTMENT_HOLDINGS_PATH, { holdings: [] }) || {};
+  const dStore = readJsonSafe(DEBT_PLANNER_PATH, { debts: [] }) || {};
+  const holdings = (Array.isArray(hStore.holdings) ? hStore.holdings : []).map((h) => {
+    const quantity = Number(h.quantity) || 0;
+    const price = Number(h.price) || 0;
+    const value = round2(Number(h.value) || quantity * price);
+    const costBasis = h.costBasis == null ? null : round2(Number(h.costBasis) || 0);
+    const gainLoss = costBasis == null ? null : round2(value - costBasis);
+    const gainLossPct = costBasis && costBasis > 0 ? round2((gainLoss / costBasis) * 100) : null;
+    return {
+      symbol: h.symbol || '',
+      name: h.name || h.symbol || 'Holding',
+      account: h.account || 'Investments',
+      assetClass: h.assetClass || 'Unclassified',
+      quantity,
+      price,
+      value,
+      costBasis,
+      gainLoss,
+      gainLossPct,
+    };
+  }).filter((h) => h.value > 0);
+  const byAssetClass = {};
+  const byAccount = {};
+  for (const h of holdings) {
+    byAssetClass[h.assetClass] = round2((byAssetClass[h.assetClass] || 0) + h.value);
+    byAccount[h.account] = round2((byAccount[h.account] || 0) + h.value);
+  }
+  const debts = (Array.isArray(dStore.debts) ? dStore.debts : []).map((d) => {
+    const projection = payoffProjection(d);
+    return {
+      id: d.id || slugify(d.name || 'debt'),
+      name: d.name || 'Debt',
+      balance: round2(Number(d.balance) || 0),
+      apr: Number(d.apr) || 0,
+      minPayment: round2(Number(d.minPayment) || 0),
+      dueDate: d.dueDate || null,
+      strategy: d.strategy || 'avalanche',
+      ...projection,
+    };
+  }).filter((d) => d.balance > 0).sort((a, b) => b.apr - a.apr || a.balance - b.balance);
+  const debtBalance = debts.reduce((s, d) => s + d.balance, 0);
+  return {
+    generatedAt: new Date().toISOString(),
+    holdings,
+    totals: {
+      value: round2(holdings.reduce((s, h) => s + h.value, 0)),
+      costBasis: round2(holdings.reduce((s, h) => s + (h.costBasis || 0), 0)),
+      gainLoss: round2(holdings.reduce((s, h) => s + (h.gainLoss || 0), 0)),
+    },
+    allocation: { byAssetClass, byAccount },
+    debts,
+    debtTotals: {
+      balance: round2(debtBalance),
+      minPayment: round2(debts.reduce((s, d) => s + d.minPayment, 0)),
+      weightedApr: debtBalance ? round2(debts.reduce((s, d) => s + d.apr * d.balance, 0) / debtBalance) : 0,
+    },
+  };
 }
 
 // collapse=true renders each split as ONE parent row (for account/activity lists);
@@ -3617,6 +3699,7 @@ module.exports = {
   getAccounts,
   setAccountOverride,
   getManualAssets,
+  getInvestments,
   saveManualAsset,
   deleteManualAsset,
   getTransactions,

@@ -1,0 +1,22 @@
+{
+  "debts": [
+    {
+      "id": "student-loan",
+      "name": "Student loan",
+      "balance": 12000,
+      "apr": 5.4,
+      "minPayment": 180,
+      "dueDate": "2026-08-01",
+      "strategy": "avalanche"
+    },
+    {
+      "id": "car-loan",
+      "name": "Car loan",
+      "balance": 9000,
+      "apr": 6.2,
+      "minPayment": 350,
+      "dueDate": "2026-08-15",
+      "strategy": "snowball"
+    }
+  ]
+}

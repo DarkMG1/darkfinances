@@ -155,6 +155,17 @@ export default function NetWorthScreen() {
             </View>
           </Card>
 
+          <View style={styles.deepLinks}>
+            <Pressable style={({ pressed }) => [styles.deepCard, pressed && { opacity: 0.65 }]} onPress={() => { haptics.tap(); router.push('/investments' as never); }}>
+              <Text style={styles.deepLabel}>Investments</Text>
+              <Text style={styles.deepSub}>Holdings, allocation, performance ›</Text>
+            </Pressable>
+            <Pressable style={({ pressed }) => [styles.deepCard, pressed && { opacity: 0.65 }]} onPress={() => { haptics.tap(); router.push('/debt' as never); }}>
+              <Text style={styles.deepLabel}>Debt payoff</Text>
+              <Text style={styles.deepSub}>APR, payoff date, strategy ›</Text>
+            </Pressable>
+          </View>
+
           {assetsList.length ? (
             <>
               <SectionLabel>Assets</SectionLabel>
@@ -258,6 +269,10 @@ const styles = StyleSheet.create({
   splitHead: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
   splitText: { color: colors.muted, fontSize: 12, fontWeight: '600' },
   splitBar: { flexDirection: 'row', height: 10, borderRadius: 5, overflow: 'hidden', gap: 2 },
+  deepLinks: { flexDirection: 'row', gap: 10, marginBottom: 16 },
+  deepCard: { flex: 1, backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: 14, padding: 13 },
+  deepLabel: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  deepSub: { color: colors.muted, fontSize: 11, lineHeight: 15, marginTop: 4 },
   list: { paddingVertical: 4 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
   name: { color: colors.text, fontSize: 15, fontWeight: '600' },

@@ -24,6 +24,39 @@ export interface ManualAssets {
   net: number;
 }
 
+export interface InvestmentHolding {
+  symbol: string;
+  name: string;
+  account: string;
+  assetClass: string;
+  quantity: number;
+  price: number;
+  value: number;
+  costBasis: number | null;
+  gainLoss: number | null;
+  gainLossPct: number | null;
+}
+export interface DebtPlan {
+  id: string;
+  name: string;
+  balance: number;
+  apr: number;
+  minPayment: number;
+  dueDate: string | null;
+  strategy: string;
+  months: number | null;
+  totalInterest: number | null;
+  payoffDate: string | null;
+}
+export interface Investments {
+  generatedAt: string;
+  holdings: InvestmentHolding[];
+  totals: { value: number; costBasis: number; gainLoss: number };
+  allocation: { byAssetClass: Record<string, number>; byAccount: Record<string, number> };
+  debts: DebtPlan[];
+  debtTotals: { balance: number; minPayment: number; weightedApr: number };
+}
+
 export interface Transaction {
   id: string;
   parentId: string | null;

@@ -15,6 +15,7 @@ import {
   Goal,
   GoalInput,
   Income,
+  Investments,
   Insights,
   ManualAssets,
   MerchantHistory,
@@ -877,6 +878,15 @@ export function useManualAssets() {
     method: API_ENDPOINTS.manualAssets.method,
     queryKey: [API_ENDPOINTS.manualAssets.key],
     staleTime: 60_000,
+  });
+}
+
+export function useInvestments() {
+  return useFinanceQuery<Investments>({
+    endpoint: API_ENDPOINTS.investments.endpoint,
+    method: API_ENDPOINTS.investments.method,
+    queryKey: [API_ENDPOINTS.investments.key],
+    staleTime: 120_000,
   });
 }
 

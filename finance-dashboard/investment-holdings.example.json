@@ -1,0 +1,22 @@
+{
+  "holdings": [
+    {
+      "symbol": "VTI",
+      "name": "Total US Market ETF",
+      "account": "Brokerage",
+      "assetClass": "US Equity",
+      "quantity": 10,
+      "price": 250,
+      "costBasis": 2200
+    },
+    {
+      "symbol": "VXUS",
+      "name": "Total International ETF",
+      "account": "Brokerage",
+      "assetClass": "International Equity",
+      "quantity": 8,
+      "price": 60,
+      "costBasis": 450
+    }
+  ]
+}

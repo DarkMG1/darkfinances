@@ -90,6 +90,8 @@ function RootNav() {
       <Stack.Protected guard={configured}>
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="networth" options={{ ...pushHeader, title: 'Net Worth' }} />
+        <Stack.Screen name="investments" options={{ ...pushHeader, title: 'Investments' }} />
+        <Stack.Screen name="debt" options={{ ...pushHeader, title: 'Debt Payoff' }} />
         <Stack.Screen name="budgets" options={{ ...pushHeader, title: 'Budgets' }} />
         <Stack.Screen name="cashflow" options={{ ...pushHeader, title: 'Cash Flow' }} />
         <Stack.Screen name="forecast" options={{ ...pushHeader, title: 'Forecast' }} />
