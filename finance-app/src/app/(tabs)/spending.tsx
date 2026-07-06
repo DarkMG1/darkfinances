@@ -1,27 +1,37 @@
-import React, { useMemo } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { useRouter } from 'expo-router';
-import { useInsights, useSpending, useTrends } from '@/api/hooks/finance.hooks';
-import { Screen } from '@/components/screen';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useBudgets, useInsights, useSpending, useTrends } from '@/api/hooks/finance.hooks';
+import { DemoRibbon } from '@/components/screen';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, PendingPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
-import { Donut, MonthNavigator } from '@/components/charts';
 import { haptics } from '@/lib/haptics';
 import { currentMonthKey, useSelectedMonth } from '@/lib/selectedMonth';
 import { categoryColors, colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
 
+type Period = 'week' | 'month' | 'quarter' | 'year';
+const PERIODS: { key: Period; label: string }[] = [
+  { key: 'week', label: 'Week' },
+  { key: 'month', label: 'Month' },
+  { key: 'quarter', label: 'Quarter' },
+  { key: 'year', label: 'Year' },
+];
+
 export default function Spending() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const curKey = useMemo(() => currentMonthKey(), []);
   const [month, setMonth] = useSelectedMonth();
+  const [period, setPeriod] = useState<Period>('month');
   // Current month keeps hitting the warmed `spending-current` cache (month=undefined).
   const apiMonth = month === curKey ? undefined : month;
   const trends = useTrends(60);
   const spending = useSpending(apiMonth);
+  const budgets = useBudgets(apiMonth);
   const insights = useInsights(apiMonth);
   const cur = spending.data?.current;
-  const prev = spending.data?.prev;
-  const spendDelta = cur && prev && prev.totalSpend > 0 ? ((cur.totalSpend - prev.totalSpend) / prev.totalSpend) * 100 : null;
 
   // Bars/navigation span exactly as far back as there's data: trim leading
   // buckets with no spend and no income from the (ascending) trends series.
@@ -29,9 +39,10 @@ export default function Spending() {
     const ms = trends.data?.months ?? [];
     let i = 0;
     while (i < ms.length && ms[i].spend === 0 && ms[i].income === 0) i++;
-    const trimmed = ms.slice(i).map((m) => ({ month: m.month, spend: m.spend }));
-    return trimmed.length ? trimmed : [{ month: curKey, spend: cur?.totalSpend ?? 0 }];
+    const trimmed = ms.slice(i);
+    return trimmed.length ? trimmed : [{ month: curKey, spend: cur?.totalSpend ?? 0, income: cur?.totalIncome ?? 0, net: 0, netWorth: 0 }];
   }, [trends.data, curKey, cur]);
+  const chartMonths = useMemo(() => availMonths.slice(-6), [availMonths]);
 
   const entries = useMemo(
     () => (cur ? Object.entries(cur.spending).sort((a, b) => b[1] - a[1]) : []),
@@ -42,210 +53,394 @@ export default function Spending() {
   // rendering it as if it were positive spend.
   const spendEntries = useMemo(() => entries.filter(([, v]) => v > 0.005), [entries]);
   const refundEntries = useMemo(() => entries.filter(([, v]) => v < -0.005).sort((a, b) => a[1] - b[1]), [entries]);
-  const donutData = spendEntries.slice(0, 10).map(([label, value], i) => ({ label, value, color: categoryColors[i % categoryColors.length] }));
-  const max = spendEntries[0]?.[1] || 1;
+  const topCategories = spendEntries.slice(0, 5);
+  const hiddenCategories = Math.max(0, spendEntries.length - topCategories.length);
+  const breakdownCategories = spendEntries.filter(([cat]) => !/^reimbursement$/i.test(cat));
+  const totalSpend = cur?.totalSpend ?? 0;
+  const totalIncome = cur?.totalIncome ?? 0;
+  const netIncome = totalIncome - totalSpend;
+  const reimbursementTotal = Math.abs(entries.find(([cat]) => /^reimbursement$/i.test(cat))?.[1] ?? 0);
+  const refundTotal = refundEntries.reduce((sum, [, amt]) => sum + Math.abs(amt), 0);
+  const budgetLeft = budgets.data?.totalRemaining ?? 0;
+  const budgetTarget = budgets.data?.totalTarget || budgets.data?.totalBudgeted || 0;
+  const budgetSpent = budgets.data?.totalSpent ?? totalSpend;
+  const budgetPct = budgetTarget > 0 ? Math.min(100, Math.max(0, (budgetSpent / budgetTarget) * 100)) : 0;
 
   // Real-spend merchants come from the backend (excludes transfers/investments/
   // CC payments/reimbursement), so savings moves and brokerage buys never show up.
   const topMerchants = insights.data?.topMerchants ?? [];
+  const refreshing = spending.isFetching || insights.isFetching || trends.isFetching || budgets.isFetching;
+  const refresh = () => { haptics.light(); spending.refetch(); insights.refetch(); trends.refetch(); budgets.refetch(); };
 
   return (
-    <Screen title="Spending" refreshing={spending.isFetching || insights.isFetching} onRefresh={() => { spending.refetch(); insights.refetch(); trends.refetch(); }}>
-      <MonthNavigator months={availMonths} selected={month} onSelect={setMonth} currentKey={curKey} />
+    <View style={styles.root}>
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
+        <Pressable hitSlop={10} onPress={() => haptics.tap()}>
+          <SymbolView name="gearshape" tintColor={colors.text} size={22} resizeMode="scaleAspectFit" />
+        </Pressable>
+        <Text style={styles.title}>Spending</Text>
+        <View style={{ width: 22 }} />
+      </View>
+      <DemoRibbon />
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={{ padding: 18, paddingBottom: insets.bottom + 72 }}
+        refreshControl={<RefreshControl tintColor={colors.accent} refreshing={refreshing} onRefresh={refresh} />}
+      >
+        <PeriodChips value={period} onChange={setPeriod} />
+        <DualMonthBars months={chartMonths} selected={month} onSelect={setMonth} />
 
-      {spending.isLoading ? (
-        <SkeletonList rows={8} />
-      ) : spending.isError ? (
-        <ErrorState error={spending.error?.error} onRetry={() => { spending.refetch(); insights.refetch(); }} />
-      ) : !spendEntries.length && !refundEntries.length ? (
-        <EmptyState icon="creditcard">{month === curKey ? 'No spending this month' : `No spending in ${monthLabel(month)}`}</EmptyState>
-      ) : (
-        <>
-          <Card style={{ alignItems: 'center', marginBottom: 16 }}>
-            <View style={styles.donutWrap}>
-              <Donut size={200} thickness={26} data={donutData} />
-              <View style={styles.donutCenter}>
-                <Text style={styles.donutAmt}>{fmtPos(cur!.totalSpend)}</Text>
-                <Text style={styles.donutLabel}>total spent</Text>
-                {spendDelta != null ? (
-                  <Text style={[styles.donutDelta, { color: spendDelta > 0 ? colors.red : colors.green }]}>
-                    {spendDelta > 0 ? '▲' : '▼'} {Math.abs(spendDelta).toFixed(0)}% vs last
-                  </Text>
-                ) : null}
-              </View>
-            </View>
-          </Card>
+        {spending.isLoading ? (
+          <SkeletonList rows={8} />
+        ) : spending.isError ? (
+          <ErrorState error={spending.error?.error} onRetry={refresh} />
+        ) : !spendEntries.length && !refundEntries.length ? (
+          <EmptyState icon="creditcard">{month === curKey ? 'No spending this month' : `No spending in ${monthLabel(month)}`}</EmptyState>
+        ) : (
+          <>
+            <SummaryCard>
+              <SummaryRow icon="dollarsign.circle" label="Income" value={fmtPos(totalIncome)} onPress={() => router.push({ pathname: '/category/[name]', params: { name: 'Income', ...(apiMonth ? { month: apiMonth } : {}) } })} />
+              <SummaryRow icon="banknote" label="Total Spend" value={fmtPos(totalSpend)} expanded onPress={() => router.push({ pathname: '/category/[name]', params: { name: 'Spending', ...(apiMonth ? { month: apiMonth } : {}) } })} />
+              {topCategories.slice(0, 2).map(([cat, amt], i) => (
+                <SummaryRow
+                  key={cat}
+                  icon={i === 0 ? 'receipt' : 'wallet.pass'}
+                  label={cat}
+                  value={fmtPos(amt)}
+                  inset
+                  onPress={() => router.push({ pathname: '/category/[name]', params: { name: cat, ...(apiMonth ? { month: apiMonth } : {}) } })}
+                />
+              ))}
+              <SummaryRow icon="minus.circle" label="Net Income" value={`${netIncome < 0 ? '-' : ''}${fmtPos(Math.abs(netIncome))}`} muted info last />
+            </SummaryCard>
 
-          <Card>
-            {spendEntries.map(([cat, amt], i) => (
-              <Pressable
-                key={cat}
-                style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}
-                onPress={() => router.push({ pathname: '/category/[name]', params: { name: cat, ...(apiMonth ? { month: apiMonth } : {}) } })}
-              >
-                <Avatar category={cat} size={30} />
-                <Text style={styles.catName} numberOfLines={1}>{cat}</Text>
-                <View style={styles.barWrap}>
-                  <View style={[styles.bar, { width: `${(amt / max) * 100}%`, backgroundColor: categoryColors[i % categoryColors.length] }]} />
-                </View>
-                <Text style={styles.amt}>{fmtPos(amt)}</Text>
+            <SectionTitle>Your Budget</SectionTitle>
+            <Card style={styles.budgetCard}>
+              <Pressable style={({ pressed }) => [styles.budgetHead, pressed && { opacity: 0.65 }]} onPress={() => router.push('/budgets')}>
+                <SymbolView name="rectangle.grid.2x2" tintColor={colors.text} size={22} resizeMode="scaleAspectFit" />
+                <Text style={styles.budgetTitle}>{monthLabel(month)} Budget</Text>
                 <Text style={styles.chevron}>›</Text>
               </Pressable>
-            ))}
-          </Card>
-
-          <View style={{ marginTop: 12 }}>
-            <CardTitle>Reimbursements</CardTitle>
-            <Card>
-              <Pressable
-                style={({ pressed }) => [styles.iRow, { borderBottomWidth: 0 }, pressed && { opacity: 0.6 }]}
-                onPress={() => { haptics.tap(); router.push({ pathname: '/category/[name]', params: { name: 'Reimbursement' } }); }}
-              >
-                <Avatar category="Reimbursement" size={34} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.iName}>View all reimbursements</Text>
-                  <Text style={styles.iSub}>Fronts you paid + paybacks received</Text>
+              <View style={styles.budgetBody}>
+                <View>
+                  <Text style={styles.mutedLabel}>Left for spending</Text>
+                  <Text style={styles.budgetValue}>{budgetLeft < 0 ? '-' : ''}{fmtPos(Math.abs(budgetLeft))}</Text>
                 </View>
-                <Text style={[styles.chevron, { marginLeft: 6 }]}>›</Text>
-              </Pressable>
+                <View style={styles.ringRow}>
+                  <Ring label="$" pct={budgetPct} />
+                  <Ring label="!" pct={Math.min(100, (refundTotal / Math.max(1, totalSpend)) * 100)} warn />
+                  <Ring label="∞" pct={100 - budgetPct} />
+                </View>
+              </View>
+              <View style={styles.progressTrack}>
+                <View style={[styles.progressFill, { width: `${budgetPct}%` }]} />
+              </View>
             </Card>
-          </View>
 
-          {refundEntries.length ? (
-            <View style={{ marginTop: 12 }}>
-              <CardTitle>Refunds & credits</CardTitle>
-              <Card>
-                {refundEntries.map(([cat, amt]) => (
-                  <Pressable
-                    key={cat}
-                    style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}
-                    onPress={() => router.push({ pathname: '/category/[name]', params: { name: cat, ...(apiMonth ? { month: apiMonth } : {}) } })}
-                  >
-                    <Avatar category={cat} size={30} />
-                    <Text style={styles.catName} numberOfLines={1}>{cat}</Text>
-                    <Text style={[styles.amt, { color: colors.green }]}>+{fmtPos(Math.abs(amt))}</Text>
-                    <Text style={styles.chevron}>›</Text>
-                  </Pressable>
-                ))}
-              </Card>
-              <Text style={styles.refundHint}>Net credits this month — these reduce your total spend.</Text>
-            </View>
-          ) : null}
+            <SectionTitle>Breakdown</SectionTitle>
+            <Card style={styles.breakdownCard}>
+              <View style={styles.segmented}>
+                <Text style={[styles.segmentText, styles.segmentOn]}>Categories</Text>
+                <Text style={styles.segmentText}>Tags</Text>
+              </View>
+              {topCategories.map(([cat, amt], i) => (
+                <CategoryRow
+                  key={cat}
+                  category={cat}
+                  amount={amt}
+                  pct={totalSpend > 0 ? amt / totalSpend : 0}
+                  color={categoryColors[i % categoryColors.length]}
+                  onPress={() => router.push({ pathname: '/category/[name]', params: { name: cat, ...(apiMonth ? { month: apiMonth } : {}) } })}
+                />
+              ))}
+              {hiddenCategories ? <OutlineButton label="See More" onPress={() => haptics.tap()} /> : null}
+            </Card>
 
-          {topMerchants.length ? (
-            <View style={{ marginTop: 12 }}>
-              <CardTitle>Top Merchants</CardTitle>
-              <Card>
-                {topMerchants.map((m) => (
-                  <Pressable
-                    key={m.payee}
-                    style={({ pressed }) => [styles.iRow, pressed && { opacity: 0.6 }]}
-                    onPress={() => { haptics.tap(); router.push({ pathname: '/merchant/[name]', params: { name: m.payee } }); }}
-                  >
-                    <Avatar label={m.payee} category={m.category ?? undefined} size={34} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.iName} numberOfLines={1}>{m.payee}</Text>
-                      <Text style={styles.iSub}>{m.count} transaction{m.count === 1 ? '' : 's'}</Text>
-                    </View>
-                    <Text style={styles.iAmt}>{fmtPos(m.total)}</Text>
-                    <Text style={[styles.chevron, { marginLeft: 6 }]}>›</Text>
-                  </Pressable>
-                ))}
-              </Card>
-            </View>
-          ) : null}
+            {topMerchants.length ? (
+              <>
+                <SectionTitle>Frequent Spend</SectionTitle>
+                <Card style={styles.groupCard}>
+                  {topMerchants.slice(0, 3).map((m, i) => (
+                    <MerchantRow
+                      key={m.payee}
+                      merchant={m.payee}
+                      category={m.category ?? undefined}
+                      count={m.count}
+                      total={m.total}
+                      last={i === Math.min(topMerchants.length, 3) - 1}
+                      onPress={() => { haptics.tap(); router.push({ pathname: '/merchant/[name]', params: { name: m.payee } }); }}
+                    />
+                  ))}
+                </Card>
+              </>
+            ) : null}
 
-          {insights.data?.largestCharges.length ? (
-            <View style={{ marginTop: 12 }}>
-              <CardTitle>Largest Charges</CardTitle>
-              <Card>
-                {insights.data.largestCharges.slice(0, 6).map((c, i) => (
-                  <Pressable
-                    key={c.id ?? i}
-                    style={({ pressed }) => [styles.iRow, pressed && { opacity: 0.6 }]}
-                    onPress={() => {
-                      haptics.tap();
-                      if (c.id) {
-                        router.push({
-                          pathname: '/transaction/[id]',
-                          params: {
-                            id: c.id,
-                            payee: c.payee || '',
-                            amount: String(c.amount),
-                            date: c.date,
-                            account: c.account || '',
-                            accountId: c.accountId || '',
-                            category: c.category || '',
-                            categoryId: c.categoryId || '',
-                            notes: c.notes || '',
-                            isLeg: c.isLeg ? '1' : '',
-                            parentId: c.parentId || '',
-                          },
-                        });
-                      } else {
-                        // older backend / stale cache without a txn id — drill into the category
-                        router.push({ pathname: '/category/[name]', params: { name: c.category, ...(apiMonth ? { month: apiMonth } : {}) } });
-                      }
-                    }}
-                  >
-                    <Avatar label={c.payee} category={c.category} size={34} />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.nameLine}>
-                        <Text style={[styles.iName, { flexShrink: 1 }]} numberOfLines={1}>{c.payee}</Text>
-                        {c.cleared === false ? <PendingPill /> : null}
-                      </View>
-                      <Text style={styles.iSub}>{fmtDate(c.date)} · {c.category}</Text>
-                    </View>
-                    <Text style={styles.iAmt}>{fmtPos(Math.abs(c.amount))}</Text>
-                    <Text style={[styles.chevron, { marginLeft: 6 }]}>›</Text>
-                  </Pressable>
-                ))}
-              </Card>
-            </View>
-          ) : null}
+            {insights.data?.largestCharges.length ? (
+              <>
+                <SectionTitle>Largest Purchases</SectionTitle>
+                <Card style={styles.groupCard}>
+                  <Text style={styles.cardCopy}>You can tap on a transaction to open it and adjust details.</Text>
+                  {insights.data.largestCharges.slice(0, 3).map((c, i) => (
+                    <PurchaseRow
+                      key={c.id ?? i}
+                      payee={c.payee}
+                      category={c.category}
+                      date={c.date}
+                      pending={c.cleared === false}
+                      amount={Math.abs(c.amount)}
+                      last={i === Math.min(insights.data!.largestCharges.length, 3) - 1}
+                      onPress={() => {
+                        haptics.tap();
+                        if (c.id) {
+                          router.push({
+                            pathname: '/transaction/[id]',
+                            params: {
+                              id: c.id,
+                              payee: c.payee || '',
+                              amount: String(c.amount),
+                              date: c.date,
+                              account: c.account || '',
+                              accountId: c.accountId || '',
+                              category: c.category || '',
+                              categoryId: c.categoryId || '',
+                              notes: c.notes || '',
+                              isLeg: c.isLeg ? '1' : '',
+                              parentId: c.parentId || '',
+                              cleared: c.cleared === false ? '0' : '1',
+                            },
+                          });
+                        } else {
+                          router.push({ pathname: '/category/[name]', params: { name: c.category, ...(apiMonth ? { month: apiMonth } : {}) } });
+                        }
+                      }}
+                    />
+                  ))}
+                  <OutlineButton label="See more" onPress={() => haptics.tap()} />
+                </Card>
+              </>
+            ) : null}
 
-          {insights.data?.anomalies.length ? (
-            <View style={{ marginTop: 12 }}>
-              <CardTitle>Spending Spikes</CardTitle>
-              <Card>
-                {insights.data.anomalies.map((a, i) => (
-                  <View key={i} style={styles.iRow}>
-                    <Avatar category={a.category} size={34} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.iName}>{a.category}</Text>
-                      <Text style={styles.iSub}>avg {fmtPos(a.avg)}/mo</Text>
-                    </View>
-                    <Text style={[styles.iAmt, { color: colors.red }]}>
-                      {fmtPos(a.current)}{a.deltaPct != null ? `  +${a.deltaPct}%` : ''}
-                    </Text>
-                  </View>
-                ))}
-              </Card>
+            <SectionTitle>Non-Spending</SectionTitle>
+            <Card style={styles.groupCard}>
+              <PlainRow icon="cross.case" label="Tax Deductible" value="$0" />
+              <PlainRow icon="arrow.uturn.backward.circle" label="Reimbursements" value={fmtPos(reimbursementTotal)} onPress={() => router.push({ pathname: '/category/[name]', params: { name: 'Reimbursement' } })} />
+              <PlainRow icon="minus.circle" label="Refunds & Credits" value={refundTotal ? `-${fmtPos(refundTotal)}` : '$0'} />
+              <PlainRow icon="arrow.left.arrow.right.circle" label="Transfers" value="0" last />
+            </Card>
+
+            <View style={styles.problemCard}>
+              <Text style={styles.problemTitle}>Data not looking right?</Text>
+              <Text style={styles.problemText}>Make adjustments when transactions are missing categories, marked pending, or counted in the wrong bucket.</Text>
+              <OutlineButton label="Review spending data" onPress={() => router.push('/review')} />
             </View>
-          ) : null}
-        </>
-      )}
-    </Screen>
+          </>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+function PeriodChips({ value, onChange }: { value: Period; onChange: (p: Period) => void }) {
+  return (
+    <View style={styles.periodRow}>
+      {PERIODS.map((p) => {
+        const on = p.key === value;
+        return (
+          <Pressable key={p.key} onPress={() => { haptics.tap(); onChange(p.key); }} style={({ pressed }) => [styles.periodChip, on && styles.periodChipOn, pressed && { opacity: 0.7 }]}>
+            <Text style={[styles.periodText, on && styles.periodTextOn]}>{p.label}</Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+function DualMonthBars({ months, selected, onSelect }: { months: { month: string; spend: number; income: number }[]; selected: string; onSelect: (m: string) => void }) {
+  const max = Math.max(1, ...months.map((m) => Math.max(m.spend, m.income)));
+  return (
+    <View style={styles.monthWrap}>
+      <View style={styles.monthBars}>
+        {months.map((m) => {
+          const on = m.month === selected;
+          return (
+            <Pressable key={m.month} onPress={() => { haptics.tap(); onSelect(m.month); }} style={[styles.monthCell, on && styles.monthCellOn]}>
+              <View style={styles.barStage}>
+                <View style={[styles.incomeBar, { height: Math.max(2, (m.income / max) * 72) }]} />
+                <View style={[styles.spendBar, { height: Math.max(2, (m.spend / max) * 72) }]} />
+              </View>
+              <Text style={[styles.monthText, on && styles.monthTextOn]}>{monthLabel(m.month).split(' ')[0]}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+      <View style={styles.legendRow}>
+        <View style={styles.legendDot} />
+        <Text style={styles.legendText}>Income</Text>
+        <View style={[styles.legendDot, styles.spendDot]} />
+        <Text style={styles.legendText}>Total Spend</Text>
+      </View>
+    </View>
+  );
+}
+
+function SummaryCard({ children }: { children: React.ReactNode }) {
+  return <Card style={styles.summaryCard}>{children}</Card>;
+}
+
+function SummaryRow({ icon, label, value, onPress, expanded, inset, muted, info, last }: {
+  icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; expanded?: boolean; inset?: boolean; muted?: boolean; info?: boolean; last?: boolean;
+}) {
+  const body = (
+    <>
+      <SymbolView name={icon} tintColor={muted ? colors.muted : colors.text} size={22} resizeMode="scaleAspectFit" />
+      <Text style={[styles.summaryLabel, inset && styles.summaryInset, muted && { color: colors.muted }]}>{label}</Text>
+      <Text style={[styles.summaryValue, muted && { color: colors.muted }]}>{value}</Text>
+      {info ? <SymbolView name="info.circle" tintColor={colors.muted} size={18} resizeMode="scaleAspectFit" /> : <Text style={styles.chevron}>{expanded ? '⌃' : '›'}</Text>}
+    </>
+  );
+  if (onPress) {
+    return <Pressable onPress={onPress} style={({ pressed }) => [styles.summaryRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{body}</Pressable>;
+  }
+  return <View style={[styles.summaryRow, last && styles.lastRow]}>{body}</View>;
+}
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return <Text style={styles.section}>{children}</Text>;
+}
+
+function Ring({ label, pct, warn }: { label: string; pct: number; warn?: boolean }) {
+  return (
+    <View style={[styles.ring, { borderColor: warn ? colors.yellow : colors.accent }]}>
+      <Text style={[styles.ringText, warn && { color: colors.yellow }]}>{label}</Text>
+    </View>
+  );
+}
+
+function CategoryRow({ category, amount, pct, color, onPress }: { category: string; amount: number; pct: number; color: string; onPress: () => void }) {
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.categoryRow, pressed && { opacity: 0.65 }]}>
+      <Avatar category={category} size={42} />
+      <View style={styles.rowMid}>
+        <Text style={styles.rowTitle}>{category}</Text>
+        <Text style={styles.rowSub}>{Math.round(pct * 100)}% of spend</Text>
+      </View>
+      <Text style={styles.rowValue}>{fmtPos(amount)}</Text>
+      <View style={[styles.categoryColor, { backgroundColor: color }]} />
+    </Pressable>
+  );
+}
+
+function MerchantRow({ merchant, category, count, total, onPress, last }: { merchant: string; category?: string; count: number; total: number; onPress: () => void; last?: boolean }) {
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.listRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>
+      <View style={styles.countBubble}><Text style={styles.countText}>{count}x</Text></View>
+      <View style={styles.rowMid}>
+        <Text style={styles.rowTitle} numberOfLines={1}>{merchant}</Text>
+        <Text style={styles.rowSub}>{category || `Average ${fmtPos(total / Math.max(1, count))}`}</Text>
+      </View>
+      <Text style={styles.rowValue}>{fmtPos(total)}</Text>
+    </Pressable>
+  );
+}
+
+function PurchaseRow({ payee, category, date, pending, amount, onPress, last }: { payee: string; category: string; date: string; pending?: boolean; amount: number; onPress: () => void; last?: boolean }) {
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.listRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>
+      <Avatar label={payee} category={category} size={42} />
+      <View style={styles.rowMid}>
+        <View style={styles.nameLine}>
+          <Text style={styles.rowTitle} numberOfLines={1}>{payee || '(no payee)'}</Text>
+          {pending ? <PendingPill /> : null}
+        </View>
+        <Text style={styles.rowSub}>{fmtDate(date)}{pending ? ' | Pending' : ''}</Text>
+      </View>
+      <Text style={styles.rowValue}>{fmtPos(amount)}</Text>
+    </Pressable>
+  );
+}
+
+function PlainRow({ icon, label, value, onPress, last }: { icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; last?: boolean }) {
+  const inner = (
+    <>
+      <SymbolView name={icon} tintColor={colors.text} size={22} resizeMode="scaleAspectFit" style={styles.plainIcon} />
+      <Text style={styles.rowTitle}>{label}</Text>
+      <Text style={styles.rowValue}>{value}</Text>
+    </>
+  );
+  if (onPress) return <Pressable onPress={onPress} style={({ pressed }) => [styles.listRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{inner}</Pressable>;
+  return <View style={[styles.listRow, last && styles.lastRow]}>{inner}</View>;
+}
+
+function OutlineButton({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.outlineBtn, pressed && { opacity: 0.65 }]}>
+      <Text style={styles.outlineText}>{label}</Text>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  donutWrap: { width: 200, height: 200, alignItems: 'center', justifyContent: 'center', position: 'relative' },
-  donutCenter: { position: 'absolute', alignItems: 'center' },
-  donutAmt: { color: colors.text, fontSize: 22, fontWeight: '800', letterSpacing: -0.5 },
-  donutLabel: { color: colors.muted, fontSize: 11 },
-  donutDelta: { fontSize: 11, fontWeight: '700', marginTop: 3 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 7 },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  catName: { color: colors.text, fontSize: 13, flex: 1 },
-  barWrap: { width: 64, height: 4, backgroundColor: colors.surface2, borderRadius: 2, overflow: 'hidden' },
-  bar: { height: 4, borderRadius: 2 },
-  amt: { color: colors.text, fontSize: 13, fontWeight: '600', width: 68, textAlign: 'right' },
-  chevron: { color: colors.muted, fontSize: 16, fontWeight: '700', width: 12, textAlign: 'right' },
-  iRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  root: { flex: 1, backgroundColor: colors.bg },
+  header: { paddingHorizontal: 28, paddingBottom: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  title: { color: colors.text, fontSize: 20, fontWeight: '800', letterSpacing: -0.4 },
+  scroll: { flex: 1 },
+  periodRow: { flexDirection: 'row', justifyContent: 'center', gap: 10, marginBottom: 18 },
+  periodChip: { backgroundColor: '#3a3a3d', borderRadius: 18, paddingHorizontal: 17, paddingVertical: 9 },
+  periodChipOn: { backgroundColor: '#fff' },
+  periodText: { color: colors.text, fontSize: 15, fontWeight: '800' },
+  periodTextOn: { color: '#19191d' },
+  monthWrap: { marginHorizontal: -12, marginBottom: 18 },
+  monthBars: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 },
+  monthCell: { flex: 1, minHeight: 102, borderWidth: 1, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 6, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 8 },
+  monthCellOn: { borderColor: '#fff', borderWidth: 2 },
+  barStage: { height: 74, flexDirection: 'row', alignItems: 'flex-end', gap: 6 },
+  incomeBar: { width: 9, borderRadius: 5, backgroundColor: '#6f8df7' },
+  spendBar: { width: 9, borderRadius: 5, backgroundColor: 'rgba(255,255,255,0.55)' },
+  monthText: { color: colors.muted, fontSize: 12, marginTop: 6 },
+  monthTextOn: { color: colors.text, fontWeight: '800' },
+  legendRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, marginTop: 10 },
+  legendDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#6f8df7' },
+  spendDot: { backgroundColor: 'rgba(255,255,255,0.55)' },
+  legendText: { color: colors.text, fontSize: 13, opacity: 0.9 },
+  summaryCard: { paddingVertical: 0, overflow: 'hidden', marginBottom: 26 },
+  summaryRow: { minHeight: 66, flexDirection: 'row', alignItems: 'center', gap: 17, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)', paddingHorizontal: 22 },
+  summaryLabel: { color: colors.text, fontSize: 18, fontWeight: '700', flex: 1 },
+  summaryInset: { paddingLeft: 34, fontSize: 16, color: colors.muted },
+  summaryValue: { color: colors.text, fontSize: 18, fontWeight: '800' },
+  section: { color: colors.text, textTransform: 'uppercase', letterSpacing: 1.1, fontSize: 13, fontWeight: '900', marginBottom: 10, marginLeft: 8 },
+  budgetCard: { padding: 0, overflow: 'hidden', marginBottom: 26 },
+  budgetHead: { flexDirection: 'row', alignItems: 'center', gap: 18, minHeight: 66, paddingHorizontal: 22, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  budgetTitle: { color: colors.text, fontSize: 18, fontWeight: '700', flex: 1 },
+  budgetBody: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 22, paddingTop: 18 },
+  mutedLabel: { color: colors.muted, fontSize: 13, fontWeight: '700' },
+  budgetValue: { color: colors.text, fontSize: 29, fontWeight: '900', marginTop: 4 },
+  ringRow: { flexDirection: 'row', gap: 10 },
+  ring: { width: 48, height: 48, borderRadius: 24, borderWidth: 3, alignItems: 'center', justifyContent: 'center' },
+  ringText: { color: colors.accentLight, fontSize: 16, fontWeight: '900' },
+  progressTrack: { height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.17)', margin: 22, marginTop: 16, overflow: 'hidden' },
+  progressFill: { height: 6, borderRadius: 3, backgroundColor: '#8aa0ff' },
+  breakdownCard: { padding: 0, overflow: 'hidden', marginBottom: 26 },
+  segmented: { flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  segmentText: { flex: 1, textAlign: 'center', color: colors.muted, fontSize: 16, fontWeight: '800', paddingVertical: 16 },
+  segmentOn: { color: colors.text },
+  categoryRow: { minHeight: 86, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  rowMid: { flex: 1, minWidth: 0 },
+  rowTitle: { color: colors.text, fontSize: 18, fontWeight: '700' },
+  rowSub: { color: colors.text, opacity: 0.62, fontSize: 15, marginTop: 5 },
+  rowValue: { color: colors.text, fontSize: 18, fontWeight: '800' },
+  categoryColor: { width: 4, height: 38, borderRadius: 2 },
+  groupCard: { padding: 0, overflow: 'hidden', marginBottom: 26 },
+  listRow: { minHeight: 84, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  lastRow: { borderBottomWidth: 0 },
+  countBubble: { width: 42, height: 42, borderRadius: 21, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
+  countText: { color: colors.text, fontSize: 16, fontWeight: '800', opacity: 0.75 },
   nameLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  iName: { color: colors.text, fontSize: 13 },
-  iSub: { color: colors.muted, fontSize: 11, marginTop: 1 },
-  iAmt: { color: colors.text, fontSize: 13, fontWeight: '600' },
-  refundHint: { color: colors.muted, fontSize: 11, marginTop: 8, lineHeight: 15 },
+  cardCopy: { color: colors.text, opacity: 0.72, fontSize: 15, lineHeight: 21, padding: 22, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  plainIcon: { width: 42 },
+  outlineBtn: { borderWidth: 1.2, borderColor: colors.text, borderRadius: 999, alignItems: 'center', paddingVertical: 14, marginHorizontal: 22, marginVertical: 18 },
+  outlineText: { color: colors.text, fontSize: 17, fontWeight: '800' },
+  problemCard: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 24, padding: 22, marginBottom: 26 },
+  problemTitle: { color: colors.text, fontSize: 20, fontWeight: '900' },
+  problemText: { color: colors.text, opacity: 0.72, fontSize: 16, lineHeight: 23, marginTop: 12, marginBottom: 10 },
+  chevron: { color: colors.text, opacity: 0.9, fontSize: 20, fontWeight: '800' },
 });

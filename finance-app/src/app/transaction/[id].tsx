@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { Image } from 'expo-image';
+import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -27,13 +28,27 @@ import {
   useTransaction,
 } from '@/api/hooks/finance.hooks';
 import { ReimbTxnRef, Transaction } from '@/api/generated/types';
-import { Avatar, Card, CardTitle, TagChips } from '@/components/ui';
+import { Card, CardTitle, TagChips } from '@/components/ui';
 import { haptics } from '@/lib/haptics';
 import { CapturedReceipt, pickReceiptFromLibrary, saveReceiptLocal, scanReceiptFromCamera } from '@/lib/receipts';
-import { cadenceLabel, colors, dueLabel, fmtDay, fmtMoney, fmtPos, NoteTag, parseNoteTags, tagKind, toTagToken } from '@/theme/colors';
+import { categoryIcon } from '@/theme/categoryIcons';
+import { cadenceLabel, colors, dueLabel, fmtDay, fmtMoney, fmtPos, monthLabel, NoteTag, parseNoteTags, tagKind, toTagToken } from '@/theme/colors';
 
 const norm = (s: string) =>
   (s || '').toLowerCase().replace(/[#*]?\d{3,}/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+const pad2 = (n: number) => String(n).padStart(2, '0');
+const ymd = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const parseYmd = (s: string) => {
+  const [y, m, d] = (s || '').split('-').map(Number);
+  return y && m && d ? new Date(y, m - 1, d) : new Date();
+};
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const fmtMenuDay = (d: string) => {
+  if (!d) return 'Pick date';
+  const [y, m, day] = d.split('-').map(Number);
+  if (!y || !m || !day) return d;
+  return new Date(y, m - 1, day).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+};
 
 export default function TransactionDetail() {
   const p = useLocalSearchParams<{
@@ -75,13 +90,21 @@ export default function TransactionDetail() {
   const [renaming, setRenaming] = useState(false);
   const [renameText, setRenameText] = useState(p.payee || '');
   const [dating, setDating] = useState(false);
-  const [dateText, setDateText] = useState(p.date || '');
+  const [txnDate, setTxnDate] = useState(p.date || '');
+  const [dateText, setDateText] = useState(p.date || ymd(new Date()));
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const d = parseYmd(p.date || ymd(new Date()));
+    return new Date(d.getFullYear(), d.getMonth(), 1);
+  });
+  const [monthPicking, setMonthPicking] = useState(false);
   const [category, setCategoryName] = useState(p.category || '');
   const [categoryId, setCategoryId] = useState(p.categoryId || '');
   const parsedNotes = useMemo(() => parseNoteTags(p.notes), [p.notes]);
   const [noteText, setNoteText] = useState(parsedNotes.text);
   const [tags, setTags] = useState<NoteTag[]>(parsedNotes.tags);
   const [tagInput, setTagInput] = useState('');
+  const [showTags, setShowTags] = useState(parsedNotes.tags.length > 0);
+  const [showNotes, setShowNotes] = useState(!!parsedNotes.text);
   // Baselines move forward on save so the Save button only shows real changes.
   const [baseText, setBaseText] = useState(parsedNotes.text);
   const [baseRaws, setBaseRaws] = useState<string[]>(parsedNotes.tags.map((t) => t.raw));
@@ -91,13 +114,14 @@ export default function TransactionDetail() {
   const [picking, setPicking] = useState(false);
   const [linking, setLinking] = useState(false);
   const [linkQuery, setLinkQuery] = useState('');
+  const currentDate = txnDate || p.date || '';
 
   const links = useReimbLinks(p.id);
   const addLink = useAddReimbLink();
   const delLink = useDeleteReimbLink();
   const search = useSearch(linkQuery);
 
-  const thisRef: ReimbTxnRef = { id: p.id, date: p.date || null, payee: p.payee || '', amount };
+  const thisRef: ReimbTxnRef = { id: p.id, date: currentDate || null, payee: p.payee || '', amount };
   // For an inflow we show the expenses it repays; for an expense, the inflows that repaid it.
   const linked = (income ? links.data?.asInflow : links.data?.asExpense) ?? [];
   // The picker lists the opposite sign: an inflow links to expenses, vice versa.
@@ -120,14 +144,14 @@ export default function TransactionDetail() {
   const sub = (recurring.data?.items ?? []).find((i) => norm(p.payee) === i.key || norm(p.payee).includes(i.key));
 
   const pickCategory = (cid: string, categoryName: string) => {
-    setCategory.mutate({ id: p.id, categoryId: cid, isLeg, parentId: p.parentId || null, accountId: p.accountId, date: p.date });
+    setCategory.mutate({ id: p.id, categoryId: cid, isLeg, parentId: p.parentId || null, accountId: p.accountId, date: currentDate });
     setCategoryName(categoryName);
     setCategoryId(cid);
     setPicking(false);
   };
 
   // --- Rules, mark-as-recurring (power features). Splitting lives on its own screen.
-  const canSplit = !isLeg && !isSplit && !!p.accountId && !!p.date && amount !== 0;
+  const canSplit = !isLeg && !isSplit && !!p.accountId && !!currentDate && amount !== 0;
   const canMarkRecurring = !isLeg && amount < 0 && !!p.payee && !sub;
 
   const applyRuleForPayee = () => {
@@ -168,7 +192,7 @@ export default function TransactionDetail() {
           style: 'destructive',
           onPress: () =>
             del.mutate(
-              { id: p.id, accountId: p.accountId, date: p.date },
+              { id: p.id, accountId: p.accountId, date: currentDate },
               {
                 onSuccess: () => { haptics.success(); router.back(); },
                 onError: (e) => Alert.alert('Could not delete', e.error || 'Please try again.'),
@@ -229,7 +253,7 @@ export default function TransactionDetail() {
     if (!reimbCat) return;
     haptics.tap();
     setCategory.mutate(
-      { id: p.id, categoryId: reimbCat.id, isLeg, parentId: p.parentId || null, accountId: p.accountId, date: p.date },
+      { id: p.id, categoryId: reimbCat.id, isLeg, parentId: p.parentId || null, accountId: p.accountId, date: currentDate },
       { onSuccess: () => haptics.success(), onError: (e) => Alert.alert('Could not move', e.error || 'Please try again.') }
     );
     setCategoryName(reimbCat.name);
@@ -239,17 +263,28 @@ export default function TransactionDetail() {
   // Change date — dating a refund back to the purchase month makes it net that
   // month's spending. Split legs follow their parent, so only non-legs qualify.
   const canEditDate = !isLeg && !!p.id;
-  const lastMonthLastDay = () => { const now = new Date(); const d = new Date(now.getFullYear(), now.getMonth(), 0); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
-  const openDate = () => { setDateText(p.date || ''); setDating(true); haptics.tap(); };
-  const doSetDate = () => {
-    const next = (dateText || '').trim();
+  const lastMonthLastDay = () => {
+    const now = new Date();
+    return ymd(new Date(now.getFullYear(), now.getMonth(), 0));
+  };
+  const openDate = () => {
+    const current = currentDate || ymd(new Date());
+    const d = parseYmd(current);
+    setDateText(current);
+    setCalendarMonth(new Date(d.getFullYear(), d.getMonth(), 1));
+    setMonthPicking(false);
+    setDating(true);
+    haptics.tap();
+  };
+  const doSetDate = (picked?: string) => {
+    const next = (picked || dateText || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(next)) { Alert.alert('Invalid date', 'Use the format YYYY-MM-DD, e.g. 2026-06-30.'); return; }
-    if (next === p.date) { setDating(false); return; }
+    if (next === currentDate) { setDating(false); return; }
     setDate.mutate(
       { id: p.id, date: next, isLeg },
       {
-        onSuccess: () => { haptics.success(); setDating(false); router.back(); },
-        onError: (e) => Alert.alert('Could not change date', e.error || 'Please try again.'),
+        onSuccess: () => { haptics.success(); setTxnDate(next); setDateText(next); setDating(false); },
+        onError: (e) => { setDateText(currentDate || ymd(new Date())); Alert.alert('Could not change date', e.error || 'Please try again.'); },
       }
     );
   };
@@ -263,7 +298,7 @@ export default function TransactionDetail() {
     const prev = payeeName;
     setPayeeNameLocal(next); // optimistic
     setPayee.mutate(
-      { id: p.id, payee: next, isLeg, parentId: p.parentId || null, accountId: p.accountId, date: p.date },
+      { id: p.id, payee: next, isLeg, parentId: p.parentId || null, accountId: p.accountId, date: currentDate },
       { onSuccess: () => haptics.success(), onError: (e) => { setPayeeNameLocal(prev); Alert.alert('Could not rename', e.error || 'Please try again.'); } }
     );
   };
@@ -276,7 +311,7 @@ export default function TransactionDetail() {
   const recombineNotes = () => [noteText.trim(), ...tags.map((t) => t.raw)].join(' ').replace(/\s{2,}/g, ' ').trim();
   const save = () =>
     setNotes.mutate(
-      { id: p.id, notes: recombineNotes(), isLeg, parentId: p.parentId || null, accountId: p.accountId, date: p.date },
+      { id: p.id, notes: recombineNotes(), isLeg, parentId: p.parentId || null, accountId: p.accountId, date: currentDate },
       { onSuccess: () => { setBaseText(noteText.trim()); setBaseRaws(rawsOf(tags)); } }
     );
 
@@ -310,30 +345,68 @@ export default function TransactionDetail() {
   const eventChips = (events.data?.events ?? [])
     .filter((e) => !tags.some((t) => t.raw.toLowerCase() === `#ev-${e.slug}`.toLowerCase()))
     .slice(0, 6);
+  const selectedDay = dateText && /^\d{4}-\d{2}-\d{2}$/.test(dateText) ? dateText : currentDate;
+  const selectedMonthKey = ymd(calendarMonth).slice(0, 7);
+  const todayKey = ymd(new Date());
+  const calendarDays = useMemo(() => {
+    const year = calendarMonth.getFullYear();
+    const month = calendarMonth.getMonth();
+    const firstWeekday = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const cells: Array<string | null> = Array(firstWeekday).fill(null);
+    for (let day = 1; day <= daysInMonth; day += 1) cells.push(ymd(new Date(year, month, day)));
+    while (cells.length % 7) cells.push(null);
+    return cells;
+  }, [calendarMonth]);
+  const changeCalendarMonth = (delta: number) => {
+    setMonthPicking(false);
+    setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + delta, 1));
+    haptics.tap();
+  };
+  const pickShortcutDate = (next: string) => {
+    const d = parseYmd(next);
+    setDateText(next);
+    setCalendarMonth(new Date(d.getFullYear(), d.getMonth(), 1));
+    doSetDate(next);
+  };
+  const catMeta = categoryIcon(category || payeeName);
+  const heroBg = income ? '#214d36' : '#733e2d';
 
   return (
     <ScrollView
       style={styles.root}
-      contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}
+      contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
       keyboardShouldPersistTaps="handled"
       automaticallyAdjustKeyboardInsets
     >
       <Stack.Screen
         options={{
-          title: payeeName || 'Transaction',
-          headerRight: dirty
-            ? () => (
-                <Pressable onPress={save} disabled={setNotes.isPending} hitSlop={8}>
-                  <Text style={styles.headerSave}>{setNotes.isPending ? 'Saving…' : 'Save'}</Text>
-                </Pressable>
-              )
-            : undefined,
+          headerShown: false,
         }}
       />
 
-      <View style={styles.hero}>
-        <Avatar label={payeeName} category={p.category || undefined} size={56} style={{ marginBottom: 10 }} />
-        <Text style={[styles.amount, { color: income ? colors.green : colors.text }]}>{income ? '+' : ''}{fmtMoney(amount)}</Text>
+      <View style={[styles.menuHero, { backgroundColor: heroBg, paddingTop: insets.top + 14 }]}>
+        <View style={styles.menuTopBar}>
+          <Pressable onPress={save} disabled={!dirty || setNotes.isPending} hitSlop={8} style={styles.topSide}>
+            {dirty ? <Text style={styles.headerSave}>{setNotes.isPending ? 'Saving…' : 'Save'}</Text> : null}
+          </Pressable>
+          {canEditDate ? (
+            <Pressable onPress={openDate} hitSlop={8} style={({ pressed }) => [styles.topDateBtn, pressed && { opacity: 0.65 }]}>
+              <Text style={styles.topDate}>{fmtMenuDay(currentDate)}</Text>
+              <SymbolView name="chevron.down" tintColor={colors.text} size={11} resizeMode="scaleAspectFit" />
+            </Pressable>
+          ) : (
+            <Text style={styles.topDate}>{fmtMenuDay(currentDate)}</Text>
+          )}
+          <Pressable onPress={() => router.back()} hitSlop={10} style={({ pressed }) => [styles.topSide, styles.closeBtn, pressed && { opacity: 0.65 }]}>
+            <SymbolView name="xmark" tintColor={colors.text} size={18} resizeMode="scaleAspectFit" />
+          </Pressable>
+        </View>
+        {pending ? (
+          <View style={styles.pendingBubble}>
+            <Text style={styles.pendingBubbleText}>Pending Transaction</Text>
+          </View>
+        ) : null}
         {canRename ? (
           <Pressable onPress={openRename} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
             <Text style={styles.payee}>{payeeName || 'Add name'}</Text>
@@ -341,14 +414,23 @@ export default function TransactionDetail() {
         ) : (
           <Text style={styles.payee}>{payeeName || '—'}</Text>
         )}
-        <Text style={styles.date}>{fmtDay(p.date)} · {p.account}</Text>
-        {pending ? (
-          <View style={styles.pendingBanner}>
-            <Text style={styles.pendingBannerText}>PENDING · not yet posted</Text>
+        <Text style={[styles.amount, { color: colors.text }]}>{income ? '+' : ''}{fmtMoney(amount)}</Text>
+        {p.payee ? (
+          <View style={styles.statementBlock}>
+            <Text style={styles.statementLabel}>Statement Description</Text>
+            <Text style={styles.statementText}>{String(p.payee).toUpperCase()}</Text>
           </View>
+        ) : null}
+        {!isSplit ? (
+          <Pressable onPress={() => { haptics.tap(); setPicking(true); }} style={({ pressed }) => [styles.categoryPill, pressed && { opacity: 0.75 }]}>
+            <SymbolView name={catMeta.symbol} tintColor={catMeta.color} size={16} resizeMode="scaleAspectFit" />
+            <Text style={styles.categoryPillText}>{category || 'Uncategorized'}</Text>
+            <SymbolView name="chevron.down" tintColor={colors.text} size={10} resizeMode="scaleAspectFit" />
+          </Pressable>
         ) : null}
       </View>
 
+      <View style={styles.menuBody}>
       {sub ? (
         <Pressable onPress={() => router.push(`/recurring/${encodeURIComponent(sub.key)}`)} style={({ pressed }) => pressed && { opacity: 0.7 }}>
           <View style={styles.subBanner}>
@@ -360,6 +442,58 @@ export default function TransactionDetail() {
           </View>
         </Pressable>
       ) : null}
+
+      <MenuGroup>
+        {canRename ? <MenuActionRow icon="pencil" label="Rename" onPress={openRename} /> : null}
+        <MenuSwitchRow
+          icon="arrow.clockwise.circle"
+          label="Is Recurring?"
+          value={!!sub}
+          disabled={!!sub || !canMarkRecurring || markRec.isPending}
+          onValueChange={() => {
+            if (sub) router.push(`/recurring/${encodeURIComponent(sub.key)}`);
+            else if (canMarkRecurring) doMarkRecurring();
+          }}
+        />
+        {canMoveReimb ? (
+          <MenuActionRow
+            icon="person.2.fill"
+            label="Move to Reimbursements"
+            right={setCategory.isPending ? 'Moving…' : 'Not personal spend'}
+            onPress={moveToReimb}
+            disabled={setCategory.isPending}
+            last
+          />
+        ) : (
+          <MenuActionRow icon="nosign" label={income ? 'Deposit' : 'Personal spend'} right="Included" disabled last />
+        )}
+      </MenuGroup>
+
+      <MenuGroup>
+        <MenuActionRow
+          icon="tag"
+          label={tags.length ? `Tags (${tags.length})` : 'Add Tags'}
+          onPress={() => { setShowTags(!showTags); haptics.tap(); }}
+        />
+        <MenuActionRow
+          icon="note.text"
+          label={noteText.trim() ? 'Edit Note' : 'Add Note'}
+          onPress={() => { setShowNotes(!showNotes); haptics.tap(); }}
+        />
+        {!isLeg && categoryId ? (
+          <MenuActionRow
+            icon="bolt.circle"
+            label="Create Rule"
+            right={saveRule.isPending ? 'Saving…' : category}
+            onPress={applyRuleForPayee}
+            disabled={saveRule.isPending}
+          />
+        ) : null}
+        {canSplit ? (
+          <MenuActionRow icon="arrow.triangle.branch" label="Split" onPress={goSplit} />
+        ) : null}
+        <MenuActionRow icon="doc.viewfinder" label={receiptList.length ? `Receipts (${receiptList.length})` : 'Add Receipt'} onPress={startScan} disabled={scanning} last />
+      </MenuGroup>
 
       <CardTitle style={styles.sectionTitle}>{income ? 'Repayment for' : 'Repaid by'}</CardTitle>
       <Card style={styles.list}>
@@ -405,18 +539,10 @@ export default function TransactionDetail() {
             </Pressable>
           </Card>
         </>
-      ) : (
-        <>
-          <CardTitle style={styles.sectionTitle}>Category</CardTitle>
-          <Pressable onPress={() => { haptics.tap(); setPicking(true); }} style={({ pressed }) => pressed && { opacity: 0.7 }}>
-            <Card style={styles.pickRow}>
-              <Text style={[styles.pickValue, !category && { color: colors.muted }]}>{category || 'Uncategorized — tap to set'}</Text>
-              <Text style={styles.pickArrow}>›</Text>
-            </Card>
-          </Pressable>
-        </>
-      )}
+      ) : null}
 
+      {showTags ? (
+      <>
       <CardTitle style={styles.sectionTitle}>Tags</CardTitle>
       <Card>
         {tags.length ? (
@@ -469,7 +595,11 @@ export default function TransactionDetail() {
         ) : null}
         {tags.length ? <Text style={styles.tagHint}>Tap a tag to see everything with it.</Text> : null}
       </Card>
+      </>
+      ) : null}
 
+      {showNotes ? (
+      <>
       <CardTitle style={styles.sectionTitle}>Notes</CardTitle>
       <Card>
         <TextInput
@@ -481,51 +611,11 @@ export default function TransactionDetail() {
           multiline
         />
       </Card>
-
-      {canSplit || canMoveReimb || (!isLeg && categoryId) || canMarkRecurring || canEditDate ? (
-        <>
-          <CardTitle style={styles.sectionTitle}>More</CardTitle>
-          <Card style={styles.list}>
-            {canSplit ? (
-              <ActionRow label="Split transaction" sub="Divide across multiple categories" onPress={goSplit} />
-            ) : null}
-            {canMoveReimb ? (
-              <ActionRow
-                label="Move to Reimbursements"
-                sub="Someone else pays this — won't count as your spending"
-                onPress={moveToReimb}
-                disabled={setCategory.isPending}
-              />
-            ) : null}
-            {!isLeg && categoryId ? (
-              <ActionRow
-                label={`Auto-categorize “${p.payee}”`}
-                sub={saveRule.isPending ? 'Saving…' : `Always set to ${category}`}
-                onPress={applyRuleForPayee}
-                disabled={saveRule.isPending}
-              />
-            ) : null}
-            {canMarkRecurring ? (
-              <ActionRow
-                label="Mark as recurring"
-                sub={markRec.isPending ? 'Saving…' : 'Track this in Subscriptions'}
-                onPress={doMarkRecurring}
-                disabled={markRec.isPending}
-              />
-            ) : null}
-            {canEditDate ? (
-              <ActionRow
-                label="Change date"
-                sub={income ? 'Move a refund back to the month you bought it' : 'Move this to a different day or month'}
-                onPress={openDate}
-                disabled={setDate.isPending}
-                last
-              />
-            ) : null}
-          </Card>
-        </>
+      </>
       ) : null}
 
+      {receiptList.length || scanning ? (
+      <>
       <CardTitle style={styles.sectionTitle}>Receipts</CardTitle>
       <Card style={styles.list}>
         {/* Plain wrapping row — a horizontal ScrollView nested in the page's
@@ -550,6 +640,8 @@ export default function TransactionDetail() {
           <Text style={styles.receiptHint}>Scan a receipt to attach it here. Text is read on-device with Apple Vision.</Text>
         ) : null}
       </Card>
+      </>
+      ) : null}
 
       {canHistory ? (
         <Pressable onPress={goHistory} style={({ pressed }) => [styles.historyBtn, pressed && { opacity: 0.7 }]}>
@@ -557,6 +649,20 @@ export default function TransactionDetail() {
           <Text style={styles.historyArrow}>›</Text>
         </Pressable>
       ) : null}
+
+      <View style={styles.metaBlock}>
+        {p.account ? (
+          <View style={styles.metaItem}>
+            <Text style={styles.metaLabel}>Account</Text>
+            <Text style={styles.metaValue}>{p.account}</Text>
+          </View>
+        ) : null}
+        <View style={styles.metaItem}>
+          <Text style={styles.metaLabel}>Other Dates</Text>
+          <Text style={styles.metaMuted}>Transacted: {currentDate || 'Unknown'}</Text>
+          <Text style={styles.metaMuted}>Posted: {currentDate || 'Unknown'}</Text>
+        </View>
+      </View>
 
       {canDelete ? (
         <Pressable
@@ -567,6 +673,8 @@ export default function TransactionDetail() {
           <Text style={styles.deleteText}>{del.isPending ? 'Deleting…' : 'Delete transaction'}</Text>
         </Pressable>
       ) : null}
+
+      </View>
 
       <Modal visible={picking} animationType="slide" transparent onRequestClose={() => setPicking(false)}>
         <Pressable style={styles.modalBg} onPress={() => setPicking(false)}>
@@ -651,38 +759,110 @@ export default function TransactionDetail() {
       </Modal>
 
       <Modal visible={dating} animationType="slide" transparent onRequestClose={() => setDating(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-          <Pressable style={styles.modalBg} onPress={() => setDating(false)}>
-            <Pressable style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
-              <Text style={styles.sheetTitle}>Change date</Text>
-              <TextInput
-                style={styles.searchInput}
-                value={dateText}
-                onChangeText={setDateText}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={colors.muted}
-                autoFocus
-                autoCorrect={false}
-                keyboardType={Platform.OS === 'ios' ? 'numbers-and-punctuation' : 'default'}
-                returnKeyType="done"
-                onSubmitEditing={doSetDate}
-              />
-              <View style={styles.suggestRow}>
-                <Pressable onPress={() => setDateText(lastMonthLastDay())} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
-                  <Text style={styles.suggestText}>End of last month</Text>
-                </Pressable>
+        <Pressable style={styles.modalBg} onPress={() => setDating(false)}>
+          <Pressable style={[styles.sheet, styles.calendarSheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
+            <View style={styles.calendarSheetHeader}>
+              <View>
+                <Text style={styles.sheetTitle}>Transaction date</Text>
+                <Text style={styles.calendarSub}>{selectedDay ? fmtDay(selectedDay) : 'Pick a date'}</Text>
               </View>
-              <Pressable style={styles.renameSave} onPress={doSetDate} disabled={setDate.isPending}>
-                <Text style={styles.renameSaveText}>{setDate.isPending ? 'Saving…' : 'Save date'}</Text>
+              <Pressable onPress={() => setDating(false)} hitSlop={10}>
+                <Text style={styles.calendarDone}>Done</Text>
               </Pressable>
-              <Text style={styles.tagHint}>
-                {income
-                  ? 'A refund dated in the month you made the purchase subtracts from that month’s spending instead of this one.'
-                  : 'Changing the date moves this transaction into a different month.'}
-              </Text>
-            </Pressable>
+            </View>
+
+            <View style={styles.calendarNav}>
+              <Pressable
+                onPress={() =>
+                  monthPicking
+                    ? setCalendarMonth(new Date(calendarMonth.getFullYear() - 1, calendarMonth.getMonth(), 1))
+                    : changeCalendarMonth(-1)
+                }
+                style={({ pressed }) => [styles.calendarNavBtn, pressed && { opacity: 0.6 }]}
+              >
+                <Text style={styles.calendarNavText}>‹</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => { setMonthPicking(!monthPicking); haptics.tap(); }}
+                style={({ pressed }) => [styles.calendarTitleBtn, pressed && { opacity: 0.7 }]}
+              >
+                <Text style={styles.calendarTitle}>{monthPicking ? calendarMonth.getFullYear() : monthLabel(selectedMonthKey)}</Text>
+                <Text style={styles.calendarTitleCaret}>{monthPicking ? '⌃' : '⌄'}</Text>
+              </Pressable>
+              <Pressable
+                onPress={() =>
+                  monthPicking
+                    ? setCalendarMonth(new Date(calendarMonth.getFullYear() + 1, calendarMonth.getMonth(), 1))
+                    : changeCalendarMonth(1)
+                }
+                style={({ pressed }) => [styles.calendarNavBtn, pressed && { opacity: 0.6 }]}
+              >
+                <Text style={styles.calendarNavText}>›</Text>
+              </Pressable>
+            </View>
+
+            {monthPicking ? (
+              <View style={styles.monthGrid}>
+                {MONTH_NAMES.map((name, idx) => {
+                  const active = idx === calendarMonth.getMonth();
+                  return (
+                    <Pressable
+                      key={name}
+                      onPress={() => { setCalendarMonth(new Date(calendarMonth.getFullYear(), idx, 1)); setMonthPicking(false); haptics.tap(); }}
+                      style={({ pressed }) => [styles.monthCell, active && styles.monthCellActive, pressed && { opacity: 0.7 }]}
+                    >
+                      <Text style={[styles.monthCellText, active && styles.monthCellTextActive]}>{name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : (
+              <>
+                <View style={styles.weekRow}>
+                  {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, idx) => (
+                    <Text key={`${d}-${idx}`} style={styles.weekText}>{d}</Text>
+                  ))}
+                </View>
+                <View style={styles.dayGrid}>
+                  {calendarDays.map((day, idx) => {
+                    const active = !!day && day === selectedDay;
+                    const today = !!day && day === todayKey;
+                    return (
+                      <Pressable
+                        key={day ?? `blank-${idx}`}
+                        disabled={!day || setDate.isPending}
+                        onPress={() => day && doSetDate(day)}
+                        style={({ pressed }) => [
+                          styles.dayCell,
+                          active && styles.dayCellActive,
+                          today && !active && styles.dayCellToday,
+                          pressed && { opacity: 0.7 },
+                        ]}
+                      >
+                        <Text style={[styles.dayText, active && styles.dayTextActive, !day && { opacity: 0 }]}>{day ? Number(day.slice(8)) : '0'}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+
+            <View style={styles.suggestRow}>
+              <Pressable onPress={() => pickShortcutDate(todayKey)} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
+                <Text style={styles.suggestText}>Today</Text>
+              </Pressable>
+              <Pressable onPress={() => pickShortcutDate(lastMonthLastDay())} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
+                <Text style={styles.suggestText}>End of last month</Text>
+              </Pressable>
+            </View>
+            {setDate.isPending ? <Text style={styles.calendarSaving}>Saving…</Text> : null}
+            <Text style={styles.tagHint}>
+              {income
+                ? 'A refund dated in the month you made the purchase subtracts from that month’s spending instead of this one.'
+                : 'Changing the date moves this transaction into a different month.'}
+            </Text>
           </Pressable>
-        </KeyboardAvoidingView>
+        </Pressable>
       </Modal>
 
       <Modal visible={!!viewerId} animationType="fade" transparent onRequestClose={() => setViewerId(null)}>
@@ -716,29 +896,96 @@ export default function TransactionDetail() {
   );
 }
 
-function ActionRow({ label, sub, onPress, disabled, last }: { label: string; sub?: string; onPress: () => void; disabled?: boolean; last?: boolean }) {
+function MenuGroup({ children }: { children: React.ReactNode }) {
+  return <View style={styles.menuGroup}>{children}</View>;
+}
+
+function MenuActionRow({
+  icon,
+  label,
+  right,
+  onPress,
+  disabled,
+  last,
+}: {
+  icon: SymbolViewProps['name'];
+  label: string;
+  right?: string;
+  onPress?: () => void;
+  disabled?: boolean;
+  last?: boolean;
+}) {
   return (
-    <Pressable onPress={onPress} disabled={disabled} style={({ pressed }) => [styles.actionRow, last && { borderBottomWidth: 0 }, pressed && { opacity: 0.6 }]}>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={styles.actionLabel} numberOfLines={1}>{label}</Text>
-        {sub ? <Text style={styles.actionSub} numberOfLines={1}>{sub}</Text> : null}
-      </View>
-      <Text style={styles.pickArrow}>›</Text>
+    <Pressable onPress={onPress} disabled={disabled || !onPress} style={({ pressed }) => [styles.menuRow, last && styles.menuRowLast, disabled && { opacity: 0.55 }, pressed && { opacity: 0.65 }]}>
+      <SymbolView name={icon} tintColor={colors.text} size={23} resizeMode="scaleAspectFit" style={styles.menuRowIcon} />
+      <Text style={styles.menuRowLabel} numberOfLines={1}>{label}</Text>
+      {right ? <Text style={styles.menuRowRight} numberOfLines={1}>{right}</Text> : null}
+      {onPress && !disabled ? <SymbolView name="chevron.right" tintColor={colors.muted} size={12} resizeMode="scaleAspectFit" /> : null}
     </Pressable>
+  );
+}
+
+function MenuSwitchRow({
+  icon,
+  label,
+  value,
+  disabled,
+  onValueChange,
+}: {
+  icon: SymbolViewProps['name'];
+  label: string;
+  value: boolean;
+  disabled?: boolean;
+  onValueChange: () => void;
+}) {
+  return (
+    <View style={styles.menuRow}>
+      <SymbolView name={icon} tintColor={colors.text} size={23} resizeMode="scaleAspectFit" style={styles.menuRowIcon} />
+      <Text style={styles.menuRowLabel}>{label}</Text>
+      <Switch
+        value={value}
+        disabled={disabled}
+        onValueChange={onValueChange}
+        trackColor={{ false: 'rgba(255,255,255,0.18)', true: colors.accent }}
+        thumbColor="#fff"
+        ios_backgroundColor="rgba(255,255,255,0.18)"
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  hero: { alignItems: 'center', marginVertical: 12 },
+  menuHero: { alignItems: 'center', paddingHorizontal: 20, paddingBottom: 28, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)' },
+  menuTopBar: { width: '100%', minHeight: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
+  topSide: { width: 72, minHeight: 36, alignItems: 'center', justifyContent: 'center' },
+  closeBtn: { alignItems: 'flex-end' },
+  topDateBtn: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16 },
+  topDate: { color: colors.text, fontSize: 17, fontWeight: '800' },
+  menuBody: { paddingHorizontal: 18, paddingTop: 18 },
+  pendingBubble: { backgroundColor: '#fff', borderRadius: 999, paddingHorizontal: 18, paddingVertical: 9, marginBottom: 28 },
+  pendingBubbleText: { color: '#201f24', fontSize: 15, fontWeight: '800' },
   amount: { fontSize: 38, fontWeight: '800', letterSpacing: -1.5 },
-  payee: { color: colors.text, fontSize: 16, fontWeight: '600', marginTop: 8 },
-  date: { color: colors.muted, fontSize: 13, marginTop: 4 },
-  pendingBanner: { marginTop: 10, backgroundColor: 'rgba(234,179,8,0.15)', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
-  pendingBannerText: { color: colors.yellow, fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
-  historyBtn: { marginTop: 22, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, borderRadius: 12, paddingVertical: 13 },
-  historyText: { color: colors.accentLight, fontSize: 15, fontWeight: '700' },
-  historyArrow: { color: colors.accentLight, fontSize: 18, fontWeight: '700' },
+  payee: { color: colors.text, fontSize: 19, fontWeight: '800', marginTop: 8, textAlign: 'center' },
+  statementBlock: { alignItems: 'center', marginTop: 22 },
+  statementLabel: { color: colors.text, opacity: 0.9, fontSize: 13, fontWeight: '800' },
+  statementText: { color: colors.text, opacity: 0.85, fontSize: 13, fontWeight: '700', letterSpacing: 0.4, marginTop: 3 },
+  categoryPill: { flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: 'rgba(255,255,255,0.85)', borderRadius: 999, paddingHorizontal: 17, paddingVertical: 11, marginTop: 28 },
+  categoryPillText: { color: colors.text, fontSize: 15, fontWeight: '800' },
+  menuGroup: { backgroundColor: '#242426', borderRadius: 22, overflow: 'hidden', marginBottom: 18 },
+  menuRow: { minHeight: 65, flexDirection: 'row', alignItems: 'center', gap: 18, paddingHorizontal: 24, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  menuRowLast: { borderBottomWidth: 0 },
+  menuRowIcon: { width: 26 },
+  menuRowLabel: { color: colors.text, fontSize: 18, fontWeight: '600', flex: 1 },
+  menuRowRight: { color: colors.text, opacity: 0.9, fontSize: 16, fontWeight: '800', maxWidth: 150 },
+  historyBtn: { marginTop: 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderWidth: 1, borderColor: colors.text, borderRadius: 999, paddingVertical: 14 },
+  historyText: { color: colors.text, fontSize: 17, fontWeight: '800' },
+  historyArrow: { color: colors.text, fontSize: 18, fontWeight: '700' },
+  metaBlock: { marginTop: 20, gap: 18 },
+  metaItem: { gap: 2 },
+  metaLabel: { color: colors.text, fontSize: 13, fontWeight: '900' },
+  metaValue: { color: colors.text, opacity: 0.9, fontSize: 13, fontWeight: '700', textDecorationLine: 'underline' },
+  metaMuted: { color: colors.text, opacity: 0.62, fontSize: 13, fontWeight: '600' },
   deleteBtn: { marginTop: 12, borderWidth: 1, borderColor: colors.red, borderRadius: 12, paddingVertical: 13, alignItems: 'center' },
   deleteText: { color: colors.red, fontSize: 15, fontWeight: '700' },
   receiptRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 10, paddingVertical: 4 },
@@ -760,9 +1007,6 @@ const styles = StyleSheet.create({
   subBanner: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(124,110,247,0.1)', borderColor: colors.accent, borderWidth: 1, borderRadius: 12, padding: 12, marginBottom: 8 },
   subText: { color: colors.accentLight, fontSize: 13, fontWeight: '600', flex: 1 },
   subArrow: { color: colors.accentLight, fontSize: 20, fontWeight: '700' },
-  pickRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  pickValue: { color: colors.text, fontSize: 15, flex: 1 },
-  pickArrow: { color: colors.muted, fontSize: 20, fontWeight: '700' },
   list: { paddingVertical: 2 },
   sectionTitle: { marginTop: 22 },
   linkRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
@@ -791,14 +1035,35 @@ const styles = StyleSheet.create({
   modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 },
   sheetTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 12 },
+  calendarSheet: { paddingTop: 14 },
+  calendarSheetHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8 },
+  calendarSub: { color: colors.muted, fontSize: 12, marginTop: -6 },
+  calendarDone: { color: colors.accentLight, fontSize: 15, fontWeight: '800' },
+  calendarNav: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
+  calendarNavBtn: { width: 42, height: 38, borderRadius: 12, backgroundColor: colors.surface2, alignItems: 'center', justifyContent: 'center' },
+  calendarNavText: { color: colors.text, fontSize: 25, fontWeight: '700', lineHeight: 27 },
+  calendarTitleBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 12 },
+  calendarTitle: { color: colors.text, fontSize: 17, fontWeight: '800' },
+  calendarTitleCaret: { color: colors.muted, fontSize: 12, fontWeight: '800', marginTop: 2 },
+  weekRow: { flexDirection: 'row', marginBottom: 6 },
+  weekText: { flex: 1, textAlign: 'center', color: colors.muted, fontSize: 11, fontWeight: '800' },
+  dayGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  dayCell: { width: '14.2857%', aspectRatio: 1, alignItems: 'center', justifyContent: 'center', borderRadius: 999 },
+  dayCellActive: { backgroundColor: colors.accent },
+  dayCellToday: { borderWidth: 1, borderColor: colors.accent },
+  dayText: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  dayTextActive: { color: '#fff' },
+  monthGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4, marginBottom: 8 },
+  monthCell: { width: '31.5%', borderRadius: 14, backgroundColor: colors.surface2, paddingVertical: 14, alignItems: 'center' },
+  monthCellActive: { backgroundColor: colors.accent },
+  monthCellText: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  monthCellTextActive: { color: '#fff' },
+  calendarSaving: { color: colors.muted, fontSize: 12, fontWeight: '700', textAlign: 'center', marginTop: 10 },
   renameSave: { backgroundColor: colors.accent, borderRadius: 12, paddingVertical: 13, alignItems: 'center', marginTop: 2 },
   renameSaveText: { color: '#fff', fontSize: 15, fontWeight: '700' },
   catOption: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   catOptionText: { color: colors.text, fontSize: 15 },
   catOptionGroup: { color: colors.muted, fontSize: 12 },
-  actionRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
-  actionLabel: { color: colors.text, fontSize: 15, fontWeight: '600' },
-  actionSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
   legInfoRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   legInfoName: { color: colors.text, fontSize: 14, fontWeight: '600' },
   legInfoSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
