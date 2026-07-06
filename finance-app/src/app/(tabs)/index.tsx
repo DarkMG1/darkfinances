@@ -10,6 +10,7 @@ import { SkeletonList } from '@/components/skeleton';
 import { AreaChart } from '@/components/charts';
 import { Account } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
+import { useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -23,6 +24,7 @@ const RANGES: { label: string; v: number }[] = [
 const ACTIONS: { label: string; route: string; symbol: SymbolViewProps['name']; color: string }[] = [
   { label: 'Budgets', route: '/budgets', symbol: 'chart.pie.fill', color: colors.accentLight },
   { label: 'Cash Flow', route: '/cashflow', symbol: 'arrow.left.arrow.right', color: '#06b6d4' },
+  { label: 'Reports', route: '/reports', symbol: 'doc.text.magnifyingglass', color: '#ec4899' },
   { label: 'Goals', route: '/goals', symbol: 'target', color: '#f59e0b' },
   { label: 'Who Owes Me', route: '/reimbursement', symbol: 'person.2.fill', color: '#22c55e' },
 ];
@@ -31,6 +33,7 @@ export default function Overview() {
   const { width } = useWindowDimensions();
   const router = useRouter();
   const [months, setMonths] = useState(12);
+  const { visible: widgets } = useDashboardWidgets();
 
   const accounts = useAccounts();
   const spending = useSpending();
@@ -129,20 +132,22 @@ export default function Overview() {
         <ErrorState error={accounts.error?.error} onRetry={onRefresh} />
       ) : (
         <>
-          <Pressable onPress={() => { haptics.tap(); router.push('/networth' as never); }} style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}>
-            <Text style={styles.heroLabel}>NET WORTH</Text>
-            <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>{fmtMoney(netWorth)}</Text>
-            <View style={styles.heroMetaRow}>
-              {nwDelta != null ? (
-                <Text style={[styles.heroDelta, { color: nwDelta >= 0 ? colors.green : colors.red }]}>
-                  {nwDelta >= 0 ? '▲' : '▼'} {fmtPos(Math.abs(nwDelta))} this month
-                </Text>
-              ) : null}
-              <Text style={styles.heroSub}>{fmtPos(assets)} assets · {fmtPos(Math.abs(liabilities))} liabilities · details ›</Text>
-            </View>
-          </Pressable>
+          {widgets.netWorth ? (
+            <Pressable onPress={() => { haptics.tap(); router.push('/networth' as never); }} style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}>
+              <Text style={styles.heroLabel}>NET WORTH</Text>
+              <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>{fmtMoney(netWorth)}</Text>
+              <View style={styles.heroMetaRow}>
+                {nwDelta != null ? (
+                  <Text style={[styles.heroDelta, { color: nwDelta >= 0 ? colors.green : colors.red }]}>
+                    {nwDelta >= 0 ? '▲' : '▼'} {fmtPos(Math.abs(nwDelta))} this month
+                  </Text>
+                ) : null}
+                <Text style={styles.heroSub}>{fmtPos(assets)} assets · {fmtPos(Math.abs(liabilities))} liabilities · details ›</Text>
+              </View>
+            </Pressable>
+          ) : null}
 
-          {nwPoints.length > 1 ? (
+          {widgets.netWorth && nwPoints.length > 1 ? (
             <Card style={{ marginBottom: 16 }}>
               <View style={styles.chartHead}>
                 <CardTitle>Net Worth</CardTitle>
@@ -163,7 +168,7 @@ export default function Overview() {
             </Card>
           ) : null}
 
-          {accts.length ? (
+          {widgets.safeToSpend && accts.length ? (
             <Animated.View entering={FadeInDown.duration(240)}>
               <Card style={styles.safeCard}>
                 <View style={{ flex: 1 }}>
@@ -176,7 +181,7 @@ export default function Overview() {
             </Animated.View>
           ) : null}
 
-          <View style={styles.tiles}>
+          {widgets.actions ? <View style={styles.tiles}>
             {ACTIONS.map((a) => (
               <Pressable
                 key={a.route}
@@ -189,9 +194,9 @@ export default function Overview() {
                 <Text style={styles.tileLabel} numberOfLines={2}>{a.label}</Text>
               </Pressable>
             ))}
-          </View>
+          </View> : null}
 
-          {reviewCount > 0 ? (
+          {widgets.review && reviewCount > 0 ? (
             <Pressable onPress={() => { haptics.tap(); router.push('/review' as never); }} style={({ pressed }) => pressed && { opacity: 0.6 }}>
               <Card style={{ ...styles.bannerCard, ...styles.reviewBanner }}>
                 <View style={[styles.bannerIcon, { backgroundColor: colors.yellow + '22' }]}>
@@ -206,6 +211,7 @@ export default function Overview() {
             </Pressable>
           ) : null}
 
+          {widgets.monthlyStats ? <>
           <SectionLabel>This Month</SectionLabel>
           <View style={styles.statsRow}>
             <StatCard
@@ -222,8 +228,9 @@ export default function Overview() {
             />
             <StatCard label="Net" value={cur ? fmtMoney(net) : '—'} valueColor={net >= 0 ? colors.green : colors.red} />
           </View>
+          </> : null}
 
-          {income.data?.primaryNextPay ?? income.data?.nextPayday ? (
+          {widgets.income && (income.data?.primaryNextPay ?? income.data?.nextPayday) ? (
             <Pressable onPress={() => router.push('/income' as never)} style={({ pressed }) => pressed && { opacity: 0.6 }}>
               <Card style={styles.bannerCard}>
                 <View style={[styles.bannerIcon, { backgroundColor: colors.green + '22' }]}>
@@ -238,7 +245,7 @@ export default function Overview() {
             </Pressable>
           ) : null}
 
-          {recurring.data && (recurring.data.subMonthlyTotal ?? recurring.data.monthlyTotal) > 0 ? (
+          {widgets.subscriptions && recurring.data && (recurring.data.subMonthlyTotal ?? recurring.data.monthlyTotal) > 0 ? (
             <Pressable onPress={() => router.push('/subscriptions' as never)} style={({ pressed }) => pressed && { opacity: 0.6 }}>
               <Card style={styles.bannerCard}>
                 <View style={[styles.bannerIcon, { backgroundColor: colors.accentLight + '22' }]}>
@@ -253,7 +260,7 @@ export default function Overview() {
             </Pressable>
           ) : null}
 
-          {upcoming.length ? (
+          {widgets.bills && upcoming.length ? (
             <View style={{ marginTop: 4 }}>
               <SectionLabel right={<Text style={styles.seeAll} onPress={() => router.push('/bills' as never)}>See all</Text>}>Upcoming Bills</SectionLabel>
               <Card style={styles.list}>
@@ -271,6 +278,7 @@ export default function Overview() {
             </View>
           ) : null}
 
+          {widgets.accounts ? <>
           <SectionLabel>Accounts</SectionLabel>
           {accts.length === 0 ? (
             <EmptyState icon="building.columns">No accounts</EmptyState>
@@ -298,6 +306,7 @@ export default function Overview() {
               </View>
             ))
           )}
+          </> : null}
 
           {accts.length ? (
             <Pressable

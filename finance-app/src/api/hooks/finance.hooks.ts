@@ -32,6 +32,7 @@ import {
   Reimbursement,
   ReimbursementLedger,
   RepaymentSuggestions,
+  Reports,
   ReviewInbox,
   Rules,
   TripEvent,
@@ -886,6 +887,16 @@ export function useInvestments() {
     endpoint: API_ENDPOINTS.investments.endpoint,
     method: API_ENDPOINTS.investments.method,
     queryKey: [API_ENDPOINTS.investments.key],
+    staleTime: 120_000,
+  });
+}
+
+export function useReports(month?: string) {
+  return useFinanceQuery<Reports>({
+    endpoint: API_ENDPOINTS.reports.endpoint,
+    method: API_ENDPOINTS.reports.method,
+    params: month ? { month } : undefined,
+    queryKey: [API_ENDPOINTS.reports.key, month ?? 'current'],
     staleTime: 120_000,
   });
 }

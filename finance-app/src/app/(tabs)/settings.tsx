@@ -9,6 +9,7 @@ import { useReconcilePending, useSetReconcileEnabled } from '@/api/hooks/finance
 import { useServerConfig } from '@/state/server';
 import { testConnection } from '@/api/client/requests';
 import { authenticate, isBiometricAvailable } from '@/lib/biometric';
+import { DASHBOARD_WIDGETS, useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { DEFAULT_LOW_BALANCE, DEFAULT_THRESHOLD, ensurePermission, getNotifSettings, NOTIF } from '@/lib/notifications';
 import { kv } from '@/lib/storage';
 import { colors } from '@/theme/colors';
@@ -31,6 +32,7 @@ export default function Settings() {
   const reconPending = useReconcilePending();
   const setReconcileEnabled = useSetReconcileEnabled();
   const [reconEnabled, setReconEnabled] = useState(false);
+  const dashboard = useDashboardWidgets();
 
   useEffect(() => {
     isBiometricAvailable().then(setBioAvailable);
@@ -168,6 +170,19 @@ export default function Settings() {
           </View>
           <Switch value={demo} onValueChange={(v) => setConfig({ demo: v })} trackColor={{ true: colors.accent }} />
         </View>
+      </Card>
+
+      <CardTitle>Dashboard</CardTitle>
+      <Card style={{ marginBottom: 16 }}>
+        {DASHBOARD_WIDGETS.map((w, idx) => (
+          <View key={w.key} style={[styles.switchRow, idx < DASHBOARD_WIDGETS.length - 1 && styles.rowDivider]}>
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={styles.switchLabel}>{w.label}</Text>
+              <Text style={styles.switchSub}>Show on Home</Text>
+            </View>
+            <Switch value={dashboard.visible[w.key]} onValueChange={(v) => dashboard.setVisible(w.key, v)} trackColor={{ true: colors.accent }} />
+          </View>
+        ))}
       </Card>
 
       <CardTitle>Automation</CardTitle>

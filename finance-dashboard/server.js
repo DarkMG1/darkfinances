@@ -224,6 +224,7 @@ function demoMiddleware(v1mode) {
       case 'rules': return send({ rules: [] });
       case 'manual-assets': return send({ items: [], assets: 0, liabilities: 0, net: 0 });
       case 'investments': return send({ generatedAt: new Date().toISOString(), holdings: [], totals: { value: 0, costBasis: 0, gainLoss: 0 }, allocation: { byAssetClass: {}, byAccount: {} }, debts: [], debtTotals: { balance: 0, minPayment: 0, weightedApr: 0 } });
+      case 'reports': return send({ generatedAt: new Date().toISOString(), month: new Date().toISOString().slice(0, 7), saved: [], monthlyReview: { income: 0, spend: 0, net: 0, transactionCount: 0, largest: [], uncategorized: [] }, categoryTrends: [], merchantTrends: [], tagSummary: [], cashFlow: [] });
       case 'goals': return send(demo.goals());
       case 'owes-config': return send({ expected: {}, debtorPatterns: {}, tripStart: {}, swNet: [], settledExt: [] });
       case 'reimb-links': return send(req.query.id ? { asInflow: [], asExpense: [] } : { links: [] });
@@ -345,6 +346,7 @@ const resolvers = {
   rules: () => cached('rules', () => Promise.resolve({ ...data.getRules(), catalog: data.getCatalogDisplay() }), 120),
   manualAssets: () => cached('manual-assets', () => Promise.resolve(data.getManualAssets()), 120),
   investments: () => cached('investments', () => Promise.resolve(data.getInvestments()), 120),
+  reports: (req) => cached(`reports-${monthOf(req) || 'current'}`, () => data.getReports({ month: monthOf(req) }), 300),
 };
 
 async function setRecurring(req) {
@@ -755,6 +757,7 @@ v1.delete('/events/:slug', env(deleteEventH));
 v1.post('/accounts/:id/override', env(setAccountOverrideH));
 v1.get('/manual-assets', env(resolvers.manualAssets));
 v1.get('/investments', env(resolvers.investments));
+v1.get('/reports', env(resolvers.reports));
 v1.post('/manual-assets', env(saveManualAssetH));
 v1.delete('/manual-assets/:id', env(deleteManualAssetH));
 v1.post('/recurring/:key/override', env(setRecurring));

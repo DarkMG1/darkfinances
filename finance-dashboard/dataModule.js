@@ -3688,6 +3688,52 @@ async function getMonthlyReport({ month } = {}) {
   return { month: m, start, end, transactions, summary: spending.current };
 }
 
+async function getReports({ month } = {}) {
+  const m = month || todayYMD().slice(0, 7);
+  const [monthly, trends, insights, tags] = await Promise.all([
+    getMonthlyReport({ month: m }),
+    getTrends({ months: 12 }),
+    getInsights({ month: m }),
+    getTags(),
+  ]);
+  const merchants = {};
+  for (const t of monthly.transactions || []) {
+    if (t.amount >= 0) continue;
+    const key = t.payee || 'Unknown';
+    const cur = merchants[key] || { payee: key, spend: 0, count: 0 };
+    cur.spend = round2(cur.spend + Math.abs(t.amount));
+    cur.count++;
+    merchants[key] = cur;
+  }
+  const topMerchants = Object.values(merchants).sort((a, b) => b.spend - a.spend).slice(0, 12);
+  const categories = (monthly.summary?.categories || []).map((c) => ({
+    name: c.name,
+    spend: c.spend,
+    pct: monthly.summary.totalSpend > 0 ? round2((c.spend / monthly.summary.totalSpend) * 100) : 0,
+  }));
+  return {
+    generatedAt: new Date().toISOString(),
+    month: m,
+    saved: [
+      { id: 'monthly-review', title: 'Monthly review', subtitle: 'Income, spend, top categories, and review tasks' },
+      { id: 'merchant-trends', title: 'Merchant trends', subtitle: 'Top merchants for the selected month' },
+      { id: 'tag-events', title: 'Tags and events', subtitle: 'Spend grouped by note tags and trips' },
+    ],
+    monthlyReview: {
+      income: monthly.summary?.totalIncome || 0,
+      spend: monthly.summary?.totalSpend || 0,
+      net: monthly.summary?.net || 0,
+      transactionCount: monthly.transactions.length,
+      largest: insights.largest || [],
+      uncategorized: insights.uncategorized || [],
+    },
+    categoryTrends: categories,
+    merchantTrends: topMerchants,
+    tagSummary: tags.tags || [],
+    cashFlow: trends.months || [],
+  };
+}
+
 module.exports = {
   api,
   config,
@@ -3762,6 +3808,7 @@ module.exports = {
   searchTransactions,
   getTags,
   getMonthlyReport,
+  getReports,
   setTransactionNotes,
   setTransactionDate,
   getGoals,

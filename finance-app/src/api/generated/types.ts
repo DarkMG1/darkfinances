@@ -57,6 +57,24 @@ export interface Investments {
   debtTotals: { balance: number; minPayment: number; weightedApr: number };
 }
 
+export interface Reports {
+  generatedAt: string;
+  month: string;
+  saved: { id: string; title: string; subtitle: string }[];
+  monthlyReview: {
+    income: number;
+    spend: number;
+    net: number;
+    transactionCount: number;
+    largest: Transaction[];
+    uncategorized: Transaction[];
+  };
+  categoryTrends: { name: string; spend: number; pct: number }[];
+  merchantTrends: { payee: string; spend: number; count: number }[];
+  tagSummary: Tag[];
+  cashFlow: TrendMonth[];
+}
+
 export interface Transaction {
   id: string;
   parentId: string | null;

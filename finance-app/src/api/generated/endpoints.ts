@@ -32,6 +32,7 @@ export const API_ENDPOINTS = {
   rules: def('/api/v1/rules', 'GET', 'rules'),
   manualAssets: def('/api/v1/manual-assets', 'GET', 'manualAssets'),
   investments: def('/api/v1/investments', 'GET', 'investments'),
+  reports: def('/api/v1/reports', 'GET', 'reports'),
   reportCsv: def('/api/v1/report.csv', 'GET', 'reportCsv'),
   goals: def('/api/v1/goals', 'GET', 'goals'),
   reimbLinks: def('/api/v1/reimb-links', 'GET', 'reimbLinks'),
