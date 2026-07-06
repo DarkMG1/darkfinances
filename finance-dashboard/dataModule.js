@@ -2043,6 +2043,121 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
   });
 }
 
+// ---------------------------------------------------------------------------
+// Review inbox — one prioritized daily queue for the app home screen.
+// ---------------------------------------------------------------------------
+async function getReview({ month } = {}) {
+  const m = month || todayYMD().slice(0, 7);
+  const start = `${m}-01`;
+  const [year, monthNum] = m.split('-').map(Number);
+  const end = m === todayYMD().slice(0, 7) ? todayYMD() : monthRange(year, monthNum - 1).end;
+  const [txns, insights, recurring, repayments, recon, receipts] = await Promise.all([
+    getTransactions({ start, end, collapse: true }),
+    getInsights({ month: m }),
+    getRecurring({}),
+    suggestRepayments({}),
+    getReconcilePending(),
+    Promise.resolve(getReceipts()),
+  ]);
+
+  const tasks = [];
+  const seen = new Set();
+  const addTxn = (kind, priority, title, subtitle, txn, action = 'open_transaction') => {
+    if (!txn || !txn.id || seen.has(`${kind}:${txn.id}`)) return;
+    seen.add(`${kind}:${txn.id}`);
+    tasks.push({
+      id: `${kind}:${txn.id}`,
+      kind,
+      priority,
+      title,
+      subtitle,
+      action,
+      amount: round2(Math.abs(Number(txn.amount) || 0)),
+      date: txn.date || null,
+      transaction: {
+        id: txn.id,
+        parentId: txn.parentId || null,
+        isLeg: !!txn.isLeg,
+        accountId: txn.accountId || '',
+        account: txn.account || '',
+        payee: txn.payee || '',
+        amount: round2(Number(txn.amount) || 0),
+        date: txn.date || '',
+        category: txn.category || null,
+        categoryId: txn.categoryId || null,
+        notes: txn.notes || '',
+        cleared: txn.cleared !== false,
+        imported: !!txn.imported,
+      },
+    });
+  };
+
+  const largeThreshold = Number(process.env.REVIEW_LARGE_CHARGE_THRESHOLD || 200);
+  const receiptThreshold = Number(process.env.REVIEW_RECEIPT_THRESHOLD || 75);
+  const receiptTxnIds = new Set((receipts.receipts || []).map((r) => String(r.txnId)));
+  for (const t of txns) {
+    if (!t.category || !String(t.category).trim()) addTxn('uncategorized', 95, 'Categorize transaction', t.payee || 'Uncategorized', t, 'categorize');
+    if (t.amount < 0 && Math.abs(t.amount) >= largeThreshold) addTxn('large_charge', 70, 'Review large charge', t.payee || 'Large charge', t);
+    if (t.amount < 0 && Math.abs(t.amount) >= receiptThreshold && !receiptTxnIds.has(String(t.id))) addTxn('missing_receipt', 60, 'Attach receipt', t.payee || 'Missing receipt', t, 'open_transaction');
+    if (t.cleared === false) addTxn('pending', 35, 'Pending transaction', t.payee || 'Pending', t);
+  }
+
+  for (const c of insights.uncategorized || [])
+    addTxn('uncategorized', 95, 'Categorize transaction', c.payee || 'Uncategorized', c, 'categorize');
+
+  for (const s of repayments.suggestions || []) {
+    const inflow = s.inflow || {};
+    if (!inflow.id || seen.has(`repayment:${inflow.id}`)) continue;
+    seen.add(`repayment:${inflow.id}`);
+    tasks.push({
+      id: `repayment:${s.id}`,
+      kind: 'repayment',
+      priority: 90,
+      title: 'Confirm repayment',
+      subtitle: `${s.person} · ${s.reason}`,
+      action: 'open_reimbursement',
+      amount: round2(inflow.amount || 0),
+      date: inflow.date || null,
+      person: s.person,
+    });
+  }
+
+  for (const item of recurring.items || []) {
+    if (item.priceChange && item.status === 'active') {
+      tasks.push({
+        id: `price:${item.key}`,
+        kind: 'price_change',
+        priority: item.priceChange.pct > 0 ? 80 : 45,
+        title: item.priceChange.pct > 0 ? 'Subscription price increased' : 'Subscription price dropped',
+        subtitle: `${item.payee} · ${item.priceChange.pct > 0 ? '+' : ''}${item.priceChange.pct}%`,
+        action: 'open_recurring',
+        amount: round2(item.amount),
+        date: item.lastCharged || null,
+        key: item.key,
+      });
+    }
+  }
+
+  if (recon && recon.pending) {
+    tasks.push({
+      id: `reconcile:${recon.pending}`,
+      kind: 'reconciliation',
+      priority: 85,
+      title: `Reconcile ${recon.pending}`,
+      subtitle: recon.remaining > 0 ? `${recon.remaining} of ${recon.total || 0} expenses left` : 'Ready to close',
+      action: 'open_reconcile',
+      amount: recon.remaining || 0,
+      date: null,
+      month: recon.pending,
+    });
+  }
+
+  tasks.sort((a, b) => b.priority - a.priority || String(b.date || '').localeCompare(String(a.date || '')));
+  const counts = {};
+  for (const t of tasks) counts[t.kind] = (counts[t.kind] || 0) + 1;
+  return { generatedAt: new Date().toISOString(), month: m, count: tasks.length, counts, tasks: tasks.slice(0, 50) };
+}
+
 // List of categories for the inline categorize dropdown.
 async function getCategories() {
   return withApi(async (api) => {
@@ -3358,6 +3473,7 @@ module.exports = {
   getReimbLinks,
   addReimbLink,
   deleteReimbLink,
+  getReview,
   suggestRepayments,
   confirmRepayment,
   dismissRepayment,

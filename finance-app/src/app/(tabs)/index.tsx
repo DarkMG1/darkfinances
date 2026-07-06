@@ -3,14 +3,14 @@ import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, useWindowDimensi
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useRouter } from 'expo-router';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
-import { useAccounts, useBankSync, useBills, useIncome, useManualAssets, useReconcilePending, useRecurring, useRepaymentSuggestions, useSpending, useTrends } from '@/api/hooks/finance.hooks';
+import { useAccounts, useBankSync, useBills, useIncome, useManualAssets, useRecurring, useReview, useSpending, useTrends } from '@/api/hooks/finance.hooks';
 import { Screen } from '@/components/screen';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, ListRow, SectionLabel, StatCard } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { AreaChart } from '@/components/charts';
 import { Account } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
-import { colors, dueLabel, fmtMoney, fmtPos, monthLabel } from '@/theme/colors';
+import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
   { label: '3M', v: 3 },
@@ -39,13 +39,10 @@ export default function Overview() {
   const recurring = useRecurring();
   const income = useIncome();
   const manual = useManualAssets();
-  const repayments = useRepaymentSuggestions();
-  const reconcile = useReconcilePending();
+  const review = useReview();
   const bankSync = useBankSync();
-  const suggestCount = repayments.data?.count ?? 0;
-  const reconPending = reconcile.data?.pending ?? null;
-  const reconRemaining = reconcile.data?.remaining ?? 0;
-  const reconTotal = reconcile.data?.total ?? 0;
+  const reviewCount = review.data?.count ?? 0;
+  const topReview = review.data?.tasks?.[0] ?? null;
 
   const doBankSync = () => {
     if (bankSync.isPending) return;
@@ -61,7 +58,7 @@ export default function Overview() {
     });
   };
 
-  const refreshing = accounts.isFetching || spending.isFetching || trends.isFetching;
+  const refreshing = accounts.isFetching || spending.isFetching || trends.isFetching || review.isFetching;
   const onRefresh = () => {
     accounts.refetch();
     spending.refetch();
@@ -70,6 +67,7 @@ export default function Overview() {
     recurring.refetch();
     income.refetch();
     manual.refetch();
+    review.refetch();
   };
 
   const accts = (accounts.data ?? []).filter((a) => !a.hidden);
@@ -179,32 +177,17 @@ export default function Overview() {
             ))}
           </View>
 
-          {reconPending ? (
-            <Pressable onPress={() => { haptics.tap(); router.push({ pathname: '/reconcile', params: { month: reconPending } }); }} style={({ pressed }) => pressed && { opacity: 0.6 }}>
-              <Card style={{ ...styles.bannerCard, ...styles.reconBanner }}>
+          {reviewCount > 0 ? (
+            <Pressable onPress={() => { haptics.tap(); router.push('/review' as never); }} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+              <Card style={{ ...styles.bannerCard, ...styles.reviewBanner }}>
                 <View style={[styles.bannerIcon, { backgroundColor: colors.yellow + '22' }]}>
                   <SymbolView name="checklist" tintColor={colors.yellow} size={22} resizeMode="scaleAspectFit" />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.bannerLabel}>Reconcile {monthLabel(reconPending)}</Text>
-                  <Text style={styles.bannerSub}>{reconRemaining > 0 ? `${reconRemaining} of ${reconTotal} expenses left to review` : 'All reviewed — close the month'}</Text>
+                  <Text style={styles.bannerLabel}>Today's review</Text>
+                  <Text style={styles.bannerSub}>{topReview ? `${topReview.title} · ${topReview.subtitle}` : `${reviewCount} item${reviewCount === 1 ? '' : 's'} need attention`}</Text>
                 </View>
-                <Text style={[styles.bannerValue, { color: colors.yellow }]}>Review ›</Text>
-              </Card>
-            </Pressable>
-          ) : null}
-
-          {suggestCount > 0 ? (
-            <Pressable onPress={() => { haptics.tap(); router.push('/reimbursement' as never); }} style={({ pressed }) => pressed && { opacity: 0.6 }}>
-              <Card style={styles.bannerCard}>
-                <View style={[styles.bannerIcon, { backgroundColor: '#22c55e22' }]}>
-                  <SymbolView name="arrow.left.arrow.right.circle.fill" tintColor="#22c55e" size={22} resizeMode="scaleAspectFit" />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.bannerLabel}>Repayments to review</Text>
-                  <Text style={styles.bannerSub}>{suggestCount} incoming payment{suggestCount === 1 ? '' : 's'} may settle what you're owed</Text>
-                </View>
-                <Text style={[styles.bannerValue, { color: '#22c55e' }]}>Review ›</Text>
+                <Text style={[styles.bannerValue, { color: colors.yellow }]}>{reviewCount} ›</Text>
               </Card>
             </Pressable>
           ) : null}
@@ -346,7 +329,7 @@ const styles = StyleSheet.create({
   tileLabel: { color: colors.text, fontSize: 11, fontWeight: '600', textAlign: 'center', paddingHorizontal: 2 },
   statsRow: { flexDirection: 'row', gap: 10, marginBottom: 16 },
   bannerCard: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 },
-  reconBanner: { borderColor: colors.yellow + '55', borderWidth: 1 },
+  reviewBanner: { borderColor: colors.yellow + '55', borderWidth: 1 },
   bannerIcon: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
   bannerLabel: { color: colors.text, fontSize: 15, fontWeight: '700' },
   bannerSub: { color: colors.muted, fontSize: 12, marginTop: 2 },

@@ -20,6 +20,7 @@ export const API_ENDPOINTS = {
   budgets: def('/api/v1/budgets', 'GET', 'budgets'),
   setBudget: def('/api/v1/budgets', 'POST', 'setBudget'),
   reimbursement: def('/api/v1/reimbursement', 'GET', 'reimbursement'),
+  review: def('/api/v1/review', 'GET', 'review'),
   insights: def('/api/v1/insights', 'GET', 'insights'),
   categories: def('/api/v1/categories', 'GET', 'categories'),
   recurring: def('/api/v1/recurring', 'GET', 'recurring'),

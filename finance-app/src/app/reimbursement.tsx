@@ -7,7 +7,7 @@ import { Avatar, Card, CardTitle, EmptyState, ErrorState, Pill } from '@/compone
 import { SkeletonList } from '@/components/skeleton';
 import { OwesPerson, ReimbLeg, RepaymentSuggestion } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
-import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
+import { colors, fmtDate, fmtPos, fmtSignedMoney } from '@/theme/colors';
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 type Status = 'outstanding' | 'partial' | 'settled';
@@ -26,7 +26,6 @@ const snapshotLabel = (source?: string | null, generatedAt?: string | null, warn
   return parts.join(' · ');
 };
 const cutoffLabel = (cutoff?: string | null) => cutoff ? `direct ledger since ${fmtDate(cutoff)}` : 'current balance';
-const fmtSigned = (n: number) => n > 0.005 ? `+${fmtMoney(n)}` : fmtMoney(n);
 const bucketTitle = (name: string) => {
   if (name === '(group/unsplit)') return 'Fronted for groups & trips';
   if (name === '(unattributed)') return 'Unattributed reimbursements';
@@ -174,7 +173,7 @@ export default function Reimbursement() {
               </View>
               <View style={styles.sumChip}>
                 <Text style={[styles.sumVal, { color: netGood ? colors.green : colors.red }]}>
-                  {range === 'life' ? fmtPos(netValue) : fmtSigned(netValue)}
+                  {range === 'life' ? fmtPos(netValue) : fmtSignedMoney(netValue)}
                 </Text>
                 <Text style={styles.sumLabel}>{range === 'life' ? 'still owed' : 'net cash flow'}</Text>
               </View>

@@ -97,6 +97,7 @@ function RootNav() {
         <Stack.Screen name="subscriptions" options={{ ...pushHeader, title: 'Subscriptions' }} />
         <Stack.Screen name="add-transaction" options={{ ...pushHeader, title: 'Add Transaction' }} />
         <Stack.Screen name="goals" options={{ ...pushHeader, title: 'Goals' }} />
+        <Stack.Screen name="review" options={{ ...pushHeader, title: 'Review' }} />
         <Stack.Screen name="rules" options={{ ...pushHeader, title: 'Rules' }} />
         <Stack.Screen name="events" options={{ ...pushHeader, title: 'Trips & Events' }} />
         <Stack.Screen name="reconcile" options={{ ...pushHeader, title: 'Reconcile' }} />

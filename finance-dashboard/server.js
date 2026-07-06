@@ -203,6 +203,7 @@ function demoMiddleware(v1mode) {
       case 'trends': return send(demo.trends(parseInt(req.query.months, 10) || 12));
       case 'budgets': return send(demo.budgets());
       case 'reimbursement': return send(demo.reimbursement());
+      case 'review': return send({ generatedAt: new Date().toISOString(), month: new Date().toISOString().slice(0, 7), count: 0, counts: {}, tasks: [] });
       case 'insights': return send(demo.insights());
       case 'categories': return send(demo.categories());
       case 'recurring': return send(demo.recurring());
@@ -306,6 +307,7 @@ const resolvers = {
     const openOnly = req.query.openOnly === '1' || req.query.openOnly === 'true';
     return cached(`reimb-${from || 'd'}-${to || 'd'}-${openOnly}`, () => data.getReimbursement({ from, to, openOnly }), 300);
   },
+  review: (req) => cached(`review-${monthOf(req) || 'current'}`, () => data.getReview({ month: monthOf(req) }), 120),
   reimbursementLedger: (req) => cached(`reimb-ledger-${monthOf(req) || 'current'}`, () => data.getReimbursementLedger({ month: monthOf(req) }), 180),
   repaymentSuggestions: (req) => {
     const { from, to } = req.query;
@@ -706,6 +708,7 @@ v1.get('/trends', env(resolvers.trends));
 v1.get('/budgets', env(resolvers.budgets));
 v1.post('/budgets', env(setBudget));
 v1.get('/reimbursement', env(resolvers.reimbursement));
+v1.get('/review', env(resolvers.review));
 v1.get('/reimbursement-ledger', env(resolvers.reimbursementLedger));
 v1.get('/insights', env(resolvers.insights));
 v1.get('/merchant-history', env(resolvers.merchantHistory));

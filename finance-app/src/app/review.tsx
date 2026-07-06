@@ -1,0 +1,168 @@
+import React, { useMemo, useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable';
+import { useRouter } from 'expo-router';
+import { SymbolView, SymbolViewProps } from 'expo-symbols';
+import { useReview } from '@/api/hooks/finance.hooks';
+import { ReviewTask, ReviewTransactionRef } from '@/api/generated/types';
+import { PushScreen } from '@/components/screen';
+import { Avatar, Card, CardTitle, EmptyState, ErrorState, Pill } from '@/components/ui';
+import { SkeletonList } from '@/components/skeleton';
+import { haptics } from '@/lib/haptics';
+import { colors, fmtDate, fmtPos, fmtSignedMoney, moneyColor } from '@/theme/colors';
+
+const KIND_ICON: Record<ReviewTask['kind'], { symbol: SymbolViewProps['name']; color: string }> = {
+  uncategorized: { symbol: 'tag.fill', color: colors.yellow },
+  large_charge: { symbol: 'exclamationmark.triangle.fill', color: colors.red },
+  missing_receipt: { symbol: 'doc.text.image.fill', color: colors.accentLight },
+  pending: { symbol: 'clock.fill', color: colors.muted },
+  repayment: { symbol: 'arrow.left.arrow.right.circle.fill', color: colors.green },
+  price_change: { symbol: 'repeat', color: colors.accentLight },
+  reconciliation: { symbol: 'checklist', color: colors.yellow },
+};
+
+const kindLabel: Record<ReviewTask['kind'], string> = {
+  uncategorized: 'Needs category',
+  large_charge: 'Large charge',
+  missing_receipt: 'Needs receipt',
+  pending: 'Pending',
+  repayment: 'Repayment',
+  price_change: 'Price change',
+  reconciliation: 'Month close',
+};
+
+function openTransaction(router: ReturnType<typeof useRouter>, t: ReviewTransactionRef) {
+  router.push({
+    pathname: '/transaction/[id]',
+    params: {
+      id: t.id,
+      payee: t.payee || '',
+      amount: String(t.amount),
+      date: t.date,
+      account: t.account,
+      accountId: t.accountId,
+      category: t.category || '',
+      categoryId: t.categoryId || '',
+      notes: t.notes || '',
+      isLeg: t.isLeg ? '1' : '',
+      parentId: t.parentId || '',
+      cleared: t.cleared === false ? '0' : '1',
+      imported: t.imported ? '1' : '',
+    },
+  });
+}
+
+export default function ReviewScreen() {
+  const router = useRouter();
+  const review = useReview();
+  const [hidden, setHidden] = useState<Record<string, boolean>>({});
+  const tasks = useMemo(() => (review.data?.tasks ?? []).filter((t) => !hidden[t.id]), [review.data?.tasks, hidden]);
+  const high = tasks.filter((t) => t.priority >= 80);
+  const normal = tasks.filter((t) => t.priority < 80);
+
+  const openTask = (task: ReviewTask) => {
+    haptics.tap();
+    if (task.transaction) return openTransaction(router, task.transaction);
+    if (task.action === 'open_reimbursement') return router.push('/reimbursement' as never);
+    if (task.action === 'open_recurring' && task.key) return router.push({ pathname: '/recurring/[key]', params: { key: task.key } });
+    if (task.action === 'open_reconcile') return router.push({ pathname: '/reconcile', params: { month: task.month || '' } });
+    return undefined;
+  };
+
+  const markReviewed = (id: string) => {
+    haptics.success();
+    setHidden((h) => ({ ...h, [id]: true }));
+  };
+
+  const renderActions = (task: ReviewTask) => (
+    <View style={styles.actions}>
+      <Pressable style={[styles.actionBtn, { backgroundColor: colors.accent }]} onPress={() => openTask(task)}>
+        <Text style={styles.actionText}>{task.action === 'categorize' ? 'Categorize' : 'Open'}</Text>
+      </Pressable>
+      <Pressable style={styles.actionBtn} onPress={() => markReviewed(task.id)}>
+        <Text style={styles.actionText}>Reviewed</Text>
+      </Pressable>
+    </View>
+  );
+
+  const renderTask = (task: ReviewTask) => {
+    const icon = KIND_ICON[task.kind];
+    const amount = task.transaction ? task.transaction.amount : task.amount;
+    return (
+      <Swipeable key={task.id} renderRightActions={() => renderActions(task)} overshootRight={false}>
+        <Pressable onPress={() => openTask(task)} style={({ pressed }) => [styles.row, pressed && { opacity: 0.65 }]}>
+          <Avatar label={task.transaction?.payee} size={38} />
+          <View style={[styles.icon, { backgroundColor: icon.color + '22' }]}>
+            <SymbolView name={icon.symbol} tintColor={icon.color} size={17} resizeMode="scaleAspectFit" />
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <View style={styles.titleLine}>
+              <Text style={styles.title} numberOfLines={1}>{task.title}</Text>
+              <Pill text={kindLabel[task.kind]} kind={task.priority >= 80 ? 'open' : 'partial'} />
+            </View>
+            <Text style={styles.sub} numberOfLines={1}>{task.subtitle}{task.date ? ` · ${fmtDate(task.date)}` : ''}</Text>
+          </View>
+          <Text style={[styles.amount, { color: moneyColor(amount, task.transaction?.amount && task.transaction.amount > 0 ? 'goodWhenPositive' : 'neutral') }]}>
+            {task.transaction ? fmtSignedMoney(task.transaction.amount) : fmtPos(task.amount)}
+          </Text>
+        </Pressable>
+      </Swipeable>
+    );
+  };
+
+  const loading = review.isLoading && !review.data;
+
+  return (
+    <PushScreen refreshing={review.isFetching} onRefresh={review.refetch}>
+      {loading ? (
+        <SkeletonList rows={6} />
+      ) : review.isError && !review.data ? (
+        <ErrorState error={review.error?.error} onRetry={review.refetch} />
+      ) : tasks.length === 0 ? (
+        <EmptyState icon="checkmark.circle">Nothing needs review right now</EmptyState>
+      ) : (
+        <>
+          <Card style={styles.hero}>
+            <Text style={styles.heroLabel}>TODAY'S REVIEW</Text>
+            <Text style={styles.heroValue}>{tasks.length}</Text>
+            <Text style={styles.heroSub}>Prioritized from categorization, reimbursements, large charges, subscription changes, and reconciliation.</Text>
+          </Card>
+
+          {high.length ? (
+            <>
+              <CardTitle>Needs Attention</CardTitle>
+              <Card style={styles.list}>{high.map(renderTask)}</Card>
+            </>
+          ) : null}
+
+          {normal.length ? (
+            <>
+              <CardTitle style={{ marginTop: 16 }}>Later</CardTitle>
+              <Card style={styles.list}>{normal.map(renderTask)}</Card>
+            </>
+          ) : null}
+
+          <Text style={styles.hint}>Swipe a row to open it or mark it reviewed for this session. Editing the transaction clears it from the inbox after refresh.</Text>
+        </>
+      )}
+    </PushScreen>
+  );
+}
+
+const styles = StyleSheet.create({
+  hero: { marginBottom: 18 },
+  heroLabel: { color: colors.muted, fontSize: 11, fontWeight: '800', letterSpacing: 1 },
+  heroValue: { color: colors.text, fontSize: 42, fontWeight: '800', letterSpacing: -1.4, marginTop: 4 },
+  heroSub: { color: colors.muted, fontSize: 13, lineHeight: 18, marginTop: 4 },
+  list: { paddingVertical: 2 },
+  row: { minHeight: 70, flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10 },
+  icon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', marginLeft: -18, borderWidth: 1, borderColor: colors.surface },
+  titleLine: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  title: { color: colors.text, fontSize: 15, fontWeight: '700', flexShrink: 1 },
+  sub: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  amount: { color: colors.text, fontSize: 14, fontWeight: '700', marginLeft: 8 },
+  actions: { flexDirection: 'row', alignItems: 'stretch' },
+  actionBtn: { width: 88, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface2, borderLeftWidth: 1, borderLeftColor: colors.border },
+  actionText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+  hint: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 12, paddingHorizontal: 2 },
+});

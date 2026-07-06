@@ -26,6 +26,18 @@ export const fmtMoney = (n: number): string => {
 };
 export const fmtPos = (n: number): string =>
   '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+export type MoneyTone = 'goodWhenPositive' | 'badWhenPositive' | 'neutral';
+export const fmtSignedMoney = (n: number): string => {
+  if (Math.abs(n) < 0.005) return '$0.00';
+  return `${n > 0 ? '+' : '-'}${fmtPos(n)}`;
+};
+export const fmtOutflow = (n: number): string => `-${fmtPos(n)}`;
+export const fmtInflow = (n: number): string => `+${fmtPos(n)}`;
+export const moneyColor = (n: number, tone: MoneyTone = 'neutral'): string => {
+  if (tone === 'neutral' || Math.abs(n) < 0.005) return colors.text;
+  if (tone === 'goodWhenPositive') return n >= 0 ? colors.green : colors.red;
+  return n > 0 ? colors.red : colors.green;
+};
 export const fmtK = (n: number): string => {
   const a = Math.abs(n);
   return (n < 0 ? '-$' : '$') + (a >= 1000 ? (a / 1000).toFixed(1) + 'k' : a.toFixed(0));

@@ -30,6 +30,7 @@ import {
   Reimbursement,
   ReimbursementLedger,
   RepaymentSuggestions,
+  ReviewInbox,
   Rules,
   TripEvent,
   SearchResult,
@@ -130,6 +131,16 @@ export function useReimbursement(params: { from?: string; to?: string } = {}) {
   });
 }
 
+export function useReview(month?: string) {
+  return useFinanceQuery<ReviewInbox>({
+    endpoint: API_ENDPOINTS.review.endpoint,
+    method: API_ENDPOINTS.review.method,
+    params: month ? { month } : undefined,
+    queryKey: [API_ENDPOINTS.review.key, month ?? 'current'],
+    staleTime: 60_000,
+  });
+}
+
 // Month-scoped, per-person ledger of fronted charges + paybacks applied (the
 // Rocket-Money "zero it out" view). `month` undefined = current month.
 export function useReimbursementLedger(month?: string) {
@@ -198,6 +209,7 @@ export function useSetReconcileMonth() {
       await Promise.all([
         qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reconciliation.key] }),
         qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reconcilePending.key] }),
+        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
       ]);
     },
   });
@@ -315,6 +327,7 @@ export function useSetCategory() {
         qc.invalidateQueries({ queryKey: [API_ENDPOINTS.spending.key] }),
         qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
         qc.invalidateQueries({ queryKey: [API_ENDPOINTS.budgets.key] }),
+        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
       ]);
     },
   });
@@ -522,6 +535,7 @@ function invalidateAfterRules(qc: ReturnType<typeof useQueryClient>) {
     qc.invalidateQueries({ queryKey: [API_ENDPOINTS.spending.key] }),
     qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
     qc.invalidateQueries({ queryKey: [API_ENDPOINTS.budgets.key] }),
+    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
   ]);
 }
 
@@ -729,6 +743,7 @@ function invalidateAfterRepayment(qc: ReturnType<typeof useQueryClient>) {
     qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactionById.key] }),
     qc.invalidateQueries({ queryKey: [API_ENDPOINTS.spending.key] }),
     qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
+    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
   ]);
 }
 export function useConfirmRepayment() {
@@ -744,7 +759,12 @@ export function useDismissRepayment() {
   return useFinanceMutation<{ ok: boolean; dismissed: string }, { id: string; inflowId?: string }>({
     endpoint: (v) => `/api/v1/repayments/${encodeURIComponent(v.id)}/dismiss`,
     method: 'POST',
-    onSuccess: async () => { await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.repaymentSuggestions.key] }); },
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.repaymentSuggestions.key] }),
+        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
+      ]);
+    },
   });
 }
 

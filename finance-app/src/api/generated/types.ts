@@ -221,6 +221,57 @@ export interface Reimbursement {
   unattributed?: { net: number; count: number; legs: ReimbLeg[] } | null;
 }
 
+export type ReviewTaskKind =
+  | 'uncategorized'
+  | 'large_charge'
+  | 'missing_receipt'
+  | 'pending'
+  | 'repayment'
+  | 'price_change'
+  | 'reconciliation';
+export type ReviewTaskAction =
+  | 'open_transaction'
+  | 'categorize'
+  | 'open_reimbursement'
+  | 'open_recurring'
+  | 'open_reconcile';
+export interface ReviewTransactionRef {
+  id: string;
+  parentId: string | null;
+  isLeg: boolean;
+  accountId: string;
+  account: string;
+  payee: string;
+  amount: number;
+  date: string;
+  category: string | null;
+  categoryId: string | null;
+  notes: string;
+  cleared: boolean;
+  imported: boolean;
+}
+export interface ReviewTask {
+  id: string;
+  kind: ReviewTaskKind;
+  priority: number;
+  title: string;
+  subtitle: string;
+  action: ReviewTaskAction;
+  amount: number;
+  date: string | null;
+  transaction?: ReviewTransactionRef;
+  person?: string;
+  key?: string;
+  month?: string;
+}
+export interface ReviewInbox {
+  generatedAt: string;
+  month: string;
+  count: number;
+  counts: Partial<Record<ReviewTaskKind, number>>;
+  tasks: ReviewTask[];
+}
+
 export interface Tag {
   raw: string;
   token: string;
