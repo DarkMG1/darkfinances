@@ -3,7 +3,7 @@ import { Alert, FlatList, Modal, Pressable, RefreshControl, ScrollView, SectionL
 import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useAccounts, useCategories, useSearch, useSetCategory, useTransactions } from '@/api/hooks/finance.hooks';
+import { useAccounts, useCategories, useEvents, useSearch, useSetCategory, useTransactions } from '@/api/hooks/finance.hooks';
 import { buildQuery } from '@/api/client/requests';
 import { useServerConfig } from '@/state/server';
 import { Transaction } from '@/api/generated/types';
@@ -13,6 +13,18 @@ import { haptics } from '@/lib/haptics';
 import { colors, fmtMoney, fmtDay } from '@/theme/colors';
 
 type Filter = 'all' | 'expense' | 'income';
+type EventGroupRow = {
+  id: string;
+  isEventGroup: true;
+  slug: string;
+  name: string;
+  count: number;
+  spend: number;
+  net: number;
+  firstDate: string;
+  lastDate: string;
+};
+type ActivityRow = Transaction | EventGroupRow;
 
 const RANGES: { label: string; m: number }[] = [
   { label: '1M', m: 1 },
@@ -36,11 +48,13 @@ export default function Transactions() {
   const [rangeM, setRangeM] = useState(3);
   const [accountId, setAccountId] = useState<string | null>(null);
   const [uncatOnly, setUncatOnly] = useState(false);
+  const [groupEvents, setGroupEvents] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [categorizing, setCategorizing] = useState<Transaction | null>(null);
 
   const accounts = useAccounts();
   const categories = useCategories();
+  const events = useEvents();
   const setCategory = useSetCategory();
 
   // 2+ chars switches from the recent (month-bound) list to an all-time server search.
@@ -59,6 +73,7 @@ export default function Transactions() {
 
   const sections = useMemo(() => {
     const q = search.toLowerCase();
+    const eventNames = new Map((events.data?.events ?? []).map((e) => [e.slug, e.name]));
     const filtered = base.filter((t) => {
       if (filter === 'expense' && t.amount >= 0) return false;
       if (filter === 'income' && t.amount <= 0) return false;
@@ -68,9 +83,41 @@ export default function Transactions() {
       if (!searching && q && !t.payee.toLowerCase().includes(q) && !(t.category || '').toLowerCase().includes(q) && !t.account.toLowerCase().includes(q)) return false;
       return true;
     });
-    const out: { title: string; date: string; data: Transaction[] }[] = [];
-    const byDate: Record<string, Transaction[]> = {};
+
+    const out: { title: string; date: string; data: ActivityRow[] }[] = [];
+    const byDate: Record<string, ActivityRow[]> = {};
+    const grouped: Record<string, EventGroupRow> = {};
+    const regular: Transaction[] = [];
+
     for (const t of filtered) {
+      const tag = !searching && groupEvents ? (t.notes || '').match(/#ev-([a-z0-9-]+)/i)?.[1]?.toLowerCase() : null;
+      if (tag) {
+        const cur = grouped[tag] || {
+          id: `event-group-${tag}`,
+          isEventGroup: true,
+          slug: tag,
+          name: eventNames.get(tag) || tag.replace(/-/g, ' '),
+          count: 0,
+          spend: 0,
+          net: 0,
+          firstDate: t.date,
+          lastDate: t.date,
+        };
+        cur.count += 1;
+        cur.spend += t.amount < 0 ? Math.abs(t.amount) : 0;
+        cur.net += t.amount;
+        if (t.date < cur.firstDate) cur.firstDate = t.date;
+        if (t.date > cur.lastDate) cur.lastDate = t.date;
+        grouped[tag] = cur;
+      } else {
+        regular.push(t);
+      }
+    }
+
+    const groupedRows = Object.values(grouped).map((g) => ({ ...g, spend: Math.round(g.spend * 100) / 100, net: Math.round(g.net * 100) / 100 }));
+    if (groupedRows.length) out.push({ title: 'Trips & Events', date: 'grouped-events', data: groupedRows.sort((a, b) => b.lastDate.localeCompare(a.lastDate)) });
+
+    for (const t of regular) {
       if (!byDate[t.date]) {
         byDate[t.date] = [];
         out.push({ title: fmtDay(t.date), date: t.date, data: byDate[t.date] });
@@ -78,7 +125,7 @@ export default function Transactions() {
       byDate[t.date].push(t);
     }
     return out;
-  }, [base, search, filter, searching, accountId, uncatOnly]);
+  }, [base, search, filter, searching, accountId, uncatOnly, groupEvents, events.data]);
 
   const exportCsv = async () => {
     setExporting(true);
@@ -133,7 +180,30 @@ export default function Transactions() {
     );
   };
 
-  const renderItem = ({ item }: { item: Transaction }) => {
+  const renderItem = ({ item }: { item: ActivityRow }) => {
+    if ('isEventGroup' in item) {
+      return (
+        <Pressable
+          style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+          onPress={() => {
+            haptics.tap();
+            router.push({ pathname: '/tag/[tag]', params: { tag: `ev-${item.slug}` } });
+          }}
+        >
+          <Avatar label={item.name} size={38} />
+          <View style={styles.mid}>
+            <View style={styles.payeeLine}>
+              <Text style={[styles.payee, { flexShrink: 1 }]} numberOfLines={1}>{item.name}</Text>
+              <SplitPill count={item.count} />
+            </View>
+            <Text style={styles.account} numberOfLines={1}>
+              {item.count} grouped expense{item.count === 1 ? '' : 's'} · {fmtDay(item.firstDate)}-{fmtDay(item.lastDate)}
+            </Text>
+          </View>
+          <Text style={[styles.amt, { color: colors.text }]}>{fmtMoney(-item.spend)}</Text>
+        </Pressable>
+      );
+    }
     const income = item.amount > 0;
     const row = (
       <Pressable style={({ pressed }) => [styles.row, pressed && styles.rowPressed]} onPress={() => openDetail(item)}>
@@ -215,6 +285,11 @@ export default function Transactions() {
         <Pressable onPress={() => { haptics.tap(); setUncatOnly((v) => !v); }} style={[styles.chip, uncatOnly && styles.chipActive]}>
           <Text style={[styles.chipText, uncatOnly && styles.chipTextActive]}>Uncategorized</Text>
         </Pressable>
+        {!searching ? (
+          <Pressable onPress={() => { haptics.tap(); setGroupEvents((v) => !v); }} style={[styles.chip, groupEvents && styles.chipActive]}>
+            <Text style={[styles.chipText, groupEvents && styles.chipTextActive]}>Group trips</Text>
+          </Pressable>
+        ) : null}
         <View style={styles.chipDivider} />
         <Pressable onPress={() => { haptics.tap(); setAccountId(null); }} style={[styles.chip, accountId === null && styles.chipActive]}>
           <Text style={[styles.chipText, accountId === null && styles.chipTextActive]}>All accounts</Text>
@@ -245,7 +320,7 @@ export default function Transactions() {
           style={styles.list}
           sections={sections}
           keyExtractor={(t) => t.id}
-          renderItem={renderItem}
+          renderItem={({ item }) => renderItem({ item })}
           renderSectionHeader={({ section }) => <Text style={styles.sectionHeader}>{section.title}</Text>}
           stickySectionHeadersEnabled={false}
           contentContainerStyle={{ paddingBottom: 96 }}
