@@ -9,7 +9,7 @@ import { SkeletonList } from '@/components/skeleton';
 import { ReconItem } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { currentMonthKey } from '@/lib/selectedMonth';
-import { colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
+import { colors, fmtDate, fmtSignedMoney, monthLabel } from '@/theme/colors';
 
 const stepMonth = (key: string, delta: number) => {
   const [y, m] = key.split('-').map(Number);
@@ -69,7 +69,7 @@ export default function Reconcile() {
       ) : recon.isError && !data ? (
         <ErrorState error={recon.error?.error} onRetry={recon.refetch} />
       ) : total === 0 ? (
-        <EmptyState icon="checkmark.circle">No expenses to reconcile in {monthLabel(month)}</EmptyState>
+        <EmptyState icon="checkmark.circle">No transactions to reconcile in {monthLabel(month)}</EmptyState>
       ) : (
         <>
           <Card style={styles.head}>
@@ -82,7 +82,7 @@ export default function Reconcile() {
               <>
                 <Text style={styles.headTitle}>{done} of {total} reviewed</Text>
                 <View style={styles.track}><View style={[styles.fill, { width: `${pct}%` }]} /></View>
-                <Text style={styles.headSub}>{allDone ? 'All expenses reviewed — close the month below.' : `${total - done} left to review`}</Text>
+                <Text style={styles.headSub}>{allDone ? 'All transactions reviewed — close the month below.' : `${total - done} left to review`}</Text>
               </>
             )}
           </Card>
@@ -98,7 +98,7 @@ export default function Reconcile() {
                     <Text style={[styles.rowPayee, it.reconciled && styles.rowPayeeDone]} numberOfLines={1}>{it.payee}</Text>
                     <Text style={styles.rowSub} numberOfLines={1}>{fmtDate(it.date)} · {it.category}</Text>
                   </View>
-                  <Text style={styles.rowAmt}>{fmtPos(it.amount)}</Text>
+                  <Text style={[styles.rowAmt, { color: it.amount > 0 ? colors.green : colors.text }]}>{fmtSignedMoney(it.amount)}</Text>
                 </Pressable>
               </View>
             ))}

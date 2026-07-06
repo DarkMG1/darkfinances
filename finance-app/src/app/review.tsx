@@ -22,14 +22,29 @@ const KIND_ICON: Record<ReviewTask['kind'], { symbol: SymbolViewProps['name']; c
 };
 
 const kindLabel: Record<ReviewTask['kind'], string> = {
-  uncategorized: 'Needs category',
+  uncategorized: 'Uncategorized',
   large_charge: 'Large charge',
-  missing_receipt: 'Needs receipt',
+  missing_receipt: 'Receipt',
   pending: 'Pending',
   repayment: 'Repayment',
   price_change: 'Price change',
   reconciliation: 'Month close',
 };
+
+const titleFor = (task: ReviewTask) => {
+  if (task.transaction?.payee) return task.transaction.payee;
+  return task.subtitle || task.title;
+};
+
+const subtitleFor = (task: ReviewTask) => {
+  if (task.transaction) {
+    const parts = [kindLabel[task.kind], task.transaction.account, task.transaction.category || null].filter(Boolean);
+    return parts.join(' · ');
+  }
+  return task.subtitle;
+};
+
+const showBadge = (task: ReviewTask) => task.kind !== 'uncategorized';
 
 function openTransaction(router: ReturnType<typeof useRouter>, t: ReviewTransactionRef) {
   router.push({
@@ -88,6 +103,8 @@ export default function ReviewScreen() {
   const renderTask = (task: ReviewTask) => {
     const icon = KIND_ICON[task.kind];
     const amount = task.transaction ? task.transaction.amount : task.amount;
+    const title = titleFor(task);
+    const subtitle = subtitleFor(task);
     return (
       <Swipeable key={task.id} renderRightActions={() => renderActions(task)} overshootRight={false}>
         <Pressable onPress={() => openTask(task)} style={({ pressed }) => [styles.row, pressed && { opacity: 0.65 }]}>
@@ -97,10 +114,10 @@ export default function ReviewScreen() {
           </View>
           <View style={{ flex: 1, minWidth: 0 }}>
             <View style={styles.titleLine}>
-              <Text style={styles.title} numberOfLines={1}>{task.title}</Text>
-              <Pill text={kindLabel[task.kind]} kind={task.priority >= 80 ? 'open' : 'partial'} />
+              <Text style={styles.title} numberOfLines={1}>{title}</Text>
+              {showBadge(task) ? <Pill text={kindLabel[task.kind]} kind={task.priority >= 80 ? 'open' : 'partial'} /> : null}
             </View>
-            <Text style={styles.sub} numberOfLines={1}>{task.subtitle}{task.date ? ` · ${fmtDate(task.date)}` : ''}</Text>
+            <Text style={styles.sub} numberOfLines={1}>{subtitle}{task.date ? ` · ${fmtDate(task.date)}` : ''}</Text>
           </View>
           <Text style={[styles.amount, { color: moneyColor(amount, task.transaction?.amount && task.transaction.amount > 0 ? 'goodWhenPositive' : 'neutral') }]}>
             {task.transaction ? fmtSignedMoney(task.transaction.amount) : fmtPos(task.amount)}

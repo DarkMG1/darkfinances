@@ -173,6 +173,21 @@ function addDays(dateStr, days) {
   d.setDate(d.getDate() + days);
   return ymd(d);
 }
+function labelFromNotes(notes) {
+  let s = String(notes || '')
+    .replace(/\[[^\]]+\]/g, '')
+    .replace(/#[A-Za-z0-9_-]+/g, '')
+    .replace(/^\s*(my share|others?'?\s+share|fronted for group)(?:\s*\([^)]*\))?\s*[:\-]\s*/i, '')
+    .replace(/\s*\|\s*.*$/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return s.slice(0, 80);
+}
+function displayPayeeName(primary, notes, fallback = 'Transaction') {
+  const p = String(primary || '').trim();
+  if (p) return p;
+  return labelFromNotes(notes) || fallback;
+}
 function median(arr) {
   if (!arr.length) return 0;
   const s = [...arr].sort((a, b) => a - b);
@@ -494,8 +509,9 @@ async function getTransactions({ accountId, start, end, category, collapse } = {
     const targetAccts = accountId
       ? accountsFull.filter((a) => a.id === accountId)
       : accountsFull.filter((a) => !a.closed);
-    const categories = await api.getCategories();
-    const catMap = Object.fromEntries(categories.map((c) => [c.id, c.name]));
+    const groups = await api.getCategoryGroups();
+    const catInfo = buildCatInfo(groups);
+    const catMap = Object.fromEntries(Object.entries(catInfo).map(([id, info]) => [id, info.name]));
     const payees = await api.getPayees();
     const payeeMap = Object.fromEntries(payees.map((p) => [p.id, p.name]));
 
@@ -503,7 +519,8 @@ async function getTransactions({ accountId, start, end, category, collapse } = {
     for (const acct of targetAccts) {
       const txns = await api.getTransactions(acct.id, startDate, endDate);
       for (const t of txns) {
-        const parentPayee = payeeMap[t.payee] || t.imported_payee || '';
+        const rawParentPayee = payeeMap[t.payee] || t.imported_payee || '';
+        const parentPayee = displayPayeeName(rawParentPayee, t.notes, '');
         const base = {
           date: t.date,
           payee: parentPayee,
@@ -529,11 +546,12 @@ async function getTransactions({ accountId, start, end, category, collapse } = {
               notes: t.notes || '',
             });
           } else {
-            subs.forEach((s, i) =>
+            subs.forEach((s, i) => {
+              const rawLegPayee = (s.payee && payeeMap[s.payee]) || '';
               all.push({
                 ...base,
                 // a named leg shows its own payee; otherwise it inherits the parent's
-                payee: (s.payee && payeeMap[s.payee]) || parentPayee,
+                payee: displayPayeeName(rawLegPayee || rawParentPayee, s.notes || t.notes, parentPayee),
                 id: s.id || `${t.id}-${i}`,
                 parentId: t.id,
                 isLeg: true,
@@ -541,8 +559,8 @@ async function getTransactions({ accountId, start, end, category, collapse } = {
                 category: catMap[s.category] || null,
                 categoryId: s.category || null,
                 notes: s.notes || t.notes || '',
-              })
-            );
+              });
+            });
           }
         } else if (!t.is_parent) {
           all.push({
@@ -559,6 +577,7 @@ async function getTransactions({ accountId, start, end, category, collapse } = {
       }
     }
     if (wantCat === 'uncategorized') all = all.filter((t) => !t.category);
+    else if (wantCat === 'income') all = all.filter((t) => t.categoryId && catInfo[t.categoryId] && catInfo[t.categoryId].kind === 'income');
     else if (wantCat) all = all.filter((t) => (t.category || '').toLowerCase() === wantCat);
     all.sort((a, b) => b.date.localeCompare(a.date));
     return all;
@@ -1816,9 +1835,9 @@ function setReconcileEnabled({ enabled } = {}) {
   return { ok: true, enabled: store.enabled };
 }
 
-// A month's reviewable expenses: on-budget outflows, minus internal money
-// movement (transfers / CC payments / investments) that aren't real spending to
-// validate. Splits are listed once as their parent total. Newest first.
+// A month's reviewable transactions: on-budget expenses + deposits, minus
+// internal money movement (transfers / CC payments / investments). Splits are
+// listed once as their parent total. Newest first.
 async function reconItemsFor(api, month) {
   const [Y, M] = month.split('-').map(Number);
   const { start, end } = monthRange(Y, M - 1);
@@ -1835,15 +1854,14 @@ async function reconItemsFor(api, month) {
   for (const a of accts) {
     const tx = await api.getTransactions(a.id, start, to);
     for (const t of tx) {
-      if (!(t.amount < 0)) continue; // outflows only
       if (t.transfer_id) continue; // internal transfer
       const isSplit = t.subtransactions && t.subtransactions.length;
       const info = t.category ? catInfo[t.category] : null;
       const kind = info ? info.kind : 'spend';
-      if (kind === 'mm' || kind === 'income') continue;
-      const payee = pn[t.payee] || t.imported_payee || '(no payee)';
+      if (kind === 'mm') continue;
+      const payee = displayPayeeName(pn[t.payee] || t.imported_payee, t.notes, 'Transaction');
       if (TRANSFER_PAYEE.test(payee)) continue;
-      const cat = isSplit ? 'Split' : info ? info.name : 'Uncategorized';
+      const cat = isSplit ? 'Split' : info ? info.name : t.amount > 0 ? 'Deposit' : 'Uncategorized';
       items.push({ id: String(t.id), date: t.date, payee: payee.slice(0, 80), amount: d2(t.amount), category: cat, account: a.name || '', accountId: a.id });
     }
   }
@@ -2242,9 +2260,12 @@ async function getReview({ month } = {}) {
   const receiptThreshold = Number(process.env.REVIEW_RECEIPT_THRESHOLD || 75);
   const receiptTxnIds = new Set((receipts.receipts || []).map((r) => String(r.txnId)));
   for (const t of txns) {
-    if (!t.category || !String(t.category).trim()) addTxn('uncategorized', 95, 'Categorize transaction', t.payee || 'Uncategorized', t, 'categorize');
-    if (t.amount < 0 && Math.abs(t.amount) >= largeThreshold) addTxn('large_charge', 70, 'Review large charge', t.payee || 'Large charge', t);
-    if (t.amount < 0 && Math.abs(t.amount) >= receiptThreshold && !receiptTxnIds.has(String(t.id))) addTxn('missing_receipt', 60, 'Attach receipt', t.payee || 'Missing receipt', t, 'open_transaction');
+    const catName = String(t.category || '');
+    const isSplitParent = t.isSplit || t.splitCount || /^split$/i.test(catName);
+    const reviewableCharge = !isSplitParent && !REIMB_CAT.test(catName) && !MM_CAT.test(catName);
+    if (!isSplitParent && (!t.category || !catName.trim())) addTxn('uncategorized', 95, 'Categorize transaction', t.payee || 'Uncategorized', t, 'categorize');
+    if (reviewableCharge && t.amount < 0 && Math.abs(t.amount) >= largeThreshold) addTxn('large_charge', 70, 'Review large charge', t.payee || 'Large charge', t);
+    if (reviewableCharge && t.amount < 0 && Math.abs(t.amount) >= receiptThreshold && !receiptTxnIds.has(String(t.id))) addTxn('missing_receipt', 60, 'Attach receipt', t.payee || 'Missing receipt', t, 'open_transaction');
     if (t.cleared === false) addTxn('pending', 35, 'Pending transaction', t.payee || 'Pending', t);
   }
 
@@ -2991,8 +3012,9 @@ async function sweepReimbursementTags({ tags, from, to } = {}) {
 // ---------------------------------------------------------------------------
 // Phantom pending cleanup — remove pending bank-imported charges that fell off
 // the card (dropped auth holds, or holds that posted as a separate cleared row).
-// Deliberately conservative; see the two rules below. Never touches manual rows,
-// cleared rows, splits, or anything you've annotated (a note / #keep protects it).
+// Deliberately conservative; see the rules below. Never touches manual rows,
+// cleared rows, splits, or anything marked #keep. Notes normally protect a row,
+// except notes that explicitly identify it as an auth hold expected to drop off.
 // ---------------------------------------------------------------------------
 function readPhantomSeen() {
   const s = readJsonSafe(PHANTOM_SEEN_PATH, { seen: {} });
@@ -3013,7 +3035,7 @@ function payeeAlike(a, b) {
   return short.length >= 3 && long.includes(short);
 }
 
-async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, dryRun = false } = {}) {
+async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, holdAgedDays = 5, holdObserveDays = 0, dryRun = false } = {}) {
   return withApi(async (api) => {
     const today = todayYMD();
     const start = addDays(today, -Math.abs(window));
@@ -3030,9 +3052,12 @@ async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, d
     const flaggedAged = [];
 
     const nameOf = (t) => pn[t.payee] || t.imported_payee || '';
-    const hasNote = (t) => {
-      const n = String(t.notes || '');
-      return n.trim().length > 0; // any user note (incl. #keep) protects the row
+    const noteText = (t) => String(t.notes || '');
+    const hasNote = (t) => noteText(t).trim().length > 0;
+    const hasKeepNote = (t) => /(^|\s)#keep\b|\[keep\]/i.test(noteText(t));
+    const isDropOffHoldNote = (t) => {
+      const n = noteText(t);
+      return /\b(auth|authorization|hold|pending)\b/i.test(n) && /\b(drop|drops|dropped|fall|falls|fell|release|released|temporary)\b/i.test(n);
     };
     const daysOld = (d) => Math.round((new Date(today) - new Date(d)) / 86400000);
 
@@ -3062,12 +3087,16 @@ async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, d
         });
 
         let reason = null;
-        if (superseder) reason = `superseded by cleared ${nameOf(superseder)} ${d2(superseder.amount)} on ${superseder.date}`;
-        else if (!hasNote(p) && daysOld(p.date) >= agedDays && firstSeenDays >= observeDays)
+        const dropOffHold = isDropOffHoldNote(p);
+        const noteProtected = hasKeepNote(p) || (hasNote(p) && !dropOffHold);
+        if (superseder && !hasKeepNote(p)) reason = `superseded by cleared ${nameOf(superseder)} ${d2(superseder.amount)} on ${superseder.date}`;
+        else if (!noteProtected && dropOffHold && daysOld(p.date) >= holdAgedDays && firstSeenDays >= holdObserveDays)
+          reason = `dropped auth hold: hold/drop-off note, age ${daysOld(p.date)}d, watched ${firstSeenDays}d`;
+        else if (!noteProtected && daysOld(p.date) >= agedDays && firstSeenDays >= observeDays)
           reason = `dropped hold: pending ${agedDays}d+ (age ${daysOld(p.date)}d, watched ${firstSeenDays}d), no matching posted charge`;
 
         if (!reason) {
-          if (!hasNote(p) && daysOld(p.date) >= agedDays && firstSeenDays < observeDays)
+          if (!noteProtected && daysOld(p.date) >= agedDays && firstSeenDays < observeDays)
             flaggedAged.push({ id, payee, amount: amt, date: p.date, watchedDays: firstSeenDays, needDays: observeDays });
           continue;
         }

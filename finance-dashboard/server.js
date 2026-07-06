@@ -397,7 +397,15 @@ async function bankSyncH() {
 }
 async function phantomCleanupH(req) {
   const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
-  const r = await data.cleanupPhantoms({ dryRun });
+  const num = (name) => req.query[name] != null ? Number(req.query[name]) : undefined;
+  const r = await data.cleanupPhantoms({
+    dryRun,
+    window: num('window'),
+    agedDays: num('agedDays'),
+    observeDays: num('observeDays'),
+    holdAgedDays: num('holdAgedDays'),
+    holdObserveDays: num('holdObserveDays'),
+  });
   if (!dryRun) { await data.syncNow().catch(() => {}); cache.flushAll(); }
   return r;
 }
