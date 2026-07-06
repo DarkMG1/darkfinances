@@ -3,7 +3,7 @@ import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, useWindowDimensi
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useRouter } from 'expo-router';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
-import { useAccounts, useBankSync, useBills, useIncome, useManualAssets, useRecurring, useReview, useSpending, useTrends } from '@/api/hooks/finance.hooks';
+import { useAccounts, useBankSync, useBills, useBudgets, useGoals, useIncome, useManualAssets, useRecurring, useReview, useSpending, useTrends } from '@/api/hooks/finance.hooks';
 import { Screen } from '@/components/screen';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, ListRow, SectionLabel, StatCard } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
@@ -36,8 +36,10 @@ export default function Overview() {
   const spending = useSpending();
   const trends = useTrends(months);
   const bills = useBills();
+  const budgets = useBudgets();
   const recurring = useRecurring();
   const income = useIncome();
+  const goals = useGoals();
   const manual = useManualAssets();
   const review = useReview();
   const bankSync = useBankSync();
@@ -64,8 +66,10 @@ export default function Overview() {
     spending.refetch();
     trends.refetch();
     bills.refetch();
+    budgets.refetch();
     recurring.refetch();
     income.refetch();
+    goals.refetch();
     manual.refetch();
     review.refetch();
   };
@@ -100,10 +104,20 @@ export default function Overview() {
     { title: 'Investments & Other', items: invest },
   ].filter((g) => g.items.length);
 
-  // Safe to Spend = on-hand cash minus the bills still due in the window.
+  // Safe to Spend = on-hand cash minus bills, remaining budget commitments, and
+  // this month's required goal funding.
   const cashOnHand = cash.reduce((s, a) => s + a.balance, 0);
   const upcomingBillsTotal = bills.data?.total ?? 0;
-  const safeToSpend = cashOnHand - upcomingBillsTotal;
+  const budgetCommitments = budgets.data?.totalRemaining ?? 0;
+  const nowForGoals = new Date();
+  const goalCommitments = (goals.data ?? []).reduce((sum, g) => {
+    const left = Math.max(0, g.target - g.current);
+    if (!left || !g.deadline) return sum;
+    const [y, m] = g.deadline.split('-').map(Number);
+    const months = Math.max(1, (y - nowForGoals.getFullYear()) * 12 + (m - nowForGoals.getMonth()));
+    return sum + left / months;
+  }, 0);
+  const safeToSpend = cashOnHand - upcomingBillsTotal - budgetCommitments - goalCommitments;
 
   const upcoming = (bills.data?.bills ?? []).slice(0, 3);
 
@@ -155,7 +169,7 @@ export default function Overview() {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.safeLabel}>SAFE TO SPEND</Text>
                   <Text style={[styles.safeValue, { color: safeToSpend >= 0 ? colors.text : colors.red }]}>{fmtMoney(safeToSpend)}</Text>
-                  <Text style={styles.safeSub}>{fmtPos(cashOnHand)} cash − {fmtPos(upcomingBillsTotal)} bills due</Text>
+                  <Text style={styles.safeSub}>{fmtPos(cashOnHand)} cash - {fmtPos(upcomingBillsTotal)} bills - {fmtPos(budgetCommitments)} budgets - {fmtPos(goalCommitments)} goals</Text>
                 </View>
                 <SymbolView name="wallet.pass.fill" tintColor={colors.accentLight} size={30} resizeMode="scaleAspectFit" />
               </Card>

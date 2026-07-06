@@ -1,0 +1,20 @@
+{
+  "defaults": {
+    "rolloverMode": "none"
+  },
+  "categories": {
+    "Dining Out": {
+      "monthlyTarget": 450,
+      "rolloverMode": "carryover",
+      "trueExpenseCadence": "monthly",
+      "priority": "flex"
+    },
+    "Travel": {
+      "annualTarget": 2400,
+      "monthlyTarget": 200,
+      "rolloverMode": "true_expense",
+      "trueExpenseCadence": "annual",
+      "priority": "planned"
+    }
+  }
+}

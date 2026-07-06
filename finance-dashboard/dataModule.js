@@ -23,6 +23,8 @@ const api = require(ACTUAL_API_PATH);
 const OVERRIDES_PATH = process.env.RECURRING_OVERRIDES_PATH || path.join(__dirname, 'recurring-overrides.json');
 const GOALS_PATH = process.env.GOALS_PATH || path.join(__dirname, 'goals.json');
 const BILLS_PAID_PATH = process.env.BILLS_PAID_PATH || path.join(__dirname, 'bills-paid.json');
+// Optional richer budgeting metadata keyed by category id or category name.
+const BUDGET_SETTINGS_PATH = process.env.BUDGET_SETTINGS_PATH || path.join(__dirname, 'budget-settings.json');
 // "Who owes me" ground truth (Splitwise expected amounts, trips, debtor name
 // patterns). Editable by deployment tooling or the user without a code change.
 const OWES_CONFIG_PATH = process.env.OWES_CONFIG_PATH || path.join(__dirname, 'owes-config.json');
@@ -644,9 +646,28 @@ async function getTrends({ months = 12 } = {}) {
 // ---------------------------------------------------------------------------
 // Budgets — Actual budgeted vs actual per category
 // ---------------------------------------------------------------------------
+function loadBudgetSettings() {
+  const raw = readJsonSafe(BUDGET_SETTINGS_PATH, {}) || {};
+  return {
+    categories: raw.categories && typeof raw.categories === 'object' ? raw.categories : {},
+    defaults: raw.defaults && typeof raw.defaults === 'object' ? raw.defaults : {},
+  };
+}
+
+function monthProgress(m) {
+  const [y, mo] = String(m).split('-').map(Number);
+  const days = new Date(y, mo, 0).getDate();
+  const cur = todayYMD().slice(0, 7);
+  const today = Number(todayYMD().slice(8, 10));
+  const elapsed = m === cur ? Math.min(today, days) : (m < cur ? days : 0);
+  return { days, elapsed: Math.max(1, elapsed || 1) };
+}
+
 async function getBudgets({ month } = {}) {
   return withApi(async (api) => {
     const m = month || todayYMD().slice(0, 7);
+    const settings = loadBudgetSettings();
+    const progress = monthProgress(m);
     let bm;
     try {
       bm = await api.getBudgetMonth(m);
@@ -660,16 +681,45 @@ async function getBudgets({ month } = {}) {
       const cats = (g.categories || [])
         .filter((c) => !REIMB_CAT.test(c.name || '')) // peer debts aren't spend
         .map((c) => {
+          const meta = { ...settings.defaults, ...(settings.categories[c.id] || {}), ...(settings.categories[c.name] || {}) };
           const budgeted = (c.budgeted || 0) / 100;
           const spent = Math.abs(c.spent || 0) / 100;
+          const target = Number(meta.monthlyTarget ?? budgeted) || 0;
+          const annualTarget = Number(meta.annualTarget || 0) || null;
+          const remaining = round2(Math.max(0, target - spent));
+          const projected = progress.elapsed > 0 ? round2((spent / progress.elapsed) * progress.days) : spent;
+          const expectedToDate = target > 0 ? round2((target / progress.days) * progress.elapsed) : null;
+          const rolloverMode = meta.rolloverMode || 'none';
+          const rolloverAmount = rolloverMode === 'none' ? 0 : round2((c.balance || 0) / 100);
+          const snoozed = meta.snoozedMonth === m;
+          const status = snoozed
+            ? 'snoozed'
+            : target > 0 && spent > target
+              ? 'over'
+              : target > 0 && projected > target * 1.05
+                ? 'watch'
+                : 'on_track';
           return {
             id: c.id,
             name: c.name,
             budgeted,
             spent,
             balance: (c.balance || 0) / 100,
-            pct: budgeted > 0 ? Math.min(999, Math.round((spent / budgeted) * 100)) : null,
-            over: budgeted > 0 && spent > budgeted,
+            pct: target > 0 ? Math.min(999, Math.round((spent / target) * 100)) : null,
+            over: target > 0 && spent > target,
+            target,
+            annualTarget,
+            remaining,
+            projected,
+            expectedToDate,
+            dailyPace: target > 0 ? round2(target / progress.days) : 0,
+            status,
+            rolloverMode,
+            rolloverAmount,
+            trueExpenseCadence: meta.trueExpenseCadence || null,
+            snoozedMonth: meta.snoozedMonth || null,
+            priority: meta.priority || null,
+            linkedGoal: meta.linkedGoal || null,
           };
         })
         .filter((c) => c.budgeted > 0 || c.spent > 0)
@@ -679,15 +729,29 @@ async function getBudgets({ month } = {}) {
         id: g.id,
         name: g.name,
         budgeted: cats.reduce((s, c) => s + c.budgeted, 0),
+        target: cats.reduce((s, c) => s + c.target, 0),
         spent: cats.reduce((s, c) => s + c.spent, 0),
+        remaining: cats.reduce((s, c) => s + c.remaining, 0),
+        projected: cats.reduce((s, c) => s + c.projected, 0),
+        status: cats.some((c) => c.status === 'over') ? 'over' : cats.some((c) => c.status === 'watch') ? 'watch' : cats.every((c) => c.status === 'snoozed') ? 'snoozed' : 'on_track',
         categories: cats,
       });
     }
+    const totalTarget = groups.reduce((s, g) => s + g.target, 0);
+    const totalSpent = groups.reduce((s, g) => s + g.spent, 0);
+    const totalRemaining = groups.reduce((s, g) => s + g.remaining, 0);
+    const totalProjected = groups.reduce((s, g) => s + g.projected, 0);
     return {
       month: m,
       supported: true,
       totalBudgeted: groups.reduce((s, g) => s + g.budgeted, 0),
-      totalSpent: groups.reduce((s, g) => s + g.spent, 0),
+      totalTarget,
+      totalSpent,
+      totalRemaining,
+      totalProjected,
+      daysInMonth: progress.days,
+      daysElapsed: progress.elapsed,
+      status: totalTarget > 0 && totalSpent > totalTarget ? 'over' : totalTarget > 0 && totalProjected > totalTarget * 1.05 ? 'watch' : 'on_track',
       groups,
     };
   });

@@ -128,23 +128,46 @@ export interface BudgetCategory {
   id: string;
   name: string;
   budgeted: number;
+  target: number;
   spent: number;
+  remaining: number;
+  projected: number;
+  expectedToDate: number | null;
+  dailyPace: number;
   balance: number;
   pct: number | null;
   over: boolean;
+  status: 'on_track' | 'watch' | 'over' | 'snoozed';
+  rolloverMode: string;
+  rolloverAmount: number;
+  annualTarget: number | null;
+  trueExpenseCadence: string | null;
+  snoozedMonth: string | null;
+  priority: string | null;
+  linkedGoal: string | null;
 }
 export interface BudgetGroup {
   id: string;
   name: string;
   budgeted: number;
+  target: number;
   spent: number;
+  remaining: number;
+  projected: number;
+  status: 'on_track' | 'watch' | 'over' | 'snoozed';
   categories: BudgetCategory[];
 }
 export interface Budgets {
   month: string;
   supported: boolean;
   totalBudgeted: number;
+  totalTarget: number;
   totalSpent: number;
+  totalRemaining: number;
+  totalProjected: number;
+  daysInMonth: number;
+  daysElapsed: number;
+  status: 'on_track' | 'watch' | 'over' | 'snoozed';
   groups: BudgetGroup[];
 }
 
