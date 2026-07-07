@@ -91,12 +91,13 @@ export function useMerchantHistory(payee?: string, months = 12) {
   });
 }
 
-export function useSpending(month?: string) {
+export function useSpending(input?: string | { month?: string; start?: string; end?: string }) {
+  const params = typeof input === 'string' ? (input ? { month: input } : undefined) : input;
   return useFinanceQuery<Spending>({
     endpoint: API_ENDPOINTS.spending.endpoint,
     method: API_ENDPOINTS.spending.method,
-    params: month ? { month } : undefined,
-    queryKey: [API_ENDPOINTS.spending.key, month ?? 'current'],
+    params,
+    queryKey: [API_ENDPOINTS.spending.key, params?.month ?? 'current', params?.start ?? '', params?.end ?? ''],
     staleTime: 60_000,
   });
 }

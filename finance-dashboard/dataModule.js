@@ -578,7 +578,12 @@ async function getTransactions({ accountId, start, end, category, collapse } = {
     }
     if (wantCat === 'uncategorized') all = all.filter((t) => !t.category);
     else if (wantCat === 'income') all = all.filter((t) => t.categoryId && catInfo[t.categoryId] && catInfo[t.categoryId].kind === 'income');
-    else if (wantCat) all = all.filter((t) => (t.category || '').toLowerCase() === wantCat);
+    else if (wantCat) {
+      all = all.filter((t) => {
+        const info = t.categoryId ? catInfo[t.categoryId] : null;
+        return (t.category || '').toLowerCase() === wantCat || (info?.group || '').toLowerCase() === wantCat;
+      });
+    }
     all.sort((a, b) => b.date.localeCompare(a.date));
     return all;
   });
@@ -652,22 +657,40 @@ async function onBudgetLeaves(api, start, end, catInfo) {
   return out;
 }
 
-async function getSpending({ month } = {}) {
+async function getSpending({ month, start, end } = {}) {
   return withApi(async (api) => {
     const now = new Date();
-    let year, mIdx;
-    if (month) {
+    let cur;
+    let prev;
+    let monthKey;
+    if (start && end) {
+      const startDate = String(start);
+      const endDate = String(end);
+      const ms = Date.parse(`${startDate}T00:00:00`);
+      const me = Date.parse(`${endDate}T00:00:00`);
+      const spanDays = Number.isFinite(ms) && Number.isFinite(me) ? Math.max(1, Math.round((me - ms) / 86400000) + 1) : 1;
+      const prevEnd = new Date(ms - 86400000);
+      const prevStart = new Date(prevEnd);
+      prevStart.setDate(prevEnd.getDate() - spanDays + 1);
+      cur = { start: startDate, end: endDate, key: startDate.slice(0, 7) };
+      prev = { start: ymd(prevStart), end: ymd(prevEnd), key: ymd(prevStart).slice(0, 7) };
+      monthKey = cur.key;
+    } else {
+      let year, mIdx;
+      if (month) {
       const [Y, M] = month.split('-').map(Number);
       year = Y;
       mIdx = M - 1;
-    } else {
-      year = now.getFullYear();
-      mIdx = now.getMonth();
+      } else {
+        year = now.getFullYear();
+        mIdx = now.getMonth();
+      }
+      cur = monthRange(year, mIdx);
+      prev = monthRange(year, mIdx - 1);
+      monthKey = cur.key;
     }
-    const cur = monthRange(year, mIdx);
-    const prev = monthRange(year, mIdx - 1);
-    const isCurrent = year === now.getFullYear() && mIdx === now.getMonth();
-    const curEnd = isCurrent ? todayYMD() : cur.end;
+    const isCurrent = cur.key === todayYMD().slice(0, 7);
+    const curEnd = isCurrent && !end ? todayYMD() : cur.end;
 
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
@@ -678,7 +701,7 @@ async function getSpending({ month } = {}) {
     return {
       current: summarize(current, catInfo),
       prev: summarize(previous, catInfo),
-      month: cur.key,
+      month: monthKey,
     };
   });
 }

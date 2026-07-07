@@ -269,9 +269,9 @@ function transactions() {
   push(3, 'iCloud+', -2.99, 'Cloud', 'acc-credit');
   push(12, 'Adobe Creative Cloud', -54.99, 'Software', 'acc-credit');
   push(22, 'Planet Fitness', -24.99, 'Gym', 'acc-credit');
-  push(6, 'Verizon Wireless', -85, 'Phone', 'acc-credit');
-  push(14, 'City Fiber Internet', -69.99, 'Internet', 'acc-credit');
-  push(9, 'City Power & Light', -94.4, 'Electric', 'acc-check');
+  push(1, 'Verizon Wireless', -85, 'Phone', 'acc-credit');
+  push(2, 'City Fiber Internet', -69.99, 'Internet', 'acc-credit');
+  push(3, 'City Power & Light', -94.4, 'Electric', 'acc-check');
   const groc = ['Whole Foods', "Trader Joe's", 'Costco', 'Safeway'];
   for (let w = 0; w < 8; w++) push(3 + w * 7 + Math.floor(rnd() * 2), groc[w % groc.length], -(40 + Math.round(rnd() * 80)), 'Groceries', 'acc-credit');
   for (let i = 0; i < 14; i++) push(Math.floor(rnd() * 55), 'Blue Bottle Coffee', -(4 + Math.round(rnd() * 4)), 'Coffee', 'acc-credit');

@@ -1,0 +1,18 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- assertVisible: Use demo data
+- tapOn:
+    text: Use demo data
+- openLink: darkfinances:///category/Bills%20%26%20Utilities
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: category-detail-screen
+- assertVisible: Bills & Utilities
+- assertVisible: Transactions
+- assertVisible:
+    id: category-transaction-row-0
+- takeScreenshot: bills-utilities-drilldown

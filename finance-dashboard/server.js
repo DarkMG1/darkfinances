@@ -194,7 +194,14 @@ function demoMiddleware(v1mode) {
       case 'transactions': {
         let r = demo.transactions();
         const { category, start, end } = req.query;
-        if (category) r = r.filter((t) => (t.category || '').toLowerCase() === String(category).toLowerCase());
+        if (category) {
+          const want = String(category).toLowerCase();
+          const groupByCategory = Object.fromEntries(demo.categories().map((c) => [String(c.name || '').toLowerCase(), String(c.group || '').toLowerCase()]));
+          r = r.filter((t) => {
+            const cat = String(t.category || '').toLowerCase();
+            return cat === want || groupByCategory[cat] === want;
+          });
+        }
         if (start) r = r.filter((t) => t.date >= start);
         if (end) r = r.filter((t) => t.date <= end);
         return send(r);
@@ -302,7 +309,12 @@ const resolvers = {
     const { payee, months } = req.query;
     return cached(`mhist-${(payee || '').toLowerCase()}-${months || 12}`, () => data.getMerchantHistory({ payee, months: months ? Number(months) : 12 }), 180);
   },
-  spending: (req) => cached(`spending-${monthOf(req) || 'current'}`, () => data.getSpending({ month: monthOf(req) }), 180),
+  spending: (req) => {
+    const start = req.query.start ? String(req.query.start) : undefined;
+    const end = req.query.end ? String(req.query.end) : undefined;
+    const key = start && end ? `spending-${start}-${end}` : `spending-${monthOf(req) || 'current'}`;
+    return cached(key, () => data.getSpending({ month: monthOf(req), start, end }), 180);
+  },
   trends: (req) => {
     const months = Math.min(60, Math.max(3, parseInt(req.query.months, 10) || 12));
     return cached(`trends-${months}`, () => data.getTrends({ months }), 600);
@@ -811,6 +823,7 @@ app.listen(PORT, '127.0.0.1', () => {
   console.log(`Finance dashboard running on http://127.0.0.1:${PORT}`);
   if (DEMO_ONLY) {
     console.log('Demo-only mode enabled; skipping Actual startup sync');
+    setInterval(() => {}, 60 * 60 * 1000);
     return;
   }
   data.initApi()

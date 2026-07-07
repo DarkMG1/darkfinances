@@ -19,16 +19,56 @@ const PERIODS: { key: Period; label: string }[] = [
   { key: 'year', label: 'Year' },
 ];
 
+const pad = (n: number) => String(n).padStart(2, '0');
+const ymd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const monthEnd = (month: string) => {
+  const [year, m] = month.split('-').map(Number);
+  return new Date(year, m, 0);
+};
+
+function periodWindow(period: Period, month: string, currentMonth: string) {
+  const now = new Date();
+  const selectedIsCurrent = month === currentMonth;
+  const anchor = selectedIsCurrent ? now : monthEnd(month);
+  let start: Date;
+  let end: Date;
+
+  if (period === 'week') {
+    end = anchor;
+    start = new Date(anchor);
+    start.setDate(anchor.getDate() - 6);
+    return { start: ymd(start), end: ymd(end), label: selectedIsCurrent ? 'This Week' : `Week ending ${monthLabel(ymd(end).slice(0, 7)).split(' ')[0]} ${end.getDate()}` };
+  }
+  if (period === 'quarter') {
+    const qStartMonth = Math.floor(anchor.getMonth() / 3) * 3;
+    start = new Date(anchor.getFullYear(), qStartMonth, 1);
+    end = selectedIsCurrent ? now : new Date(anchor.getFullYear(), qStartMonth + 3, 0);
+    return { start: ymd(start), end: ymd(end), label: `Q${Math.floor(anchor.getMonth() / 3) + 1} ${anchor.getFullYear()}` };
+  }
+  if (period === 'year') {
+    start = new Date(anchor.getFullYear(), 0, 1);
+    end = selectedIsCurrent ? now : new Date(anchor.getFullYear(), 11, 31);
+    return { start: ymd(start), end: ymd(end), label: `${anchor.getFullYear()}` };
+  }
+
+  start = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+  end = selectedIsCurrent ? now : monthEnd(month);
+  return { start: ymd(start), end: ymd(end), label: monthLabel(month) };
+}
+
 export default function Spending() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const curKey = useMemo(() => currentMonthKey(), []);
   const [month, setMonth] = useSelectedMonth();
   const [period, setPeriod] = useState<Period>('month');
+  const [totalExpanded, setTotalExpanded] = useState(true);
   // Current month keeps hitting the warmed `spending-current` cache (month=undefined).
   const apiMonth = month === curKey ? undefined : month;
+  const selectedWindow = useMemo(() => periodWindow(period, month, curKey), [period, month, curKey]);
+  const spendingParams = period === 'month' ? apiMonth : { start: selectedWindow.start, end: selectedWindow.end };
   const trends = useTrends(60);
-  const spending = useSpending(apiMonth);
+  const spending = useSpending(spendingParams);
   const budgets = useBudgets(apiMonth);
   const insights = useInsights(apiMonth);
   const cur = spending.data?.current;
@@ -71,6 +111,12 @@ export default function Spending() {
   const topMerchants = insights.data?.topMerchants ?? [];
   const refreshing = spending.isFetching || insights.isFetching || trends.isFetching || budgets.isFetching;
   const refresh = () => { haptics.light(); spending.refetch(); insights.refetch(); trends.refetch(); budgets.refetch(); };
+  const categoryParams = (name: string) => ({
+    name,
+    start: selectedWindow.start,
+    end: selectedWindow.end,
+    label: selectedWindow.label,
+  });
 
   return (
     <View style={styles.root} testID="spending-screen">
@@ -99,18 +145,19 @@ export default function Spending() {
         ) : (
           <>
             <SummaryCard>
-              <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={fmtPos(totalIncome)} onPress={() => router.push({ pathname: '/category/[name]', params: { name: 'Income', ...(apiMonth ? { month: apiMonth } : {}) } })} />
-              <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={fmtPos(totalSpend)} expanded onPress={() => router.push({ pathname: '/category/[name]', params: { name: 'Spending', ...(apiMonth ? { month: apiMonth } : {}) } })} />
-              {topCategories.slice(0, 2).map(([cat, amt], i) => (
+              <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={fmtPos(totalIncome)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Income') })} />
+              <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={fmtPos(totalSpend)} expanded={totalExpanded} onPress={() => { haptics.tap(); setTotalExpanded((v) => !v); }} />
+              {totalExpanded ? topCategories.slice(0, 5).map(([cat, amt], i) => (
                 <SummaryRow
                   key={cat}
+                  testID={`spending-expanded-category-row-${i}`}
                   icon={i === 0 ? 'receipt' : 'wallet.pass'}
                   label={cat}
                   value={fmtPos(amt)}
                   inset
-                  onPress={() => router.push({ pathname: '/category/[name]', params: { name: cat, ...(apiMonth ? { month: apiMonth } : {}) } })}
+                  onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(cat) })}
                 />
-              ))}
+              )) : null}
               <SummaryRow icon="minus.circle" label="Net Income" value={`${netIncome < 0 ? '-' : ''}${fmtPos(Math.abs(netIncome))}`} muted info last />
             </SummaryCard>
 
@@ -150,7 +197,7 @@ export default function Spending() {
                   amount={amt}
                   pct={totalSpend > 0 ? amt / totalSpend : 0}
                   color={categoryColors[i % categoryColors.length]}
-                  onPress={() => router.push({ pathname: '/category/[name]', params: { name: cat, ...(apiMonth ? { month: apiMonth } : {}) } })}
+                  onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(cat) })}
                 />
               ))}
               {hiddenCategories ? <OutlineButton label="See More" onPress={() => haptics.tap()} /> : null}
@@ -210,7 +257,7 @@ export default function Spending() {
                             },
                           });
                         } else {
-                          router.push({ pathname: '/category/[name]', params: { name: c.category, ...(apiMonth ? { month: apiMonth } : {}) } });
+                          router.push({ pathname: '/category/[name]', params: categoryParams(c.category) });
                         }
                       }}
                     />
@@ -223,16 +270,11 @@ export default function Spending() {
             <SectionTitle>Non-Spending</SectionTitle>
             <Card style={styles.groupCard}>
               <PlainRow icon="cross.case" label="Tax Deductible" value="$0" />
-              <PlainRow icon="arrow.uturn.backward.circle" label="Reimbursements" value={fmtPos(reimbursementTotal)} onPress={() => router.push({ pathname: '/category/[name]', params: { name: 'Reimbursement' } })} />
+              <PlainRow icon="arrow.uturn.backward.circle" label="Reimbursements" value={fmtPos(reimbursementTotal)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Reimbursement') })} />
               <PlainRow icon="minus.circle" label="Refunds & Credits" value={refundTotal ? `-${fmtPos(refundTotal)}` : '$0'} />
               <PlainRow icon="arrow.left.arrow.right.circle" label="Transfers" value="0" last />
             </Card>
 
-            <View style={styles.problemCard}>
-              <Text style={styles.problemTitle}>Data not looking right?</Text>
-              <Text style={styles.problemText}>Make adjustments when transactions are missing categories, marked pending, or counted in the wrong bucket.</Text>
-              <OutlineButton label="Review spending data" onPress={() => router.push('/review')} />
-            </View>
           </>
         )}
       </ScrollView>
@@ -246,7 +288,7 @@ function PeriodChips({ value, onChange }: { value: Period; onChange: (p: Period)
       {PERIODS.map((p) => {
         const on = p.key === value;
         return (
-          <Pressable key={p.key} onPress={() => { haptics.tap(); onChange(p.key); }} style={({ pressed }) => [styles.periodChip, on && styles.periodChipOn, pressed && { opacity: 0.7 }]}>
+          <Pressable testID={`spending-period-${p.key}`} key={p.key} onPress={() => { haptics.tap(); onChange(p.key); }} style={({ pressed }) => [styles.periodChip, on && styles.periodChipOn, pressed && { opacity: 0.7 }]}>
             <Text style={[styles.periodText, on && styles.periodTextOn]}>{p.label}</Text>
           </Pressable>
         );
@@ -362,13 +404,13 @@ function PurchaseRow({ payee, category, date, pending, amount, onPress, last }: 
 function PlainRow({ icon, label, value, onPress, last }: { icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; last?: boolean }) {
   const inner = (
     <>
-      <SymbolView name={icon} tintColor={colors.text} size={20} resizeMode="scaleAspectFit" style={styles.plainIcon} />
-      <Text style={[styles.rowTitle, { flex: 1 }]}>{label}</Text>
-      <Text style={styles.rowValue}>{value}</Text>
+      <SymbolView name={icon} tintColor={colors.text} size={18} resizeMode="scaleAspectFit" style={styles.plainIcon} />
+      <Text style={styles.plainTitle}>{label}</Text>
+      <Text style={styles.plainValue}>{value}</Text>
     </>
   );
-  if (onPress) return <Pressable onPress={onPress} style={({ pressed }) => [styles.listRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{inner}</Pressable>;
-  return <View style={[styles.listRow, last && styles.lastRow]}>{inner}</View>;
+  if (onPress) return <Pressable onPress={onPress} style={({ pressed }) => [styles.plainRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{inner}</Pressable>;
+  return <View style={[styles.plainRow, last && styles.lastRow]}>{inner}</View>;
 }
 
 function OutlineButton({ label, onPress }: { label: string; onPress: () => void }) {
@@ -384,15 +426,15 @@ const styles = StyleSheet.create({
   header: { paddingHorizontal: 28, paddingBottom: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   title: { color: colors.text, fontSize: 19, fontWeight: '700', letterSpacing: -0.3 },
   scroll: { flex: 1 },
-  periodRow: { flexDirection: 'row', justifyContent: 'center', gap: 9, marginBottom: 17 },
-  periodChip: { backgroundColor: '#3a3a3d', borderRadius: 18, paddingHorizontal: 16, paddingVertical: 8 },
+  periodRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 15 },
+  periodChip: { backgroundColor: '#343438', borderRadius: 999, paddingHorizontal: 15, paddingVertical: 7 },
   periodChipOn: { backgroundColor: '#fff' },
-  periodText: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  periodText: { color: colors.text, fontSize: 13, fontWeight: '700' },
   periodTextOn: { color: '#19191d' },
   monthWrap: { marginHorizontal: -12, marginBottom: 18 },
   monthBars: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 },
-  monthCell: { flex: 1, minHeight: 102, borderWidth: 1, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 6, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 8 },
-  monthCellOn: { borderColor: '#fff', borderWidth: 2 },
+  monthCell: { flex: 1, minHeight: 100, borderRadius: 18, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 8 },
+  monthCellOn: { backgroundColor: 'rgba(255,255,255,0.08)' },
   barStage: { height: 74, flexDirection: 'row', alignItems: 'flex-end', gap: 6 },
   incomeBar: { width: 9, borderRadius: 5, backgroundColor: '#6f8df7' },
   spendBar: { width: 9, borderRadius: 5, backgroundColor: 'rgba(255,255,255,0.55)' },
@@ -402,16 +444,16 @@ const styles = StyleSheet.create({
   legendDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#6f8df7' },
   spendDot: { backgroundColor: 'rgba(255,255,255,0.55)' },
   legendText: { color: colors.text, fontSize: 13, opacity: 0.82 },
-  summaryCard: { paddingVertical: 0, overflow: 'hidden', marginBottom: 26 },
-  summaryRow: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)', paddingHorizontal: 22 },
+  summaryCard: { paddingVertical: 0, overflow: 'hidden', marginBottom: 22, borderWidth: 0, borderRadius: 30, backgroundColor: '#242426' },
+  summaryRow: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)', paddingHorizontal: 20 },
   summaryLabel: { color: colors.text, fontSize: 16, fontWeight: '600', flex: 1 },
   summaryInset: { fontSize: 15, color: colors.muted },
   summaryValue: { color: colors.text, fontSize: 16, fontWeight: '700' },
   section: { color: colors.text, textTransform: 'uppercase', letterSpacing: 1.1, fontSize: 12, fontWeight: '800', marginBottom: 10, marginLeft: 8 },
-  budgetCard: { padding: 0, overflow: 'hidden', marginBottom: 26 },
-  budgetHead: { flexDirection: 'row', alignItems: 'center', gap: 16, minHeight: 60, paddingHorizontal: 22, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  budgetCard: { padding: 0, overflow: 'hidden', marginBottom: 22, borderWidth: 0, borderRadius: 30, backgroundColor: '#242426' },
+  budgetHead: { flexDirection: 'row', alignItems: 'center', gap: 14, minHeight: 56, paddingHorizontal: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)' },
   budgetTitle: { color: colors.text, fontSize: 17, fontWeight: '600', flex: 1 },
-  budgetBody: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 22, paddingTop: 16 },
+  budgetBody: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 15 },
   mutedLabel: { color: colors.muted, fontSize: 12, fontWeight: '600' },
   budgetValue: { color: colors.text, fontSize: 26, fontWeight: '800', marginTop: 4 },
   ringRow: { flexDirection: 'row', gap: 9 },
@@ -419,28 +461,28 @@ const styles = StyleSheet.create({
   ringText: { color: colors.accentLight, fontSize: 15, fontWeight: '800' },
   progressTrack: { height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.17)', margin: 22, marginTop: 14, overflow: 'hidden' },
   progressFill: { height: 6, borderRadius: 3, backgroundColor: '#8aa0ff' },
-  breakdownCard: { padding: 0, overflow: 'hidden', marginBottom: 26 },
-  segmented: { flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  breakdownCard: { padding: 0, overflow: 'hidden', marginBottom: 22, borderWidth: 0, borderRadius: 30, backgroundColor: '#242426' },
+  segmented: { flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)' },
   segmentText: { flex: 1, textAlign: 'center', color: colors.muted, fontSize: 15, fontWeight: '700', paddingVertical: 15 },
   segmentOn: { color: colors.text },
-  categoryRow: { minHeight: 74, flexDirection: 'row', alignItems: 'center', gap: 13, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  categoryRow: { minHeight: 70, flexDirection: 'row', alignItems: 'center', gap: 13, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)' },
   rowMid: { flex: 1, minWidth: 0 },
   rowTitle: { color: colors.text, fontSize: 16, fontWeight: '600' },
   rowSub: { color: colors.text, opacity: 0.56, fontSize: 14, marginTop: 4 },
   rowValue: { color: colors.text, fontSize: 16, fontWeight: '700' },
   categoryColor: { width: 4, height: 36, borderRadius: 2 },
-  groupCard: { padding: 0, overflow: 'hidden', marginBottom: 26 },
-  listRow: { minHeight: 76, flexDirection: 'row', alignItems: 'center', gap: 13, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  groupCard: { padding: 0, overflow: 'hidden', marginBottom: 22, borderWidth: 0, borderRadius: 30, backgroundColor: '#242426' },
+  listRow: { minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: 13, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)' },
+  plainRow: { minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)' },
   lastRow: { borderBottomWidth: 0 },
   countBubble: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
   countText: { color: colors.text, fontSize: 15, fontWeight: '700', opacity: 0.72 },
   nameLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   cardCopy: { color: colors.text, opacity: 0.68, fontSize: 14, lineHeight: 20, padding: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
-  plainIcon: { width: 38 },
-  outlineBtn: { borderWidth: 1.2, borderColor: colors.text, borderRadius: 999, alignItems: 'center', paddingVertical: 13, marginHorizontal: 22, marginVertical: 17 },
+  plainIcon: { width: 30 },
+  plainTitle: { color: colors.text, fontSize: 15, fontWeight: '600', flex: 1 },
+  plainValue: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  outlineBtn: { borderWidth: 1.2, borderColor: colors.text, borderRadius: 999, alignItems: 'center', paddingVertical: 12, marginHorizontal: 22, marginVertical: 16 },
   outlineText: { color: colors.text, fontSize: 16, fontWeight: '700' },
-  problemCard: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 24, padding: 22, marginBottom: 26 },
-  problemTitle: { color: colors.text, fontSize: 18, fontWeight: '800' },
-  problemText: { color: colors.text, opacity: 0.68, fontSize: 15, lineHeight: 22, marginTop: 12, marginBottom: 10 },
   chevron: { color: colors.text, opacity: 0.82, fontSize: 18, fontWeight: '700' },
 });

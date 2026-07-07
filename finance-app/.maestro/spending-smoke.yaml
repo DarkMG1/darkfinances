@@ -10,8 +10,32 @@ appId: dev.darkmg1.finances
 - assertVisible:
     id: spending-screen
 - assertVisible: Spending
+- tapOn:
+    id: spending-period-week
+- assertVisible:
+    id: spending-screen
+- tapOn:
+    id: spending-period-quarter
+- assertVisible:
+    id: spending-screen
+- tapOn:
+    id: spending-period-year
+- assertVisible:
+    id: spending-screen
+- tapOn:
+    id: spending-period-month
 - assertVisible: Income
 - assertVisible: Total Spend
+- assertVisible:
+    id: spending-expanded-category-row-0
+- tapOn:
+    id: spending-total-row
+- assertNotVisible:
+    id: spending-expanded-category-row-0
+- tapOn:
+    id: spending-total-row
+- assertVisible:
+    id: spending-expanded-category-row-0
 - takeScreenshot: spending-overview
 - scroll
 - assertVisible: Your Budget

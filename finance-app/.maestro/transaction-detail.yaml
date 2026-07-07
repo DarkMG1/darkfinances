@@ -10,7 +10,7 @@ appId: dev.darkmg1.finances
 - assertVisible:
     id: spending-screen
 - tapOn:
-    id: spending-total-row
+    id: spending-expanded-category-row-0
 - assertVisible:
     id: category-detail-screen
 - tapOn:

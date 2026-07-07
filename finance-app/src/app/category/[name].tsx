@@ -24,7 +24,8 @@ const RANGES: { key: CatRange; label: string }[] = [
   { key: 'all', label: 'All' },
 ];
 
-function rangeWindow(key: CatRange, month?: string): { start: string; end: string; label: string } {
+function rangeWindow(key: CatRange, month?: string, explicitStart?: string, explicitEnd?: string, explicitLabel?: string): { start: string; end: string; label: string } {
+  if (explicitStart && explicitEnd) return { start: explicitStart, end: explicitEnd, label: explicitLabel || 'Selected period' };
   const now = new Date();
   const end = ymd(now);
   if (key === 'month') {
@@ -43,7 +44,7 @@ function rangeWindow(key: CatRange, month?: string): { start: string; end: strin
 export default function CategoryDetail() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const params = useLocalSearchParams<{ name: string; month?: string; range?: string }>();
+  const params = useLocalSearchParams<{ name: string; month?: string; range?: string; start?: string; end?: string; label?: string }>();
   // expo-router already decodes route params; use as-is.
   const name = params.name ?? '';
   const isAllSpending = /^(spending|total spend)$/i.test(name);
@@ -52,7 +53,7 @@ export default function CategoryDetail() {
     (RANGES.some((r) => r.key === params.range) ? (params.range as CatRange) : 'month')
   );
   const [sort, setSort] = useState<SortKey>('newest');
-  const { start, end, label } = rangeWindow(range, params.month);
+  const { start, end, label } = rangeWindow(range, params.month, params.start, params.end, params.label);
   const chartWindow = useMemo(() => {
     const base = params.month ? (() => { const [y, m] = params.month!.split('-').map(Number); return new Date(y, m - 1, 1); })() : new Date();
     const first = new Date(base.getFullYear(), base.getMonth() - 5, 1);
@@ -61,15 +62,15 @@ export default function CategoryDetail() {
   }, [params.month]);
 
   const queryCategory = isAllSpending ? undefined : name;
-  const txns = useTransactions({ start, end, category: queryCategory, collapse: true });
-  const chartTxns = useTransactions({ start: chartWindow.start, end: chartWindow.end, category: queryCategory, collapse: true });
+  const txns = useTransactions({ start, end, category: queryCategory, collapse: false });
+  const chartTxns = useTransactions({ start: chartWindow.start, end: chartWindow.end, category: queryCategory, collapse: false });
 
   const isUncat = name.toLowerCase() === 'uncategorized';
   const rows = useMemo(() => {
     const list = (txns.data ?? []).filter((t) => {
       if (isAllSpending) return t.amount < 0 && !/^reimbursement$/i.test(t.category || '');
       if (isIncome) return t.amount > 0;
-      return isUncat ? !t.category : (t.category || '').toLowerCase() === name.toLowerCase();
+      return isUncat ? !t.category : true;
     });
     return [...list].sort((a, b) => {
       if (sort === 'oldest') return a.date.localeCompare(b.date);
@@ -88,7 +89,7 @@ export default function CategoryDetail() {
     });
     const totals = new Map(months.map((m) => [m, 0]));
     (chartTxns.data ?? []).forEach((t) => {
-      const ok = isAllSpending ? t.amount < 0 && !/^reimbursement$/i.test(t.category || '') : isIncome ? t.amount > 0 : isUncat ? !t.category : (t.category || '').toLowerCase() === name.toLowerCase();
+      const ok = isAllSpending ? t.amount < 0 && !/^reimbursement$/i.test(t.category || '') : isIncome ? t.amount > 0 : isUncat ? !t.category : true;
       if (!ok) return;
       const key = t.date.slice(0, 7);
       if (totals.has(key)) totals.set(key, (totals.get(key) || 0) + Math.abs(t.amount));
