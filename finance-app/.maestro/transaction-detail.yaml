@@ -1,0 +1,27 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- tapOn:
+    point: 38%,95%
+- assertVisible:
+    id: spending-screen
+- tapOn:
+    id: spending-total-row
+- assertVisible:
+    id: category-detail-screen
+- tapOn:
+    id: category-transaction-row-0
+- assertVisible:
+    id: transaction-detail-screen
+- assertVisible:
+    id: transaction-date-button
+- assertVisible:
+    id: transaction-category-pill
+- assertVisible:
+    id: transaction-action-menu
+- takeScreenshot: transaction-detail
+

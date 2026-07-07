@@ -10,6 +10,7 @@
     "check": "npm run check:dashboard && npm run check:app && npm run check:tools",
     "check:dashboard": "npm --prefix finance-dashboard test",
     "check:app": "npm --prefix finance-app run typecheck",
-    "check:tools": "node --check actual-tools/owes-snapshot.js && node --check actual-tools/splitwise-lib.js"
+    "check:tools": "node --check actual-tools/owes-snapshot.js && node --check actual-tools/splitwise-lib.js",
+    "test:e2e:ios": "npm --prefix finance-app run test:e2e:ios"
   }
 }

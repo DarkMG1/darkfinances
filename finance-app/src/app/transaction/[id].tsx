@@ -374,6 +374,7 @@ export default function TransactionDetail() {
 
   return (
     <ScrollView
+      testID="transaction-detail-screen"
       style={styles.root}
       contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
       keyboardShouldPersistTaps="handled"
@@ -391,7 +392,7 @@ export default function TransactionDetail() {
             {dirty ? <Text style={styles.headerSave}>{setNotes.isPending ? 'Saving…' : 'Save'}</Text> : null}
           </Pressable>
           {canEditDate ? (
-            <Pressable onPress={openDate} hitSlop={8} style={({ pressed }) => [styles.topDateBtn, pressed && { opacity: 0.65 }]}>
+            <Pressable testID="transaction-date-button" onPress={openDate} hitSlop={8} style={({ pressed }) => [styles.topDateBtn, pressed && { opacity: 0.65 }]}>
               <Text style={styles.topDate}>{fmtMenuDay(currentDate)}</Text>
               <SymbolView name="chevron.down" tintColor={colors.text} size={11} resizeMode="scaleAspectFit" />
             </Pressable>
@@ -422,12 +423,17 @@ export default function TransactionDetail() {
           </View>
         ) : null}
         {!isSplit ? (
-          <Pressable onPress={() => { haptics.tap(); setPicking(true); }} style={({ pressed }) => [styles.categoryPill, pressed && { opacity: 0.75 }]}>
+          <Pressable testID="transaction-category-pill" onPress={() => { haptics.tap(); setPicking(true); }} style={({ pressed }) => [styles.categoryPill, pressed && { opacity: 0.75 }]}>
             <SymbolView name={catMeta.symbol} tintColor={catMeta.color} size={16} resizeMode="scaleAspectFit" />
             <Text style={styles.categoryPillText}>{category || 'Uncategorized'}</Text>
             <SymbolView name="chevron.down" tintColor={colors.text} size={10} resizeMode="scaleAspectFit" />
           </Pressable>
-        ) : null}
+        ) : (
+          <View testID="transaction-category-pill" style={styles.categoryPill}>
+            <SymbolView name="arrow.triangle.branch" tintColor={colors.text} size={16} resizeMode="scaleAspectFit" />
+            <Text style={styles.categoryPillText}>Split transaction</Text>
+          </View>
+        )}
       </View>
 
       <View style={styles.menuBody}>
@@ -443,7 +449,7 @@ export default function TransactionDetail() {
         </Pressable>
       ) : null}
 
-      <MenuGroup>
+      <MenuGroup testID="transaction-action-menu">
         {canRename ? <MenuActionRow icon="pencil" label="Rename" onPress={openRename} /> : null}
         <MenuSwitchRow
           icon="arrow.clockwise.circle"
@@ -896,8 +902,8 @@ export default function TransactionDetail() {
   );
 }
 
-function MenuGroup({ children }: { children: React.ReactNode }) {
-  return <View style={styles.menuGroup}>{children}</View>;
+function MenuGroup({ children, testID }: { children: React.ReactNode; testID?: string }) {
+  return <View testID={testID} style={styles.menuGroup}>{children}</View>;
 }
 
 function MenuActionRow({

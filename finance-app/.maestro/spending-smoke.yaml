@@ -1,0 +1,24 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- tapOn:
+    point: 38%,95%
+- assertVisible:
+    id: spending-screen
+- assertVisible: Spending
+- assertVisible: Income
+- assertVisible: Total Spend
+- takeScreenshot: spending-overview
+- scroll
+- assertVisible: Your Budget
+- assertVisible: Breakdown
+- takeScreenshot: spending-budget-breakdown
+- scroll
+- assertVisible: Largest Purchases
+- assertVisible: Non-Spending
+- takeScreenshot: spending-lower-sections
+

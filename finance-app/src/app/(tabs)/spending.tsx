@@ -73,7 +73,7 @@ export default function Spending() {
   const refresh = () => { haptics.light(); spending.refetch(); insights.refetch(); trends.refetch(); budgets.refetch(); };
 
   return (
-    <View style={styles.root}>
+    <View style={styles.root} testID="spending-screen">
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <Pressable hitSlop={10} onPress={() => haptics.tap()}>
           <SymbolView name="gearshape" tintColor={colors.text} size={22} resizeMode="scaleAspectFit" />
@@ -99,8 +99,8 @@ export default function Spending() {
         ) : (
           <>
             <SummaryCard>
-              <SummaryRow icon="dollarsign.circle" label="Income" value={fmtPos(totalIncome)} onPress={() => router.push({ pathname: '/category/[name]', params: { name: 'Income', ...(apiMonth ? { month: apiMonth } : {}) } })} />
-              <SummaryRow icon="banknote" label="Total Spend" value={fmtPos(totalSpend)} expanded onPress={() => router.push({ pathname: '/category/[name]', params: { name: 'Spending', ...(apiMonth ? { month: apiMonth } : {}) } })} />
+              <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={fmtPos(totalIncome)} onPress={() => router.push({ pathname: '/category/[name]', params: { name: 'Income', ...(apiMonth ? { month: apiMonth } : {}) } })} />
+              <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={fmtPos(totalSpend)} expanded onPress={() => router.push({ pathname: '/category/[name]', params: { name: 'Spending', ...(apiMonth ? { month: apiMonth } : {}) } })} />
               {topCategories.slice(0, 2).map(([cat, amt], i) => (
                 <SummaryRow
                   key={cat}
@@ -287,8 +287,8 @@ function SummaryCard({ children }: { children: React.ReactNode }) {
   return <Card style={styles.summaryCard}>{children}</Card>;
 }
 
-function SummaryRow({ icon, label, value, onPress, expanded, inset, muted, info, last }: {
-  icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; expanded?: boolean; inset?: boolean; muted?: boolean; info?: boolean; last?: boolean;
+function SummaryRow({ icon, label, value, onPress, expanded, inset, muted, info, last, testID }: {
+  icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; expanded?: boolean; inset?: boolean; muted?: boolean; info?: boolean; last?: boolean; testID?: string;
 }) {
   const body = (
     <>
@@ -299,9 +299,9 @@ function SummaryRow({ icon, label, value, onPress, expanded, inset, muted, info,
     </>
   );
   if (onPress) {
-    return <Pressable onPress={onPress} style={({ pressed }) => [styles.summaryRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{body}</Pressable>;
+    return <Pressable testID={testID} onPress={onPress} style={({ pressed }) => [styles.summaryRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{body}</Pressable>;
   }
-  return <View style={[styles.summaryRow, last && styles.lastRow]}>{body}</View>;
+  return <View testID={testID} style={[styles.summaryRow, last && styles.lastRow]}>{body}</View>;
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {

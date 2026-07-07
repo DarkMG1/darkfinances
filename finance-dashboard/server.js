@@ -228,7 +228,10 @@ function demoMiddleware(v1mode) {
       case 'goals': return send(demo.goals());
       case 'owes-config': return send({ expected: {}, debtorPatterns: {}, tripStart: {}, swNet: [], settledExt: [] });
       case 'reimb-links': return send(req.query.id ? { asInflow: [], asExpense: [] } : { links: [] });
-      default: return next();
+      default: {
+        if (DEMO_ONLY) return send({ ok: true, demo: true });
+        return next();
+      }
     }
   };
 }
@@ -699,6 +702,7 @@ function tokenOk(presented) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function v1Auth(req, res, next) {
+  if (isDemo(req)) return next(); // public sample data only; demoMiddleware handles the response.
   if (req.session && req.session.authenticated) return next(); // browser (passkey)
   const headerTok = req.get('X-Finance-Token') || (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
   if (tokenOk(headerTok)) return next(); // native app (token)
@@ -709,7 +713,7 @@ const v1 = express.Router();
 v1.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', req.get('Origin') || '*');
   res.header('Vary', 'Origin');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Finance-Token');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Finance-Token, X-Demo-Mode');
   res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -802,8 +806,13 @@ async function periodicSync() {
 }
 
 const PORT = parseInt(process.env.PORT, 10) || 5007;
+const DEMO_ONLY = process.env.DEMO_ONLY === '1';
 app.listen(PORT, '127.0.0.1', () => {
   console.log(`Finance dashboard running on http://127.0.0.1:${PORT}`);
+  if (DEMO_ONLY) {
+    console.log('Demo-only mode enabled; skipping Actual startup sync');
+    return;
+  }
   data.initApi()
     .then(async () => {
       await warmCache(); // pre-warm once at startup so the first page loads are fast

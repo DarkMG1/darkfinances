@@ -31,10 +31,10 @@ export default function TabsLayout() {
         tabBarLabelStyle: { fontSize: 10, fontWeight: '600' },
       }}
     >
-      <Tabs.Screen name="index" options={{ title: 'Home', tabBarIcon: ({ color }) => <TabIcon name="house.fill" color={color} /> }} />
-      <Tabs.Screen name="spending" options={{ title: 'Spending', tabBarIcon: ({ color }) => <TabIcon name="creditcard.fill" color={color} /> }} />
-      <Tabs.Screen name="transactions" options={{ title: 'Activity', tabBarIcon: ({ color }) => <TabIcon name="list.bullet" color={color} /> }} />
-      <Tabs.Screen name="settings" options={{ title: 'Settings', tabBarIcon: ({ color }) => <TabIcon name="gearshape.fill" color={color} /> }} />
+      <Tabs.Screen name="index" options={{ title: 'Home', tabBarButtonTestID: 'home-tab', tabBarIcon: ({ color }) => <TabIcon name="house.fill" color={color} /> }} />
+      <Tabs.Screen name="spending" options={{ title: 'Spending', tabBarButtonTestID: 'spending-tab', tabBarIcon: ({ color }) => <TabIcon name="creditcard.fill" color={color} /> }} />
+      <Tabs.Screen name="transactions" options={{ title: 'Activity', tabBarButtonTestID: 'activity-tab', tabBarIcon: ({ color }) => <TabIcon name="list.bullet" color={color} /> }} />
+      <Tabs.Screen name="settings" options={{ title: 'Settings', tabBarButtonTestID: 'settings-tab', tabBarIcon: ({ color }) => <TabIcon name="gearshape.fill" color={color} /> }} />
     </Tabs>
     </>
   );

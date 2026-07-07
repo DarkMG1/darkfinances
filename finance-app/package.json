@@ -53,6 +53,10 @@
     "release:ios": "bash ./scripts/ios-build.sh",
     "ota:configure": "npx eas-cli@latest update:configure",
     "ota:publish": "bash ./scripts/ota-publish.sh",
+    "test:e2e:ios": "maestro test .maestro",
+    "test:e2e:ios:spending": "maestro test .maestro/spending-smoke.yaml",
+    "test:e2e:ios:drilldown": "maestro test .maestro/spending-drilldown.yaml",
+    "test:e2e:ios:transaction": "maestro test .maestro/transaction-detail.yaml",
     "typecheck": "tsc --noEmit",
     "lint": "expo lint"
   },

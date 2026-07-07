@@ -30,6 +30,9 @@ export default function Onboarding() {
       setBusy(false);
     }
   };
+  const useDemo = async () => {
+    await setConfig({ serverUrl: 'http://127.0.0.1:5007', token: 'demo', demo: true });
+  };
 
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -64,6 +67,9 @@ export default function Onboarding() {
         <Pressable style={[styles.btn, busy && { opacity: 0.6 }]} disabled={busy} onPress={connect}>
           {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnText}>Connect</Text>}
         </Pressable>
+        <Pressable testID="onboarding-demo-button" style={styles.demoBtn} disabled={busy} onPress={useDemo}>
+          <Text style={styles.demoText}>Use demo data</Text>
+        </Pressable>
 
         {status ? <Text style={styles.status}>{status}</Text> : null}
         <Text style={styles.hint}>Find your token in the dashboard server environment as FINANCE_API_TOKEN.</Text>
@@ -90,6 +96,8 @@ const styles = StyleSheet.create({
   },
   btn: { backgroundColor: colors.accent, borderRadius: 12, paddingVertical: 15, alignItems: 'center', marginTop: 28 },
   btnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  demoBtn: { borderColor: colors.border, borderWidth: 1, borderRadius: 12, paddingVertical: 13, alignItems: 'center', marginTop: 12 },
+  demoText: { color: colors.text, fontWeight: '700', fontSize: 15 },
   status: { color: colors.accentLight, marginTop: 16, fontSize: 13, textAlign: 'center' },
   hint: { color: colors.muted, marginTop: 18, fontSize: 12, lineHeight: 18, textAlign: 'center' },
 });

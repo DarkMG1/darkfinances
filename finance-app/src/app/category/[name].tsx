@@ -102,7 +102,7 @@ export default function CategoryDetail() {
   const refresh = () => { haptics.light(); txns.refetch(); chartTxns.refetch(); };
 
   return (
-    <View style={styles.root}>
+    <View style={styles.root} testID="category-detail-screen">
       <Stack.Screen options={{ headerShown: false }} />
       <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
         <Pressable onPress={() => router.back()} hitSlop={12} style={styles.headerBtn}>
@@ -115,6 +115,7 @@ export default function CategoryDetail() {
         <View style={styles.headerActions}>
           <SymbolView name="doc.text" tintColor={colors.text} size={20} resizeMode="scaleAspectFit" />
           <Pressable
+            testID="category-header-sort-control"
             onPress={() => {
               const next: SortKey = sort === 'newest' ? 'oldest' : sort === 'oldest' ? 'amount' : 'newest';
               setSort(next);
@@ -146,6 +147,7 @@ export default function CategoryDetail() {
             <View style={styles.transactionHeader}>
               <Text style={styles.sectionLabel}>Transactions</Text>
               <Pressable
+                testID="category-sort-control"
                 onPress={() => {
                   const next: SortKey = sort === 'newest' ? 'oldest' : sort === 'oldest' ? 'amount' : 'newest';
                   setSort(next);
@@ -175,6 +177,7 @@ export default function CategoryDetail() {
                 {rows.map((t, i) => (
                   <Animated.View key={t.id} entering={FadeInDown.duration(180).delay(Math.min(i * 14, 160))}>
                     <Pressable
+                      testID={`category-transaction-row-${i}`}
                       style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}
                       onPress={() =>
                         router.push({
@@ -218,7 +221,7 @@ export default function CategoryDetail() {
           </>
         )}
       </ScrollView>
-      <View style={[styles.footer, { paddingBottom: insets.bottom + 12 }]}>
+      <View testID="category-total-footer" style={[styles.footer, { paddingBottom: insets.bottom + 12 }]}>
         <Text style={styles.footerLabel}>Total of Transactions</Text>
         <Text style={styles.footerValue}>{fmtPos(total)}</Text>
       </View>
