@@ -27,15 +27,20 @@ appId: dev.darkmg1.finances
 - assertVisible: Income
 - assertVisible: Total Spend
 - assertVisible:
-    id: spending-expanded-category-row-0
+    id: spending-summary-spending-row
+- assertVisible:
+    id: spending-summary-bills-row
+- assertVisible:
+    id: spending-summary-subscriptions-row
+- assertNotVisible: Gas
 - tapOn:
     id: spending-total-row
 - assertNotVisible:
-    id: spending-expanded-category-row-0
+    id: spending-summary-spending-row
 - tapOn:
     id: spending-total-row
 - assertVisible:
-    id: spending-expanded-category-row-0
+    id: spending-summary-spending-row
 - takeScreenshot: spending-overview
 - scroll
 - assertVisible: Your Budget

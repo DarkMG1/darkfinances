@@ -56,6 +56,13 @@ function periodWindow(period: Period, month: string, currentMonth: string) {
   return { start: ymd(start), end: ymd(end), label: monthLabel(month) };
 }
 
+function totalSpendBucket(category: string, group?: string) {
+  const key = `${category} ${group || ''}`.toLowerCase();
+  if (/rent|housing|electric|internet|phone|utilities?|water|sewer|trash|insurance|loan|mortgage/.test(key)) return 'bills';
+  if (/subscription|streaming|software|cloud/.test(key)) return 'subscriptions';
+  return 'spending';
+}
+
 export default function Spending() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -96,6 +103,29 @@ export default function Spending() {
   const topCategories = spendEntries.slice(0, 5);
   const hiddenCategories = Math.max(0, spendEntries.length - topCategories.length);
   const breakdownCategories = spendEntries.filter(([cat]) => !/^reimbursement$/i.test(cat));
+  const groupByCategory = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const group of budgets.data?.groups ?? []) {
+      for (const cat of group.categories ?? []) map.set(cat.name.toLowerCase(), group.name);
+    }
+    return map;
+  }, [budgets.data]);
+  const totalSpendRows = useMemo(() => {
+    let bills = 0;
+    let subscriptions = 0;
+    let everyday = 0;
+    for (const [cat, amt] of spendEntries) {
+      const bucket = totalSpendBucket(cat, groupByCategory.get(cat.toLowerCase()));
+      if (bucket === 'bills') bills += amt;
+      else if (bucket === 'subscriptions') subscriptions += amt;
+      else everyday += amt;
+    }
+    return [
+      { key: 'spending', label: 'Spending', amount: everyday, target: 'Spending' },
+      { key: 'bills', label: 'Bills & Utilities', amount: bills, target: 'Bills & Utilities' },
+      { key: 'subscriptions', label: 'Subscriptions', amount: subscriptions, target: 'Subscriptions' },
+    ].filter((row) => row.amount > 0.005);
+  }, [groupByCategory, spendEntries]);
   const totalSpend = cur?.totalSpend ?? 0;
   const totalIncome = cur?.totalIncome ?? 0;
   const netIncome = totalIncome - totalSpend;
@@ -147,15 +177,16 @@ export default function Spending() {
             <SummaryCard>
               <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={fmtPos(totalIncome)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Income') })} />
               <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={fmtPos(totalSpend)} expanded={totalExpanded} onPress={() => { haptics.tap(); setTotalExpanded((v) => !v); }} />
-              {totalExpanded ? topCategories.slice(0, 5).map(([cat, amt], i) => (
+              {totalExpanded ? totalSpendRows.map((row, i) => (
                 <SummaryRow
-                  key={cat}
+                  key={row.key}
                   testID={`spending-expanded-category-row-${i}`}
-                  icon={i === 0 ? 'receipt' : 'wallet.pass'}
-                  label={cat}
-                  value={fmtPos(amt)}
+                  accessibilityID={`spending-summary-${row.key}-row`}
+                  icon={row.key === 'spending' ? 'creditcard' : row.key === 'bills' ? 'bolt.fill' : 'play.rectangle.fill'}
+                  label={row.label}
+                  value={fmtPos(row.amount)}
                   inset
-                  onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(cat) })}
+                  onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(row.target) })}
                 />
               )) : null}
               <SummaryRow icon="minus.circle" label="Net Income" value={`${netIncome < 0 ? '-' : ''}${fmtPos(Math.abs(netIncome))}`} muted info last />
@@ -329,8 +360,8 @@ function SummaryCard({ children }: { children: React.ReactNode }) {
   return <Card style={styles.summaryCard}>{children}</Card>;
 }
 
-function SummaryRow({ icon, label, value, onPress, expanded, inset, muted, info, last, testID }: {
-  icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; expanded?: boolean; inset?: boolean; muted?: boolean; info?: boolean; last?: boolean; testID?: string;
+function SummaryRow({ icon, label, value, onPress, expanded, inset, muted, info, last, testID, accessibilityID }: {
+  icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; expanded?: boolean; inset?: boolean; muted?: boolean; info?: boolean; last?: boolean; testID?: string; accessibilityID?: string;
 }) {
   const body = (
     <>
@@ -341,9 +372,9 @@ function SummaryRow({ icon, label, value, onPress, expanded, inset, muted, info,
     </>
   );
   if (onPress) {
-    return <Pressable testID={testID} onPress={onPress} style={({ pressed }) => [styles.summaryRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{body}</Pressable>;
+    return <Pressable testID={accessibilityID || testID} onPress={onPress} style={({ pressed }) => [styles.summaryRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{body}</Pressable>;
   }
-  return <View testID={testID} style={[styles.summaryRow, last && styles.lastRow]}>{body}</View>;
+  return <View testID={accessibilityID || testID} style={[styles.summaryRow, last && styles.lastRow]}>{body}</View>;
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
