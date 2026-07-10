@@ -9,6 +9,8 @@ node_modules/
 
 # Personal config (copy the *.example.json template and fill in your own)
 splitwise-groups.json
+collection-rules.json
+build-rules-config.json
 
 # Generated snapshots & imported data (never commit)
 owes-truth.json

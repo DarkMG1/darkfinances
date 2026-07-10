@@ -1,0 +1,8 @@
+{
+  "skipNames": [
+    "Ambiguous transfer payee"
+  ],
+  "skipPatterns": [
+    "custom payment pattern"
+  ]
+}

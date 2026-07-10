@@ -18,11 +18,33 @@
 
 const fs = require('fs');
 const path = require('path');
+const { slugForName } = require('./splitwise-lib');
 
 const OUT_DEFAULT = process.env.VENMO_TRUTH_PATH || path.resolve(__dirname, '..', 'finance-dashboard', 'venmo-truth.json');
 const r2 = (n) => +Number(n).toFixed(2);
 const slugify = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
-const firstNameSlug = (full) => slugify(String(full || '').trim().split(/\s+/)[0] || full);
+const firstNameSlug = (full) => slugForName(full) || slugify(String(full || '').trim().split(/\s+/)[0] || full);
+
+function writeJsonAtomic(file, value) {
+  const dir = path.dirname(file);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+  if (fs.existsSync(file)) {
+    fs.copyFileSync(file, `${file}.last-good`);
+    fs.chmodSync(`${file}.last-good`, 0o600);
+  }
+  try {
+    const fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(value, null, 2) + '\n');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fs.renameSync(tmp, file);
+    fs.chmodSync(file, 0o600);
+  } catch (error) {
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    throw error;
+  }
+}
 
 function parseArgs(argv) {
   const flags = {};
@@ -59,8 +81,53 @@ function parseCsv(text) {
       row = [];
     } else cell += c;
   }
+  if (inQ) throw new Error('CSV ended inside a quoted field');
   if (cell !== '' || row.length) { row.push(cell); if (row.some((x) => x !== '')) rows.push(row); }
   return rows;
+}
+
+function mergeEvent(existing, eventName, next) {
+  const bySlug = {};
+  for (const [slug, entries] of Object.entries(existing?.bySlug || {})) {
+    const kept = (Array.isArray(entries) ? entries : []).filter((entry) => entry.event !== eventName);
+    if (kept.length) bySlug[slug] = kept;
+  }
+  for (const [slug, entries] of Object.entries(next.bySlug || {})) {
+    bySlug[slug] = [...(bySlug[slug] || []), ...entries];
+  }
+  const names = new Map();
+  for (const person of existing?.people || []) names.set(person.slug, person.name);
+  for (const person of next.people || []) {
+    const prior = names.get(person.slug);
+    if (prior && prior.toLowerCase() !== person.name.toLowerCase()) {
+      throw new Error(`Venmo identity collision for #${person.slug}; add a Splitwise surname alias`);
+    }
+    names.set(person.slug, person.name);
+  }
+  const people = Object.entries(bySlug)
+    .map(([slug, entries]) => ({
+      slug,
+      name: names.get(slug) || slug,
+      owed: r2(entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0)),
+    }))
+    .filter((person) => person.owed > 0.005)
+    .sort((a, b) => b.owed - a.owed);
+  return {
+    schemaVersion: 2,
+    generatedAt: new Date().toISOString(),
+    source: 'venmo-csv',
+    event: eventName,
+    imports: {
+      ...(existing?.imports || {}),
+      [eventName]: {
+        importedAt: next.generatedAt,
+        sourceFile: next.sourceFile,
+        settledNet: next.settledNet,
+      },
+    },
+    bySlug,
+    people,
+  };
 }
 
 const parseAmount = (s) => {
@@ -90,6 +157,9 @@ function main() {
     from: col(/^from$/), to: col(/^to$/), amount: col(/amount\s*\(total\)/),
     datetime: col(/datetime/),
   };
+  for (const key of ['type', 'status', 'from', 'to', 'amount']) {
+    if (idx[key] < 0) throw new Error(`Venmo CSV is missing the ${key} column`);
+  }
 
   const meNorm = me.trim().toLowerCase();
   const isMe = (name) => (name || '').trim().toLowerCase() === meNorm;
@@ -118,6 +188,9 @@ function main() {
       const slug = firstNameSlug(from);
       if (!slug) continue;
       owed[slug] = owed[slug] || { name: from, amount: 0 };
+      if (owed[slug].name.toLowerCase() !== from.toLowerCase()) {
+        throw new Error(`Venmo identity collision for #${slug}; add a Splitwise surname alias`);
+      }
       owed[slug].amount = r2(owed[slug].amount + amount);
       pendingCount++;
     } else if (/complete/i.test(status)) {
@@ -156,8 +229,13 @@ function main() {
 
   if (flags.dry) { console.log('\n--dry: not writing.'); return; }
   const outPath = (flags.out && flags.out !== true) ? String(flags.out) : OUT_DEFAULT;
-  fs.writeFileSync(outPath, JSON.stringify(out, null, 2) + '\n');
+  let existing = null;
+  try { existing = JSON.parse(fs.readFileSync(outPath, 'utf8')); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  writeJsonAtomic(outPath, mergeEvent(existing, eventName, out));
   console.log(`\nWrote ${outPath}. Run a dashboard refresh to merge into Who Owes Me.`);
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { mergeEvent, parseAmount, parseArgs, parseCsv };

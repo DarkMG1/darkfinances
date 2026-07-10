@@ -14,7 +14,30 @@ const sw = require(path.join(__dirname, 'splitwise-lib.js'));
 
 const dashboardPath = (...parts) => path.resolve(__dirname, '..', 'finance-dashboard', ...parts);
 const OUT = process.env.OWES_TRUTH_PATH || dashboardPath('owes-truth.json');
+const EXPECTED_CURRENCY = process.env.SPLITWISE_CURRENCY || 'USD';
 const r2 = (n) => +Number(n).toFixed(2);
+
+function writeSnapshotAtomic(file, value) {
+  const dir = path.dirname(file);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+  const backup = `${file}.last-good`;
+  try {
+    if (fs.existsSync(file)) {
+      fs.copyFileSync(file, backup);
+      fs.chmodSync(backup, 0o600);
+    }
+    const fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(value, null, 2) + '\n');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fs.renameSync(tmp, file);
+    fs.chmodSync(file, 0o600);
+  } catch (error) {
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    throw error;
+  }
+}
 
 // Built-in event->Splitwise-group map, extended by any trips created in the app
 // (events.json). A trip with a `group` set auto-pulls its Splitwise data here.
@@ -38,6 +61,8 @@ function loadEventMap() {
   const perPerson = {};     // slug -> pairwise rollup + itemized diagnostics
   const mySpendItems = [];  // [{ event, id, date, desc, category, myShare, paidByMe, payer }]
   const recon = {};         // slug -> { itemized, pairwise, diff } diagnostic log
+  const failures = [];
+  const groupOwner = new Map();
   let total = 0, ok = 0;
 
   for (const ev of events) {
@@ -47,10 +72,30 @@ function loadEventMap() {
       pair = await sw.getDirectOwed(grp);
     } catch (e) {
       console.error(`[owes-snapshot] ${ev} (${grp}) pairwise failed: ${e.message}`);
+      failures.push({ event: ev, group: grp, stage: 'pairwise', error: e.message });
       continue;
     }
+    const priorEvent = groupOwner.get(String(pair.id));
+    if (priorEvent) {
+      const message = `Splitwise group ${pair.id} is mapped by both ${priorEvent} and ${ev}`;
+      console.error(`[owes-snapshot] ${message}`);
+      failures.push({ event: ev, group: grp, stage: 'duplicate-group', error: message });
+      continue;
+    }
+    groupOwner.set(String(pair.id), ev);
     try { it = await sw.getItemizedOwed(grp); }
-    catch (e) { console.error(`[owes-snapshot] ${ev} (${grp}) itemized metadata failed: ${e.message}`); }
+    catch (e) {
+      console.error(`[owes-snapshot] ${ev} (${grp}) itemized metadata failed: ${e.message}`);
+      failures.push({ event: ev, group: grp, stage: 'itemized', error: e.message });
+      continue;
+    }
+    const currencies = [pair.currency, it.currency].filter(Boolean);
+    if (currencies.some((currency) => currency !== EXPECTED_CURRENCY)) {
+      const message = `expected ${EXPECTED_CURRENCY}, received ${[...new Set(currencies)].join(', ')}`;
+      console.error(`[owes-snapshot] ${ev} (${grp}) currency failed: ${message}`);
+      failures.push({ event: ev, group: grp, stage: 'currency', error: message });
+      continue;
+    }
     ok++;
 
     const eventOwed = pair.owedToMe.map((p) => ({
@@ -94,9 +139,10 @@ function loadEventMap() {
     byEvent[ev] = { name: pair.name, total: r2(eventOwed.reduce((s, x) => s + x.amount, 0)), owedToMe: eventOwed };
   }
 
-  if (ok === 0) {
-    console.error('[owes-snapshot] no Splitwise groups resolved — leaving existing snapshot untouched');
-    process.exit(1);
+  if (ok === 0 || failures.length || ok !== events.length) {
+    throw new Error(
+      `incomplete Splitwise snapshot (${ok}/${events.length} events; ${failures.length} failure(s)) — existing snapshot left untouched`
+    );
   }
 
   // Items someone else paid but I owe a share of — these are real spending that
@@ -104,8 +150,18 @@ function loadEventMap() {
   const othersPaidItems = mySpendItems.filter((m) => !m.paidByMe);
 
   const snap = {
+    schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     source: 'splitwise-pairwise (get_friends groups.balance); itemized spend metadata only',
+    manifest: {
+      complete: true,
+      expectedEvents: events.length,
+      resolvedEvents: ok,
+      failedEvents: [],
+      uniqueGroupIds: [...groupOwner.keys()].sort(),
+      itemizedComplete: true,
+      currency: EXPECTED_CURRENCY,
+    },
     events,
     bySlug,
     byEvent,
@@ -116,8 +172,7 @@ function loadEventMap() {
     total: r2(total),
   };
 
-  fs.mkdirSync(path.dirname(OUT), { recursive: true });
-  fs.writeFileSync(OUT, JSON.stringify(snap, null, 2));
+  writeSnapshotAtomic(OUT, snap);
   const reconN = Object.keys(recon).length;
   console.log(`[owes-snapshot] wrote ${OUT} — $${snap.total} across ${Object.keys(bySlug).length} debtor(s), ${ok}/${events.length} groups, ${mySpendItems.length} my-share items (${othersPaidItems.length} others-paid)${reconN ? `, ${reconN} pairwise divergence(s) logged` : ''}`);
   if (reconN) console.log('[owes-snapshot] divergences:', JSON.stringify(recon));

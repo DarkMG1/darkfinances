@@ -1,0 +1,19 @@
+{
+  "events": {
+    "example-trip": {
+      "group": "123456",
+      "tag": "ev-example-trip",
+      "start": "2026-01-01",
+      "minRatio": 0.4,
+      "maxRatio": 1.6,
+      "debtors": {
+        "alex": {
+          "patterns": [
+            "\\balex\\b",
+            "example surname"
+          ]
+        }
+      }
+    }
+  }
+}

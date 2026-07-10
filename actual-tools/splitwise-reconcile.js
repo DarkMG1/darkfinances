@@ -13,8 +13,8 @@
 // Usage: bash ~/actual-tools/splitwise-run.sh --reconcile <group name|id>
 //    or: node splitwise-reconcile.js --group <name|id>   (needs creds in env)
 
-const API = 'https://secure.splitwise.com/api/v3.0';
-const TOKEN_URL = 'https://secure.splitwise.com/oauth/token';
+const { getToken, resolveGroup, swApi } = require('./splitwise-lib');
+const MAX_EXPENSES = Number(process.env.SPLITWISE_MAX_EXPENSES || 20_000);
 
 function arg(name, def = null) {
   const i = process.argv.indexOf(name);
@@ -24,33 +24,15 @@ function arg(name, def = null) {
 }
 const f2 = n => Number(n).toFixed(2);
 
-async function getToken() {
-  if (process.env.SPLITWISE_API_KEY) return process.env.SPLITWISE_API_KEY;
-  const key = process.env.SPLITWISE_CONSUMER_KEY, secret = process.env.SPLITWISE_CONSUMER_SECRET;
-  if (!key || !secret) throw new Error('Missing SPLITWISE_API_KEY or SPLITWISE_CONSUMER_KEY/SECRET');
-  const body = new URLSearchParams({ grant_type: 'client_credentials', client_id: key, client_secret: secret });
-  const r = await fetch(TOKEN_URL, { method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-  if (!r.ok) throw new Error(`token failed: ${r.status} ${await r.text()}`);
-  return (await r.json()).access_token;
-}
-async function api(token, endpoint, params = {}) {
-  const qs = new URLSearchParams(params).toString();
-  const r = await fetch(`${API}/${endpoint}${qs ? '?' + qs : ''}`, { headers: { Authorization: `Bearer ${token}` } });
-  if (!r.ok) throw new Error(`${endpoint} failed: ${r.status} ${await r.text()}`);
-  return r.json();
-}
-
 async function main() {
   const token = await getToken();
-  const me = (await api(token, 'get_current_user')).user;
+  const me = (await swApi(token, 'get_current_user')).user;
   const myId = me.id;
   const groupArg = arg('--group');
   if (!groupArg || groupArg === true) throw new Error('pass --group <name|id>');
 
-  let groups = (await api(token, 'get_groups')).groups;
-  const gf = String(groupArg).toLowerCase();
-  const g = groups.find(x => String(x.id) === gf || (x.name || '').toLowerCase().includes(gf));
-  if (!g) throw new Error(`no group matched "${groupArg}"`);
+  const groups = (await swApi(token, 'get_groups')).groups;
+  const g = resolveGroup(groups, groupArg);
   const names = Object.fromEntries((g.members || []).map(m => [m.id, `${m.first_name || ''} ${m.last_name || ''}`.trim()]));
 
   // ── AUTHORITATIVE: Splitwise's own group balance + simplified debts ───────────
@@ -59,13 +41,20 @@ async function main() {
   console.log(`My net balance in group: ${myBal}`);
   const sd = (g.simplified_debts || []);
   const owesMe = sd.filter(x => x.to === myId), iOwe = sd.filter(x => x.from === myId);
-  if (owesMe.length) { console.log('Owes me:'); for (const x of owesMe) console.log(`   ${names[x.from] || x.from}: $${x.amount}`); }
-  if (iOwe.length) { console.log('I owe:'); for (const x of iOwe) console.log(`   ${names[x.to] || x.to}: $${x.amount}`); }
+  if (owesMe.length) { console.log('Owes me:'); for (const x of owesMe) console.log(`   ${names[x.from] || x.from}: ${x.amount} ${x.currency_code || ''}`.trimEnd()); }
+  if (iOwe.length) { console.log('I owe:'); for (const x of iOwe) console.log(`   ${names[x.to] || x.to}: ${x.amount} ${x.currency_code || ''}`.trimEnd()); }
   if (!owesMe.length && !iOwe.length) console.log('   (no open debts involving me — settled)');
   console.log('\n--- line-item reconstruction below is a CROSS-CHECK on the total only ---');
   console.log('--- (per-person may differ from above due to Splitwise debt simplification) ---');
 
-  const expenses = (await api(token, 'get_expenses', { group_id: g.id, limit: 0 })).expenses.filter(e => !e.deleted_at);
+  const expenses = [];
+  const pageSize = 100;
+  for (let offset = 0; ; offset += pageSize) {
+    const page = (await swApi(token, 'get_expenses', { group_id: g.id, limit: pageSize, offset })).expenses || [];
+    expenses.push(...page.filter((expense) => !expense.deleted_at));
+    if (page.length < pageSize) break;
+    if (expenses.length >= MAX_EXPENSES) throw new Error(`${g.name} exceeds the ${MAX_EXPENSES}-expense safety limit`);
+  }
 
   const grossOwed = {}, meOwes = {}, paid = {};
   let multiPayerNote = 0;
@@ -75,7 +64,7 @@ async function main() {
     const users = e.users || [];
     const c = users.find(u => u.user_id === myId);
     const payers = users.filter(u => Number(u.paid_share) > 0);
-    if (e.payment) {
+    if (e.payment || /settle|^payment$|reimburs|paid\s+back/i.test(e.description || '')) {
       // settle-up. NET both directions: payments TO me reduce remaining (+),
       // payments FROM me to a person increase their remaining (−).
       const payer = users.find(u => Number(u.paid_share) > 0);
