@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Alert, FlatList, Modal, Pressable, RefreshControl, ScrollView, SectionList, Share, StyleSheet, Text, TextInput, View } from 'react-native';
 import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAccounts, useCategories, useEvents, useSearch, useSetCategory, useTransactions } from '@/api/hooks/finance.hooks';
@@ -10,6 +11,7 @@ import { Transaction } from '@/api/generated/types';
 import { Avatar, ErrorState, PendingPill, SplitPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
+import { financeToday } from '@/lib/date-only';
 import { colors, fmtMoney, fmtDay } from '@/theme/colors';
 
 type Filter = 'all' | 'expense' | 'income';
@@ -62,7 +64,10 @@ export default function Transactions() {
   const txns = useTransactions({ start: startMonthsAgo(rangeM), accountId: accountId ?? undefined, collapse: true });
   const searchRes = useSearch(search);
 
-  const base = searching ? (searchRes.data?.transactions ?? []) : (txns.data ?? []);
+  const base = useMemo(
+    () => searching ? (searchRes.data?.transactions ?? []) : (txns.data ?? []),
+    [searching, searchRes.data, txns.data],
+  );
   const loading = searching ? searchRes.isLoading : txns.isLoading;
   const errored = searching ? searchRes.isError : txns.isError;
   const fetching = searching ? searchRes.isFetching : txns.isFetching;
@@ -130,9 +135,17 @@ export default function Transactions() {
   const exportCsv = async () => {
     setExporting(true);
     try {
-      const month = new Date().toISOString().slice(0, 7);
+      const month = financeToday().slice(0, 7);
       const csv = await buildQuery<string>({ serverUrl, token, demo, endpoint: '/api/v1/report.csv', method: 'GET', params: { month } });
-      if (csv) await Share.share({ message: csv as unknown as string });
+      if (csv && FileSystem.cacheDirectory) {
+        const file = `${FileSystem.cacheDirectory}darkfinances-${month}.csv`;
+        await FileSystem.writeAsStringAsync(file, csv, { encoding: FileSystem.EncodingType.UTF8 });
+        try {
+          await Share.share({ url: file, title: `DarkFinances ${month}` });
+        } finally {
+          await FileSystem.deleteAsync(file, { idempotent: true });
+        }
+      }
       else Alert.alert('Export', 'Nothing to export for this month.');
     } catch (e: any) {
       haptics.warning();
@@ -184,6 +197,7 @@ export default function Transactions() {
     if ('isEventGroup' in item) {
       return (
         <Pressable
+          testID={`activity-event-row-${item.slug}`}
           style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
           onPress={() => {
             haptics.tap();
@@ -206,7 +220,7 @@ export default function Transactions() {
     }
     const income = item.amount > 0;
     const row = (
-      <Pressable style={({ pressed }) => [styles.row, pressed && styles.rowPressed]} onPress={() => openDetail(item)}>
+      <Pressable testID={`activity-transaction-${item.id}`} style={({ pressed }) => [styles.row, pressed && styles.rowPressed]} onPress={() => openDetail(item)}>
         <Avatar label={item.payee} category={item.isSplit ? undefined : item.category ?? undefined} size={38} />
         <View style={styles.mid}>
           <View style={styles.payeeLine}>
@@ -246,15 +260,16 @@ export default function Transactions() {
   };
 
   return (
-    <View style={styles.root}>
+    <View style={styles.root} testID="activity-screen">
       <View style={[styles.header, { paddingTop: insets.top + 6 }]}>
         <Text style={styles.title}>Activity</Text>
-        <Pressable onPress={exportCsv} disabled={exporting} style={({ pressed }) => [styles.exportBtn, pressed && { opacity: 0.7 }]}>
+        <Pressable testID="activity-export-button" onPress={exportCsv} disabled={exporting} style={({ pressed }) => [styles.exportBtn, pressed && { opacity: 0.7 }]}>
           <Text style={styles.exportText}>{exporting ? 'Exporting…' : 'Export'}</Text>
         </Pressable>
       </View>
       <View style={styles.controls}>
         <TextInput
+          testID="activity-search-input"
           style={styles.search}
           value={search}
           onChangeText={setSearch}
@@ -264,7 +279,7 @@ export default function Transactions() {
         />
         <View style={styles.filters}>
           {(['all', 'expense', 'income'] as Filter[]).map((f) => (
-            <Pressable key={f} onPress={() => { haptics.tap(); setFilter(f); }} style={[styles.fbtn, filter === f && styles.fbtnActive]}>
+            <Pressable testID={`activity-filter-${f}${filter === f ? '-selected' : ''}`} key={f} onPress={() => { haptics.tap(); setFilter(f); }} style={[styles.fbtn, filter === f && styles.fbtnActive]}>
               <Text style={[styles.fbtnText, filter === f && styles.fbtnTextActive]}>{f === 'all' ? 'All' : f === 'expense' ? 'Out' : 'In'}</Text>
             </Pressable>
           ))}
@@ -275,27 +290,27 @@ export default function Transactions() {
         {!searching ? (
           <>
             {RANGES.map((r) => (
-              <Pressable key={r.label} onPress={() => { haptics.tap(); setRangeM(r.m); }} style={[styles.chip, rangeM === r.m && styles.chipActive]}>
+              <Pressable testID={`activity-range-${r.label.toLowerCase()}${rangeM === r.m ? '-selected' : ''}`} key={r.label} onPress={() => { haptics.tap(); setRangeM(r.m); }} style={[styles.chip, rangeM === r.m && styles.chipActive]}>
                 <Text style={[styles.chipText, rangeM === r.m && styles.chipTextActive]}>{r.label}</Text>
               </Pressable>
             ))}
             <View style={styles.chipDivider} />
           </>
         ) : null}
-        <Pressable onPress={() => { haptics.tap(); setUncatOnly((v) => !v); }} style={[styles.chip, uncatOnly && styles.chipActive]}>
+        <Pressable testID={`activity-uncategorized${uncatOnly ? '-selected' : ''}`} onPress={() => { haptics.tap(); setUncatOnly((v) => !v); }} style={[styles.chip, uncatOnly && styles.chipActive]}>
           <Text style={[styles.chipText, uncatOnly && styles.chipTextActive]}>Uncategorized</Text>
         </Pressable>
         {!searching ? (
-          <Pressable onPress={() => { haptics.tap(); setGroupEvents((v) => !v); }} style={[styles.chip, groupEvents && styles.chipActive]}>
+          <Pressable testID={`activity-group-events${groupEvents ? '-selected' : ''}`} onPress={() => { haptics.tap(); setGroupEvents((v) => !v); }} style={[styles.chip, groupEvents && styles.chipActive]}>
             <Text style={[styles.chipText, groupEvents && styles.chipTextActive]}>Group trips</Text>
           </Pressable>
         ) : null}
         <View style={styles.chipDivider} />
-        <Pressable onPress={() => { haptics.tap(); setAccountId(null); }} style={[styles.chip, accountId === null && styles.chipActive]}>
+        <Pressable testID={`activity-account-all${accountId === null ? '-selected' : ''}`} onPress={() => { haptics.tap(); setAccountId(null); }} style={[styles.chip, accountId === null && styles.chipActive]}>
           <Text style={[styles.chipText, accountId === null && styles.chipTextActive]}>All accounts</Text>
         </Pressable>
         {(accounts.data ?? []).map((a) => (
-          <Pressable key={a.id} onPress={() => { haptics.tap(); setAccountId(a.id); }} style={[styles.chip, accountId === a.id && styles.chipActive]}>
+          <Pressable testID={`activity-account-${a.id}${accountId === a.id ? '-selected' : ''}`} key={a.id} onPress={() => { haptics.tap(); setAccountId(a.id); }} style={[styles.chip, accountId === a.id && styles.chipActive]}>
             <Text style={[styles.chipText, accountId === a.id && styles.chipTextActive]} numberOfLines={1}>{a.name}</Text>
           </Pressable>
         ))}
@@ -330,6 +345,7 @@ export default function Transactions() {
       )}
 
       <Pressable
+        testID="activity-add-transaction-button"
         style={({ pressed }) => [styles.fab, pressed && styles.fabPressed]}
         onPress={() => { haptics.tap(); router.push('/add-transaction'); }}
         accessibilityLabel="Add transaction"
@@ -339,7 +355,7 @@ export default function Transactions() {
 
       <Modal visible={!!categorizing} animationType="slide" transparent onRequestClose={() => setCategorizing(null)}>
         <Pressable style={styles.modalBg} onPress={() => setCategorizing(null)}>
-          <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
+          <View testID="activity-category-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Categorize</Text>
             <Text style={styles.sheetSub} numberOfLines={1}>{categorizing?.payee || '—'} · {categorizing ? fmtMoney(categorizing.amount) : ''}</Text>
             <FlatList
@@ -348,7 +364,7 @@ export default function Transactions() {
               style={{ maxHeight: 420 }}
               keyboardShouldPersistTaps="handled"
               renderItem={({ item }) => (
-                <Pressable style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => applyCategory(item.id)} disabled={setCategory.isPending}>
+                <Pressable testID={`activity-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => applyCategory(item.id)} disabled={setCategory.isPending}>
                   <Text style={styles.catOptionText}>{item.name}</Text>
                   <Text style={styles.catOptionGroup}>{item.group}</Text>
                 </Pressable>

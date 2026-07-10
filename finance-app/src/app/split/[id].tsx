@@ -68,10 +68,9 @@ export default function SplitEditor() {
   useEffect(() => {
     if (!d || inited.current) return;
     inited.current = true;
-    if (d.isSplit && d.legs.length) {
-      setMode('specific');
-      setLegs(
-        d.legs.map((l) => ({
+    const nextMode = d.isSplit && d.legs.length ? 'specific' : mode;
+    const nextLegs = d.isSplit && d.legs.length
+      ? d.legs.map((l) => ({
           key: nk(),
           id: l.id,
           catId: l.categoryId,
@@ -82,14 +81,16 @@ export default function SplitEditor() {
           amt: Math.abs(l.amount).toFixed(2),
           pct: total ? String(r2((Math.abs(l.amount) / total) * 100)) : '',
         }))
-      );
-    } else {
-      // First split: master carries the whole amount + inherits the category.
-      setLegs([
-        { key: nk(), catId: d.categoryId, catName: d.category || '', name: '', notes: '', showNote: false, amt: total.toFixed(2), pct: '100' },
-      ]);
-    }
-  }, [d, total]);
+      : [
+          // First split: master carries the whole amount + inherits the category.
+          { key: nk(), catId: d.categoryId, catName: d.category || '', name: '', notes: '', showNote: false, amt: total.toFixed(2), pct: '100' },
+        ];
+    const timer = setTimeout(() => {
+      setMode(nextMode);
+      setLegs(nextLegs);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [d, mode, total]);
 
   const amounts = useMemo(() => computeAmounts(legs, mode, total), [legs, mode, total]);
   const master = amounts[0] ?? 0;
@@ -142,7 +143,13 @@ export default function SplitEditor() {
     split.mutate(
       { id: d.id, accountId: d.accountId, date: d.date, legs: payload },
       {
-        onSuccess: () => { haptics.success(); router.back(); },
+        onSuccess: (result) => {
+          haptics.success();
+          router.replace({
+            pathname: '/transaction/[id]',
+            params: { id: result?.id || d.id, accountId: d.accountId, date: d.date },
+          });
+        },
         onError: (e) => Alert.alert('Could not save split', e.error || 'Please try again.'),
       }
     );
@@ -158,23 +165,32 @@ export default function SplitEditor() {
         onPress: () =>
           unsplit.mutate(
             { id: d.id, accountId: d.accountId, date: d.date, categoryId: legs[0]?.catId ?? null },
-            { onSuccess: () => { haptics.success(); router.back(); }, onError: (e) => Alert.alert('Could not remove split', e.error || 'Please try again.') }
+            {
+              onSuccess: (result) => {
+                haptics.success();
+                router.replace({
+                  pathname: '/transaction/[id]',
+                  params: { id: result?.id || d.id, accountId: d.accountId, date: d.date },
+                });
+              },
+              onError: (e) => Alert.alert('Could not remove split', e.error || 'Please try again.'),
+            }
           ),
       },
     ]);
   };
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1, backgroundColor: colors.bg }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView testID="split-editor-screen" style={{ flex: 1, backgroundColor: colors.bg }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       {/* Custom dark header — the native modal header rendered Cancel/Save as
           light "glass" capsules on iOS 26; this keeps the app's dark styling. */}
       <Stack.Screen options={{ headerShown: false }} />
       <View style={[styles.topBar, { paddingTop: Math.max(insets.top, 8) + 6 }]}>
-        <Pressable onPress={() => router.back()} hitSlop={12} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+        <Pressable testID="split-cancel-button" onPress={() => router.back()} hitSlop={12} style={({ pressed }) => pressed && { opacity: 0.6 }}>
           <Text style={styles.topCancel}>Cancel</Text>
         </Pressable>
         <Text style={styles.topTitle}>Split</Text>
-        <Pressable onPress={doSave} disabled={!canSave || split.isPending} hitSlop={12} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+        <Pressable testID="split-save-button" onPress={doSave} disabled={!canSave || split.isPending} hitSlop={12} style={({ pressed }) => pressed && { opacity: 0.6 }}>
           <Text style={[styles.topSave, (!canSave || split.isPending) && { opacity: 0.4 }]}>{split.isPending ? 'Saving…' : 'Save'}</Text>
         </Pressable>
       </View>
@@ -199,7 +215,7 @@ export default function SplitEditor() {
               </View>
             ) : null}
 
-            <Pressable style={styles.modeRow} onPress={() => setModePick(true)}>
+            <Pressable testID="split-mode-picker" style={styles.modeRow} onPress={() => setModePick(true)}>
               <Text style={styles.modeLead}>Split this transaction</Text>
               <View style={styles.modePill}>
                 <Text style={styles.modePillText}>{MODE_LABEL[mode]}</Text>
@@ -208,12 +224,13 @@ export default function SplitEditor() {
             </Pressable>
 
             {legs.map((l, i) => (
-              <View key={l.key} style={styles.legCard}>
+              <View key={l.key} testID={`split-leg-${i}`} style={styles.legCard}>
                 <View style={styles.legTop}>
                   <View style={styles.amtWrap}>
                     {mode === 'percent' ? (
                       <>
                         <TextInput
+                          testID={`split-leg-${i}-percent-input`}
                           style={styles.amtInput}
                           value={i === 0 ? String(r2(total ? (master / total) * 100 : 0)) : l.pct}
                           onChangeText={(v) => setLeg(i, { pct: v.replace(/[^0-9.]/g, '') })}
@@ -229,6 +246,7 @@ export default function SplitEditor() {
                       <>
                         <Text style={styles.amtDollar}>$</Text>
                         <TextInput
+                          testID={`split-leg-${i}-amount-input`}
                           style={styles.amtInput}
                           value={i === 0 || mode === 'equal' ? (amounts[i] ?? 0).toFixed(2) : l.amt}
                           onChangeText={(v) => setLeg(i, { amt: v.replace(/[^0-9.]/g, '') })}
@@ -244,13 +262,13 @@ export default function SplitEditor() {
                   {i === 0 ? (
                     <View style={styles.masterBadge}><Text style={styles.masterBadgeText}>REMAINDER</Text></View>
                   ) : (
-                    <Pressable hitSlop={10} onPress={() => removeLeg(i)} style={({ pressed }) => pressed && { opacity: 0.5 }}>
+                    <Pressable testID={`split-leg-${i}-remove-button`} hitSlop={10} onPress={() => removeLeg(i)} style={({ pressed }) => pressed && { opacity: 0.5 }}>
                       <Text style={styles.legRemove}>✕</Text>
                     </Pressable>
                   )}
                 </View>
 
-                <Pressable style={styles.legField} onPress={() => setCatPick(i)}>
+                <Pressable testID={`split-leg-${i}-category-picker`} style={styles.legField} onPress={() => setCatPick(i)}>
                   <Text style={styles.legFieldLabel}>Category</Text>
                   <Text style={[styles.legFieldValue, !l.catName && { color: colors.muted }]} numberOfLines={1}>{l.catName || 'Choose'}</Text>
                 </Pressable>
@@ -258,6 +276,7 @@ export default function SplitEditor() {
                 <View style={styles.legField}>
                   <Text style={styles.legFieldLabel}>Name</Text>
                   <TextInput
+                    testID={`split-leg-${i}-name-input`}
                     style={styles.legFieldInput}
                     value={l.name}
                     onChangeText={(v) => setLeg(i, { name: v })}
@@ -270,6 +289,7 @@ export default function SplitEditor() {
                   <View style={styles.legField}>
                     <Text style={styles.legFieldLabel}>Note</Text>
                     <TextInput
+                      testID={`split-leg-${i}-note-input`}
                       style={styles.legFieldInput}
                       value={l.notes}
                       onChangeText={(v) => setLeg(i, { notes: v })}
@@ -278,14 +298,14 @@ export default function SplitEditor() {
                     />
                   </View>
                 ) : (
-                  <Pressable onPress={() => setLeg(i, { showNote: true })} style={({ pressed }) => [styles.addNote, pressed && { opacity: 0.6 }]}>
+                  <Pressable testID={`split-leg-${i}-add-note-button`} onPress={() => setLeg(i, { showNote: true })} style={({ pressed }) => [styles.addNote, pressed && { opacity: 0.6 }]}>
                     <Text style={styles.addNoteText}>+ add note</Text>
                   </Pressable>
                 )}
               </View>
             ))}
 
-            <Pressable onPress={addLeg} style={({ pressed }) => [styles.addSplit, pressed && { opacity: 0.85 }]}>
+            <Pressable testID="split-add-leg-button" onPress={addLeg} style={({ pressed }) => [styles.addSplit, pressed && { opacity: 0.85 }]}>
               <Text style={styles.addSplitText}>Add Split</Text>
             </Pressable>
 
@@ -296,7 +316,7 @@ export default function SplitEditor() {
             ) : null}
 
             {d.isSplit ? (
-              <Pressable onPress={doUnsplit} disabled={unsplit.isPending} style={({ pressed }) => [styles.unsplitBtn, pressed && { opacity: 0.7 }]}>
+              <Pressable testID="split-unsplit-button" onPress={doUnsplit} disabled={unsplit.isPending} style={({ pressed }) => [styles.unsplitBtn, pressed && { opacity: 0.7 }]}>
                 <Text style={styles.unsplitText}>{unsplit.isPending ? 'Removing…' : 'Remove split'}</Text>
               </Pressable>
             ) : null}
@@ -306,10 +326,10 @@ export default function SplitEditor() {
 
       <Modal visible={modePick} transparent animationType="fade" onRequestClose={() => setModePick(false)}>
         <Pressable style={styles.modalBg} onPress={() => setModePick(false)}>
-          <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
+          <View testID="split-mode-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Split method</Text>
             {(['equal', 'specific', 'percent'] as Mode[]).map((m) => (
-              <Pressable key={m} style={({ pressed }) => [styles.modeOption, pressed && { opacity: 0.6 }]} onPress={() => changeMode(m)}>
+              <Pressable testID={`split-mode-${m}${mode === m ? '-selected' : ''}`} key={m} style={({ pressed }) => [styles.modeOption, pressed && { opacity: 0.6 }]} onPress={() => changeMode(m)}>
                 <Text style={styles.modeOptionText}>{MODE_LABEL[m]}</Text>
                 {mode === m ? <Text style={styles.modeCheck}>✓</Text> : null}
               </Pressable>
@@ -320,7 +340,7 @@ export default function SplitEditor() {
 
       <Modal visible={catPick !== null} transparent animationType="slide" onRequestClose={() => setCatPick(null)}>
         <Pressable style={styles.modalBg} onPress={() => setCatPick(null)}>
-          <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
+          <View testID="split-category-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Category for this split</Text>
             <FlatList
               data={categories.data ?? []}
@@ -328,7 +348,7 @@ export default function SplitEditor() {
               style={{ maxHeight: 420 }}
               keyboardShouldPersistTaps="handled"
               renderItem={({ item }) => (
-                <Pressable style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => pickCat(item.id, item.name)}>
+                <Pressable testID={`split-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => pickCat(item.id, item.name)}>
                   <Text style={styles.catOptionText}>{item.name}</Text>
                   <Text style={styles.catOptionGroup}>{item.group}</Text>
                 </Pressable>

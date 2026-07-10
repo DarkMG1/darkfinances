@@ -25,7 +25,7 @@ const metaLabel = (c: BudgetCategory) => {
 export default function Budgets() {
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const curKey = useMemo(() => currentMonthKey(), []);
+  const curKey = currentMonthKey();
   const [month, setMonth] = useSelectedMonth();
   // Current month keeps hitting the warmed `budgets-current` cache (month=undefined).
   const apiMonth = month === curKey ? undefined : month;
@@ -42,7 +42,7 @@ export default function Budgets() {
     budgets.refetch();
   };
 
-  const allMonths = trends.data?.months ?? [];
+  const allMonths = useMemo(() => trends.data?.months ?? [], [trends.data?.months]);
   // Bars/navigation span exactly as far back as there's data.
   const availMonths = useMemo(() => {
     let i = 0;
@@ -79,7 +79,7 @@ export default function Budgets() {
   };
 
   return (
-    <PushScreen refreshing={refreshing} onRefresh={onRefresh}>
+    <PushScreen testID="budgets-screen" refreshing={refreshing} onRefresh={onRefresh}>
       <MonthNavigator months={availMonths} selected={month} onSelect={setMonth} currentKey={curKey} />
       {chart.length > 1 ? (
         <Card style={{ marginBottom: 20 }}>
@@ -132,6 +132,7 @@ export default function Budgets() {
                   const meta = metaLabel(c);
                   return (
                     <Pressable
+                      testID={`budgets-category-${c.id}`}
                       key={c.id}
                       style={({ pressed }) => [styles.catRow, pressed && { opacity: 0.6 }]}
                       onPress={() => openEdit(c, g.name)}
@@ -161,7 +162,7 @@ export default function Budgets() {
       <Modal visible={!!editing} animationType="slide" transparent onRequestClose={() => setEditing(null)}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
           <Pressable style={styles.modalBg} onPress={() => setEditing(null)}>
-            <Pressable style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
+            <Pressable testID="budgets-edit-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
               <Text style={styles.sheetTitle}>{editing?.name}</Text>
               <Text style={styles.sheetSub}>{editing?.groupName} · spent {editing ? fmtPos(editing.spent) : ''} · projected {editing ? fmtPos(editing.projected ?? editing.spent) : ''}</Text>
 
@@ -169,6 +170,7 @@ export default function Budgets() {
               <View style={styles.inputRow}>
                 <Text style={styles.dollar}>$</Text>
                 <TextInput
+                  testID="budgets-target-input"
                   style={styles.input}
                   value={targetText}
                   onChangeText={setTargetText}
@@ -179,10 +181,11 @@ export default function Budgets() {
                 />
               </View>
 
-              <Pressable style={({ pressed }) => [styles.saveBtn, pressed && { opacity: 0.85 }]} onPress={save} disabled={setBudget.isPending}>
+              <Pressable testID="budgets-save-target-button" style={({ pressed }) => [styles.saveBtn, pressed && { opacity: 0.85 }]} onPress={save} disabled={setBudget.isPending}>
                 <Text style={styles.saveText}>{setBudget.isPending ? 'Saving…' : 'Save target'}</Text>
               </Pressable>
               <Pressable
+                testID="budgets-clear-target-button"
                 style={({ pressed }) => [styles.clearBtn, pressed && { opacity: 0.7 }]}
                 onPress={() => { setTargetText('0'); }}
               >

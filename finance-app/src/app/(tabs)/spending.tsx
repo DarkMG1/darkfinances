@@ -1,17 +1,19 @@
 import React, { useMemo, useState } from 'react';
-import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { useRouter } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useBudgets, useInsights, useSpending, useTrends } from '@/api/hooks/finance.hooks';
-import { DemoRibbon } from '@/components/screen';
+import Svg, { Circle } from 'react-native-svg';
+import { useBudgets, useInsights, useSpending, useTags, useTrends } from '@/api/hooks/finance.hooks';
+import { Screen } from '@/components/screen';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, PendingPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
+import { addDateOnlyDays, financeToday, monthEnd } from '@/lib/date-only';
 import { currentMonthKey, useSelectedMonth } from '@/lib/selectedMonth';
 import { categoryColors, colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
 
 type Period = 'week' | 'month' | 'quarter' | 'year';
+type BreakdownMode = 'categories' | 'tags';
 const PERIODS: { key: Period; label: string }[] = [
   { key: 'week', label: 'Week' },
   { key: 'month', label: 'Month' },
@@ -19,41 +21,35 @@ const PERIODS: { key: Period; label: string }[] = [
   { key: 'year', label: 'Year' },
 ];
 
-const pad = (n: number) => String(n).padStart(2, '0');
-const ymd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-const monthEnd = (month: string) => {
-  const [year, m] = month.split('-').map(Number);
-  return new Date(year, m, 0);
-};
-
 function periodWindow(period: Period, month: string, currentMonth: string) {
-  const now = new Date();
   const selectedIsCurrent = month === currentMonth;
-  const anchor = selectedIsCurrent ? now : monthEnd(month);
-  let start: Date;
-  let end: Date;
+  const anchorYmd = selectedIsCurrent ? financeToday() : monthEnd(month);
+  const [anchorYear, anchorMonth, anchorDay] = anchorYmd.split('-').map(Number);
 
   if (period === 'week') {
-    end = anchor;
-    start = new Date(anchor);
-    start.setDate(anchor.getDate() - 6);
-    return { start: ymd(start), end: ymd(end), label: selectedIsCurrent ? 'This Week' : `Week ending ${monthLabel(ymd(end).slice(0, 7)).split(' ')[0]} ${end.getDate()}` };
+    return {
+      start: addDateOnlyDays(anchorYmd, -6),
+      end: anchorYmd,
+      label: selectedIsCurrent ? 'This Week' : `Week ending ${monthLabel(anchorYmd.slice(0, 7)).split(' ')[0]} ${anchorDay}`,
+    };
   }
   if (period === 'quarter') {
-    const qStartMonth = Math.floor(anchor.getMonth() / 3) * 3;
-    start = new Date(anchor.getFullYear(), qStartMonth, 1);
-    end = selectedIsCurrent ? now : new Date(anchor.getFullYear(), qStartMonth + 3, 0);
-    return { start: ymd(start), end: ymd(end), label: `Q${Math.floor(anchor.getMonth() / 3) + 1} ${anchor.getFullYear()}` };
+    const quarter = Math.floor((anchorMonth - 1) / 3) + 1;
+    const startMonth = (quarter - 1) * 3 + 1;
+    const endMonth = startMonth + 2;
+    const quarterStart = `${anchorYear}-${String(startMonth).padStart(2, '0')}-01`;
+    const quarterEnd = selectedIsCurrent ? anchorYmd : monthEnd(`${anchorYear}-${String(endMonth).padStart(2, '0')}`);
+    return { start: quarterStart, end: quarterEnd, label: `Q${quarter} ${anchorYear}` };
   }
   if (period === 'year') {
-    start = new Date(anchor.getFullYear(), 0, 1);
-    end = selectedIsCurrent ? now : new Date(anchor.getFullYear(), 11, 31);
-    return { start: ymd(start), end: ymd(end), label: `${anchor.getFullYear()}` };
+    return {
+      start: `${anchorYear}-01-01`,
+      end: selectedIsCurrent ? anchorYmd : `${anchorYear}-12-31`,
+      label: `${anchorYear}`,
+    };
   }
 
-  start = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
-  end = selectedIsCurrent ? now : monthEnd(month);
-  return { start: ymd(start), end: ymd(end), label: monthLabel(month) };
+  return { start: `${month}-01`, end: selectedIsCurrent ? anchorYmd : monthEnd(month), label: monthLabel(month) };
 }
 
 function totalSpendBucket(category: string, group?: string) {
@@ -65,11 +61,12 @@ function totalSpendBucket(category: string, group?: string) {
 
 export default function Spending() {
   const router = useRouter();
-  const insets = useSafeAreaInsets();
-  const curKey = useMemo(() => currentMonthKey(), []);
+  const curKey = currentMonthKey();
   const [month, setMonth] = useSelectedMonth();
   const [period, setPeriod] = useState<Period>('month');
-  const [totalExpanded, setTotalExpanded] = useState(true);
+  const [totalExpanded, setTotalExpanded] = useState(false);
+  const [showAllCategories, setShowAllCategories] = useState(false);
+  const [breakdownMode, setBreakdownMode] = useState<BreakdownMode>('categories');
   // Current month keeps hitting the warmed `spending-current` cache (month=undefined).
   const apiMonth = month === curKey ? undefined : month;
   const selectedWindow = useMemo(() => periodWindow(period, month, curKey), [period, month, curKey]);
@@ -78,6 +75,7 @@ export default function Spending() {
   const spending = useSpending(spendingParams);
   const budgets = useBudgets(apiMonth);
   const insights = useInsights(apiMonth);
+  const tags = useTags();
   const cur = spending.data?.current;
 
   // Bars/navigation span exactly as far back as there's data: trim leading
@@ -121,8 +119,8 @@ export default function Spending() {
       else everyday += amt;
     }
     return [
-      { key: 'spending', label: 'Spending', amount: everyday, target: 'Spending' },
       { key: 'bills', label: 'Bills & Utilities', amount: bills, target: 'Bills & Utilities' },
+      { key: 'spending', label: 'Spending', amount: everyday, target: 'Spending' },
       { key: 'subscriptions', label: 'Subscriptions', amount: subscriptions, target: 'Subscriptions' },
     ].filter((row) => row.amount > 0.005);
   }, [groupByCategory, spendEntries]);
@@ -140,176 +138,198 @@ export default function Spending() {
   // CC payments/reimbursement), so savings moves and brokerage buys never show up.
   const topMerchants = insights.data?.topMerchants ?? [];
   const refreshing = spending.isFetching || insights.isFetching || trends.isFetching || budgets.isFetching;
-  const refresh = () => { haptics.light(); spending.refetch(); insights.refetch(); trends.refetch(); budgets.refetch(); };
-  const categoryParams = (name: string) => ({
+  const refresh = () => { spending.refetch(); insights.refetch(); trends.refetch(); budgets.refetch(); };
+  const categoryParams = (name: string, bucket?: string) => ({
     name,
     start: selectedWindow.start,
     end: selectedWindow.end,
     label: selectedWindow.label,
+    bucket,
   });
 
-  return (
-    <View style={styles.root} testID="spending-screen">
-      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
-        <Pressable hitSlop={10} onPress={() => haptics.tap()}>
-          <SymbolView name="gearshape" tintColor={colors.text} size={22} resizeMode="scaleAspectFit" />
-        </Pressable>
-        <Text style={styles.title}>Spending</Text>
-        <View style={{ width: 22 }} />
+  const headerRight = (
+    <Pressable hitSlop={10} onPress={() => { haptics.tap(); router.push('/(tabs)/settings' as never); }}>
+      <View style={styles.headerIcon}>
+        <SymbolView name="gearshape" tintColor={colors.muted} size={18} resizeMode="scaleAspectFit" />
       </View>
-      <DemoRibbon />
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={{ padding: 18, paddingBottom: insets.bottom + 72 }}
-        refreshControl={<RefreshControl tintColor={colors.accent} refreshing={refreshing} onRefresh={refresh} />}
-      >
+    </Pressable>
+  );
+
+  return (
+    <Screen title="Spending" right={headerRight} refreshing={refreshing} onRefresh={refresh} testID="spending-screen">
+      <View style={styles.controlsCard}>
         <PeriodChips value={period} onChange={setPeriod} />
         <DualMonthBars months={chartMonths} selected={month} onSelect={setMonth} />
+      </View>
 
-        {spending.isLoading ? (
-          <SkeletonList rows={8} />
-        ) : spending.isError ? (
-          <ErrorState error={spending.error?.error} onRetry={refresh} />
-        ) : !spendEntries.length && !refundEntries.length ? (
-          <EmptyState icon="creditcard">{month === curKey ? 'No spending this month' : `No spending in ${monthLabel(month)}`}</EmptyState>
-        ) : (
-          <>
-            <SummaryCard>
-              <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={fmtPos(totalIncome)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Income') })} />
-              <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={fmtPos(totalSpend)} expanded={totalExpanded} onPress={() => { haptics.tap(); setTotalExpanded((v) => !v); }} />
-              {totalExpanded ? totalSpendRows.map((row, i) => (
-                <SummaryRow
-                  key={row.key}
-                  testID={`spending-expanded-category-row-${i}`}
-                  accessibilityID={`spending-summary-${row.key}-row`}
-                  icon={row.key === 'spending' ? 'creditcard' : row.key === 'bills' ? 'bolt.fill' : 'play.rectangle.fill'}
-                  label={row.label}
-                  value={fmtPos(row.amount)}
-                  inset
-                  onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(row.target) })}
-                />
-              )) : null}
-              <SummaryRow icon="minus.circle" label="Net Income" value={`${netIncome < 0 ? '-' : ''}${fmtPos(Math.abs(netIncome))}`} muted info last />
-            </SummaryCard>
+      {spending.isLoading ? (
+        <SkeletonList rows={8} />
+      ) : spending.isError ? (
+        <ErrorState error={spending.error?.error} onRetry={refresh} />
+      ) : !spendEntries.length && !refundEntries.length ? (
+        <EmptyState icon="creditcard">{month === curKey ? 'No spending this month' : `No spending in ${monthLabel(month)}`}</EmptyState>
+      ) : (
+        <>
+          <SummaryCard>
+            <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={fmtPos(totalIncome)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Income') })} />
+            <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={fmtPos(totalSpend)} expanded={totalExpanded} onPress={() => { haptics.tap(); setTotalExpanded((v) => !v); }} />
+            {totalExpanded ? totalSpendRows.map((row, i) => (
+              <SummaryRow
+                key={row.key}
+                testID={`spending-expanded-category-row-${i}`}
+                accessibilityID={`spending-summary-${row.key}-row`}
+                icon={row.key === 'spending' ? 'creditcard' : row.key === 'bills' ? 'bolt.fill' : 'play.rectangle.fill'}
+                label={row.label}
+                value={fmtPos(row.amount)}
+                inset
+                onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(row.target, row.key) })}
+              />
+            )) : null}
+            <SummaryRow icon="minus.circle" label="Net Income" value={`${netIncome < 0 ? '-' : ''}${fmtPos(Math.abs(netIncome))}`} muted last />
+          </SummaryCard>
 
-            <SectionTitle>Your Budget</SectionTitle>
-            <Card style={styles.budgetCard}>
-              <Pressable style={({ pressed }) => [styles.budgetHead, pressed && { opacity: 0.65 }]} onPress={() => router.push('/budgets')}>
-                <SymbolView name="rectangle.grid.2x2" tintColor={colors.text} size={22} resizeMode="scaleAspectFit" />
-                <Text style={styles.budgetTitle}>{monthLabel(month)} Budget</Text>
-                <Text style={styles.chevron}>›</Text>
+          <SectionTitle>Your Budget</SectionTitle>
+          <Card style={styles.budgetCard}>
+            <Pressable style={({ pressed }) => [styles.budgetHead, pressed && { opacity: 0.65 }]} onPress={() => router.push('/budgets')}>
+              <View style={styles.inlineIcon}>
+                <SymbolView name="rectangle.grid.2x2" tintColor={colors.accentLight} size={18} resizeMode="scaleAspectFit" />
+              </View>
+              <Text style={styles.budgetTitle}>{monthLabel(month)} Budget</Text>
+              <Text style={styles.chevron}>›</Text>
+            </Pressable>
+            <View style={styles.budgetBody}>
+              <View style={styles.budgetMain}>
+                <Text style={styles.mutedLabel}>Left for spending</Text>
+                <Text style={styles.budgetValue}>{budgetLeft < 0 ? '-' : ''}{fmtPos(Math.abs(budgetLeft))}</Text>
+              </View>
+              <View style={styles.ringRow}>
+                <Ring label="$" pct={budgetPct} />
+                <Ring label="!" pct={Math.min(100, (refundTotal / Math.max(1, totalSpend)) * 100)} warn />
+                <Ring label="∞" pct={100 - budgetPct} />
+              </View>
+            </View>
+            <View style={styles.progressTrack}>
+              <View style={[styles.progressFill, { width: `${budgetPct}%` }]} />
+            </View>
+          </Card>
+
+          <SectionTitle>Breakdown</SectionTitle>
+          <Card style={styles.breakdownCard}>
+            <View style={styles.segmented}>
+              <Pressable
+                testID={breakdownMode === 'categories' ? 'spending-breakdown-segment-categories-selected' : 'spending-breakdown-segment-categories'}
+                onPress={() => { haptics.tap(); setBreakdownMode('categories'); }}
+                style={[styles.segmentButton, breakdownMode === 'categories' && styles.segmentOn]}
+              >
+                <Text style={[styles.segmentText, breakdownMode === 'categories' && styles.segmentTextOn]}>Categories</Text>
               </Pressable>
-              <View style={styles.budgetBody}>
-                <View>
-                  <Text style={styles.mutedLabel}>Left for spending</Text>
-                  <Text style={styles.budgetValue}>{budgetLeft < 0 ? '-' : ''}{fmtPos(Math.abs(budgetLeft))}</Text>
-                </View>
-                <View style={styles.ringRow}>
-                  <Ring label="$" pct={budgetPct} />
-                  <Ring label="!" pct={Math.min(100, (refundTotal / Math.max(1, totalSpend)) * 100)} warn />
-                  <Ring label="∞" pct={100 - budgetPct} />
-                </View>
-              </View>
-              <View style={styles.progressTrack}>
-                <View style={[styles.progressFill, { width: `${budgetPct}%` }]} />
-              </View>
-            </Card>
-
-            <SectionTitle>Breakdown</SectionTitle>
-            <Card style={styles.breakdownCard}>
-              <View style={styles.segmented}>
-                <Text style={[styles.segmentText, styles.segmentOn]}>Categories</Text>
-                <Text style={styles.segmentText}>Tags</Text>
-              </View>
-              {topCategories.map(([cat, amt], i) => (
-                <CategoryRow
-                  key={cat}
-                  category={cat}
-                  amount={amt}
-                  pct={totalSpend > 0 ? amt / totalSpend : 0}
-                  color={categoryColors[i % categoryColors.length]}
-                  onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(cat) })}
-                />
-              ))}
-              {hiddenCategories ? <OutlineButton label="See More" onPress={() => haptics.tap()} /> : null}
-            </Card>
-
-            {topMerchants.length ? (
+              <Pressable
+                testID={breakdownMode === 'tags' ? 'spending-breakdown-segment-tags-selected' : 'spending-breakdown-segment-tags'}
+                onPress={() => { haptics.tap(); setBreakdownMode('tags'); }}
+                style={[styles.segmentButton, breakdownMode === 'tags' && styles.segmentOn]}
+              >
+                <Text style={[styles.segmentText, breakdownMode === 'tags' && styles.segmentTextOn]}>Tags</Text>
+              </Pressable>
+            </View>
+            {breakdownMode === 'categories' ? (
               <>
-                <SectionTitle>Frequent Spend</SectionTitle>
-                <Card style={styles.groupCard}>
-                  {topMerchants.slice(0, 3).map((m, i) => (
-                    <MerchantRow
-                      key={m.payee}
-                      merchant={m.payee}
-                      category={m.category ?? undefined}
-                      count={m.count}
-                      total={m.total}
-                      last={i === Math.min(topMerchants.length, 3) - 1}
-                      onPress={() => { haptics.tap(); router.push({ pathname: '/merchant/[name]', params: { name: m.payee } }); }}
-                    />
-                  ))}
-                </Card>
+                <BreakdownCircle entries={breakdownCategories.slice(0, 5)} total={totalSpend} />
+                {(showAllCategories ? breakdownCategories : breakdownCategories.slice(0, 5)).map(([cat, amt], i) => (
+                  <CategoryRow
+                    key={cat}
+                    category={cat}
+                    amount={amt}
+                    pct={totalSpend > 0 ? amt / totalSpend : 0}
+                    color={categoryColors[i % categoryColors.length]}
+                    onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(cat) })}
+                  />
+                ))}
+                {hiddenCategories ? (
+                  <OutlineButton
+                    label={showAllCategories ? 'Show Less' : `See ${hiddenCategories} More`}
+                    onPress={() => { haptics.tap(); setShowAllCategories((value) => !value); }}
+                  />
+                ) : null}
               </>
-            ) : null}
+            ) : (
+              <View testID="spending-breakdown-tags-list">
+                {(tags.data?.tags ?? []).slice(0, 6).map((tag, i) => (
+                  <TagBreakdownRow
+                    key={tag.raw}
+                    testID={`spending-breakdown-tag-row-${i}`}
+                    label={tag.label}
+                    count={tag.count}
+                    kind={tag.kind}
+                    onPress={() => router.push({ pathname: '/tag/[tag]', params: { tag: tag.raw } })}
+                  />
+                ))}
+                {tags.data && !tags.data.tags.length ? <Text style={styles.emptyCopy}>No tagged transactions yet.</Text> : null}
+                {tags.isLoading ? <Text style={styles.emptyCopy}>Loading tags...</Text> : null}
+              </View>
+            )}
+          </Card>
 
-            {insights.data?.largestCharges.length ? (
-              <>
-                <SectionTitle>Largest Purchases</SectionTitle>
-                <Card style={styles.groupCard}>
-                  <Text style={styles.cardCopy}>You can tap on a transaction to open it and adjust details.</Text>
-                  {insights.data.largestCharges.slice(0, 3).map((c, i) => (
-                    <PurchaseRow
-                      key={c.id ?? i}
-                      payee={c.payee}
-                      category={c.category}
-                      date={c.date}
-                      pending={c.cleared === false}
-                      amount={Math.abs(c.amount)}
-                      last={i === Math.min(insights.data!.largestCharges.length, 3) - 1}
-                      onPress={() => {
-                        haptics.tap();
-                        if (c.id) {
-                          router.push({
-                            pathname: '/transaction/[id]',
-                            params: {
-                              id: c.id,
-                              payee: c.payee || '',
-                              amount: String(c.amount),
-                              date: c.date,
-                              account: c.account || '',
-                              accountId: c.accountId || '',
-                              category: c.category || '',
-                              categoryId: c.categoryId || '',
-                              notes: c.notes || '',
-                              isLeg: c.isLeg ? '1' : '',
-                              parentId: c.parentId || '',
-                              cleared: c.cleared === false ? '0' : '1',
-                            },
-                          });
-                        } else {
-                          router.push({ pathname: '/category/[name]', params: categoryParams(c.category) });
-                        }
-                      }}
-                    />
-                  ))}
-                  <OutlineButton label="See more" onPress={() => haptics.tap()} />
-                </Card>
-              </>
-            ) : null}
+          {topMerchants.length ? (
+            <>
+              <SectionTitle>Frequent Spend</SectionTitle>
+              <Card style={styles.groupCard}>
+                {topMerchants.slice(0, 3).map((m, i) => (
+                  <MerchantRow
+                    key={m.payee}
+                    merchant={m.payee}
+                    category={m.category ?? undefined}
+                    count={m.count}
+                    total={m.total}
+                    last={i === Math.min(topMerchants.length, 3) - 1}
+                    onPress={() => { haptics.tap(); router.push({ pathname: '/merchant/[name]', params: { name: m.payee } }); }}
+                  />
+                ))}
+              </Card>
+            </>
+          ) : null}
 
-            <SectionTitle>Non-Spending</SectionTitle>
-            <Card style={styles.groupCard}>
-              <PlainRow icon="cross.case" label="Tax Deductible" value="$0" />
-              <PlainRow icon="arrow.uturn.backward.circle" label="Reimbursements" value={fmtPos(reimbursementTotal)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Reimbursement') })} />
-              <PlainRow icon="minus.circle" label="Refunds & Credits" value={refundTotal ? `-${fmtPos(refundTotal)}` : '$0'} />
-              <PlainRow icon="arrow.left.arrow.right.circle" label="Transfers" value="0" last />
-            </Card>
+          {insights.data?.largestCharges.length ? (
+            <>
+              <SectionTitle>Largest Purchases</SectionTitle>
+              <Card style={styles.groupCard}>
+                <Text style={styles.cardCopy}>Tap a transaction to edit its details.</Text>
+                {insights.data.largestCharges.slice(0, 3).map((c, i) => (
+                  <PurchaseRow
+                    key={c.id ?? i}
+                    payee={c.payee}
+                    category={c.category}
+                    date={c.date}
+                    pending={c.cleared === false}
+                    amount={Math.abs(c.amount)}
+                    last={i === Math.min(insights.data!.largestCharges.length, 3) - 1}
+                    onPress={() => {
+                      haptics.tap();
+                      if (c.id) {
+                        router.push({
+                          pathname: '/transaction/[id]',
+                          params: { id: c.id, date: c.date, accountId: c.accountId || '' },
+                        });
+                      } else {
+                        router.push({ pathname: '/category/[name]', params: categoryParams(c.category) });
+                      }
+                    }}
+                  />
+                ))}
+                <OutlineButton label="See all activity" onPress={() => { haptics.tap(); router.push('/(tabs)/transactions' as never); }} />
+              </Card>
+            </>
+          ) : null}
 
-          </>
-        )}
-      </ScrollView>
-    </View>
+          <SectionTitle>Non-Spending</SectionTitle>
+          <Card style={styles.groupCard}>
+            <PlainRow icon="cross.case" label="Tax Deductible" value="$0" />
+            <PlainRow icon="arrow.uturn.backward.circle" label="Reimbursements" value={fmtPos(reimbursementTotal)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Reimbursement') })} />
+            <PlainRow icon="minus.circle" label="Refunds & Credits" value={refundTotal ? `-${fmtPos(refundTotal)}` : '$0'} />
+            <PlainRow icon="arrow.left.arrow.right.circle" label="Transfers" value="0" last />
+          </Card>
+        </>
+      )}
+    </Screen>
   );
 }
 
@@ -319,7 +339,7 @@ function PeriodChips({ value, onChange }: { value: Period; onChange: (p: Period)
       {PERIODS.map((p) => {
         const on = p.key === value;
         return (
-          <Pressable testID={`spending-period-${p.key}`} key={p.key} onPress={() => { haptics.tap(); onChange(p.key); }} style={({ pressed }) => [styles.periodChip, on && styles.periodChipOn, pressed && { opacity: 0.7 }]}>
+          <Pressable testID={on ? `spending-period-${p.key}-selected` : `spending-period-${p.key}`} key={p.key} onPress={() => { haptics.tap(); onChange(p.key); }} style={({ pressed }) => [styles.periodChip, on && styles.periodChipOn, pressed && { opacity: 0.7 }]}>
             <Text style={[styles.periodText, on && styles.periodTextOn]}>{p.label}</Text>
           </Pressable>
         );
@@ -330,6 +350,7 @@ function PeriodChips({ value, onChange }: { value: Period; onChange: (p: Period)
 
 function DualMonthBars({ months, selected, onSelect }: { months: { month: string; spend: number; income: number }[]; selected: string; onSelect: (m: string) => void }) {
   const max = Math.max(1, ...months.map((m) => Math.max(m.spend, m.income)));
+  const barMax = 48;
   return (
     <View style={styles.monthWrap}>
       <View style={styles.monthBars}>
@@ -338,8 +359,8 @@ function DualMonthBars({ months, selected, onSelect }: { months: { month: string
           return (
             <Pressable key={m.month} onPress={() => { haptics.tap(); onSelect(m.month); }} style={[styles.monthCell, on && styles.monthCellOn]}>
               <View style={styles.barStage}>
-                <View style={[styles.incomeBar, { height: Math.max(2, (m.income / max) * 72) }]} />
-                <View style={[styles.spendBar, { height: Math.max(2, (m.spend / max) * 72) }]} />
+                <View style={[styles.incomeBar, { height: Math.max(2, (m.income / max) * barMax) }]} />
+                <View style={[styles.spendBar, { height: Math.max(2, (m.spend / max) * barMax) }]} />
               </View>
               <Text style={[styles.monthText, on && styles.monthTextOn]}>{monthLabel(m.month).split(' ')[0]}</Text>
             </Pressable>
@@ -368,17 +389,17 @@ function SummaryRow({ icon, label, value, onPress, expanded, inset, muted, info,
       <SymbolView name={icon} tintColor={muted ? colors.muted : colors.text} size={20} resizeMode="scaleAspectFit" />
       <Text style={[styles.summaryLabel, inset && styles.summaryInset, muted && { color: colors.muted }]}>{label}</Text>
       <Text style={[styles.summaryValue, muted && { color: colors.muted }]}>{value}</Text>
-      {info ? <SymbolView name="info.circle" tintColor={colors.muted} size={16} resizeMode="scaleAspectFit" /> : <Text style={styles.chevron}>{expanded ? '⌃' : '›'}</Text>}
+      {info ? <SymbolView name="info.circle" tintColor={colors.muted} size={16} resizeMode="scaleAspectFit" /> : onPress ? <Text style={styles.chevron}>{expanded ? '⌃' : '›'}</Text> : null}
     </>
   );
   if (onPress) {
-    return <Pressable testID={accessibilityID || testID} onPress={onPress} style={({ pressed }) => [styles.summaryRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{body}</Pressable>;
+    return <Pressable testID={accessibilityID || testID} accessibilityRole="button" accessibilityLabel={`${label}, ${value}`} accessibilityState={expanded === undefined ? undefined : { expanded }} onPress={onPress} style={({ pressed }) => [styles.summaryRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{body}</Pressable>;
   }
   return <View testID={accessibilityID || testID} style={[styles.summaryRow, last && styles.lastRow]}>{body}</View>;
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <Text style={styles.section}>{children}</Text>;
+  return <CardTitle style={styles.section}>{children}</CardTitle>;
 }
 
 function Ring({ label, pct, warn }: { label: string; pct: number; warn?: boolean }) {
@@ -389,9 +410,64 @@ function Ring({ label, pct, warn }: { label: string; pct: number; warn?: boolean
   );
 }
 
+function BreakdownCircle({ entries, total }: { entries: [string, number][]; total: number }) {
+  const size = 118;
+  const stroke = 14;
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const pcts = entries.map(([, amount]) => (total > 0 ? Math.max(0.025, amount / total) : 0));
+  const segments = entries.map(([cat], i) => ({
+    cat,
+    pct: pcts[i],
+    offset: pcts.slice(0, i).reduce((sum, pct) => sum + pct, 0),
+  }));
+
+  return (
+    <View style={styles.breakdownHero}>
+      <View style={styles.breakdownRingWrap} testID="spending-breakdown-circle">
+        <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+          <Circle cx={size / 2} cy={size / 2} r={radius} stroke="rgba(255,255,255,0.10)" strokeWidth={stroke} fill="none" />
+          {segments.map(({ cat, pct, offset }, i) => {
+            const dash = pct * circumference;
+            const dashOffset = -offset * circumference;
+            return (
+              <Circle
+                key={cat}
+                cx={size / 2}
+                cy={size / 2}
+                r={radius}
+                stroke={categoryColors[i % categoryColors.length]}
+                strokeWidth={stroke}
+                fill="none"
+                strokeDasharray={`${dash} ${circumference - dash}`}
+                strokeDashoffset={dashOffset}
+                strokeLinecap="round"
+                rotation="-90"
+                origin={`${size / 2}, ${size / 2}`}
+              />
+            );
+          })}
+        </Svg>
+        <View style={styles.breakdownRingCenter}>
+          <Text style={styles.breakdownCenterLabel}>Spend</Text>
+          <Text style={styles.breakdownCenterValue}>{fmtPos(total).replace('.00', '')}</Text>
+        </View>
+      </View>
+      <View style={styles.breakdownLegend}>
+        {entries.slice(0, 4).map(([cat], i) => (
+          <View key={cat} style={styles.breakdownLegendRow}>
+            <View style={[styles.breakdownLegendDot, { backgroundColor: categoryColors[i % categoryColors.length] }]} />
+            <Text style={styles.breakdownLegendText} numberOfLines={1}>{cat}</Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 function CategoryRow({ category, amount, pct, color, onPress }: { category: string; amount: number; pct: number; color: string; onPress: () => void }) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.categoryRow, pressed && { opacity: 0.65 }]}>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${category}, ${fmtPos(amount)}, ${Math.round(pct * 100)} percent of spend`} onPress={onPress} style={({ pressed }) => [styles.categoryRow, pressed && { opacity: 0.65 }]}>
       <Avatar category={category} size={42} />
       <View style={styles.rowMid}>
         <Text style={styles.rowTitle}>{category}</Text>
@@ -405,7 +481,7 @@ function CategoryRow({ category, amount, pct, color, onPress }: { category: stri
 
 function MerchantRow({ merchant, category, count, total, onPress, last }: { merchant: string; category?: string; count: number; total: number; onPress: () => void; last?: boolean }) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.listRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${merchant}, ${count} transactions, ${fmtPos(total)}`} onPress={onPress} style={({ pressed }) => [styles.listRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>
       <View style={styles.countBubble}><Text style={styles.countText}>{count}x</Text></View>
       <View style={styles.rowMid}>
         <Text style={styles.rowTitle} numberOfLines={1}>{merchant}</Text>
@@ -418,7 +494,7 @@ function MerchantRow({ merchant, category, count, total, onPress, last }: { merc
 
 function PurchaseRow({ payee, category, date, pending, amount, onPress, last }: { payee: string; category: string; date: string; pending?: boolean; amount: number; onPress: () => void; last?: boolean }) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.listRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${payee || 'No payee'}, ${fmtPos(amount)}, ${fmtDate(date)}${pending ? ', pending' : ''}`} onPress={onPress} style={({ pressed }) => [styles.listRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>
       <Avatar label={payee} category={category} size={42} />
       <View style={styles.rowMid}>
         <View style={styles.nameLine}>
@@ -432,6 +508,27 @@ function PurchaseRow({ payee, category, date, pending, amount, onPress, last }: 
   );
 }
 
+function TagBreakdownRow({ label, count, kind, onPress, testID }: { label: string; count: number; kind: 'event' | 'tag'; onPress: () => void; testID: string }) {
+  const tint = kind === 'event' ? colors.accentLight : colors.green;
+  return (
+    <Pressable
+      testID={testID}
+      accessibilityRole="button"
+      onPress={() => { haptics.tap(); onPress(); }}
+      style={({ pressed }) => [styles.tagBreakdownRow, pressed && { opacity: 0.65 }]}
+    >
+      <View style={[styles.tagBreakdownIcon, { backgroundColor: tint + '22' }]}>
+        <SymbolView name={kind === 'event' ? 'mappin.and.ellipse' : 'number'} tintColor={tint} size={15} resizeMode="scaleAspectFit" />
+      </View>
+      <View style={styles.rowMid}>
+        <Text style={styles.rowTitle}>{label.charAt(0).toUpperCase() + label.slice(1)}</Text>
+        <Text style={styles.rowSub}>{kind === 'event' ? 'Trip tag' : 'Tag'} · {count} transaction{count === 1 ? '' : 's'}</Text>
+      </View>
+      <Text style={styles.chevron}>›</Text>
+    </Pressable>
+  );
+}
+
 function PlainRow({ icon, label, value, onPress, last }: { icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; last?: boolean }) {
   const inner = (
     <>
@@ -440,80 +537,94 @@ function PlainRow({ icon, label, value, onPress, last }: { icon: SymbolViewProps
       <Text style={styles.plainValue}>{value}</Text>
     </>
   );
-  if (onPress) return <Pressable onPress={onPress} style={({ pressed }) => [styles.plainRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{inner}</Pressable>;
+  if (onPress) return <Pressable accessibilityRole="button" accessibilityLabel={`${label}, ${value}`} onPress={onPress} style={({ pressed }) => [styles.plainRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{inner}</Pressable>;
   return <View style={[styles.plainRow, last && styles.lastRow]}>{inner}</View>;
 }
 
 function OutlineButton({ label, onPress }: { label: string; onPress: () => void }) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.outlineBtn, pressed && { opacity: 0.65 }]}>
+    <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={({ pressed }) => [styles.outlineBtn, pressed && { opacity: 0.65 }]}>
       <Text style={styles.outlineText}>{label}</Text>
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.bg },
-  header: { paddingHorizontal: 28, paddingBottom: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  title: { color: colors.text, fontSize: 19, fontWeight: '700', letterSpacing: -0.3 },
-  scroll: { flex: 1 },
-  periodRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 15 },
-  periodChip: { backgroundColor: '#343438', borderRadius: 999, paddingHorizontal: 15, paddingVertical: 7 },
-  periodChipOn: { backgroundColor: '#fff' },
-  periodText: { color: colors.text, fontSize: 13, fontWeight: '700' },
-  periodTextOn: { color: '#19191d' },
-  monthWrap: { marginHorizontal: -12, marginBottom: 18 },
-  monthBars: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 },
-  monthCell: { flex: 1, minHeight: 100, borderRadius: 18, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 8 },
-  monthCellOn: { backgroundColor: 'rgba(255,255,255,0.08)' },
-  barStage: { height: 74, flexDirection: 'row', alignItems: 'flex-end', gap: 6 },
-  incomeBar: { width: 9, borderRadius: 5, backgroundColor: '#6f8df7' },
-  spendBar: { width: 9, borderRadius: 5, backgroundColor: 'rgba(255,255,255,0.55)' },
-  monthText: { color: colors.muted, fontSize: 12, marginTop: 6 },
+  headerIcon: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  inlineIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(124,110,247,0.14)', alignItems: 'center', justifyContent: 'center' },
+  controlsCard: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: 14, padding: 12, marginBottom: 16 },
+  periodRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  periodChip: { flex: 1, backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 10, paddingVertical: 8, alignItems: 'center' },
+  periodChipOn: { backgroundColor: 'rgba(124,110,247,0.18)', borderColor: 'rgba(168,152,255,0.55)' },
+  periodText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
+  periodTextOn: { color: colors.accentLight },
+  monthWrap: { marginBottom: 0 },
+  monthBars: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
+  monthCell: { flex: 1, minHeight: 82, borderRadius: 12, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 7, borderWidth: 1, borderColor: 'transparent' },
+  monthCellOn: { backgroundColor: colors.surface2, borderColor: colors.border },
+  barStage: { height: 56, flexDirection: 'row', alignItems: 'flex-end', gap: 5 },
+  incomeBar: { width: 7, borderRadius: 4, backgroundColor: colors.green },
+  spendBar: { width: 7, borderRadius: 4, backgroundColor: colors.accentLight },
+  monthText: { color: colors.muted, fontSize: 11, marginTop: 5, fontWeight: '600' },
   monthTextOn: { color: colors.text, fontWeight: '800' },
-  legendRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, marginTop: 10 },
-  legendDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#6f8df7' },
-  spendDot: { backgroundColor: 'rgba(255,255,255,0.55)' },
-  legendText: { color: colors.text, fontSize: 13, opacity: 0.82 },
-  summaryCard: { paddingVertical: 0, overflow: 'hidden', marginBottom: 22, borderWidth: 0, borderRadius: 30, backgroundColor: '#242426' },
-  summaryRow: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)', paddingHorizontal: 20 },
-  summaryLabel: { color: colors.text, fontSize: 16, fontWeight: '600', flex: 1 },
-  summaryInset: { fontSize: 15, color: colors.muted },
-  summaryValue: { color: colors.text, fontSize: 16, fontWeight: '700' },
-  section: { color: colors.text, textTransform: 'uppercase', letterSpacing: 1.1, fontSize: 12, fontWeight: '800', marginBottom: 10, marginLeft: 8 },
-  budgetCard: { padding: 0, overflow: 'hidden', marginBottom: 22, borderWidth: 0, borderRadius: 30, backgroundColor: '#242426' },
-  budgetHead: { flexDirection: 'row', alignItems: 'center', gap: 14, minHeight: 56, paddingHorizontal: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)' },
-  budgetTitle: { color: colors.text, fontSize: 17, fontWeight: '600', flex: 1 },
-  budgetBody: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 15 },
+  legendRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10 },
+  legendDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.green },
+  spendDot: { backgroundColor: colors.accentLight },
+  legendText: { color: colors.muted, fontSize: 11, fontWeight: '600' },
+  summaryCard: { padding: 0, overflow: 'hidden', marginBottom: 16 },
+  summaryRow: { minHeight: 50, flexDirection: 'row', alignItems: 'center', gap: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, paddingHorizontal: 16 },
+  summaryLabel: { color: colors.text, fontSize: 15, fontWeight: '600', flex: 1 },
+  summaryInset: { fontSize: 14, color: colors.muted },
+  summaryValue: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  section: { marginBottom: 12, marginTop: 2 },
+  budgetCard: { padding: 0, overflow: 'hidden', marginBottom: 16 },
+  budgetHead: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 54, paddingHorizontal: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  budgetTitle: { color: colors.text, fontSize: 15, fontWeight: '700', flex: 1 },
+  budgetBody: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 14, gap: 12 },
+  budgetMain: { flex: 1, minWidth: 0 },
   mutedLabel: { color: colors.muted, fontSize: 12, fontWeight: '600' },
-  budgetValue: { color: colors.text, fontSize: 26, fontWeight: '800', marginTop: 4 },
-  ringRow: { flexDirection: 'row', gap: 9 },
-  ring: { width: 44, height: 44, borderRadius: 22, borderWidth: 3, alignItems: 'center', justifyContent: 'center' },
-  ringText: { color: colors.accentLight, fontSize: 15, fontWeight: '800' },
-  progressTrack: { height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.17)', margin: 22, marginTop: 14, overflow: 'hidden' },
-  progressFill: { height: 6, borderRadius: 3, backgroundColor: '#8aa0ff' },
-  breakdownCard: { padding: 0, overflow: 'hidden', marginBottom: 22, borderWidth: 0, borderRadius: 30, backgroundColor: '#242426' },
-  segmented: { flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)' },
-  segmentText: { flex: 1, textAlign: 'center', color: colors.muted, fontSize: 15, fontWeight: '700', paddingVertical: 15 },
-  segmentOn: { color: colors.text },
-  categoryRow: { minHeight: 70, flexDirection: 'row', alignItems: 'center', gap: 13, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)' },
+  budgetValue: { color: colors.text, fontSize: 24, fontWeight: '800', marginTop: 4, letterSpacing: -0.5 },
+  ringRow: { flexDirection: 'row', gap: 8 },
+  ring: { width: 36, height: 36, borderRadius: 18, borderWidth: 2, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface2 },
+  ringText: { color: colors.accentLight, fontSize: 13, fontWeight: '800' },
+  progressTrack: { height: 5, borderRadius: 3, backgroundColor: colors.surface2, margin: 16, marginTop: 14, overflow: 'hidden' },
+  progressFill: { height: 5, borderRadius: 3, backgroundColor: colors.accent },
+  breakdownCard: { padding: 0, overflow: 'hidden', marginBottom: 16 },
+  segmented: { flexDirection: 'row', margin: 12, padding: 3, borderRadius: 10, backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1 },
+  segmentButton: { flex: 1, borderRadius: 8 },
+  segmentText: { textAlign: 'center', color: colors.muted, fontSize: 12, fontWeight: '700', paddingVertical: 7 },
+  segmentTextOn: { color: colors.text },
+  segmentOn: { backgroundColor: colors.surface },
+  breakdownHero: { flexDirection: 'row', alignItems: 'center', gap: 16, paddingHorizontal: 16, paddingBottom: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  breakdownRingWrap: { width: 118, height: 118, alignItems: 'center', justifyContent: 'center' },
+  breakdownRingCenter: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
+  breakdownCenterLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.7 },
+  breakdownCenterValue: { color: colors.text, fontSize: 16, fontWeight: '800', marginTop: 3, letterSpacing: -0.4 },
+  breakdownLegend: { flex: 1, gap: 8 },
+  breakdownLegendRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  breakdownLegendDot: { width: 8, height: 8, borderRadius: 4 },
+  breakdownLegendText: { color: colors.muted, fontSize: 12, fontWeight: '600', flex: 1 },
+  categoryRow: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   rowMid: { flex: 1, minWidth: 0 },
-  rowTitle: { color: colors.text, fontSize: 16, fontWeight: '600' },
-  rowSub: { color: colors.text, opacity: 0.56, fontSize: 14, marginTop: 4 },
-  rowValue: { color: colors.text, fontSize: 16, fontWeight: '700' },
-  categoryColor: { width: 4, height: 36, borderRadius: 2 },
-  groupCard: { padding: 0, overflow: 'hidden', marginBottom: 22, borderWidth: 0, borderRadius: 30, backgroundColor: '#242426' },
-  listRow: { minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: 13, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)' },
-  plainRow: { minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.10)' },
+  rowTitle: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  rowSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  rowValue: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  categoryColor: { width: 3, height: 30, borderRadius: 2 },
+  groupCard: { padding: 0, overflow: 'hidden', marginBottom: 16 },
+  listRow: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  tagBreakdownRow: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  tagBreakdownIcon: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
+  plainRow: { minHeight: 50, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   lastRow: { borderBottomWidth: 0 },
-  countBubble: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
-  countText: { color: colors.text, fontSize: 15, fontWeight: '700', opacity: 0.72 },
+  countBubble: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(124,110,247,0.14)', alignItems: 'center', justifyContent: 'center' },
+  countText: { color: colors.accentLight, fontSize: 13, fontWeight: '800' },
   nameLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  cardCopy: { color: colors.text, opacity: 0.68, fontSize: 14, lineHeight: 20, padding: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  cardCopy: { color: colors.muted, fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   plainIcon: { width: 30 },
-  plainTitle: { color: colors.text, fontSize: 15, fontWeight: '600', flex: 1 },
+  plainTitle: { color: colors.text, fontSize: 14, fontWeight: '600', flex: 1 },
   plainValue: { color: colors.text, fontSize: 15, fontWeight: '700' },
-  outlineBtn: { borderWidth: 1.2, borderColor: colors.text, borderRadius: 999, alignItems: 'center', paddingVertical: 12, marginHorizontal: 22, marginVertical: 16 },
-  outlineText: { color: colors.text, fontSize: 16, fontWeight: '700' },
-  chevron: { color: colors.text, opacity: 0.82, fontSize: 18, fontWeight: '700' },
+  outlineBtn: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, borderRadius: 10, alignItems: 'center', paddingVertical: 10, marginHorizontal: 16, marginVertical: 14 },
+  outlineText: { color: colors.accentLight, fontSize: 13, fontWeight: '700' },
+  emptyCopy: { color: colors.muted, fontSize: 13, padding: 16 },
+  chevron: { color: colors.muted, fontSize: 18, fontWeight: '700' },
 });

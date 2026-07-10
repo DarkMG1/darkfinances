@@ -5,8 +5,8 @@ import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { colors } from '@/theme/colors';
 import { categoryIcon, monogramColor } from '@/theme/categoryIcons';
 
-export function Card({ children, style }: { children: React.ReactNode; style?: ViewStyle }) {
-  return <View style={[styles.card, style]}>{children}</View>;
+export function Card({ children, style, testID }: { children: React.ReactNode; style?: ViewStyle; testID?: string }) {
+  return <View testID={testID} style={[styles.card, style]}>{children}</View>;
 }
 
 export function SectionLabel({ children, right }: { children: React.ReactNode; right?: React.ReactNode }) {
@@ -22,8 +22,8 @@ export function CardTitle({ children, style }: { children: React.ReactNode; styl
   return <Text style={[styles.cardTitle, style]}>{children}</Text>;
 }
 
-export function StatCard({ label, value, valueColor, sub, subColor, onPress }: {
-  label: string; value: string; valueColor?: string; sub?: string; subColor?: string; onPress?: () => void;
+export function StatCard({ label, value, valueColor, sub, subColor, onPress, testID }: {
+  label: string; value: string; valueColor?: string; sub?: string; subColor?: string; onPress?: () => void; testID?: string;
 }) {
   const body = (
     <>
@@ -41,12 +41,12 @@ export function StatCard({ label, value, valueColor, sub, subColor, onPress }: {
   );
   if (onPress) {
     return (
-      <Pressable style={({ pressed }) => [styles.card, styles.statCard, pressed && { opacity: 0.6 }]} onPress={onPress}>
+      <Pressable testID={testID} style={({ pressed }) => [styles.card, styles.statCard, pressed && { opacity: 0.6 }]} onPress={onPress}>
         {body}
       </Pressable>
     );
   }
-  return <View style={[styles.card, styles.statCard]}>{body}</View>;
+  return <View testID={testID} style={[styles.card, styles.statCard]}>{body}</View>;
 }
 
 // Offline merchant/category avatar. Pass `label` (payee) for a colored monogram,
@@ -78,7 +78,7 @@ export function Avatar({ label, category, size = 38, style }: {
 
 // Canonical list row: avatar + title/subtitle + right value (+ optional chevron).
 // Replaces the bespoke per-screen row styles so every list looks the same.
-export function ListRow({ avatar, title, subtitle, value, valueColor, valueSub, onPress, chevron = true, dim, right }: {
+export function ListRow({ avatar, title, subtitle, value, valueColor, valueSub, onPress, chevron = true, dim, right, testID }: {
   avatar?: React.ReactNode;
   title: string;
   subtitle?: string;
@@ -89,6 +89,7 @@ export function ListRow({ avatar, title, subtitle, value, valueColor, valueSub, 
   chevron?: boolean;
   dim?: boolean;
   right?: React.ReactNode;
+  testID?: string;
 }) {
   const inner = (
     <>
@@ -108,12 +109,12 @@ export function ListRow({ avatar, title, subtitle, value, valueColor, valueSub, 
   );
   if (onPress) {
     return (
-      <Pressable onPress={onPress} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}>
+      <Pressable testID={testID} onPress={onPress} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}>
         {inner}
       </Pressable>
     );
   }
-  return <View style={styles.row}>{inner}</View>;
+  return <View testID={testID} style={styles.row}>{inner}</View>;
 }
 
 // Pressable with a subtle scale+fade for a tactile, premium press feel.

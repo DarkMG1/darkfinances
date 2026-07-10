@@ -91,10 +91,10 @@ export default function ReviewScreen() {
 
   const renderActions = (task: ReviewTask) => (
     <View style={styles.actions}>
-      <Pressable style={[styles.actionBtn, { backgroundColor: colors.accent }]} onPress={() => openTask(task)}>
+      <Pressable testID={`review-task-open-${task.id}`} style={[styles.actionBtn, { backgroundColor: colors.accent }]} onPress={() => openTask(task)}>
         <Text style={styles.actionText}>{task.action === 'categorize' ? 'Categorize' : 'Open'}</Text>
       </Pressable>
-      <Pressable style={styles.actionBtn} onPress={() => markReviewed(task.id)}>
+      <Pressable testID={`review-task-reviewed-${task.id}`} style={styles.actionBtn} onPress={() => markReviewed(task.id)}>
         <Text style={styles.actionText}>Reviewed</Text>
       </Pressable>
     </View>
@@ -107,7 +107,7 @@ export default function ReviewScreen() {
     const subtitle = subtitleFor(task);
     return (
       <Swipeable key={task.id} renderRightActions={() => renderActions(task)} overshootRight={false}>
-        <Pressable onPress={() => openTask(task)} style={({ pressed }) => [styles.row, pressed && { opacity: 0.65 }]}>
+        <Pressable testID={`review-task-${task.id}`} onPress={() => openTask(task)} style={({ pressed }) => [styles.row, pressed && { opacity: 0.65 }]}>
           <Avatar label={task.transaction?.payee} size={38} />
           <View style={[styles.icon, { backgroundColor: icon.color + '22' }]}>
             <SymbolView name={icon.symbol} tintColor={icon.color} size={17} resizeMode="scaleAspectFit" />
@@ -130,7 +130,7 @@ export default function ReviewScreen() {
   const loading = review.isLoading && !review.data;
 
   return (
-    <PushScreen refreshing={review.isFetching} onRefresh={review.refetch}>
+    <PushScreen testID="review-screen" refreshing={review.isFetching} onRefresh={review.refetch}>
       {loading ? (
         <SkeletonList rows={6} />
       ) : review.isError && !review.data ? (
@@ -140,7 +140,7 @@ export default function ReviewScreen() {
       ) : (
         <>
           <Card style={styles.hero}>
-            <Text style={styles.heroLabel}>TODAY'S REVIEW</Text>
+            <Text style={styles.heroLabel}>TODAY REVIEW</Text>
             <Text style={styles.heroValue}>{tasks.length}</Text>
             <Text style={styles.heroSub}>Prioritized from categorization, reimbursements, large charges, subscription changes, and reconciliation.</Text>
           </Card>

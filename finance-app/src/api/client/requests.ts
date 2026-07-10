@@ -3,14 +3,17 @@ import { getServerAuthHeaders } from '@/api/client/server-auth';
 import { getServerBaseUrl } from '@/api/client/server-url';
 import { HttpMethod } from '@/api/generated/endpoints';
 import { haptics } from '@/lib/haptics';
+import { registerFinanceRequest } from '@/lib/request-lifecycle';
 import { useServerConfig } from '@/state/server';
 
-export type FinanceError = Error & { error: string; status?: number };
+export type FinanceError = Error & { error: string; status?: number; code?: string; requestId?: string };
 
-function createError(message: string, status?: number): FinanceError {
+function createError(message: string, status?: number, code?: string, requestId?: string): FinanceError {
   const err = new Error(message) as FinanceError;
   err.error = message;
   err.status = status;
+  err.code = code;
+  err.requestId = requestId;
   return err;
 }
 
@@ -22,6 +25,8 @@ interface QueryArgs<D> {
   data?: D;
   params?: Record<string, unknown>;
   demo?: boolean;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 // Core fetch wrapper. Unwraps the { data } / { error } envelope returned by /api/v1.
@@ -33,6 +38,8 @@ export async function buildQuery<T, D = unknown>({
   data,
   params,
   demo,
+  signal,
+  timeoutMs,
 }: QueryArgs<D>): Promise<T | undefined> {
   const url = new URL(getServerBaseUrl(serverUrl) + endpoint);
   if (params && method === 'GET') {
@@ -41,33 +48,64 @@ export async function buildQuery<T, D = unknown>({
     });
   }
 
+  const controller = new AbortController();
+  const unregister = registerFinanceRequest(controller);
+  let timedOut = false;
+  const onAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+  const requestTimeout = timeoutMs ?? (endpoint.includes('/receipts') && method === 'POST' ? 90_000 : method === 'GET' ? 20_000 : 30_000);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, requestTimeout);
+
   const options: RequestInit = {
     method,
     headers: {
-      'Content-Type': 'application/json',
       ...getServerAuthHeaders(token),
       ...(demo ? { 'X-Demo-Mode': '1' } : {}),
     },
+    signal: controller.signal,
   };
-  if (data && method !== 'GET') options.body = JSON.stringify(data);
+  if (data !== undefined && method !== 'GET') {
+    (options.headers as Record<string, string>)['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(data);
+  }
 
-  const response = await fetch(url.toString(), options);
-  const text = await response.text();
+  try {
+    const response = await fetch(url.toString(), options);
+    const text = await response.text();
 
-  let parsed: { data?: T; error?: string } | undefined;
-  if (text) {
-    try {
-      parsed = JSON.parse(text) as { data?: T; error?: string };
-    } catch {
-      if (!response.ok) throw createError(`Request failed with status ${response.status}`, response.status);
-      return text as unknown as T;
+    let parsed: { data?: T; error?: string; code?: string; requestId?: string } | undefined;
+    if (text) {
+      try {
+        parsed = JSON.parse(text) as { data?: T; error?: string; code?: string; requestId?: string };
+      } catch {
+        if (!response.ok) throw createError(`Request failed with status ${response.status}`, response.status);
+        return text as unknown as T;
+      }
     }
-  }
 
-  if (!response.ok) {
-    throw createError(parsed?.error || `Request failed with status ${response.status}`, response.status);
+    if (!response.ok) {
+      throw createError(
+        parsed?.error || `Request failed with status ${response.status}`,
+        response.status,
+        parsed?.code,
+        parsed?.requestId,
+      );
+    }
+    return parsed?.data;
+  } catch (error) {
+    if (timedOut) throw createError('Request timed out. Check your connection and try again.', 408, 'TIMEOUT');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onAbort);
+    unregister();
   }
-  return parsed?.data;
 }
 
 type FinanceQueryProps<R, V> = Omit<UseQueryOptions<R | undefined, FinanceError>, 'queryFn'> & {
@@ -82,11 +120,18 @@ export function useFinanceQuery<R, V = Record<string, unknown>>({
   params,
   ...options
 }: FinanceQueryProps<R, V>) {
-  const { serverUrl, token, demo, configured } = useServerConfig();
-  // Append the demo flag so flipping demo mode swaps cache buckets + refetches.
-  const queryKey = [...((options.queryKey as unknown[] | undefined) ?? []), demo ? 'demo' : 'live'];
+  const { serverUrl, token, demo, configured, scope } = useServerConfig();
+  const queryKey = [...((options.queryKey as unknown[] | undefined) ?? []), scope];
   return useQuery<R | undefined, FinanceError>({
-    queryFn: () => buildQuery<R, V>({ serverUrl, token, demo, endpoint, method, params: params as Record<string, unknown> }),
+    queryFn: ({ signal }) => buildQuery<R, V>({
+      serverUrl,
+      token,
+      demo,
+      endpoint,
+      method,
+      params: params as Record<string, unknown>,
+      signal,
+    }),
     ...options,
     queryKey,
     enabled: configured && (options.enabled ?? true),
@@ -132,7 +177,7 @@ export function useFinanceMutation<R = void, V = void>({
 }
 
 // Imperative connection test used by onboarding/settings.
-export async function testConnection(serverUrl: string, token: string): Promise<boolean> {
-  const res = await buildQuery<{ ok: boolean }>({ serverUrl, token, endpoint: '/api/v1/ping', method: 'GET' });
+export async function testConnection(serverUrl: string, token: string, demo = false): Promise<boolean> {
+  const res = await buildQuery<{ ok: boolean }>({ serverUrl, token, demo, endpoint: '/api/v1/ping', method: 'GET' });
   return !!res?.ok;
 }

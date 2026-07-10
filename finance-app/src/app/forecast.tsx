@@ -21,7 +21,7 @@ export default function ForecastScreen() {
   const events = data?.events.slice(0, 20) ?? [];
 
   return (
-    <PushScreen refreshing={forecast.isFetching} onRefresh={forecast.refetch}>
+    <PushScreen testID="forecast-screen" refreshing={forecast.isFetching} onRefresh={forecast.refetch}>
       {forecast.isLoading && !data ? (
         <Loading />
       ) : forecast.isError && !data ? (
@@ -32,16 +32,16 @@ export default function ForecastScreen() {
         <>
           <View style={styles.rangeRow}>
             {WINDOWS.map((w) => (
-              <Pressable key={w} onPress={() => { haptics.tap(); setDays(w); }} style={[styles.range, days === w && styles.rangeActive]}>
+              <Pressable testID={`forecast-range-${w}${days === w ? '-selected' : ''}`} key={w} onPress={() => { haptics.tap(); setDays(w); }} style={[styles.range, days === w && styles.rangeActive]}>
                 <Text style={[styles.rangeText, days === w && styles.rangeTextActive]}>{w}D</Text>
               </Pressable>
             ))}
           </View>
 
           <View style={styles.statsRow}>
-            <StatCard label="Ending" value={fmtMoney(data.endingBalance)} valueColor={data.endingBalance >= 0 ? colors.green : colors.red} />
-            <StatCard label="Lowest" value={fmtMoney(data.lowest.balance)} valueColor={data.lowest.balance >= 0 ? colors.text : colors.red} sub={fmtDate(data.lowest.date)} />
-            <StatCard label="Net" value={fmtSignedMoney(data.totals.inflow - data.totals.outflow)} valueColor={data.totals.inflow >= data.totals.outflow ? colors.green : colors.red} />
+            <StatCard testID="forecast-ending" label="Ending" value={fmtMoney(data.endingBalance)} valueColor={data.endingBalance >= 0 ? colors.green : colors.red} />
+            <StatCard testID="forecast-lowest" label="Lowest" value={fmtMoney(data.lowest.balance)} valueColor={data.lowest.balance >= 0 ? colors.text : colors.red} sub={fmtDate(data.lowest.date)} />
+            <StatCard testID="forecast-net" label="Net" value={fmtSignedMoney(data.totals.inflow - data.totals.outflow)} valueColor={data.totals.inflow >= data.totals.outflow ? colors.green : colors.red} />
           </View>
 
           {data.warnings.length ? (
@@ -60,7 +60,7 @@ export default function ForecastScreen() {
           <Card style={{ marginTop: 12 }}>
             <CardTitle>Upcoming Forecast Events</CardTitle>
             {events.length ? events.map((e, i) => (
-              <View key={`${e.date}-${e.label}-${i}`} style={styles.row}>
+              <View key={`${e.date}-${e.label}-${i}`} testID={`forecast-event-${i}`} style={styles.row}>
                 <View style={[styles.dot, { backgroundColor: kindColor(e.kind) }]} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.eventName} numberOfLines={1}>{e.label}</Text>

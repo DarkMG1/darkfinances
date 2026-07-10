@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Switch, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { useAccounts, useDeleteManualAsset, useManualAssets, useSaveManualAsset, useTrends } from '@/api/hooks/finance.hooks';
 import { Account, ManualAsset } from '@/api/generated/types';
@@ -80,6 +80,7 @@ export default function NetWorthScreen() {
 
   const acctRow = (a: Account) => (
     <Pressable
+      testID={`networth-account-${a.id}`}
       key={a.id}
       style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}
       onPress={() => router.push({ pathname: '/account/[id]', params: { id: a.id, name: a.name, balance: String(a.balance), hidden: a.hidden ? '1' : '0' } })}
@@ -95,7 +96,7 @@ export default function NetWorthScreen() {
   );
 
   const manualRow = (m: ManualAsset) => (
-    <Pressable key={m.id} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]} onPress={() => openEdit(m)}>
+    <Pressable testID={`networth-manual-${m.id}`} key={m.id} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]} onPress={() => openEdit(m)}>
       <Avatar label={m.name} size={36} />
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text style={styles.name} numberOfLines={1}>{m.name}</Text>
@@ -109,7 +110,7 @@ export default function NetWorthScreen() {
   );
 
   return (
-    <PushScreen refreshing={accounts.isFetching || trends.isFetching || manual.isFetching} onRefresh={onRefresh}>
+    <PushScreen testID="networth-screen" refreshing={accounts.isFetching || trends.isFetching || manual.isFetching} onRefresh={onRefresh}>
       <Stack.Screen options={{ title: 'Net Worth' }} />
       {accounts.isLoading && !accounts.data ? (
         <SkeletonList hero rows={6} />
@@ -133,6 +134,7 @@ export default function NetWorthScreen() {
               <View style={styles.rangeRow}>
                 {RANGES.map((r) => (
                   <Pressable
+                    testID={`networth-range-${r.label.toLowerCase()}${months === r.v ? '-selected' : ''}`}
                     key={r.label}
                     onPress={() => { haptics.tap(); setMonths(r.v); }}
                     style={({ pressed }) => [styles.range, months === r.v && styles.rangeActive, pressed && { opacity: 0.7 }]}
@@ -156,11 +158,11 @@ export default function NetWorthScreen() {
           </Card>
 
           <View style={styles.deepLinks}>
-            <Pressable style={({ pressed }) => [styles.deepCard, pressed && { opacity: 0.65 }]} onPress={() => { haptics.tap(); router.push('/investments' as never); }}>
+            <Pressable testID="networth-investments-link" style={({ pressed }) => [styles.deepCard, pressed && { opacity: 0.65 }]} onPress={() => { haptics.tap(); router.push('/investments' as never); }}>
               <Text style={styles.deepLabel}>Investments</Text>
               <Text style={styles.deepSub}>Holdings, allocation, performance ›</Text>
             </Pressable>
-            <Pressable style={({ pressed }) => [styles.deepCard, pressed && { opacity: 0.65 }]} onPress={() => { haptics.tap(); router.push('/debt' as never); }}>
+            <Pressable testID="networth-debt-link" style={({ pressed }) => [styles.deepCard, pressed && { opacity: 0.65 }]} onPress={() => { haptics.tap(); router.push('/debt' as never); }}>
               <Text style={styles.deepLabel}>Debt payoff</Text>
               <Text style={styles.deepSub}>APR, payoff date, strategy ›</Text>
             </Pressable>
@@ -184,10 +186,10 @@ export default function NetWorthScreen() {
             <SectionLabel>Manual assets</SectionLabel>
             {manualItems.length ? <Card style={styles.list}>{manualItems.map(manualRow)}</Card> : null}
             <View style={styles.addRow}>
-              <Pressable style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.7 }]} onPress={() => openNew('asset')}>
+              <Pressable testID="networth-add-asset-button" style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.7 }]} onPress={() => openNew('asset')}>
                 <Text style={styles.addBtnText}>+ Add asset</Text>
               </Pressable>
-              <Pressable style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.7 }]} onPress={() => openNew('liability')}>
+              <Pressable testID="networth-add-liability-button" style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.7 }]} onPress={() => openNew('liability')}>
                 <Text style={styles.addBtnText}>+ Add liability</Text>
               </Pressable>
             </View>
@@ -196,7 +198,7 @@ export default function NetWorthScreen() {
 
           {hiddenAccts.length ? (
             <View style={{ marginTop: 20 }}>
-              <Pressable style={styles.hiddenToggle} onPress={() => { haptics.tap(); setShowHidden((s) => !s); }}>
+              <Pressable testID="networth-hidden-toggle" style={styles.hiddenToggle} onPress={() => { haptics.tap(); setShowHidden((s) => !s); }}>
                 <Text style={styles.hiddenToggleText}>{showHidden ? 'Hide' : 'Show'} {hiddenAccts.length} hidden account{hiddenAccts.length === 1 ? '' : 's'}</Text>
                 <Text style={styles.chev}>{showHidden ? '⌃' : '⌄'}</Text>
               </Pressable>
@@ -209,10 +211,11 @@ export default function NetWorthScreen() {
       <Modal visible={edit !== null} animationType="slide" transparent onRequestClose={() => setEdit(null)}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
           <Pressable style={styles.modalBg} onPress={() => setEdit(null)}>
-            <Pressable style={styles.sheet} onPress={() => {}}>
+            <Pressable testID="networth-manual-sheet" style={styles.sheet} onPress={() => {}}>
               <Text style={styles.sheetTitle}>{edit?.id ? 'Edit' : 'Add'} {edit?.kind === 'liability' ? 'liability' : 'asset'}</Text>
               <Text style={styles.label}>Name</Text>
               <TextInput
+                testID="networth-manual-name-input"
                 style={styles.input}
                 value={edit?.name ?? ''}
                 onChangeText={(v) => setEdit((e) => (e ? { ...e, name: v } : e))}
@@ -224,6 +227,7 @@ export default function NetWorthScreen() {
               <View style={styles.amtWrap}>
                 <Text style={styles.amtDollar}>$</Text>
                 <TextInput
+                  testID="networth-manual-value-input"
                   style={styles.amtInput}
                   value={edit?.value ?? ''}
                   onChangeText={(v) => setEdit((e) => (e ? { ...e, value: v.replace(/[^0-9.]/g, '') } : e))}
@@ -233,18 +237,18 @@ export default function NetWorthScreen() {
                 />
               </View>
               <View style={styles.segment}>
-                <Pressable style={[styles.segBtn, edit?.kind === 'asset' && styles.segActive]} onPress={() => setEdit((e) => (e ? { ...e, kind: 'asset' } : e))}>
+                <Pressable testID={`networth-manual-kind-asset${edit?.kind === 'asset' ? '-selected' : ''}`} style={[styles.segBtn, edit?.kind === 'asset' && styles.segActive]} onPress={() => setEdit((e) => (e ? { ...e, kind: 'asset' } : e))}>
                   <Text style={[styles.segText, edit?.kind === 'asset' && styles.segTextActive]}>Asset</Text>
                 </Pressable>
-                <Pressable style={[styles.segBtn, edit?.kind === 'liability' && styles.segActive]} onPress={() => setEdit((e) => (e ? { ...e, kind: 'liability' } : e))}>
+                <Pressable testID={`networth-manual-kind-liability${edit?.kind === 'liability' ? '-selected' : ''}`} style={[styles.segBtn, edit?.kind === 'liability' && styles.segActive]} onPress={() => setEdit((e) => (e ? { ...e, kind: 'liability' } : e))}>
                   <Text style={[styles.segText, edit?.kind === 'liability' && styles.segTextActive]}>Liability</Text>
                 </Pressable>
               </View>
-              <Pressable style={({ pressed }) => [styles.saveBtn, !canSave && { opacity: 0.4 }, pressed && { opacity: 0.85 }]} onPress={doSave} disabled={!canSave}>
+              <Pressable testID="networth-manual-save-button" style={({ pressed }) => [styles.saveBtn, !canSave && { opacity: 0.4 }, pressed && { opacity: 0.85 }]} onPress={doSave} disabled={!canSave}>
                 <Text style={styles.saveText}>{saveManual.isPending ? 'Saving…' : 'Save'}</Text>
               </Pressable>
               {edit?.id ? (
-                <Pressable style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={doDelete} disabled={delManual.isPending}>
+                <Pressable testID="networth-manual-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={doDelete} disabled={delManual.isPending}>
                   <Text style={styles.deleteText}>Delete</Text>
                 </Pressable>
               ) : null}

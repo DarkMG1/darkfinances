@@ -18,14 +18,21 @@ export function Donut({ size = 180, thickness = 22, data }: {
   const circumference = 2 * Math.PI * r;
   const cx = size / 2;
   const cy = size / 2;
-  let offset = 0;
+  const lengths = data.map((d) => (d.value / total) * circumference);
+  const offsets = lengths.map((_, i) => lengths.slice(0, i).reduce((sum, len) => sum + len, 0));
   return (
+    <View
+      accessible
+      accessibilityRole="image"
+      accessibilityLabel={`Breakdown: ${data.map((item) => `${item.label} ${fmtMoney(item.value)}`).join(', ')}`}
+      style={{ width: size, height: size }}
+    >
     <Svg width={size} height={size}>
       <G rotation={-90} origin={`${cx}, ${cy}`}>
         <Circle cx={cx} cy={cy} r={r} stroke={colors.surface2} strokeWidth={thickness} fill="none" />
         {data.map((d, i) => {
-          const len = (d.value / total) * circumference;
-          const el = (
+          const len = lengths[i];
+          return (
             <Circle
               key={i}
               cx={cx}
@@ -35,15 +42,14 @@ export function Donut({ size = 180, thickness = 22, data }: {
               strokeWidth={thickness}
               fill="none"
               strokeDasharray={`${len} ${circumference - len}`}
-              strokeDashoffset={-offset}
+              strokeDashoffset={-offsets[i]}
               strokeLinecap="butt"
             />
           );
-          offset += len;
-          return el;
         })}
       </G>
     </Svg>
+    </View>
   );
 }
 
@@ -64,6 +70,7 @@ export function LineChart({ width, height = 160, values, color = colors.accent }
   const poly = pts.map((p) => p.join(',')).join(' ');
   const area = `${poly} ${pad + (values.length - 1) * stepX},${height - pad} ${pad},${height - pad}`;
   return (
+    <View accessible accessibilityRole="image" accessibilityLabel={`Trend from ${fmtMoney(values[0])} to ${fmtMoney(values[values.length - 1])}`} style={{ width, height }}>
     <Svg width={width} height={height}>
       <Polygon points={area} fill={color + '22'} />
       <Polyline points={poly} fill="none" stroke={color} strokeWidth={2} />
@@ -71,6 +78,7 @@ export function LineChart({ width, height = 160, values, color = colors.accent }
         <Circle key={i} cx={p[0]} cy={p[1]} r={2} fill={color} />
       ))}
     </Svg>
+    </View>
   );
 }
 
@@ -130,7 +138,12 @@ export function AreaChart({
   const tipTop = active != null ? Math.max(0, Math.min(height - 46, yAt(values[active]) - 50)) : 0;
 
   return (
-    <View style={{ width, height }}>
+    <View
+      accessible
+      accessibilityRole="image"
+      accessibilityLabel={`Trend from ${points[0].label} ${formatValue(values[0])} to ${points[n - 1].label} ${formatValue(values[n - 1])}`}
+      style={{ width, height }}
+    >
       <Svg width={width} height={height}>
         {yTicks.map((tv, i) => {
           const y = yAt(tv);
@@ -183,6 +196,7 @@ export function GroupedBars({ width, height = 180, labels, seriesA, seriesB, col
   const groupW = (width - pad * 2) / labels.length;
   const barW = Math.max(3, Math.min(11, groupW / 3));
   return (
+    <View accessible accessibilityRole="image" accessibilityLabel={`Grouped comparison across ${labels.length} periods`} style={{ width, height }}>
     <Svg width={width} height={height}>
       {labels.map((lab, i) => {
         const gx = pad + i * groupW + groupW / 2;
@@ -197,6 +211,7 @@ export function GroupedBars({ width, height = 180, labels, seriesA, seriesB, col
         );
       })}
     </Svg>
+    </View>
   );
 }
 
@@ -245,6 +260,9 @@ export function MonthBars({ data, selected, onSelect, height = 120 }: {
           return (
             <Pressable
               key={d.month}
+              accessibilityRole="button"
+              accessibilityState={{ selected: on }}
+              accessibilityLabel={`${monthLabel(d.month)}, ${fmtMoney(d.spend)} spent`}
               onPress={() => { haptics.tap(); onSelect(d.month); }}
               style={[styles.barCol, { width: COL_W, height }]}
               hitSlop={4}

@@ -1,17 +1,23 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import * as SecureStore from 'expo-secure-store';
+import { normalizeServerUrl } from '@/api/client/server-url';
+import { clearFinanceNotifications } from '@/lib/notifications';
+import { clearFinanceQueries, financeServerScope } from '@/lib/query-client';
+import { abortFinanceRequests } from '@/lib/request-lifecycle';
 import { kv } from '@/lib/storage';
 
 const TOKEN_KEY = 'finance_token';
 const URL_KEY = 'finance_url';
 const FACEID_KEY = 'finance_faceid';
 const DEMO_KEY = 'finance_demo';
+const LEGACY_QUERY_CACHE_KEY = 'rq-cache-v2';
 
 export interface ServerConfig {
   serverUrl: string | null;
   token: string | null;
   faceId: boolean;
   demo: boolean;
+  scope: string;
   configured: boolean;
   ready: boolean;
 }
@@ -32,51 +38,93 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     (async () => {
-      setServerUrl(kv.getString(URL_KEY));
+      kv.setString(LEGACY_QUERY_CACHE_KEY, null);
+      const storedUrl = kv.getString(URL_KEY);
+      const storedDemo = kv.getBool(DEMO_KEY, false);
+      let storedToken: string | null = null;
+      setServerUrl(storedUrl);
       setFaceId(kv.getBool(FACEID_KEY, false));
-      setDemo(kv.getBool(DEMO_KEY, false));
+      setDemo(storedDemo);
       try {
-        setToken(await SecureStore.getItemAsync(TOKEN_KEY));
+        storedToken = await SecureStore.getItemAsync(TOKEN_KEY);
+        if (storedToken) {
+          await SecureStore.setItemAsync(TOKEN_KEY, storedToken, {
+            keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+          });
+        }
       } catch {
-        setToken(null);
+        storedToken = null;
       }
+      setToken(storedToken);
       setReady(true);
     })();
   }, []);
 
   const setConfig = useCallback(
     async (next: { serverUrl?: string | null; token?: string | null; faceId?: boolean; demo?: boolean }) => {
-      if (next.serverUrl !== undefined) {
-        kv.setString(URL_KEY, next.serverUrl);
-        setServerUrl(next.serverUrl);
-      }
-      if (next.faceId !== undefined) {
-        kv.setBool(FACEID_KEY, next.faceId);
-        setFaceId(next.faceId);
-      }
-      if (next.demo !== undefined) {
-        kv.setBool(DEMO_KEY, next.demo);
-        setDemo(next.demo);
-      }
-      if (next.token !== undefined) {
-        if (next.token) await SecureStore.setItemAsync(TOKEN_KEY, next.token);
-        else await SecureStore.deleteItemAsync(TOKEN_KEY);
-        setToken(next.token);
+      const nextUrl = next.serverUrl === undefined
+        ? serverUrl
+        : next.serverUrl
+          ? normalizeServerUrl(next.serverUrl)
+          : null;
+      const nextToken = next.token === undefined ? token : next.token;
+      const nextFaceId = next.faceId === undefined ? faceId : next.faceId;
+      const nextDemo = next.demo === undefined ? demo : next.demo;
+      const identityChanged = nextUrl !== serverUrl || nextToken !== token || nextDemo !== demo;
+
+      try {
+        if (next.token !== undefined) {
+          if (nextToken) {
+            await SecureStore.setItemAsync(TOKEN_KEY, nextToken, {
+              keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+            });
+          } else {
+            await SecureStore.deleteItemAsync(TOKEN_KEY);
+          }
+        }
+        if (identityChanged) {
+          abortFinanceRequests();
+          await clearFinanceQueries();
+        }
+        kv.setString(URL_KEY, nextUrl);
+        kv.setBool(FACEID_KEY, nextFaceId);
+        kv.setBool(DEMO_KEY, nextDemo);
+        setServerUrl(nextUrl);
+        setToken(nextToken);
+        setFaceId(nextFaceId);
+        setDemo(nextDemo);
+      } catch (error) {
+        if (next.token !== undefined) {
+          try {
+            if (token) {
+              await SecureStore.setItemAsync(TOKEN_KEY, token, {
+                keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+              });
+            } else {
+              await SecureStore.deleteItemAsync(TOKEN_KEY);
+            }
+          } catch {}
+        }
+        throw error;
       }
     },
-    []
+    [demo, faceId, serverUrl, token]
   );
 
   const clear = useCallback(async () => {
+    abortFinanceRequests();
+    await clearFinanceQueries();
+    await clearFinanceNotifications(financeServerScope(serverUrl, token, demo)).catch(() => {});
+    await SecureStore.deleteItemAsync(TOKEN_KEY);
     kv.setString(URL_KEY, null);
+    kv.setString(LEGACY_QUERY_CACHE_KEY, null);
     kv.setBool(FACEID_KEY, false);
     kv.setBool(DEMO_KEY, false);
-    await SecureStore.deleteItemAsync(TOKEN_KEY);
     setServerUrl(null);
     setToken(null);
     setFaceId(false);
     setDemo(false);
-  }, []);
+  }, [demo, serverUrl, token]);
 
   const value = useMemo<ServerContextValue>(
     () => ({
@@ -84,6 +132,7 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
       token,
       faceId,
       demo,
+      scope: financeServerScope(serverUrl, token, demo),
       configured: !!serverUrl && !!token,
       ready,
       setConfig,

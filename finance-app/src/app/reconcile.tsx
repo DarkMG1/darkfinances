@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
@@ -13,16 +13,21 @@ import { colors, fmtDate, fmtSignedMoney, monthLabel } from '@/theme/colors';
 
 const stepMonth = (key: string, delta: number) => {
   const [y, m] = key.split('-').map(Number);
-  const d = new Date(y, m - 1 + delta, 1);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 };
 
 export default function Reconcile() {
-  const router = useRouter();
   const params = useLocalSearchParams<{ month?: string }>();
-  const curKey = useMemo(() => currentMonthKey(), []);
+  const initialMonth = params.month || stepMonth(currentMonthKey(), -1);
+  return <ReconcileContent key={initialMonth} initialMonth={initialMonth} />;
+}
+
+function ReconcileContent({ initialMonth }: { initialMonth: string }) {
+  const router = useRouter();
+  const curKey = currentMonthKey();
   // Deep-link (from the nag banner) wins; otherwise default to last month.
-  const [month, setMonth] = useState(() => params.month || stepMonth(currentMonthKey(), -1));
+  const [month, setMonth] = useState(initialMonth);
 
   const recon = useReconciliation(month);
   const setItem = useSetReconcileItem();
@@ -42,7 +47,7 @@ export default function Reconcile() {
     haptics.tap();
     router.push({
       pathname: '/transaction/[id]',
-      params: { id: it.id, payee: it.payee, amount: String(it.amount), date: it.date, account: it.account, accountId: it.accountId, category: it.category, imported: '1', cleared: '1' },
+      params: { id: it.id, date: it.date, accountId: it.accountId },
     });
   };
   const doClose = () => {
@@ -53,13 +58,13 @@ export default function Reconcile() {
   };
 
   return (
-    <PushScreen refreshing={recon.isFetching} onRefresh={recon.refetch}>
+    <PushScreen testID="reconcile-screen" refreshing={recon.isFetching} onRefresh={recon.refetch}>
       <View style={styles.nav}>
-        <Pressable onPress={() => { haptics.tap(); setMonth(stepMonth(month, -1)); }} hitSlop={12} style={({ pressed }) => [styles.navBtn, pressed && { opacity: 0.5 }]}>
+        <Pressable testID="reconcile-prev-month" onPress={() => { haptics.tap(); setMonth(stepMonth(month, -1)); }} hitSlop={12} style={({ pressed }) => [styles.navBtn, pressed && { opacity: 0.5 }]}>
           <Text style={styles.navArrow}>‹</Text>
         </Pressable>
         <Text style={styles.navTitle}>{monthLabel(month)}</Text>
-        <Pressable disabled={!canNext} onPress={() => { haptics.tap(); setMonth(stepMonth(month, 1)); }} hitSlop={12} style={({ pressed }) => [styles.navBtn, pressed && canNext && { opacity: 0.5 }]}>
+        <Pressable testID="reconcile-next-month" disabled={!canNext} onPress={() => { haptics.tap(); setMonth(stepMonth(month, 1)); }} hitSlop={12} style={({ pressed }) => [styles.navBtn, pressed && canNext && { opacity: 0.5 }]}>
           <Text style={[styles.navArrow, !canNext && styles.navArrowOff]}>›</Text>
         </Pressable>
       </View>
@@ -89,11 +94,11 @@ export default function Reconcile() {
 
           <Card style={styles.list}>
             {items.map((it, i) => (
-              <View key={it.id} style={[styles.row, i > 0 && styles.rowDiv]}>
-                <Pressable onPress={() => toggle(it)} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+              <View key={it.id} testID={`reconcile-item-${i}`} style={[styles.row, i > 0 && styles.rowDiv]}>
+                <Pressable testID={`reconcile-item-toggle-${i}`} onPress={() => toggle(it)} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
                   <SymbolView name={it.reconciled ? 'checkmark.circle.fill' : 'circle'} tintColor={it.reconciled ? colors.green : colors.muted} size={26} resizeMode="scaleAspectFit" />
                 </Pressable>
-                <Pressable style={styles.rowBody} onPress={() => openTxn(it)}>
+                <Pressable testID={`reconcile-item-row-${i}`} style={styles.rowBody} onPress={() => openTxn(it)}>
                   <View style={{ flex: 1, minWidth: 0 }}>
                     <Text style={[styles.rowPayee, it.reconciled && styles.rowPayeeDone]} numberOfLines={1}>{it.payee}</Text>
                     <Text style={styles.rowSub} numberOfLines={1}>{fmtDate(it.date)} · {it.category}</Text>
@@ -105,7 +110,7 @@ export default function Reconcile() {
           </Card>
 
           {!monthClosed ? (
-            <Pressable onPress={doClose} disabled={!allDone || closeMonth.isPending} style={({ pressed }) => [styles.closeBtn, (!allDone || closeMonth.isPending) && styles.closeBtnOff, pressed && allDone && { opacity: 0.8 }]}>
+            <Pressable testID="reconcile-close-month-button" onPress={doClose} disabled={!allDone || closeMonth.isPending} style={({ pressed }) => [styles.closeBtn, (!allDone || closeMonth.isPending) && styles.closeBtnOff, pressed && allDone && { opacity: 0.8 }]}>
               {closeMonth.isPending ? (
                 <ActivityIndicator color="#fff" />
               ) : (

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { Alert, AppState } from 'react-native';
+import { AppState } from 'react-native';
 import * as Updates from 'expo-updates';
 
 // Auto-check for an OTA update on JS launch AND whenever the app returns to the
@@ -25,10 +25,8 @@ export function useAutoUpdate() {
         if (res.isAvailable) {
           await Updates.fetchUpdateAsync();
           fetched.current = true;
-          Alert.alert('Update ready', 'A new version is ready. Restart to apply it now?', [
-            { text: 'Later', style: 'cancel' },
-            { text: 'Restart', onPress: () => Updates.reloadAsync() },
-          ]);
+          // Apply on the next cold launch. An alert here can race the Face ID
+          // inactive/active transition and destabilize the privacy overlay.
         }
       } catch {
         /* offline / transient network — ignore and retry on the next foreground */

@@ -21,9 +21,9 @@ export default function Onboarding() {
     setBusy(true);
     setStatus('Connecting…');
     try {
-      const ok = await testConnection(url.trim(), token.trim());
+      const ok = await testConnection(url.trim(), token.trim(), false);
       if (!ok) throw new Error('Server did not confirm');
-      await setConfig({ serverUrl: url.trim(), token: token.trim() });
+      await setConfig({ serverUrl: url.trim(), token: token.trim(), demo: false });
       // gate in _layout will switch to the tabs automatically
     } catch (e: any) {
       setStatus(e?.error || e?.message || 'Connection failed');
@@ -31,29 +31,45 @@ export default function Onboarding() {
     }
   };
   const useDemo = async () => {
-    await setConfig({ serverUrl: 'http://127.0.0.1:5007', token: 'demo', demo: true });
+    const demoServer = process.env.EXPO_PUBLIC_FINANCE_DEMO_URL || (__DEV__ ? 'http://127.0.0.1:5007' : url.trim());
+    if (!demoServer) {
+      setStatus('Enter the demo server URL first.');
+      return;
+    }
+    setBusy(true);
+    setStatus('Loading demo…');
+    try {
+      const ok = await testConnection(demoServer, 'demo', true);
+      if (!ok) throw new Error('Demo server did not confirm');
+      await setConfig({ serverUrl: demoServer, token: 'demo', demo: true });
+    } catch (e: any) {
+      setStatus(e?.error || e?.message || 'Demo connection failed');
+      setBusy(false);
+    }
   };
 
   return (
-    <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView testID="onboarding-screen" style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <View style={[styles.inner, { paddingTop: insets.top + 40 }]}>
         <Text style={styles.logo}>dark<Text style={{ color: colors.accentLight }}>finances</Text></Text>
         <Text style={styles.sub}>Connect to your server</Text>
 
         <Text style={styles.label}>Server URL</Text>
         <TextInput
+          testID="onboarding-server-url-input"
           style={styles.input}
           value={url}
           onChangeText={setUrl}
           autoCapitalize="none"
           autoCorrect={false}
           keyboardType="url"
-          placeholder="https://finances.example.dev"
+          placeholder="https://finances.example.dev (also used for demo)"
           placeholderTextColor={colors.muted}
         />
 
         <Text style={styles.label}>API Token</Text>
         <TextInput
+          testID="onboarding-token-input"
           style={styles.input}
           value={token}
           onChangeText={setToken}
@@ -64,7 +80,7 @@ export default function Onboarding() {
           placeholderTextColor={colors.muted}
         />
 
-        <Pressable style={[styles.btn, busy && { opacity: 0.6 }]} disabled={busy} onPress={connect}>
+        <Pressable testID="onboarding-connect-button" style={[styles.btn, busy && { opacity: 0.6 }]} disabled={busy} onPress={connect}>
           {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnText}>Connect</Text>}
         </Pressable>
         <Pressable testID="onboarding-demo-button" style={styles.demoBtn} disabled={busy} onPress={useDemo}>

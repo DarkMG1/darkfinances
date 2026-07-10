@@ -93,11 +93,11 @@ export default function AddTransaction() {
   };
 
   return (
-    <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView testID="add-transaction-screen" style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
     <ScrollView style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
       <View style={styles.typeRow}>
         {(['expense', 'income'] as Kind[]).map((k) => (
-          <Pressable key={k} style={({ pressed }) => [styles.typeBtn, kind === k && (k === 'expense' ? styles.typeExpense : styles.typeIncome), pressed && { opacity: 0.8 }]} onPress={() => { haptics.tap(); setKind(k); }}>
+          <Pressable testID={`add-transaction-type-${k}${kind === k ? '-selected' : ''}`} key={k} style={({ pressed }) => [styles.typeBtn, kind === k && (k === 'expense' ? styles.typeExpense : styles.typeIncome), pressed && { opacity: 0.8 }]} onPress={() => { haptics.tap(); setKind(k); }}>
             <Text style={[styles.typeText, kind === k && styles.typeTextActive]}>{k === 'expense' ? 'Expense' : 'Income'}</Text>
           </Pressable>
         ))}
@@ -106,6 +106,7 @@ export default function AddTransaction() {
       <View style={styles.amountWrap}>
         <Text style={[styles.amountSign, { color: kind === 'expense' ? colors.text : colors.green }]}>{kind === 'expense' ? '−' : '+'}$</Text>
         <TextInput
+          testID="add-transaction-amount-input"
           ref={amountRef}
           style={styles.amountInput}
           value={amount}
@@ -121,7 +122,7 @@ export default function AddTransaction() {
         {ordered.map((a) => {
           const active = a.id === selectedAccount;
           return (
-            <Pressable key={a.id} style={[styles.chip, active && styles.chipActive]} onPress={() => { haptics.tap(); setAccountId(a.id); }}>
+            <Pressable testID={`add-transaction-account-${a.id}${active ? '-selected' : ''}`} key={a.id} style={[styles.chip, active && styles.chipActive]} onPress={() => { haptics.tap(); setAccountId(a.id); }}>
               <Text style={[styles.chipText, active && styles.chipTextActive]} numberOfLines={1}>{a.name}</Text>
             </Pressable>
           );
@@ -130,16 +131,16 @@ export default function AddTransaction() {
 
       <CardTitle>Payee</CardTitle>
       <Card>
-        <TextInput style={styles.input} value={payee} onChangeText={setPayee} placeholder="Who was it?" placeholderTextColor={colors.muted} autoCapitalize="words" />
+        <TextInput testID="add-transaction-payee-input" style={styles.input} value={payee} onChangeText={setPayee} placeholder="Who was it?" placeholderTextColor={colors.muted} autoCapitalize="words" />
       </Card>
 
       <CardTitle>Date</CardTitle>
       <Card>
-        <TextInput style={styles.input} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" placeholderTextColor={colors.muted} autoCapitalize="none" />
+        <TextInput testID="add-transaction-date-input" style={styles.input} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" placeholderTextColor={colors.muted} autoCapitalize="none" />
       </Card>
 
       <CardTitle>Category</CardTitle>
-      <Pressable onPress={() => { haptics.tap(); setPickingCat(true); }} style={({ pressed }) => pressed && { opacity: 0.7 }}>
+      <Pressable testID="add-transaction-category-picker" onPress={() => { haptics.tap(); setPickingCat(true); }} style={({ pressed }) => pressed && { opacity: 0.7 }}>
         <Card style={styles.pickRow}>
           <Text style={[styles.pickValue, !categoryName && { color: colors.muted }]}>{categoryName || 'Optional — tap to set'}</Text>
           <Text style={styles.pickArrow}>›</Text>
@@ -148,29 +149,29 @@ export default function AddTransaction() {
 
       <CardTitle>Notes</CardTitle>
       <Card>
-        <TextInput style={[styles.input, { minHeight: 44, textAlignVertical: 'top' }]} value={notes} onChangeText={setNotes} placeholder="Add a note…" placeholderTextColor={colors.muted} multiline />
+        <TextInput testID="add-transaction-notes-input" style={[styles.input, { minHeight: 44, textAlignVertical: 'top' }]} value={notes} onChangeText={setNotes} placeholder="Add a note…" placeholderTextColor={colors.muted} multiline />
       </Card>
 
-      <Pressable style={({ pressed }) => [styles.submit, (create.isPending || pressed) && { opacity: 0.7 }]} onPress={submit} disabled={create.isPending}>
+      <Pressable testID="add-transaction-submit-button" style={({ pressed }) => [styles.submit, (create.isPending || pressed) && { opacity: 0.7 }]} onPress={submit} disabled={create.isPending}>
         <Text style={styles.submitText}>{create.isPending ? 'Adding…' : 'Add transaction'}</Text>
       </Pressable>
       <Text style={styles.warn}>This writes to your real budget.</Text>
 
       <Modal visible={pickingCat} animationType="slide" transparent onRequestClose={() => setPickingCat(false)}>
         <Pressable style={styles.modalBg} onPress={() => setPickingCat(false)}>
-          <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
+          <View testID="add-transaction-category-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Set category</Text>
             <FlatList
               data={categories.data ?? []}
               keyExtractor={(c) => c.id}
               style={{ maxHeight: 400 }}
               ListHeaderComponent={
-                <Pressable style={styles.catOption} onPress={() => { setCategoryId(null); setCategoryName(''); setPickingCat(false); }}>
+                <Pressable testID="add-transaction-category-none" style={styles.catOption} onPress={() => { setCategoryId(null); setCategoryName(''); setPickingCat(false); }}>
                   <Text style={styles.catOptionText}>Uncategorized</Text>
                 </Pressable>
               }
               renderItem={({ item }) => (
-                <Pressable style={styles.catOption} onPress={() => { setCategoryId(item.id); setCategoryName(item.name); setPickingCat(false); }}>
+                <Pressable testID={`add-transaction-category-${item.id}`} style={styles.catOption} onPress={() => { setCategoryId(item.id); setCategoryName(item.name); setPickingCat(false); }}>
                   <Text style={styles.catOptionText}>{item.name}</Text>
                   <Text style={styles.catOptionGroup}>{item.group}</Text>
                 </Pressable>

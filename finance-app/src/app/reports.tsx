@@ -1,16 +1,20 @@
 import React from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useReports } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
 import { Card, CardTitle, EmptyState, ErrorState, Loading } from '@/components/ui';
+import { shiftMonth } from '@/lib/date-only';
+import { currentMonthKey, useSelectedMonth } from '@/lib/selectedMonth';
 import { colors, fmtMoney, fmtPos, fmtSignedMoney } from '@/theme/colors';
 
 export default function ReportsScreen() {
-  const reports = useReports();
+  const [month, setMonth] = useSelectedMonth();
+  const current = currentMonthKey();
+  const reports = useReports(month === current ? undefined : month);
   const data = reports.data;
 
   return (
-    <PushScreen refreshing={reports.isFetching} onRefresh={reports.refetch}>
+    <PushScreen testID="reports-screen" refreshing={reports.isFetching} onRefresh={reports.refetch}>
       {reports.isLoading && !data ? (
         <Loading />
       ) : reports.isError && !data ? (
@@ -19,6 +23,15 @@ export default function ReportsScreen() {
         <EmptyState icon="doc.text.magnifyingglass">No reports available</EmptyState>
       ) : (
         <>
+          <View style={styles.navigator}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Previous month" onPress={() => setMonth(shiftMonth(month, -1))} style={styles.navButton}>
+              <Text style={styles.navText}>‹</Text>
+            </Pressable>
+            <Text style={styles.navMonth}>{data.month}</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Next month" disabled={month >= current} onPress={() => setMonth(shiftMonth(month, 1))} style={styles.navButton}>
+              <Text style={[styles.navText, month >= current && { opacity: 0.25 }]}>›</Text>
+            </Pressable>
+          </View>
           <View style={styles.hero}>
             <Text style={styles.heroLabel}>MONTHLY REVIEW · {data.month}</Text>
             <Text style={[styles.heroValue, { color: data.monthlyReview.net >= 0 ? colors.green : colors.red }]}>{fmtSignedMoney(data.monthlyReview.net)}</Text>
@@ -26,7 +39,7 @@ export default function ReportsScreen() {
           </View>
 
           <Card style={{ marginBottom: 16 }}>
-            <CardTitle>Saved Reports</CardTitle>
+            <CardTitle>Report Sections</CardTitle>
             {data.saved.map((r) => (
               <View key={r.id} style={styles.savedRow}>
                 <Text style={styles.savedTitle}>{r.title}</Text>
@@ -68,6 +81,10 @@ export default function ReportsScreen() {
 }
 
 const styles = StyleSheet.create({
+  navigator: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
+  navButton: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  navText: { color: colors.accentLight, fontSize: 28, fontWeight: '700' },
+  navMonth: { color: colors.text, fontSize: 15, fontWeight: '700' },
   hero: { marginBottom: 16, marginTop: 4 },
   heroLabel: { color: colors.muted, fontSize: 11, fontWeight: '800', letterSpacing: 1 },
   heroValue: { fontSize: 40, fontWeight: '800', letterSpacing: -1.5, marginTop: 4 },

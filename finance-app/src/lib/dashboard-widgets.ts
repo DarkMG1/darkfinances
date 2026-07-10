@@ -27,6 +27,7 @@ export function setDashboardWidgetVisible(key: DashboardWidgetKey, visible: bool
 export function useDashboardWidgets() {
   const [version, setVersion] = useState(0);
   const visible = useMemo(() => {
+    void version;
     const out = {} as Record<DashboardWidgetKey, boolean>;
     for (const w of DASHBOARD_WIDGETS) out[w.key] = getDashboardWidgetVisible(w.key);
     return out;

@@ -108,6 +108,8 @@ export interface SplitLeg {
 // A single transaction with its legs, for the detail + split editor.
 export interface TransactionDetail {
   id: string;
+  parentId: string | null;
+  isLeg: boolean;
   accountId: string;
   account: string;
   date: string;
@@ -173,6 +175,11 @@ export interface TrendMonth {
 }
 export interface Trends {
   months: TrendMonth[];
+  scope?: {
+    includesClosedAccountHistory: boolean;
+    includesManualAssets: boolean;
+    excludedHiddenAccounts: boolean;
+  };
 }
 
 export interface BudgetCategory {
@@ -410,6 +417,8 @@ export interface RecurringItem {
 }
 export interface Recurring {
   items: RecurringItem[];
+  hiddenItems?: RecurringItem[];
+  hiddenCount?: number;
   monthlyTotal: number;
   annualTotal: number;
   activeCount: number;
@@ -464,6 +473,13 @@ export interface Forecast {
   totals: { inflow: number; outflow: number };
   points: ForecastPoint[];
   events: ForecastEvent[];
+  assumptions?: {
+    liquidAccounts: { id: string; name: string }[];
+    genericBudgetTarget: number;
+    billsExcludedFromGenericBudget: boolean;
+    reimbursementsIncluded: boolean;
+  };
+  possibleReimbursement?: { date: string; amount: number; includedInBalance: false } | null;
   warnings: string[];
 }
 
@@ -508,6 +524,9 @@ export interface ReimbTxnRef {
   date: string | null;
   payee: string;
   amount: number;
+  accountId?: string | null;
+  account?: string;
+  imported?: boolean;
 }
 export interface ReimbLinks {
   asInflow: (ReimbTxnRef & { allocated?: number })[]; // expenses this inflow repays
@@ -657,11 +676,15 @@ export interface GoalInput {
   target: number;
   accountId?: string | null;
   deadline?: string | null;
+  current?: number;
 }
 
 export interface OkResult {
   ok: boolean;
   id?: string;
+  previousId?: string;
+  parentId?: string;
+  legIds?: string[];
   key?: string;
   applied?: number; // rows touched by a saved/applied rule
   removed?: number; // rules removed
@@ -702,8 +725,21 @@ export interface Category {
 export interface CategorizeResult {
   ok: boolean;
   mode: string;
+  id?: string;
+  previousId?: string;
+  parentId?: string;
 }
 export interface Ping {
   ok: boolean;
   ts: number;
+  startedAt?: string;
+  financeTimeZone?: string;
+  queuedMutations?: number;
+  actual?: {
+    ready: boolean;
+    initializedAt?: string | null;
+    lastSyncAt?: string | null;
+    lastErrorAt?: string | null;
+    lastError?: string | null;
+  };
 }

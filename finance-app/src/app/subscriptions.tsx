@@ -1,12 +1,14 @@
 import React, { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useRecurring } from '@/api/hooks/finance.hooks';
+import { useRecurring, useSetRecurringOverride } from '@/api/hooks/finance.hooks';
 import { RecurringItem } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
 import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { cadenceLabel, colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
+
+const sid = (s: string) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
 
 // Subscriptions = discretionary recurring charges (streaming, software, gym,
 // cloud). True must-pay bills (rent/utilities/phone/loan) live in the Bills
@@ -14,15 +16,17 @@ import { cadenceLabel, colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors
 export default function Subscriptions() {
   const router = useRouter();
   const recurring = useRecurring();
+  const override = useSetRecurringOverride();
   const data = recurring.data;
 
-  const { active, inactive, monthly, annual } = useMemo(() => {
+  const { active, inactive, hidden, monthly, annual } = useMemo(() => {
     const subs = (data?.items ?? []).filter((i) => !i.isBill);
     const act = subs.filter((i) => i.status === 'active');
     const monthlyTotal = data?.subMonthlyTotal ?? act.reduce((s, i) => s + i.monthlyEquivalent, 0);
     return {
       active: act,
       inactive: subs.filter((i) => i.status !== 'active'),
+      hidden: data?.hiddenItems ?? [],
       monthly: monthlyTotal,
       annual: monthlyTotal * 12,
     };
@@ -31,7 +35,7 @@ export default function Subscriptions() {
   const Row = ({ item }: { item: RecurringItem }) => {
     const dim = item.status !== 'active';
     return (
-      <Pressable style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]} onPress={() => router.push(`/recurring/${encodeURIComponent(item.key)}`)}>
+      <Pressable testID={`subscriptions-row-${sid(item.key)}`} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]} onPress={() => router.push(`/recurring/${encodeURIComponent(item.key)}`)}>
         <Avatar label={item.payee} category={item.category ?? undefined} size={38} />
         <View style={styles.mid}>
           <Text style={[styles.payee, dim && styles.dim]} numberOfLines={1}>{item.payee}</Text>
@@ -55,12 +59,12 @@ export default function Subscriptions() {
   };
 
   return (
-    <PushScreen refreshing={recurring.isFetching} onRefresh={recurring.refetch}>
+    <PushScreen testID="subscriptions-screen" refreshing={recurring.isFetching} onRefresh={recurring.refetch}>
       {recurring.isLoading && !data ? (
         <SkeletonList hero rows={6} />
       ) : recurring.isError && !data ? (
         <ErrorState error={recurring.error?.error} onRetry={recurring.refetch} />
-      ) : !active.length && !inactive.length ? (
+      ) : !active.length && !inactive.length && !hidden.length ? (
         <EmptyState icon="repeat">No subscriptions detected yet</EmptyState>
       ) : (
         <>
@@ -94,7 +98,31 @@ export default function Subscriptions() {
             </View>
           ) : null}
 
-          <Pressable style={({ pressed }) => [styles.note, pressed && { opacity: 0.6 }]} onPress={() => router.push('/bills' as never)}>
+          {hidden.length ? (
+            <View style={{ marginTop: 16 }}>
+              <SectionLabel>Hidden</SectionLabel>
+              <Card style={styles.list}>
+                {hidden.map((item) => (
+                  <View key={item.key} style={styles.row}>
+                    <View style={styles.mid}>
+                      <Text style={styles.payee} numberOfLines={1}>{item.payee}</Text>
+                      <Text style={styles.sub}>{cadenceLabel(item.cadence)} · hidden {item.isBill ? 'bill' : 'subscription'}</Text>
+                    </View>
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={override.isPending}
+                      onPress={() => override.mutate({ key: item.key, hidden: false })}
+                      style={({ pressed }) => [styles.restoreButton, pressed && { opacity: 0.7 }]}
+                    >
+                      <Text style={styles.restoreText}>Restore</Text>
+                    </Pressable>
+                  </View>
+                ))}
+              </Card>
+            </View>
+          ) : null}
+
+          <Pressable testID="subscriptions-bills-link" style={({ pressed }) => [styles.note, pressed && { opacity: 0.6 }]} onPress={() => router.push('/bills' as never)}>
             <Text style={styles.noteText}>
               Recurring memberships & apps only. Utilities, rent & internet are tracked as Bills ›
             </Text>
@@ -123,4 +151,6 @@ const styles = StyleSheet.create({
   hike: { fontSize: 11, fontWeight: '700', marginTop: 2 },
   note: { marginTop: 18, paddingHorizontal: 4 },
   noteText: { color: colors.muted, fontSize: 12, lineHeight: 17 },
+  restoreButton: { borderRadius: 8, backgroundColor: colors.surface2, paddingHorizontal: 12, paddingVertical: 8 },
+  restoreText: { color: colors.accentLight, fontSize: 12, fontWeight: '700' },
 });

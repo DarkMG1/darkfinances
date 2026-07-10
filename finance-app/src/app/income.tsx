@@ -8,10 +8,11 @@ import { SkeletonList } from '@/components/skeleton';
 import { cadenceLabel, colors, dueLabel, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+const sid = (s: string) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
 
 function Row({ s, muted }: { s: IncomeStream; muted?: boolean }) {
   return (
-    <View style={[styles.row, muted ? { opacity: 0.5 } : null]}>
+    <View testID={`income-stream-${sid(s.key)}`} style={[styles.row, muted ? { opacity: 0.5 } : null]}>
       <Avatar label={s.payee} category="income" size={38} />
       <View style={styles.mid}>
         <Text style={styles.payee} numberOfLines={1}>{cap(s.payee)}</Text>
@@ -34,7 +35,7 @@ export default function Income() {
   const inactive = (data?.streams ?? []).filter((s) => !s.active);
 
   return (
-    <PushScreen refreshing={income.isFetching} onRefresh={income.refetch}>
+    <PushScreen testID="income-screen" refreshing={income.isFetching} onRefresh={income.refetch}>
       {income.isLoading ? (
         <SkeletonList hero rows={4} />
       ) : income.isError && !data ? (

@@ -6,15 +6,13 @@ import { PushScreen } from '@/components/screen';
 import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { Bill } from '@/api/generated/types';
+import { financeToday } from '@/lib/date-only';
 import { haptics } from '@/lib/haptics';
 import { cadenceLabel, colors, daysUntil, dueLabel, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const WEEKDAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
-const todayYMD = () => {
-  const n = new Date();
-  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`;
-};
+const sid = (s: string) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
 
 function CalendarMonth({ year, month, dueByDay, selected, onSelect }: {
   year: number;
@@ -23,7 +21,7 @@ function CalendarMonth({ year, month, dueByDay, selected, onSelect }: {
   selected: string | null;
   onSelect: (day: string | null) => void;
 }) {
-  const today = todayYMD();
+  const today = financeToday();
   const monthName = new Date(year, month, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   const startWeekday = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -70,7 +68,7 @@ export default function Bills() {
   const data = bills.data;
   const [selected, setSelected] = useState<string | null>(null);
 
-  const all = data?.bills ?? [];
+  const all = useMemo(() => data?.bills ?? [], [data?.bills]);
 
   const dueByDay = useMemo(() => {
     const m: Record<string, number> = {};
@@ -81,7 +79,7 @@ export default function Bills() {
   const months = useMemo(() => {
     const set = new Set<string>();
     for (const b of all) set.add(b.dueDate.slice(0, 7));
-    set.add(todayYMD().slice(0, 7));
+    set.add(financeToday().slice(0, 7));
     return Array.from(set).sort().map((k) => {
       const [y, mo] = k.split('-').map(Number);
       return { year: y, month: mo - 1 };
@@ -112,7 +110,7 @@ export default function Bills() {
     const variance = b.variance ?? null;
     const varianceText = variance != null && Math.abs(variance) >= 0.01 ? ` · ${variance > 0 ? '+' : ''}${fmtMoney(variance)} vs expected` : '';
     return (
-      <Pressable key={b.id} style={({ pressed }) => [styles.row, pressed && { opacity: 0.65 }]} onPress={() => { haptics.tap(); router.push(`/recurring/${encodeURIComponent(b.key)}`); }}>
+      <Pressable testID={`bills-row-${sid(b.key)}`} key={b.id} style={({ pressed }) => [styles.row, pressed && { opacity: 0.65 }]} onPress={() => { haptics.tap(); router.push(`/recurring/${encodeURIComponent(b.key)}`); }}>
         <Avatar label={cap(b.payee)} category={b.category} size={36} />
         <View style={styles.mid}>
           <Text style={[styles.payee, b.paid && styles.paidText]} numberOfLines={1}>{cap(b.payee)}</Text>
@@ -126,7 +124,7 @@ export default function Bills() {
   };
 
   return (
-    <PushScreen refreshing={bills.isFetching} onRefresh={bills.refetch}>
+    <PushScreen testID="bills-screen" refreshing={bills.isFetching} onRefresh={bills.refetch}>
       {bills.isLoading ? (
         <SkeletonList hero rows={5} />
       ) : bills.isError && !data ? (

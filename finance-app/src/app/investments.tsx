@@ -11,7 +11,7 @@ export default function InvestmentsScreen() {
   const allocation = Object.entries(data?.allocation.byAssetClass ?? {}).sort((a, b) => b[1] - a[1]);
 
   return (
-    <PushScreen refreshing={investments.isFetching} onRefresh={investments.refetch}>
+    <PushScreen testID="investments-screen" refreshing={investments.isFetching} onRefresh={investments.refetch}>
       {investments.isLoading && !data ? (
         <Loading />
       ) : investments.isError && !data ? (
@@ -31,7 +31,7 @@ export default function InvestmentsScreen() {
             {allocation.map(([name, value]) => {
               const pct = data.totals.value > 0 ? (value / data.totals.value) * 100 : 0;
               return (
-                <View key={name} style={styles.allocRow}>
+                <View key={name} testID={`investments-allocation-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`} style={styles.allocRow}>
                   <Text style={styles.allocName}>{name}</Text>
                   <View style={styles.allocTrack}><View style={[styles.allocFill, { width: `${Math.min(100, pct)}%` }]} /></View>
                   <Text style={styles.allocValue}>{pct.toFixed(0)}%</Text>
@@ -43,7 +43,7 @@ export default function InvestmentsScreen() {
           <Card>
             <CardTitle>Holdings</CardTitle>
             {data.holdings.map((h) => (
-              <View key={`${h.account}-${h.symbol}-${h.name}`} style={styles.row}>
+              <View key={`${h.account}-${h.symbol}-${h.name}`} testID={`investments-holding-${h.symbol || h.name}`} style={styles.row}>
                 <Avatar label={h.symbol || h.name} size={36} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.name} numberOfLines={1}>{h.symbol || h.name}</Text>

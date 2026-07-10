@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { SymbolView } from 'expo-symbols';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
@@ -16,16 +16,23 @@ const pad = (n: number) => String(n).padStart(2, '0');
 const ymd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
 type CatRange = 'month' | '3m' | 'year' | 'all';
-type SortKey = 'newest' | 'oldest' | 'amount';
+type SortKey = 'newest' | 'oldest' | 'amountHigh' | 'amountLow';
+type BucketKey = 'spending' | 'bills' | 'subscriptions';
 const RANGES: { key: CatRange; label: string }[] = [
   { key: 'month', label: 'Month' },
   { key: '3m', label: '3M' },
   { key: 'year', label: 'Year' },
   { key: 'all', label: 'All' },
 ];
+const SORTS: { key: SortKey; label: string }[] = [
+  { key: 'newest', label: 'Date: Newest' },
+  { key: 'oldest', label: 'Date: Oldest' },
+  { key: 'amountHigh', label: 'Amount: Highest' },
+  { key: 'amountLow', label: 'Amount: Lowest' },
+];
 
 function rangeWindow(key: CatRange, month?: string, explicitStart?: string, explicitEnd?: string, explicitLabel?: string): { start: string; end: string; label: string } {
-  if (explicitStart && explicitEnd) return { start: explicitStart, end: explicitEnd, label: explicitLabel || 'Selected period' };
+  if (explicitStart && explicitEnd) return { start: explicitStart, end: explicitEnd, label: relativePeriodLabel(explicitStart, explicitEnd, explicitLabel) };
   const now = new Date();
   const end = ymd(now);
   if (key === 'month') {
@@ -41,66 +48,110 @@ function rangeWindow(key: CatRange, month?: string, explicitStart?: string, expl
   return { start: '2000-01-01', end, label: 'All time' };
 }
 
+function relativePeriodLabel(start: string, end: string, fallback?: string) {
+  const now = new Date();
+  const currentMonth = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+  const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const prevMonth = `${prev.getFullYear()}-${pad(prev.getMonth() + 1)}`;
+  const fullMonth = (month: string, s: string, e: string) => {
+    const [y, m] = month.split('-').map(Number);
+    const last = `${month}-${pad(new Date(y, m, 0).getDate())}`;
+    return s === `${month}-01` && (e === last || month === currentMonth);
+  };
+  const month = start.slice(0, 7);
+  if (month === currentMonth && fullMonth(month, start, end)) return 'This month';
+  if (month === prevMonth && fullMonth(month, start, end)) return 'Last month';
+  return fallback || 'Selected period';
+}
+
+function monthWindow(month: string) {
+  const now = new Date();
+  const currentMonth = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+  const [year, m] = month.split('-').map(Number);
+  const start = `${month}-01`;
+  const end = month === currentMonth ? ymd(now) : `${month}-${pad(new Date(year, m, 0).getDate())}`;
+  return { start, end, label: relativePeriodLabel(start, end, monthLabel(month)) };
+}
+
+function compactMoney(n: number) {
+  const abs = Math.abs(n);
+  if (abs >= 1000) return `$${(abs / 1000).toFixed(abs >= 10000 ? 0 : 1)}k`;
+  return fmtPos(abs).replace('.00', '');
+}
+
 export default function CategoryDetail() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const params = useLocalSearchParams<{ name: string; month?: string; range?: string; start?: string; end?: string; label?: string }>();
+  const params = useLocalSearchParams<{ name: string; month?: string; range?: string; start?: string; end?: string; label?: string; bucket?: BucketKey }>();
   // expo-router already decodes route params; use as-is.
   const name = params.name ?? '';
   const isAllSpending = /^(spending|total spend)$/i.test(name);
   const isIncome = /^(income|earnings)$/i.test(name);
-  const [range, setRange] = useState<CatRange>(
+  const [range] = useState<CatRange>(
     (RANGES.some((r) => r.key === params.range) ? (params.range as CatRange) : 'month')
   );
   const [sort, setSort] = useState<SortKey>('newest');
-  const { start, end, label } = rangeWindow(range, params.month, params.start, params.end, params.label);
+  const [sortOpen, setSortOpen] = useState(false);
+  const baseWindow = rangeWindow(range, params.month, params.start, params.end, params.label);
+  const windowKey = `${name}-${params.bucket || ''}-${baseWindow.start}-${baseWindow.end}`;
+  const [monthOverride, setMonthOverride] = useState<{ key: string; month: string } | null>(null);
+  const activeWindow = monthOverride?.key === windowKey ? monthWindow(monthOverride.month) : baseWindow;
+  const { start, end, label } = activeWindow;
+  const chartAnchorMonth = params.month || baseWindow.end.slice(0, 7);
   const chartWindow = useMemo(() => {
-    const base = params.month ? (() => { const [y, m] = params.month!.split('-').map(Number); return new Date(y, m - 1, 1); })() : new Date();
+    const [y, m] = chartAnchorMonth.split('-').map(Number);
+    const base = new Date(y, m - 1, 1);
     const first = new Date(base.getFullYear(), base.getMonth() - 5, 1);
     const last = new Date(base.getFullYear(), base.getMonth() + 1, 0);
     return { start: ymd(first), end: ymd(last) };
-  }, [params.month]);
+  }, [chartAnchorMonth]);
 
-  const queryCategory = isAllSpending ? undefined : name;
-  const txns = useTransactions({ start, end, category: queryCategory, collapse: false });
-  const chartTxns = useTransactions({ start: chartWindow.start, end: chartWindow.end, category: queryCategory, collapse: false });
+  const selectedMonth = end.slice(0, 7);
+  const queryCategory = params.bucket || isAllSpending ? undefined : name;
+  const allTxns = useTransactions({ start: chartWindow.start, end: chartWindow.end, category: queryCategory, bucket: params.bucket, budgetOnly: isIncome, collapse: false });
 
   const isUncat = name.toLowerCase() === 'uncategorized';
   const rows = useMemo(() => {
-    const list = (txns.data ?? []).filter((t) => {
+    const list = (allTxns.data ?? []).filter((t) => {
+      if (t.date < start || t.date > end) return false;
       if (isAllSpending) return t.amount < 0 && !/^reimbursement$/i.test(t.category || '');
       if (isIncome) return t.amount > 0;
       return isUncat ? !t.category : true;
     });
     return [...list].sort((a, b) => {
       if (sort === 'oldest') return a.date.localeCompare(b.date);
-      if (sort === 'amount') return Math.abs(b.amount) - Math.abs(a.amount);
+      if (sort === 'amountHigh') return Math.abs(b.amount) - Math.abs(a.amount);
+      if (sort === 'amountLow') return Math.abs(a.amount) - Math.abs(b.amount);
       return b.date.localeCompare(a.date);
     });
-  }, [txns.data, name, isUncat, isAllSpending, isIncome, sort]);
+  }, [allTxns.data, start, end, isUncat, isAllSpending, isIncome, sort]);
 
-  const total = useMemo(() => rows.reduce((s, t) => s + Math.abs(t.amount), 0), [rows]);
+  const total = useMemo(() => rows.reduce((s, t) => {
+    if (isIncome) return s + Math.max(0, t.amount);
+    return s + (t.amount < 0 ? Math.abs(t.amount) : -Math.abs(t.amount));
+  }, 0), [rows, isIncome]);
   const refunds = useMemo(() => rows.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0), [rows]);
   const chartMonths = useMemo(() => {
-    const base = params.month ? (() => { const [y, m] = params.month!.split('-').map(Number); return new Date(y, m - 1, 1); })() : new Date();
+    const [y, m] = chartAnchorMonth.split('-').map(Number);
+    const base = new Date(y, m - 1, 1);
     const months = Array.from({ length: 6 }, (_, i) => {
       const d = new Date(base.getFullYear(), base.getMonth() - 5 + i, 1);
       return ymd(d).slice(0, 7);
     });
     const totals = new Map(months.map((m) => [m, 0]));
-    (chartTxns.data ?? []).forEach((t) => {
+    (allTxns.data ?? []).forEach((t) => {
       const ok = isAllSpending ? t.amount < 0 && !/^reimbursement$/i.test(t.category || '') : isIncome ? t.amount > 0 : isUncat ? !t.category : true;
       if (!ok) return;
       const key = t.date.slice(0, 7);
-      if (totals.has(key)) totals.set(key, (totals.get(key) || 0) + Math.abs(t.amount));
+      if (totals.has(key)) totals.set(key, (totals.get(key) || 0) + (isIncome ? Math.max(0, t.amount) : t.amount < 0 ? Math.abs(t.amount) : -Math.abs(t.amount)));
     });
     return months.map((m) => ({ month: m, total: totals.get(m) || 0 }));
-  }, [chartTxns.data, params.month, isAllSpending, isIncome, isUncat, name]);
+  }, [allTxns.data, chartAnchorMonth, isAllSpending, isIncome, isUncat]);
   const displayName = isAllSpending ? 'Spending' : isIncome ? 'Earnings' : name;
   const icon = categoryIcon(displayName);
-  const loading = txns.isLoading && !txns.data;
-  const refreshing = txns.isFetching || chartTxns.isFetching;
-  const refresh = () => { haptics.light(); txns.refetch(); chartTxns.refetch(); };
+  const loading = allTxns.isLoading && !allTxns.data;
+  const refreshing = allTxns.isFetching;
+  const refresh = () => { haptics.light(); allTxns.refetch(); };
 
   return (
     <View style={styles.root} testID="category-detail-screen">
@@ -118,8 +169,7 @@ export default function CategoryDetail() {
           <Pressable
             testID="category-header-sort-control"
             onPress={() => {
-              const next: SortKey = sort === 'newest' ? 'oldest' : sort === 'oldest' ? 'amount' : 'newest';
-              setSort(next);
+              setSortOpen(true);
               haptics.tap();
             }}
             hitSlop={10}
@@ -131,18 +181,25 @@ export default function CategoryDetail() {
       <DemoRibbon />
       <ScrollView
         style={styles.scroll}
-        contentContainerStyle={{ paddingBottom: insets.bottom + 96 }}
+        contentContainerStyle={{ paddingBottom: insets.bottom + 86 }}
         refreshControl={<RefreshControl tintColor={colors.accent} refreshing={refreshing} onRefresh={refresh} />}
       >
         {loading ? (
           <View style={{ padding: 18 }}><SkeletonList hero rows={7} /></View>
-        ) : txns.isError && !txns.data ? (
-          <View style={{ padding: 18 }}><ErrorState error={txns.error?.error} onRetry={refresh} /></View>
+        ) : allTxns.isError && !allTxns.data ? (
+          <View style={{ padding: 18 }}><ErrorState error={allTxns.error?.error} onRetry={refresh} /></View>
         ) : (
           <>
             <View style={styles.chartPanel}>
-              <Text style={styles.chartTitle}>{label === 'This month' ? 'This Month' : label}</Text>
-              <MiniCategoryBars months={chartMonths} selected={params.month ?? ymd(new Date()).slice(0, 7)} />
+              <Text style={styles.chartTitle}>{label}</Text>
+              <MiniCategoryBars
+                months={chartMonths}
+                selected={selectedMonth}
+                onSelect={(month) => {
+                  haptics.tap();
+                  setMonthOverride({ key: windowKey, month });
+                }}
+              />
             </View>
 
             <View style={styles.transactionHeader}>
@@ -150,22 +207,21 @@ export default function CategoryDetail() {
               <Pressable
                 testID="category-sort-control"
                 onPress={() => {
-                  const next: SortKey = sort === 'newest' ? 'oldest' : sort === 'oldest' ? 'amount' : 'newest';
-                  setSort(next);
+                  setSortOpen(true);
                   haptics.tap();
                 }}
                 style={({ pressed }) => [styles.sortPill, pressed && { opacity: 0.7 }]}
               >
-                <Text style={styles.sortText}>{sort === 'newest' ? 'Newest' : sort === 'oldest' ? 'Oldest' : 'Amount'}</Text>
+                <Text style={styles.sortText}>{SORTS.find((s) => s.key === sort)?.label ?? 'Date: Newest'}</Text>
                 <SymbolView name="chevron.down" tintColor={colors.text} size={10} resizeMode="scaleAspectFit" />
               </Pressable>
             </View>
 
             {isAllSpending && refunds > 0 ? (
               <View style={styles.infoCard}>
-                <SymbolView name="banknote" tintColor="#111" size={22} resizeMode="scaleAspectFit" />
+                <SymbolView name="banknote" tintColor={colors.accentLight} size={22} resizeMode="scaleAspectFit" />
                 <Text style={styles.infoText}>Your spending includes refunds for {fmtPos(refunds)}. Refunds may impact your spending totals and percentages.</Text>
-                <SymbolView name="xmark" tintColor="#111" size={18} resizeMode="scaleAspectFit" />
+                <SymbolView name="xmark" tintColor={colors.muted} size={18} resizeMode="scaleAspectFit" />
               </View>
             ) : null}
 
@@ -222,15 +278,25 @@ export default function CategoryDetail() {
           </>
         )}
       </ScrollView>
-      <View testID="category-total-footer" style={[styles.footer, { paddingBottom: insets.bottom + 12 }]}>
+      <SortSheet
+        visible={sortOpen}
+        value={sort}
+        onClose={() => setSortOpen(false)}
+        onSelect={(next) => {
+          setSort(next);
+          setSortOpen(false);
+          haptics.tap();
+        }}
+      />
+      <View testID="category-total-footer" style={[styles.footer, { bottom: insets.bottom + 10 }]}>
         <Text style={styles.footerLabel}>Total of Transactions</Text>
-        <Text style={styles.footerValue}>{fmtPos(total)}</Text>
+        <Text style={styles.footerValue}>{total < 0 ? '-' : ''}{fmtPos(Math.abs(total))}</Text>
       </View>
     </View>
   );
 }
 
-function MiniCategoryBars({ months, selected }: { months: { month: string; total: number }[]; selected: string }) {
+function MiniCategoryBars({ months, selected, onSelect }: { months: { month: string; total: number }[]; selected: string; onSelect: (month: string) => void }) {
   const max = Math.max(1, ...months.map((m) => m.total));
   return (
     <View style={styles.barChart}>
@@ -238,48 +304,88 @@ function MiniCategoryBars({ months, selected }: { months: { month: string; total
         const on = m.month === selected;
         const h = Math.max(2, (m.total / max) * 86);
         return (
-          <View key={m.month} style={styles.barCol}>
-            <Text style={styles.barValue}>{m.total > 0 ? fmtPos(m.total).replace('.00', '') : ''}</Text>
+          <Pressable
+            key={m.month}
+            testID={on ? `category-month-bar-${m.month}-selected` : `category-month-bar-${m.month}`}
+            onPress={() => onSelect(m.month)}
+            style={({ pressed }) => [styles.barCol, pressed && { opacity: 0.65 }]}
+          >
+            <Text style={styles.barValue}>{m.total > 0 ? compactMoney(m.total) : ''}</Text>
             <View style={[styles.bar, { height: h }, on && styles.barOn]} />
             <Text style={[styles.barLabel, on && styles.barLabelOn]}>{monthLabel(m.month).split(' ')[0]}</Text>
-          </View>
+          </Pressable>
         );
       })}
     </View>
   );
 }
 
+function SortSheet({ visible, value, onSelect, onClose }: { visible: boolean; value: SortKey; onSelect: (key: SortKey) => void; onClose: () => void }) {
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable testID="category-sort-sheet-backdrop" style={styles.sheetBackdrop} onPress={onClose}>
+        <Pressable testID="category-sort-sheet" style={styles.sheetCard} onPress={() => undefined}>
+          <View style={styles.sheetHandle} />
+          <Text style={styles.sheetTitle}>Sort transactions</Text>
+          {SORTS.map((option) => {
+            const selected = option.key === value;
+            return (
+              <Pressable
+                key={option.key}
+                testID={`category-sort-option-${option.key}`}
+                accessibilityLabel={option.label}
+                onPress={() => onSelect(option.key)}
+                style={({ pressed }) => [styles.sheetOption, pressed && { opacity: 0.7 }]}
+              >
+                <Text style={[styles.sheetOptionText, selected && styles.sheetOptionTextOn]}>{option.label}</Text>
+                {selected ? <SymbolView name="checkmark.circle.fill" tintColor={colors.accentLight} size={19} resizeMode="scaleAspectFit" /> : null}
+              </Pressable>
+            );
+          })}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  header: { minHeight: 82, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 22, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)' },
+  header: { minHeight: 82, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   headerBtn: { width: 34, height: 34, alignItems: 'flex-start', justifyContent: 'center' },
   headerTitle: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   title: { color: colors.text, fontSize: 19, fontWeight: '900', letterSpacing: -0.3 },
   headerActions: { width: 72, flexDirection: 'row', justifyContent: 'flex-end', gap: 16 },
   scroll: { flex: 1 },
-  chartPanel: { backgroundColor: '#242426', paddingHorizontal: 24, paddingTop: 18, paddingBottom: 18 },
-  chartTitle: { color: colors.text, fontSize: 21, fontWeight: '900', marginBottom: 12 },
-  barChart: { height: 150, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' },
+  chartPanel: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: 16, margin: 16, paddingHorizontal: 16, paddingTop: 16, paddingBottom: 14 },
+  chartTitle: { color: colors.text, fontSize: 20, fontWeight: '800', marginBottom: 12, letterSpacing: -0.3 },
+  barChart: { height: 132, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' },
   barCol: { flex: 1, alignItems: 'center', justifyContent: 'flex-end', minWidth: 48 },
-  barValue: { color: colors.text, fontSize: 12, fontWeight: '700', marginBottom: 4 },
-  bar: { width: 42, borderRadius: 9, backgroundColor: '#6f8df7' },
-  barOn: { backgroundColor: '#7f99ff' },
+  barValue: { color: colors.muted, fontSize: 11, fontWeight: '700', marginBottom: 5 },
+  bar: { width: 34, borderRadius: 9, backgroundColor: 'rgba(124,110,247,0.35)' },
+  barOn: { backgroundColor: colors.accentLight },
   barLabel: { color: colors.muted, fontSize: 12, marginTop: 8 },
-  barLabelOn: { color: '#111', backgroundColor: '#fff', borderRadius: 999, overflow: 'hidden', paddingHorizontal: 10, paddingVertical: 4, fontWeight: '800' },
-  transactionHeader: { minHeight: 72, paddingHorizontal: 23, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.bg, borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.12)' },
-  sectionLabel: { color: colors.text, textTransform: 'uppercase', letterSpacing: 1.1, fontSize: 13, fontWeight: '900' },
-  sortPill: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#4a4a4d', borderRadius: 22, paddingHorizontal: 15, paddingVertical: 10 },
-  sortText: { color: colors.text, fontSize: 16, fontWeight: '800' },
-  infoCard: { margin: 23, marginBottom: 8, backgroundColor: '#b6cbff', borderRadius: 16, flexDirection: 'row', alignItems: 'center', gap: 14, padding: 18 },
-  infoText: { color: '#111', fontSize: 14, lineHeight: 19, flex: 1 },
-  list: { backgroundColor: '#242426' },
-  row: { minHeight: 86, flexDirection: 'row', alignItems: 'center', gap: 16, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.14)' },
+  barLabelOn: { color: colors.accentLight, backgroundColor: 'rgba(124,110,247,0.16)', borderColor: 'rgba(168,152,255,0.35)', borderWidth: 1, borderRadius: 999, overflow: 'hidden', paddingHorizontal: 10, paddingVertical: 4, fontWeight: '800' },
+  transactionHeader: { minHeight: 58, marginHorizontal: 16, marginBottom: 8, paddingHorizontal: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  sectionLabel: { color: colors.text, textTransform: 'uppercase', letterSpacing: 1.1, fontSize: 12, fontWeight: '900' },
+  sortPill: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8 },
+  sortText: { color: colors.text, fontSize: 13, fontWeight: '700' },
+  infoCard: { margin: 16, marginTop: 0, backgroundColor: 'rgba(124,110,247,0.14)', borderColor: 'rgba(168,152,255,0.28)', borderWidth: 1, borderRadius: 14, flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14 },
+  infoText: { color: colors.text, fontSize: 13, lineHeight: 18, flex: 1 },
+  list: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: 16, marginHorizontal: 16, overflow: 'hidden' },
+  row: { minHeight: 62, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   mid: { flex: 1, minWidth: 0 },
   payeeLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  payee: { color: colors.text, fontSize: 18, fontWeight: '700' },
-  sub: { color: colors.text, opacity: 0.62, fontSize: 15, marginTop: 5 },
-  amt: { fontSize: 18, fontWeight: '800' },
-  footer: { position: 'absolute', left: 0, right: 0, bottom: 0, minHeight: 64, paddingHorizontal: 28, paddingTop: 14, flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', backgroundColor: '#242426', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(255,255,255,0.16)' },
-  footerLabel: { color: colors.text, opacity: 0.6, fontSize: 15, fontWeight: '700' },
-  footerValue: { color: colors.text, fontSize: 18, fontWeight: '900' },
+  payee: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  sub: { color: colors.muted, fontSize: 12, marginTop: 3 },
+  amt: { fontSize: 15, fontWeight: '800' },
+  footer: { position: 'absolute', left: 14, right: 14, minHeight: 50, paddingHorizontal: 16, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16 },
+  footerLabel: { color: colors.muted, fontSize: 13, fontWeight: '700' },
+  footerValue: { color: colors.text, fontSize: 17, fontWeight: '900' },
+  sheetBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.48)' },
+  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, borderColor: colors.border, borderWidth: 1, paddingHorizontal: 18, paddingTop: 10, paddingBottom: 28 },
+  sheetHandle: { alignSelf: 'center', width: 42, height: 4, borderRadius: 2, backgroundColor: colors.border, marginBottom: 16 },
+  sheetTitle: { color: colors.text, fontSize: 18, fontWeight: '800', marginBottom: 10 },
+  sheetOption: { minHeight: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  sheetOptionText: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  sheetOptionTextOn: { color: colors.accentLight, fontWeight: '800' },
 });

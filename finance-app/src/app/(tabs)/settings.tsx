@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, Pressable, Share, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
 import * as Updates from 'expo-updates';
@@ -10,13 +10,14 @@ import { useServerConfig } from '@/state/server';
 import { testConnection } from '@/api/client/requests';
 import { authenticate, isBiometricAvailable } from '@/lib/biometric';
 import { DASHBOARD_WIDGETS, useDashboardWidgets } from '@/lib/dashboard-widgets';
-import { DEFAULT_LOW_BALANCE, DEFAULT_THRESHOLD, ensurePermission, getNotifSettings, NOTIF } from '@/lib/notifications';
+import { buildRedactedDiagnostics } from '@/lib/diagnostics';
+import { DEFAULT_LOW_BALANCE, DEFAULT_THRESHOLD, ensurePermission, getNotifSettings, NOTIF, notifyNotifSettingsChanged } from '@/lib/notifications';
 import { kv } from '@/lib/storage';
 import { colors } from '@/theme/colors';
 
 type NotifKey = 'bills' | 'largeCharge' | 'newSub' | 'weekly' | 'lowBalance' | 'repayments';
 
-const mask = (t: string | null) => (t ? `${t.slice(0, 6)}…${t.slice(-4)}` : '—');
+const mask = (t: string | null) => (t ? `••••${t.slice(-4)}` : '—');
 
 export default function Settings() {
   const { serverUrl, token, faceId, demo, setConfig, clear } = useServerConfig();
@@ -31,16 +32,14 @@ export default function Settings() {
   const [lowText, setLowText] = useState(String(getNotifSettings().lowBalanceThreshold || DEFAULT_LOW_BALANCE));
   const reconPending = useReconcilePending();
   const setReconcileEnabled = useSetReconcileEnabled();
-  const [reconEnabled, setReconEnabled] = useState(false);
+  const [reconEnabled, setReconEnabled] = useState<boolean | null>(null);
   const dashboard = useDashboardWidgets();
 
   useEffect(() => {
     isBiometricAvailable().then(setBioAvailable);
   }, []);
 
-  useEffect(() => {
-    if (reconPending.data) setReconEnabled(!!reconPending.data.enabled);
-  }, [reconPending.data]);
+  const reconEnabledValue = reconEnabled ?? !!reconPending.data?.enabled;
 
   const toggleNotif = async (key: NotifKey, value: boolean) => {
     if (value && !(await ensurePermission())) {
@@ -49,6 +48,7 @@ export default function Settings() {
     }
     kv.setBool(NOTIF[key], value);
     setNotif(getNotifSettings());
+    notifyNotifSettingsChanged();
   };
 
   const saveThreshold = () => {
@@ -56,6 +56,7 @@ export default function Settings() {
     if (n > 0) {
       kv.setNum(NOTIF.threshold, n);
       setNotif(getNotifSettings());
+      notifyNotifSettingsChanged();
       setStatus(`Large-charge threshold set to $${n}`);
     }
   };
@@ -65,6 +66,7 @@ export default function Settings() {
     if (n > 0) {
       kv.setNum(NOTIF.lowBalanceThreshold, n);
       setNotif(getNotifSettings());
+      notifyNotifSettingsChanged();
       setStatus(`Low-balance alert set to $${n}`);
     }
   };
@@ -91,6 +93,13 @@ export default function Settings() {
       setUpdateStatus(e?.message || 'Update check failed');
     }
   };
+  const exportDiagnostics = async () => {
+    const diagnostics = buildRedactedDiagnostics({ serverUrl, demo, faceId });
+    await Share.share({
+      title: 'DarkFinances diagnostics',
+      message: JSON.stringify(diagnostics, null, 2),
+    });
+  };
 
   const toggleFaceId = async (value: boolean) => {
     if (value) {
@@ -103,7 +112,9 @@ export default function Settings() {
   const test = async () => {
     setStatus('Testing…');
     try {
-      const ok = await testConnection(serverUrl ?? '', token ?? '');
+      const candidateUrl = editUrl.trim() || serverUrl || '';
+      const candidateToken = newToken.trim() || token || '';
+      const ok = await testConnection(candidateUrl, candidateToken, demo);
       setStatus(ok ? 'Connected ✓' : 'Failed');
     } catch (e: any) {
       setStatus(e?.error || e?.message || 'Failed');
@@ -112,15 +123,40 @@ export default function Settings() {
 
   const saveUrl = async () => {
     if (editUrl.trim()) {
-      await setConfig({ serverUrl: editUrl.trim() });
-      setStatus('Server URL updated');
+      setStatus('Verifying server…');
+      try {
+        const ok = await testConnection(editUrl.trim(), newToken.trim() || token || '', demo);
+        if (!ok) throw new Error('Server did not confirm');
+        await setConfig({ serverUrl: editUrl.trim() });
+        setStatus('Server URL updated');
+      } catch (e: any) {
+        setStatus(e?.error || e?.message || 'Could not verify server');
+      }
     }
   };
   const saveToken = async () => {
     if (newToken.trim()) {
-      await setConfig({ token: newToken.trim() });
-      setNewToken('');
-      setStatus('Token updated');
+      setStatus('Verifying token…');
+      try {
+        const ok = await testConnection(editUrl.trim() || serverUrl || '', newToken.trim(), false);
+        if (!ok) throw new Error('Server did not confirm');
+        await setConfig({ token: newToken.trim() });
+        setNewToken('');
+        setStatus('Token updated');
+      } catch (e: any) {
+        setStatus(e?.error || e?.message || 'Could not verify token');
+      }
+    }
+  };
+  const setDemoMode = async (value: boolean) => {
+    try {
+      if (value) {
+        const ok = await testConnection(editUrl.trim() || serverUrl || '', token || '', true);
+        if (!ok) throw new Error('Demo endpoint did not confirm');
+      }
+      await setConfig({ demo: value });
+    } catch (e: any) {
+      Alert.alert('Could not change demo mode', e?.error || e?.message || 'Please try again.');
     }
   };
 
@@ -132,19 +168,19 @@ export default function Settings() {
   };
 
   return (
-    <Screen title="Settings">
+    <Screen title="Settings" testID="settings-screen">
       <CardTitle>Connection</CardTitle>
       <Card style={{ marginBottom: 16 }}>
         <Text style={styles.label}>Server URL</Text>
-        <TextInput style={styles.input} value={editUrl} onChangeText={setEditUrl} autoCapitalize="none" autoCorrect={false} />
-        <Pressable style={({ pressed }) => [styles.smallBtn, pressed && { opacity: 0.85 }]} onPress={saveUrl}><Text style={styles.smallBtnText}>Save URL</Text></Pressable>
+        <TextInput testID="settings-server-url-input" style={styles.input} value={editUrl} onChangeText={setEditUrl} autoCapitalize="none" autoCorrect={false} />
+        <Pressable testID="settings-save-url-button" style={({ pressed }) => [styles.smallBtn, pressed && { opacity: 0.85 }]} onPress={saveUrl}><Text style={styles.smallBtnText}>Save URL</Text></Pressable>
 
         <Text style={[styles.label, { marginTop: 16 }]}>API Token</Text>
         <Text style={styles.maskedToken}>{mask(token)}</Text>
-        <TextInput style={styles.input} value={newToken} onChangeText={setNewToken} autoCapitalize="none" autoCorrect={false} secureTextEntry placeholder="Replace token…" placeholderTextColor={colors.muted} />
-        <Pressable style={({ pressed }) => [styles.smallBtn, pressed && { opacity: 0.85 }]} onPress={saveToken}><Text style={styles.smallBtnText}>Update Token</Text></Pressable>
+        <TextInput testID="settings-token-input" style={styles.input} value={newToken} onChangeText={setNewToken} autoCapitalize="none" autoCorrect={false} secureTextEntry placeholder="Replace token…" placeholderTextColor={colors.muted} />
+        <Pressable testID="settings-save-token-button" style={({ pressed }) => [styles.smallBtn, pressed && { opacity: 0.85 }]} onPress={saveToken}><Text style={styles.smallBtnText}>Update Token</Text></Pressable>
 
-        <Pressable style={({ pressed }) => [styles.smallBtn, { marginTop: 16, backgroundColor: colors.surface2 }, pressed && { opacity: 0.7 }]} onPress={test}>
+        <Pressable testID="settings-test-connection-button" style={({ pressed }) => [styles.smallBtn, { marginTop: 16, backgroundColor: colors.surface2 }, pressed && { opacity: 0.7 }]} onPress={test}>
           <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>Test Connection</Text>
         </Pressable>
         {status ? <Text style={styles.status}>{status}</Text> : null}
@@ -157,7 +193,7 @@ export default function Settings() {
             <Text style={styles.switchLabel}>Face ID Lock</Text>
             <Text style={styles.switchSub}>{bioAvailable ? 'Require Face ID on open' : 'Not available on this device'}</Text>
           </View>
-          <Switch value={faceId} onValueChange={toggleFaceId} disabled={!bioAvailable} trackColor={{ true: colors.accent }} />
+          <Switch testID="settings-face-id-switch" value={faceId} onValueChange={toggleFaceId} disabled={!bioAvailable} trackColor={{ true: colors.accent }} />
         </View>
       </Card>
 
@@ -168,7 +204,7 @@ export default function Settings() {
             <Text style={styles.switchLabel}>Show demo data</Text>
             <Text style={styles.switchSub}>Replace everything with sample finances — safe to show others. Your real data is never touched.</Text>
           </View>
-          <Switch value={demo} onValueChange={(v) => setConfig({ demo: v })} trackColor={{ true: colors.accent }} />
+          <Switch testID="settings-demo-mode-switch" value={demo} onValueChange={setDemoMode} trackColor={{ true: colors.accent }} />
         </View>
       </Card>
 
@@ -180,14 +216,14 @@ export default function Settings() {
               <Text style={styles.switchLabel}>{w.label}</Text>
               <Text style={styles.switchSub}>Show on Home</Text>
             </View>
-            <Switch value={dashboard.visible[w.key]} onValueChange={(v) => dashboard.setVisible(w.key, v)} trackColor={{ true: colors.accent }} />
+            <Switch testID={`settings-dashboard-${w.key}-switch`} value={dashboard.visible[w.key]} onValueChange={(v) => dashboard.setVisible(w.key, v)} trackColor={{ true: colors.accent }} />
           </View>
         ))}
       </Card>
 
       <CardTitle>Automation</CardTitle>
       <Card style={{ marginBottom: 16 }}>
-        <Pressable style={({ pressed }) => [styles.navRow, styles.rowDivider, pressed && { opacity: 0.6 }]} onPress={() => router.push('/rules')}>
+        <Pressable testID="settings-rules-row" style={({ pressed }) => [styles.navRow, styles.rowDivider, pressed && { opacity: 0.6 }]} onPress={() => router.push('/rules')}>
           <View style={{ flex: 1, paddingRight: 12 }}>
             <Text style={styles.switchLabel}>Categorization Rules</Text>
             <Text style={styles.switchSub}>Auto-categorize transactions by payee</Text>
@@ -195,7 +231,7 @@ export default function Settings() {
           <Text style={styles.navArrow}>›</Text>
         </Pressable>
 
-        <Pressable style={({ pressed }) => [styles.navRow, styles.rowDivider, pressed && { opacity: 0.6 }]} onPress={() => router.push('/events')}>
+        <Pressable testID="settings-events-row" style={({ pressed }) => [styles.navRow, styles.rowDivider, pressed && { opacity: 0.6 }]} onPress={() => router.push('/events')}>
           <View style={{ flex: 1, paddingRight: 12 }}>
             <Text style={styles.switchLabel}>Trips & Events</Text>
             <Text style={styles.switchSub}>Group charges for a trip and track who owes you</Text>
@@ -206,16 +242,17 @@ export default function Settings() {
         <View style={[styles.switchRow, styles.rowDivider]}>
           <View style={{ flex: 1, paddingRight: 12 }}>
             <Text style={styles.switchLabel}>Monthly reconciliation</Text>
-            <Text style={styles.switchSub}>At month-end, review every expense and close out the month. You'll be reminded until it's done.</Text>
+            <Text style={styles.switchSub}>At month-end, review every expense and close out the month. You will be reminded until it is done.</Text>
           </View>
           <Switch
-            value={reconEnabled}
+            testID="settings-reconciliation-switch"
+            value={reconEnabledValue}
             onValueChange={(v) => { setReconEnabled(v); setReconcileEnabled.mutate({ enabled: v }); }}
             trackColor={{ true: colors.accent }}
           />
         </View>
 
-        <Pressable style={({ pressed }) => [styles.navRow, pressed && { opacity: 0.6 }]} onPress={() => router.push('/reconcile')}>
+        <Pressable testID="settings-reconcile-row" style={({ pressed }) => [styles.navRow, pressed && { opacity: 0.6 }]} onPress={() => router.push('/reconcile')}>
           <View style={{ flex: 1, paddingRight: 12 }}>
             <Text style={styles.switchLabel}>Reconcile a month</Text>
             <Text style={styles.switchSub}>Review a past month now</Text>
@@ -226,24 +263,24 @@ export default function Settings() {
 
       <CardTitle>Notifications</CardTitle>
       <Card style={{ marginBottom: 16 }}>
-        <NotifSwitch label="Bills due" sub="Remind me the day before" value={notif.bills} onChange={(v) => toggleNotif('bills', v)} />
-        <NotifSwitch label="Large charges" sub={`Alert over $${notif.threshold}`} value={notif.largeCharge} onChange={(v) => toggleNotif('largeCharge', v)} />
+        <NotifSwitch testID="settings-notif-bills" label="Bills due" sub="Remind me the day before" value={notif.bills} onChange={(v) => toggleNotif('bills', v)} />
+        <NotifSwitch testID="settings-notif-large-charge" label="Large charges" sub={`Alert over $${notif.threshold}`} value={notif.largeCharge} onChange={(v) => toggleNotif('largeCharge', v)} />
         {notif.largeCharge ? (
           <View style={styles.thresholdRow}>
             <Text style={styles.switchSub}>Large-charge threshold ($)</Text>
-            <TextInput style={styles.thresholdInput} value={thresholdText} onChangeText={setThresholdText} onBlur={saveThreshold} keyboardType="decimal-pad" />
+            <TextInput testID="settings-large-charge-threshold-input" style={styles.thresholdInput} value={thresholdText} onChangeText={setThresholdText} onBlur={saveThreshold} keyboardType="decimal-pad" />
           </View>
         ) : null}
-        <NotifSwitch label="Low balance" sub={`Alert under $${notif.lowBalanceThreshold} in a cash account`} value={notif.lowBalance} onChange={(v) => toggleNotif('lowBalance', v)} />
+        <NotifSwitch testID="settings-notif-low-balance" label="Low balance" sub={`Alert under $${notif.lowBalanceThreshold} in a cash account`} value={notif.lowBalance} onChange={(v) => toggleNotif('lowBalance', v)} />
         {notif.lowBalance ? (
           <View style={styles.thresholdRow}>
             <Text style={styles.switchSub}>Low-balance threshold ($)</Text>
-            <TextInput style={styles.thresholdInput} value={lowText} onChangeText={setLowText} onBlur={saveLowThreshold} keyboardType="decimal-pad" />
+            <TextInput testID="settings-low-balance-threshold-input" style={styles.thresholdInput} value={lowText} onChangeText={setLowText} onBlur={saveLowThreshold} keyboardType="decimal-pad" />
           </View>
         ) : null}
-        <NotifSwitch label="New subscriptions" sub="When a new recurring charge appears" value={notif.newSub} onChange={(v) => toggleNotif('newSub', v)} />
-        <NotifSwitch label="Repayments to review" sub="When an incoming payment may settle a debt" value={notif.repayments} onChange={(v) => toggleNotif('repayments', v)} />
-        <NotifSwitch label="Weekly digest" sub="Sunday 9am check-in" value={notif.weekly} onChange={(v) => toggleNotif('weekly', v)} last />
+        <NotifSwitch testID="settings-notif-new-sub" label="New subscriptions" sub="When a new recurring charge appears" value={notif.newSub} onChange={(v) => toggleNotif('newSub', v)} />
+        <NotifSwitch testID="settings-notif-repayments" label="Repayments to review" sub="When an incoming payment may settle a debt" value={notif.repayments} onChange={(v) => toggleNotif('repayments', v)} />
+        <NotifSwitch testID="settings-notif-weekly" label="Weekly digest" sub="Sunday 9am check-in" value={notif.weekly} onChange={(v) => toggleNotif('weekly', v)} last />
         <Text style={styles.notifHint}>Alerts are on-device and refresh when you open the app.</Text>
       </Card>
 
@@ -257,27 +294,30 @@ export default function Settings() {
           <Text style={styles.aboutKey}>Channel</Text>
           <Text style={styles.aboutVal}>{Updates.channel || 'dev'}</Text>
         </View>
-        <Pressable style={({ pressed }) => [styles.smallBtn, { marginTop: 12, backgroundColor: colors.surface2 }, pressed && { opacity: 0.7 }]} onPress={checkUpdates}>
+        <Pressable testID="settings-check-updates-button" style={({ pressed }) => [styles.smallBtn, { marginTop: 12, backgroundColor: colors.surface2 }, pressed && { opacity: 0.7 }]} onPress={checkUpdates}>
           <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>Check for Updates</Text>
+        </Pressable>
+        <Pressable testID="settings-export-diagnostics-button" style={({ pressed }) => [styles.smallBtn, { marginTop: 8, backgroundColor: colors.surface2 }, pressed && { opacity: 0.7 }]} onPress={exportDiagnostics}>
+          <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>Export Redacted Diagnostics</Text>
         </Pressable>
         {updateStatus ? <Text style={styles.status}>{updateStatus}</Text> : null}
       </Card>
 
-      <Pressable style={({ pressed }) => [styles.disconnect, pressed && { opacity: 0.7 }]} onPress={disconnect}>
+      <Pressable testID="settings-disconnect-button" style={({ pressed }) => [styles.disconnect, pressed && { opacity: 0.7 }]} onPress={disconnect}>
         <Text style={styles.disconnectText}>Disconnect</Text>
       </Pressable>
     </Screen>
   );
 }
 
-function NotifSwitch({ label, sub, value, onChange, last }: { label: string; sub: string; value: boolean; onChange: (v: boolean) => void; last?: boolean }) {
+function NotifSwitch({ label, sub, value, onChange, last, testID }: { label: string; sub: string; value: boolean; onChange: (v: boolean) => void; last?: boolean; testID?: string }) {
   return (
     <View style={[styles.switchRow, styles.notifRow, last && { borderBottomWidth: 0 }]}>
       <View style={{ flex: 1, paddingRight: 12 }}>
         <Text style={styles.switchLabel}>{label}</Text>
         <Text style={styles.switchSub}>{sub}</Text>
       </View>
-      <Switch value={value} onValueChange={onChange} trackColor={{ true: colors.accent }} />
+      <Switch testID={testID} value={value} onValueChange={onChange} trackColor={{ true: colors.accent }} />
     </View>
   );
 }

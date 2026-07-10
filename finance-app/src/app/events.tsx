@@ -5,10 +5,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useDeleteEvent, useEvents, useSaveEvent } from '@/api/hooks/finance.hooks';
 import { Card, CardTitle } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
+import { financeToday, isDateOnly } from '@/lib/date-only';
 import { haptics } from '@/lib/haptics';
 import { colors } from '@/theme/colors';
-
-const todayYMD = () => new Date().toISOString().slice(0, 10);
 
 export default function Events() {
   const insets = useSafeAreaInsets();
@@ -18,7 +17,7 @@ export default function Events() {
   const deleteEvent = useDeleteEvent();
 
   const [name, setName] = useState('');
-  const [start, setStart] = useState(todayYMD());
+  const [start, setStart] = useState(financeToday());
   const [members, setMembers] = useState('');
   const [group, setGroup] = useState('');
 
@@ -26,15 +25,20 @@ export default function Events() {
 
   const add = () => {
     if (!canAdd) return;
+    const startDate = start.trim() || financeToday();
+    if (!isDateOnly(startDate)) {
+      Alert.alert('Invalid start date', 'Use a real date in YYYY-MM-DD format.');
+      return;
+    }
     haptics.tap();
     saveEvent.mutate(
-      { name: name.trim(), start: start.trim() || todayYMD(), members: members.trim(), group: group.trim() },
+      { name: name.trim(), start: startDate, members: members.trim(), group: group.trim() },
       {
         onSuccess: (r) => {
           setName('');
           setMembers('');
           setGroup('');
-          setStart(todayYMD());
+          setStart(financeToday());
           Alert.alert(
             'Trip created',
             `Tag any charge with #ev-${r?.event?.slug} to add it to “${r?.event?.name}”.` +
@@ -55,7 +59,7 @@ export default function Events() {
   const list = events.data?.events ?? [];
 
   return (
-    <ScrollView style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
+    <ScrollView testID="events-screen" style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
       <Stack.Screen options={{ title: 'Trips & Events' }} />
 
       <Text style={styles.intro}>
@@ -66,18 +70,18 @@ export default function Events() {
       <CardTitle style={{ marginTop: 8 }}>New trip / event</CardTitle>
       <Card>
         <Text style={styles.label}>Name</Text>
-        <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="e.g. Summer trip 2026" placeholderTextColor={colors.muted} autoCorrect={false} />
+        <TextInput testID="events-name-input" style={styles.input} value={name} onChangeText={setName} placeholder="e.g. Summer trip 2026" placeholderTextColor={colors.muted} autoCorrect={false} />
 
         <Text style={[styles.label, { marginTop: 12 }]}>Start date</Text>
-        <TextInput style={styles.input} value={start} onChangeText={setStart} placeholder="YYYY-MM-DD" placeholderTextColor={colors.muted} autoCapitalize="none" autoCorrect={false} />
+        <TextInput testID="events-start-input" style={styles.input} value={start} onChangeText={setStart} placeholder="YYYY-MM-DD" placeholderTextColor={colors.muted} autoCapitalize="none" autoCorrect={false} />
 
         <Text style={[styles.label, { marginTop: 12 }]}>People (comma-separated)</Text>
-        <TextInput style={styles.input} value={members} onChangeText={setMembers} placeholder="e.g. alex, sam, jordan" placeholderTextColor={colors.muted} autoCapitalize="none" autoCorrect={false} />
+        <TextInput testID="events-members-input" style={styles.input} value={members} onChangeText={setMembers} placeholder="e.g. alex, sam, jordan" placeholderTextColor={colors.muted} autoCapitalize="none" autoCorrect={false} />
 
         <Text style={[styles.label, { marginTop: 12 }]}>Splitwise group (optional)</Text>
-        <TextInput style={styles.input} value={group} onChangeText={setGroup} placeholder="Exact Splitwise group name" placeholderTextColor={colors.muted} autoCorrect={false} />
+        <TextInput testID="events-group-input" style={styles.input} value={group} onChangeText={setGroup} placeholder="Exact Splitwise group name" placeholderTextColor={colors.muted} autoCorrect={false} />
 
-        <Pressable style={({ pressed }) => [styles.addBtn, !canAdd && { opacity: 0.4 }, pressed && { opacity: 0.85 }]} onPress={add} disabled={!canAdd}>
+        <Pressable testID="events-create-button" style={({ pressed }) => [styles.addBtn, !canAdd && { opacity: 0.4 }, pressed && { opacity: 0.85 }]} onPress={add} disabled={!canAdd}>
           <Text style={styles.addText}>{saveEvent.isPending ? 'Saving…' : 'Create trip'}</Text>
         </Pressable>
       </Card>
@@ -89,6 +93,7 @@ export default function Events() {
         <Card style={styles.list}>
           {list.map((e, i) => (
             <Pressable
+              testID={`events-row-${e.slug}`}
               key={e.slug}
               style={({ pressed }) => [styles.row, i === list.length - 1 && { borderBottomWidth: 0 }, pressed && { opacity: 0.6 }]}
               onLongPress={() => remove(e.slug, e.name)}

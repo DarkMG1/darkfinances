@@ -134,7 +134,7 @@ export default function Reimbursement() {
   };
 
   return (
-    <PushScreen refreshing={reimb.isFetching || suggestions.isFetching} onRefresh={() => { reimb.refetch(); suggestions.refetch(); }}>
+    <PushScreen testID="reimbursement-screen" refreshing={reimb.isFetching || suggestions.isFetching} onRefresh={() => { reimb.refetch(); suggestions.refetch(); }}>
       {loading ? (
         <SkeletonList rows={5} />
       ) : reimb.isError && !reimb.data ? (
@@ -151,6 +151,7 @@ export default function Reimbursement() {
                 const on = r.key === range;
                 return (
                   <Pressable
+                    testID={`reimbursement-range-${r.key}${on ? '-selected' : ''}`}
                     key={r.key}
                     onPress={() => { haptics.tap(); setRange(r.key); }}
                     style={({ pressed }) => [styles.rangeChip, on && styles.rangeChipOn, pressed && { opacity: 0.7 }]}
@@ -187,7 +188,7 @@ export default function Reimbursement() {
                 {sugg.map((s, i) => {
                   const busy = acting === s.id;
                   return (
-                    <View key={s.id} style={[styles.suggest, i > 0 && styles.suggestDivider]}>
+                    <View key={s.id} testID={`reimbursement-suggestion-${i}`} style={[styles.suggest, i > 0 && styles.suggestDivider]}>
                       <View style={styles.suggestHead}>
                         <Avatar label={cap(s.person)} size={34} />
                         <View style={{ flex: 1, minWidth: 0 }}>
@@ -203,14 +204,14 @@ export default function Reimbursement() {
                             <Text key={j} style={styles.alloc} numberOfLines={1}>• {a.expense.payee || 'charge'} — {fmtPos(a.amount)}</Text>
                           ))}
                           {s.allocations.length > 4 ? <Text style={styles.alloc}>+{s.allocations.length - 4} more</Text> : null}
-                          {s.remainder > 0.005 ? <Text style={[styles.alloc, { color: colors.yellow }]}>• {fmtPos(s.remainder)} extra (over what's tracked)</Text> : null}
+                          {s.remainder > 0.005 ? <Text style={[styles.alloc, { color: colors.yellow }]}>• {fmtPos(s.remainder)} extra (over what is tracked)</Text> : null}
                         </View>
                       ) : null}
                       <View style={styles.suggestActions}>
-                        <Pressable onPress={() => onConfirm(s)} disabled={busy} style={({ pressed }) => [styles.confirmBtn, pressed && { opacity: 0.7 }, busy && { opacity: 0.5 }]}>
+                        <Pressable testID={`reimbursement-suggestion-confirm-${i}`} onPress={() => onConfirm(s)} disabled={busy} style={({ pressed }) => [styles.confirmBtn, pressed && { opacity: 0.7 }, busy && { opacity: 0.5 }]}>
                           {busy && confirm.isPending ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.confirmText}>Confirm</Text>}
                         </Pressable>
-                        <Pressable onPress={() => onDismiss(s)} disabled={busy} style={({ pressed }) => [styles.dismissBtn, pressed && { opacity: 0.7 }, busy && { opacity: 0.5 }]}>
+                        <Pressable testID={`reimbursement-suggestion-dismiss-${i}`} onPress={() => onDismiss(s)} disabled={busy} style={({ pressed }) => [styles.dismissBtn, pressed && { opacity: 0.7 }, busy && { opacity: 0.5 }]}>
                           <Text style={styles.dismissText}>Dismiss</Text>
                         </Pressable>
                       </View>
@@ -232,7 +233,7 @@ export default function Reimbursement() {
                 const status = personStatus(p);
                 return (
                   <View key={p.slug} style={idx > 0 ? styles.personDivider : undefined}>
-                    <Pressable style={styles.personRow} onPress={() => toggle(p.slug)}>
+                    <Pressable testID={`reimbursement-person-${p.slug}`} style={styles.personRow} onPress={() => toggle(p.slug)}>
                       <Avatar label={cap(p.slug)} size={38} />
                       <View style={{ flex: 1, minWidth: 0 }}>
                         <Text style={styles.name}>{cap(p.slug)}</Text>
@@ -263,6 +264,7 @@ export default function Reimbursement() {
                             <Text style={styles.chargesLabel}>Fronts</Text>
                             {p.legs.map((l, j) => (
                               <Pressable
+                                testID={`reimbursement-person-${p.slug}-leg-${j}`}
                                 key={`${l.id || l.date}-${j}`}
                                 disabled={!l.id || !l.accountId}
                                 onPress={() => openLeg(l)}
@@ -294,7 +296,7 @@ export default function Reimbursement() {
               <Card>
                 {bucketList.map((bk, i) => (
                   <View key={bk.name} style={i > 0 ? styles.personDivider : undefined}>
-                    <Pressable style={styles.personRow} onPress={() => toggle(`__b_${bk.name}`)}>
+                    <Pressable testID={`reimbursement-bucket-${i}`} style={styles.personRow} onPress={() => toggle(`__b_${bk.name}`)}>
                       <View style={{ flex: 1, minWidth: 0 }}>
                         <Text style={styles.name}>{bucketTitle(bk.name)}</Text>
                         <Text style={styles.sub}>{bk.count} charge{bk.count === 1 ? '' : 's'} · not yet split per person</Text>
@@ -306,6 +308,7 @@ export default function Reimbursement() {
                       <View style={styles.charges}>
                         {bk.legs.map((l, j) => (
                           <Pressable
+                            testID={`reimbursement-bucket-${i}-leg-${j}`}
                             key={`${l.id || l.date}-${j}`}
                             disabled={!l.id || !l.accountId}
                             onPress={() => openLeg(l)}

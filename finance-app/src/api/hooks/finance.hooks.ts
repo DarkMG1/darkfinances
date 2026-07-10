@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useFinanceMutation, useFinanceQuery } from '@/api/client/requests';
 import { getServerAuthHeaders } from '@/api/client/server-auth';
@@ -20,6 +21,7 @@ import {
   ManualAssets,
   MerchantHistory,
   OkResult,
+  Ping,
   Receipt,
   Receipts,
   ReconcilePending,
@@ -44,6 +46,48 @@ import {
   Trends,
 } from '@/api/generated/types';
 
+const TRANSACTION_DERIVED_KEYS = [
+  API_ENDPOINTS.accounts.key,
+  API_ENDPOINTS.transactions.key,
+  API_ENDPOINTS.transactionById.key,
+  API_ENDPOINTS.spending.key,
+  API_ENDPOINTS.trends.key,
+  API_ENDPOINTS.budgets.key,
+  API_ENDPOINTS.reimbursement.key,
+  API_ENDPOINTS.reimbursementLedger.key,
+  API_ENDPOINTS.repaymentSuggestions.key,
+  API_ENDPOINTS.review.key,
+  API_ENDPOINTS.insights.key,
+  API_ENDPOINTS.merchantHistory.key,
+  API_ENDPOINTS.recurring.key,
+  API_ENDPOINTS.bills.key,
+  API_ENDPOINTS.forecast.key,
+  API_ENDPOINTS.income.key,
+  API_ENDPOINTS.search.key,
+  API_ENDPOINTS.tags.key,
+  API_ENDPOINTS.reports.key,
+  API_ENDPOINTS.reconciliation.key,
+  API_ENDPOINTS.reconcilePending.key,
+] as const;
+
+function invalidateKeys(qc: ReturnType<typeof useQueryClient>, keys: readonly string[]) {
+  return Promise.all(keys.map((key) => qc.invalidateQueries({ queryKey: [key] })));
+}
+
+function invalidateTransactionDerivedData(qc: ReturnType<typeof useQueryClient>) {
+  return invalidateKeys(qc, TRANSACTION_DERIVED_KEYS);
+}
+
+export function usePing() {
+  return useFinanceQuery<Ping>({
+    endpoint: API_ENDPOINTS.ping.endpoint,
+    method: API_ENDPOINTS.ping.method,
+    queryKey: [API_ENDPOINTS.ping.key],
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+}
+
 export function useAccounts() {
   return useFinanceQuery<Account[]>({
     endpoint: API_ENDPOINTS.accounts.endpoint,
@@ -54,27 +98,27 @@ export function useAccounts() {
 }
 
 export function useTransactions(
-  params: { start?: string; end?: string; accountId?: string; category?: string; collapse?: boolean } = {}
+  params: { start?: string; end?: string; accountId?: string; category?: string; bucket?: string; budgetOnly?: boolean; collapse?: boolean } = {}
 ) {
-  const query = { ...params, collapse: params.collapse ? 1 : undefined };
+  const query = { ...params, budgetOnly: params.budgetOnly ? 1 : undefined, collapse: params.collapse ? 1 : undefined };
   return useFinanceQuery<Transaction[]>({
     endpoint: API_ENDPOINTS.transactions.endpoint,
     method: API_ENDPOINTS.transactions.method,
     params: query,
-    queryKey: [API_ENDPOINTS.transactions.key, params.start, params.end, params.accountId, params.category, params.collapse ? 'c' : 'x'],
+    queryKey: [API_ENDPOINTS.transactions.key, params.start, params.end, params.accountId, params.category, params.bucket, params.budgetOnly ? 'budget' : 'all', params.collapse ? 'c' : 'x'],
     staleTime: 60_000,
   });
 }
 
-// One transaction (parent or simple) with its split legs — powers the detail view
-// and split editor. Needs accountId + date to locate it cheaply on the backend.
+// One transaction (parent or simple) with its split legs. accountId is preferred;
+// the backend can scan that one date for legacy reimbursement links that lack it.
 export function useTransaction(id?: string, accountId?: string, date?: string) {
   return useFinanceQuery<TransactionDetail>({
     endpoint: `/api/v1/transactions/${encodeURIComponent(id ?? '')}`,
     method: 'GET',
     params: { accountId, date },
     queryKey: [API_ENDPOINTS.transactionById.key, id, accountId, date],
-    enabled: !!id && !!accountId && !!date,
+    enabled: !!id && !!date,
     staleTime: 15_000,
   });
 }
@@ -181,12 +225,13 @@ export function useReconcilePending() {
 export interface SetReconItemVars { month: string; id: string; reconciled: boolean }
 export function useSetReconcileItem() {
   const qc = useQueryClient();
+  const { scope } = useServerConfig();
   return useFinanceMutation<OkResult, SetReconItemVars>({
     endpoint: API_ENDPOINTS.setReconcileItem.endpoint,
     method: 'POST',
     // Optimistically flip the checkbox so tapping down a long list feels instant.
     onMutate: async (v) => {
-      const key = [API_ENDPOINTS.reconciliation.key, v.month];
+      const key = [API_ENDPOINTS.reconciliation.key, v.month, scope];
       await qc.cancelQueries({ queryKey: key });
       const prev = qc.getQueryData<Reconciliation>(key);
       if (prev) {
@@ -200,7 +245,12 @@ export function useSetReconcileItem() {
       const c = ctx as { prev?: Reconciliation; key: (string | undefined)[] } | undefined;
       if (c?.prev) qc.setQueryData(c.key, c.prev);
     },
-    onSuccess: async () => { await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reconcilePending.key] }); },
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reconciliation.key] }),
+        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reconcilePending.key] }),
+      ]);
+    },
   });
 }
 
@@ -293,12 +343,17 @@ export function useIncome(window?: number) {
 }
 
 export function useSearch(q: string) {
+  const [debounced, setDebounced] = useState(q.trim());
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(q.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [q]);
   return useFinanceQuery<SearchResult>({
     endpoint: API_ENDPOINTS.search.endpoint,
     method: API_ENDPOINTS.search.method,
-    params: { q },
-    queryKey: [API_ENDPOINTS.search.key, q],
-    enabled: q.trim().length >= 2,
+    params: { q: debounced },
+    queryKey: [API_ENDPOINTS.search.key, debounced],
+    enabled: debounced.length >= 2,
     staleTime: 30_000,
   });
 }
@@ -335,15 +390,7 @@ export function useSetCategory() {
   return useFinanceMutation<CategorizeResult, SetCategoryVars>({
     endpoint: (v) => `/api/v1/transactions/${encodeURIComponent(v.id)}/category`,
     method: 'POST',
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactions.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.spending.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.budgets.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
-      ]);
-    },
+    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
   });
 }
 
@@ -433,11 +480,7 @@ export interface SplitVars {
 // Everything a split/unsplit touches: lists, the single-txn detail, spending, etc.
 function invalidateAfterSplit(qc: ReturnType<typeof useQueryClient>) {
   return Promise.all([
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactions.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactionById.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.spending.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.budgets.key] }),
+    invalidateTransactionDerivedData(qc),
     qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reimbLinks.key] }),
   ]);
 }
@@ -484,16 +527,7 @@ export function useDeleteTransaction() {
       return `/api/v1/transactions/${encodeURIComponent(v.id)}${q ? `?${q}` : ''}`;
     },
     method: 'DELETE',
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactions.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.accounts.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.spending.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.trends.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.budgets.key] }),
-      ]);
-    },
+    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
   });
 }
 
@@ -510,14 +544,7 @@ export function useSetPayee() {
   return useFinanceMutation<OkResult, SetPayeeVars>({
     endpoint: (v) => `/api/v1/transactions/${encodeURIComponent(v.id)}/payee`,
     method: 'POST',
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactions.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactionById.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.search.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
-      ]);
-    },
+    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
   });
 }
 
@@ -647,15 +674,7 @@ export function useSetNotes() {
   return useFinanceMutation<CategorizeResult, SetNotesVars>({
     endpoint: (v) => `/api/v1/transactions/${encodeURIComponent(v.id)}/notes`,
     method: 'POST',
-    onSuccess: async () => {
-      // Notes carry #tags, so refresh anything tag-derived too.
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactions.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.tags.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.search.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
-      ]);
-    },
+    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
   });
 }
 
@@ -671,17 +690,7 @@ export function useSetDate() {
   return useFinanceMutation<{ ok: boolean; date: string }, SetDateVars>({
     endpoint: (v) => `/api/v1/transactions/${encodeURIComponent(v.id)}/date`,
     method: 'POST',
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactions.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactionById.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.spending.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.trends.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.budgets.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reimbursement.key] }),
-      ]);
-    },
+    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
   });
 }
 
@@ -803,13 +812,15 @@ export function useReceipts(txnId?: string) {
 }
 export interface AddReceiptVars {
   txnId: string;
+  accountId: string;
+  transactionDate: string;
   imageBase64: string;
   mime: string;
   ocrText?: string;
   ocrLines?: string[];
   amount?: number | null;
   date?: string | null;
-  source?: string;
+  source?: 'camera' | 'library';
 }
 export function useAddReceipt() {
   const qc = useQueryClient();
@@ -840,15 +851,7 @@ export function useCreateTransaction() {
   return useFinanceMutation<OkResult, CreateTransactionInput>({
     endpoint: API_ENDPOINTS.createTransaction.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactions.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.accounts.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.spending.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.budgets.key] }),
-      ]);
-    },
+    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
   });
 }
 

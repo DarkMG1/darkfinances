@@ -57,7 +57,7 @@ export default function Rules() {
   const catalog = rules.data?.catalog ?? [];
 
   return (
-    <ScrollView style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
+    <ScrollView testID="rules-screen" style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
       <Stack.Screen options={{ title: 'Rules' }} />
 
       <Text style={styles.intro}>Automatically categorize transactions whose payee contains your text. Rules apply to matching uncategorized transactions now and to new ones as they sync.</Text>
@@ -66,6 +66,7 @@ export default function Rules() {
       <Card>
         <Text style={styles.label}>When payee contains</Text>
         <TextInput
+          testID="rules-match-input"
           style={styles.input}
           value={match}
           onChangeText={setMatch}
@@ -75,11 +76,11 @@ export default function Rules() {
           autoCorrect={false}
         />
         <Text style={[styles.label, { marginTop: 12 }]}>Set category to</Text>
-        <Pressable style={({ pressed }) => [styles.pickRow, pressed && { opacity: 0.7 }]} onPress={() => { haptics.tap(); setPicking(true); }}>
+        <Pressable testID="rules-category-picker" style={({ pressed }) => [styles.pickRow, pressed && { opacity: 0.7 }]} onPress={() => { haptics.tap(); setPicking(true); }}>
           <Text style={[styles.pickValue, !catName && { color: colors.muted }]}>{catName || 'Choose a category'}</Text>
           <Text style={styles.pickArrow}>›</Text>
         </Pressable>
-        <Pressable style={({ pressed }) => [styles.addBtn, !canAdd && { opacity: 0.4 }, pressed && { opacity: 0.85 }]} onPress={add} disabled={!canAdd}>
+        <Pressable testID="rules-add-button" style={({ pressed }) => [styles.addBtn, !canAdd && { opacity: 0.4 }, pressed && { opacity: 0.85 }]} onPress={add} disabled={!canAdd}>
           <Text style={styles.addText}>{saveRule.isPending ? 'Saving…' : 'Add rule'}</Text>
         </Pressable>
       </Card>
@@ -87,7 +88,7 @@ export default function Rules() {
       <View style={styles.listHeader}>
         <CardTitle style={{ marginTop: 0 }}>Your rules{list.length ? ` (${list.length})` : ''}</CardTitle>
         {list.length ? (
-          <Pressable onPress={applyAll} disabled={applyRules.isPending} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+          <Pressable testID="rules-apply-button" onPress={applyAll} disabled={applyRules.isPending} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
             <Text style={styles.applyLink}>{applyRules.isPending ? 'Applying…' : 'Apply now'}</Text>
           </Pressable>
         ) : null}
@@ -98,12 +99,12 @@ export default function Rules() {
       ) : list.length ? (
         <Card style={styles.list}>
           {list.map((r, i) => (
-            <View key={r.id} style={[styles.ruleRow, i === list.length - 1 && { borderBottomWidth: 0 }]}>
+            <View key={r.id} testID={`rules-row-${r.id}`} style={[styles.ruleRow, i === list.length - 1 && { borderBottomWidth: 0 }]}>
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={styles.ruleMatch} numberOfLines={1}>“{r.match}”</Text>
                 <Text style={styles.ruleCat} numberOfLines={1}>→ {r.categoryName || 'category'}</Text>
               </View>
-              <Pressable hitSlop={8} onPress={() => remove(r.id, r.match)} disabled={deleteRule.isPending} style={({ pressed }) => pressed && { opacity: 0.5 }}>
+              <Pressable testID={`rules-delete-${r.id}`} hitSlop={8} onPress={() => remove(r.id, r.match)} disabled={deleteRule.isPending} style={({ pressed }) => pressed && { opacity: 0.5 }}>
                 <Text style={styles.del}>Delete</Text>
               </Pressable>
             </View>
@@ -135,7 +136,7 @@ export default function Rules() {
       <Modal visible={picking} animationType="slide" transparent onRequestClose={() => setPicking(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
           <Pressable style={styles.modalBg} onPress={() => setPicking(false)}>
-            <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
+            <View testID="rules-category-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
               <Text style={styles.sheetTitle}>Choose category</Text>
               <FlatList
                 data={categories.data ?? []}
@@ -144,6 +145,7 @@ export default function Rules() {
                 keyboardShouldPersistTaps="handled"
                 renderItem={({ item }) => (
                   <Pressable
+                    testID={`rules-category-option-${item.id}`}
                     style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]}
                     onPress={() => { setCatId(item.id); setCatName(item.name); setPicking(false); }}
                   >

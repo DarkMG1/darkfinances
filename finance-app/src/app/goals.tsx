@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAccounts, useDeleteGoal, useGoals, useSaveGoal } from '@/api/hooks/finance.hooks';
 import { Goal } from '@/api/generated/types';
@@ -22,25 +22,44 @@ export default function Goals() {
   const [editing, setEditing] = useState<Editing>(null);
   const [name, setName] = useState('');
   const [target, setTarget] = useState('');
+  const [current, setCurrent] = useState('');
+  const [deadline, setDeadline] = useState('');
   const [accountId, setAccountId] = useState<string | null>(null);
 
-  const openNew = () => { setName(''); setTarget(''); setAccountId(null); setEditing({ isNew: true }); };
-  const openEdit = (g: Goal) => { setName(g.name); setTarget(String(g.target)); setAccountId(g.accountId ?? null); setEditing(g); };
+  const openNew = () => { setName(''); setTarget(''); setCurrent('0'); setDeadline(''); setAccountId(null); setEditing({ isNew: true }); };
+  const openEdit = (g: Goal) => {
+    setName(g.name);
+    setTarget(String(g.target));
+    setCurrent(String(g.current));
+    setDeadline(g.deadline ?? '');
+    setAccountId(g.accountId ?? null);
+    setEditing(g);
+  };
 
   const submit = () => {
     const t = parseFloat(target);
-    if (!name.trim() || !(t > 0)) return;
+    const saved = parseFloat(current) || 0;
+    const deadlineValue = deadline.trim();
+    if (!name.trim() || !(t > 0) || saved < 0) return;
+    if (deadlineValue && !/^\d{4}-(0[1-9]|1[0-2])$/.test(deadlineValue)) {
+      Alert.alert('Invalid deadline', 'Use YYYY-MM, for example 2027-06.');
+      return;
+    }
     saveGoal.mutate(
-      { id: editing?.id, name: name.trim(), target: t, accountId },
+      { id: editing?.id, name: name.trim(), target: t, accountId, current: accountId ? undefined : saved, deadline: deadlineValue || null },
       { onSuccess: () => setEditing(null) }
     );
   };
   const remove = () => {
-    if (editing?.id) deleteGoal.mutate({ id: editing.id }, { onSuccess: () => setEditing(null) });
+    if (!editing?.id) return;
+    Alert.alert('Delete goal?', `Remove “${editing.name || 'this goal'}”?`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => deleteGoal.mutate({ id: editing.id! }, { onSuccess: () => setEditing(null) }) },
+    ]);
   };
 
   return (
-    <PushScreen refreshing={goals.isFetching} onRefresh={goals.refetch}>
+    <PushScreen testID="goals-screen" refreshing={goals.isFetching} onRefresh={goals.refetch}>
       {goals.isLoading ? (
         <SkeletonList rows={4} />
       ) : goals.isError && !goals.data ? (
@@ -51,7 +70,7 @@ export default function Goals() {
             <EmptyState icon="target">No goals yet — add one below</EmptyState>
           ) : (
             (goals.data ?? []).map((g) => (
-              <Pressable key={g.id} onPress={() => openEdit(g)} style={({ pressed }) => pressed && { opacity: 0.7 }}>
+              <Pressable testID={`goals-row-${g.id}`} key={g.id} onPress={() => openEdit(g)} style={({ pressed }) => pressed && { opacity: 0.7 }}>
                 <Card style={{ marginBottom: 12 }}>
                   <View style={styles.head}>
                     <Text style={styles.name}>{g.name}</Text>
@@ -64,7 +83,7 @@ export default function Goals() {
             ))
           )}
 
-          <Pressable style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.7 }]} onPress={openNew}>
+          <Pressable testID="goals-add-button" style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.7 }]} onPress={openNew}>
             <Text style={styles.addText}>+ Add goal</Text>
           </Pressable>
         </>
@@ -72,32 +91,42 @@ export default function Goals() {
 
       <Modal visible={!!editing} animationType="slide" transparent onRequestClose={() => setEditing(null)}>
         <Pressable style={styles.modalBg} onPress={() => setEditing(null)}>
-          <Pressable style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
+          <Pressable testID="goals-edit-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
             <Text style={styles.sheetTitle}>{editing?.isNew ? 'New goal' : 'Edit goal'}</Text>
 
             <Text style={styles.field}>Name</Text>
-            <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="Emergency fund" placeholderTextColor={colors.muted} />
+            <TextInput testID="goals-name-input" style={styles.input} value={name} onChangeText={setName} placeholder="Emergency fund" placeholderTextColor={colors.muted} />
 
             <Text style={styles.field}>Target amount</Text>
-            <TextInput style={styles.input} value={target} onChangeText={setTarget} placeholder="5000" placeholderTextColor={colors.muted} keyboardType="decimal-pad" />
+            <TextInput testID="goals-target-input" style={styles.input} value={target} onChangeText={setTarget} placeholder="5000" placeholderTextColor={colors.muted} keyboardType="decimal-pad" />
+
+            {accountId === null ? (
+              <>
+                <Text style={styles.field}>Saved so far</Text>
+                <TextInput testID="goals-current-input" style={styles.input} value={current} onChangeText={setCurrent} placeholder="0" placeholderTextColor={colors.muted} keyboardType="decimal-pad" />
+              </>
+            ) : null}
+
+            <Text style={styles.field}>Deadline (optional)</Text>
+            <TextInput testID="goals-deadline-input" style={styles.input} value={deadline} onChangeText={setDeadline} placeholder="YYYY-MM" placeholderTextColor={colors.muted} autoCapitalize="none" />
 
             <Text style={styles.field}>Track an account (optional)</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
-              <Pressable onPress={() => { haptics.tap(); setAccountId(null); }} style={[styles.chip, accountId === null && styles.chipActive]}>
+              <Pressable testID={`goals-account-manual${accountId === null ? '-selected' : ''}`} onPress={() => { haptics.tap(); setAccountId(null); }} style={[styles.chip, accountId === null && styles.chipActive]}>
                 <Text style={[styles.chipText, accountId === null && styles.chipTextActive]}>Manual</Text>
               </Pressable>
               {(accounts.data ?? []).map((a) => (
-                <Pressable key={a.id} onPress={() => { haptics.tap(); setAccountId(a.id); }} style={[styles.chip, accountId === a.id && styles.chipActive]}>
+                <Pressable testID={`goals-account-${a.id}${accountId === a.id ? '-selected' : ''}`} key={a.id} onPress={() => { haptics.tap(); setAccountId(a.id); }} style={[styles.chip, accountId === a.id && styles.chipActive]}>
                   <Text style={[styles.chipText, accountId === a.id && styles.chipTextActive]} numberOfLines={1}>{a.name}</Text>
                 </Pressable>
               ))}
             </ScrollView>
 
-            <Pressable style={({ pressed }) => [styles.saveBtn, pressed && { opacity: 0.85 }]} onPress={submit} disabled={saveGoal.isPending}>
+            <Pressable testID="goals-save-button" style={({ pressed }) => [styles.saveBtn, pressed && { opacity: 0.85 }]} onPress={submit} disabled={saveGoal.isPending}>
               <Text style={styles.saveText}>{saveGoal.isPending ? 'Saving…' : 'Save'}</Text>
             </Pressable>
             {!editing?.isNew ? (
-              <Pressable style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={remove} disabled={deleteGoal.isPending}>
+              <Pressable testID="goals-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={remove} disabled={deleteGoal.isPending}>
                 <Text style={styles.deleteText}>Delete goal</Text>
               </Pressable>
             ) : null}

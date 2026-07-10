@@ -11,6 +11,7 @@ import { AreaChart } from '@/components/charts';
 import { Account } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { useDashboardWidgets } from '@/lib/dashboard-widgets';
+import { financeToday, monthEnd } from '@/lib/date-only';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -18,7 +19,7 @@ const RANGES: { label: string; v: number }[] = [
   { label: '6M', v: 6 },
   { label: '1Y', v: 12 },
   { label: '2Y', v: 24 },
-  { label: 'ALL', v: 36 },
+  { label: '3Y', v: 36 },
 ];
 
 const ACTIONS: { label: string; route: string; symbol: SymbolViewProps['name']; color: string }[] = [
@@ -84,8 +85,8 @@ export default function Overview() {
   const liabilities = acctLiab - (manual.data?.liabilities ?? 0);
   const netWorth = assets + liabilities;
 
-  const now = new Date();
-  const curMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const financeDate = financeToday();
+  const curMonth = financeDate.slice(0, 7);
   const cur = spending.data?.current;
   const prev = spending.data?.prev;
   const net = cur ? cur.totalIncome - cur.totalSpend : 0;
@@ -98,7 +99,13 @@ export default function Overview() {
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
   const nwDelta = prevNW != null ? acctAssets + acctLiab - prevNW : null;
 
-  const cash = accts.filter((a) => !a.offbudget && a.balance >= 0);
+  const nonLiquidName = /(credit|\bcard\b|visa|mastercard|amex|sapphire|freedom|explorer|\bloan\b|mortgage|\bdebt\b|\broth\b|\bira\b|broker|invest)/i;
+  const cashName = /(check|saving|cash|money market)/i;
+  const cash = accts.filter((a) =>
+    !a.offbudget &&
+    !nonLiquidName.test(a.name) &&
+    (a.balance >= 0 || cashName.test(a.name))
+  );
   const credit = accts.filter((a) => a.balance < 0);
   const invest = accts.filter((a) => a.offbudget && a.balance >= 0);
   const groups: { title: string; items: Account[] }[] = [
@@ -110,22 +117,32 @@ export default function Overview() {
   // Safe to Spend = on-hand cash minus bills, remaining budget commitments, and
   // this month's required goal funding.
   const cashOnHand = cash.reduce((s, a) => s + a.balance, 0);
-  const upcomingBillsTotal = bills.data?.total ?? 0;
-  const budgetCommitments = budgets.data?.totalRemaining ?? 0;
-  const nowForGoals = new Date();
+  const currentMonthEnd = monthEnd(curMonth);
+  const upcomingBillsTotal = (bills.data?.bills ?? [])
+    .filter((bill) => !bill.paid && bill.dueDate >= financeDate && bill.dueDate <= currentMonthEnd)
+    .reduce((sum, bill) => sum + bill.amount, 0);
+  const billCategory = /(util|electric|power|energy|\bgas\b|water|sewer|trash|internet|cable|phone|mobile|wireless|insuranc|rent|mortgage|\bloan|subscription|membership|fitness|gym|\bhealth|software|hosting|cloud|stream|donat|charit)/i;
+  const budgetCommitments = (budgets.data?.groups ?? []).reduce(
+    (total, group) => total + group.categories
+      .filter((category) => !billCategory.test(`${group.name} ${category.name}`))
+      .reduce((sum, category) => sum + category.remaining, 0),
+    0,
+  );
+  const [currentYear, currentMonthNumber] = curMonth.split('-').map(Number);
   const goalCommitments = (goals.data ?? []).reduce((sum, g) => {
     const left = Math.max(0, g.target - g.current);
-    if (!left || !g.deadline) return sum;
+    if (!left || !g.deadline || !/^\d{4}-(0[1-9]|1[0-2])$/.test(g.deadline)) return sum;
     const [y, m] = g.deadline.split('-').map(Number);
-    const months = Math.max(1, (y - nowForGoals.getFullYear()) * 12 + (m - nowForGoals.getMonth()));
+    const months = Math.max(1, (y - currentYear) * 12 + (m - currentMonthNumber) + 1);
     return sum + left / months;
   }, 0);
-  const safeToSpend = cashOnHand - upcomingBillsTotal - budgetCommitments - goalCommitments;
+  const computedSafeToSpend = cashOnHand - upcomingBillsTotal - budgetCommitments - goalCommitments;
+  const safeToSpend = Number.isFinite(computedSafeToSpend) ? computedSafeToSpend : 0;
 
   const upcoming = (bills.data?.bills ?? []).slice(0, 3);
 
   return (
-    <Screen title="dark" accent="finances" refreshing={refreshing} onRefresh={onRefresh}>
+    <Screen title="dark" accent="finances" refreshing={refreshing} onRefresh={onRefresh} testID="home-screen">
       {!accounts.data && accounts.isLoading ? (
         <SkeletonList hero rows={4} />
       ) : !accounts.data && accounts.isError ? (
@@ -133,7 +150,7 @@ export default function Overview() {
       ) : (
         <>
           {widgets.netWorth ? (
-            <Pressable onPress={() => { haptics.tap(); router.push('/networth' as never); }} style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}>
+            <Pressable testID="home-networth-hero" onPress={() => { haptics.tap(); router.push('/networth' as never); }} style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}>
               <Text style={styles.heroLabel}>NET WORTH</Text>
               <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>{fmtMoney(netWorth)}</Text>
               <View style={styles.heroMetaRow}>
@@ -184,6 +201,7 @@ export default function Overview() {
           {widgets.actions ? <View style={styles.tiles}>
             {ACTIONS.map((a) => (
               <Pressable
+                testID={`home-action-${a.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}
                 key={a.route}
                 style={({ pressed }) => [styles.tile, pressed && { opacity: 0.6, transform: [{ scale: 0.97 }] }]}
                 onPress={() => { haptics.tap(); router.push(a.route as never); }}
@@ -197,13 +215,13 @@ export default function Overview() {
           </View> : null}
 
           {widgets.review && reviewCount > 0 ? (
-            <Pressable onPress={() => { haptics.tap(); router.push('/review' as never); }} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+            <Pressable testID="home-review-banner" onPress={() => { haptics.tap(); router.push('/review' as never); }} style={({ pressed }) => pressed && { opacity: 0.6 }}>
               <Card style={{ ...styles.bannerCard, ...styles.reviewBanner }}>
                 <View style={[styles.bannerIcon, { backgroundColor: colors.yellow + '22' }]}>
                   <SymbolView name="checklist" tintColor={colors.yellow} size={22} resizeMode="scaleAspectFit" />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.bannerLabel}>Today's review</Text>
+                  <Text style={styles.bannerLabel}>Review today</Text>
                   <Text style={styles.bannerSub}>{topReview ? `${topReview.title} · ${topReview.subtitle}` : `${reviewCount} item${reviewCount === 1 ? '' : 's'} need attention`}</Text>
                 </View>
                 <Text style={[styles.bannerValue, { color: colors.yellow }]}>{reviewCount} ›</Text>
@@ -215,23 +233,25 @@ export default function Overview() {
           <SectionLabel>This Month</SectionLabel>
           <View style={styles.statsRow}>
             <StatCard
+              testID="home-stat-spent"
               label="Spent"
               value={cur ? fmtPos(cur.totalSpend) : '—'}
               sub={spendDelta != null ? `${spendDelta > 0 ? '▲' : '▼'} ${Math.abs(spendDelta).toFixed(0)}% vs prev` : undefined}
               subColor={spendDelta != null ? (spendDelta > 0 ? colors.red : colors.green) : undefined}
             />
             <StatCard
+              testID="home-stat-income"
               label="Income"
               value={cur ? fmtPos(cur.totalIncome) : '—'}
               sub="sources ›"
               onPress={() => router.push(`/category/${encodeURIComponent('Income')}?month=${curMonth}` as never)}
             />
-            <StatCard label="Net" value={cur ? fmtMoney(net) : '—'} valueColor={net >= 0 ? colors.green : colors.red} />
+            <StatCard testID="home-stat-net" label="Net" value={cur ? fmtMoney(net) : '—'} valueColor={net >= 0 ? colors.green : colors.red} />
           </View>
           </> : null}
 
           {widgets.income && (income.data?.primaryNextPay ?? income.data?.nextPayday) ? (
-            <Pressable onPress={() => router.push('/income' as never)} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+            <Pressable testID="home-income-banner" onPress={() => router.push('/income' as never)} style={({ pressed }) => pressed && { opacity: 0.6 }}>
               <Card style={styles.bannerCard}>
                 <View style={[styles.bannerIcon, { backgroundColor: colors.green + '22' }]}>
                   <SymbolView name="dollarsign.circle.fill" tintColor={colors.green} size={22} resizeMode="scaleAspectFit" />
@@ -246,7 +266,7 @@ export default function Overview() {
           ) : null}
 
           {widgets.subscriptions && recurring.data && (recurring.data.subMonthlyTotal ?? recurring.data.monthlyTotal) > 0 ? (
-            <Pressable onPress={() => router.push('/subscriptions' as never)} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+            <Pressable testID="home-subscriptions-banner" onPress={() => router.push('/subscriptions' as never)} style={({ pressed }) => pressed && { opacity: 0.6 }}>
               <Card style={styles.bannerCard}>
                 <View style={[styles.bannerIcon, { backgroundColor: colors.accentLight + '22' }]}>
                   <SymbolView name="repeat" tintColor={colors.accentLight} size={20} resizeMode="scaleAspectFit" />
@@ -267,6 +287,7 @@ export default function Overview() {
                 {upcoming.map((b, i) => (
                   <ListRow
                     key={`${b.key}-${i}`}
+                    testID={`home-bill-row-${i}`}
                     avatar={<Avatar label={b.payee} category={b.category} size={34} />}
                     title={b.payee}
                     subtitle={dueLabel(b.dueDate)}
@@ -292,6 +313,7 @@ export default function Overview() {
                 <View style={styles.accountsGrid}>
                   {g.items.map((a) => (
                     <Pressable
+                      testID={`home-account-${a.id}`}
                       key={a.id}
                       style={({ pressed }) => [styles.accountCard, pressed && { opacity: 0.6 }]}
                       onPress={() => router.push({ pathname: '/account/[id]', params: { id: a.id, name: a.name, balance: String(a.balance) } })}
@@ -310,6 +332,7 @@ export default function Overview() {
 
           {accts.length ? (
             <Pressable
+              testID="home-sync-button"
               onPress={doBankSync}
               disabled={bankSync.isPending}
               style={({ pressed }) => [styles.syncBtn, pressed && { opacity: 0.6 }]}

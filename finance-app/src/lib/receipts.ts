@@ -2,9 +2,9 @@ import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { extractTextFromImage, isSupported } from 'expo-text-extractor';
 
-// On-device receipt capture + OCR. iOS runs Apple Vision (via expo-text-extractor),
-// so text never leaves the phone. The raw image is copied into the app's document
-// dir (survives cache eviction) and also uploaded to the server for durability.
+// On-device receipt capture + OCR. iOS runs Apple Vision (via expo-text-extractor).
+// Before upload, photos are resized and transcoded to bounded JPEGs so a modern
+// phone camera cannot create a 25 MB JSON payload or exhaust app memory.
 export const ocrSupported = isSupported;
 
 export interface CapturedReceipt {
@@ -19,35 +19,9 @@ export interface CapturedReceipt {
 }
 
 const DIR = (FileSystem.documentDirectory ?? '') + 'receipts/';
-const localPath = (id: string) => `${DIR}${id}.jpg`;
-
-async function ensureDir() {
-  const info = await FileSystem.getInfoAsync(DIR);
-  if (!info.exists) await FileSystem.makeDirectoryAsync(DIR, { intermediates: true });
-}
-
-// Persist a local copy keyed by the server-assigned receipt id.
-export async function saveReceiptLocal(sourceUri: string, id: string): Promise<string | null> {
+export async function purgeLegacyReceiptCopies() {
   try {
-    await ensureDir();
-    const dest = localPath(id);
-    await FileSystem.copyAsync({ from: sourceUri, to: dest });
-    return dest;
-  } catch {
-    return null;
-  }
-}
-export async function localReceiptUri(id: string): Promise<string | null> {
-  try {
-    const info = await FileSystem.getInfoAsync(localPath(id));
-    return info.exists ? localPath(id) : null;
-  } catch {
-    return null;
-  }
-}
-export async function deleteReceiptLocal(id: string) {
-  try {
-    await FileSystem.deleteAsync(localPath(id), { idempotent: true });
+    await FileSystem.deleteAsync(DIR, { idempotent: true });
   } catch {
     /* best effort */
   }
@@ -93,10 +67,38 @@ async function processAsset(asset: ImagePicker.ImagePickerAsset, source: 'camera
     ocrLines = [];
   }
   const { amount, date } = parseOcr(ocrLines);
+  const longest = Math.max(asset.width || 0, asset.height || 0);
+  const resize = longest > 2200
+    ? asset.width >= asset.height
+      ? { width: 2200 }
+      : { height: 2200 }
+    : undefined;
+  let processed: { uri: string; base64?: string };
+  try {
+    // Dynamic loading keeps the 1.1 OTA bridge safe on binaries built before
+    // ExpoImageManipulator existed; 1.2+ uses the bounded native path.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const manipulator = require('expo-image-manipulator') as typeof import('expo-image-manipulator');
+    processed = await manipulator.manipulateAsync(
+      asset.uri,
+      resize ? [{ resize }] : [],
+      { base64: true, compress: 0.72, format: manipulator.SaveFormat.JPEG },
+    );
+  } catch {
+    processed = {
+      uri: asset.uri,
+      base64: await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 }),
+    };
+  }
+  if (!processed.base64) throw new Error('Could not encode receipt image.');
+  const fallbackMime = String(asset.mimeType || '').toLowerCase();
+  const mime = processed.uri === asset.uri && ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'].includes(fallbackMime)
+    ? fallbackMime
+    : 'image/jpeg';
   return {
-    uri: asset.uri,
-    base64: asset.base64 ?? '',
-    mime: 'image/jpeg',
+    uri: processed.uri,
+    base64: processed.base64,
+    mime,
     ocrText: ocrLines.join('\n'),
     ocrLines,
     amount,
@@ -108,13 +110,13 @@ async function processAsset(asset: ImagePicker.ImagePickerAsset, source: 'camera
 export async function scanReceiptFromCamera(): Promise<CapturedReceipt | null> {
   const perm = await ImagePicker.requestCameraPermissionsAsync();
   if (!perm.granted) throw new Error('Camera access is off — enable it in iOS Settings.');
-  const res = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.6, base64: true, exif: false });
+  const res = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 1, base64: false, exif: false });
   if (res.canceled || !res.assets?.length) return null;
   return processAsset(res.assets[0], 'camera');
 }
 
 export async function pickReceiptFromLibrary(): Promise<CapturedReceipt | null> {
-  const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.6, base64: true, exif: false });
+  const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 1, base64: false, exif: false });
   if (res.canceled || !res.assets?.length) return null;
   return processAsset(res.assets[0], 'library');
 }

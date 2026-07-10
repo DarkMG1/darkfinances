@@ -1,10 +1,11 @@
 import React from 'react';
-import { ColorValue, StyleSheet } from 'react-native';
+import { ColorValue, StyleSheet, View } from 'react-native';
 import { Tabs } from 'expo-router';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { NotificationScheduler } from '@/components/notification-scheduler';
 import { WidgetSync } from '@/components/widget-sync';
+import { FinanceStatusBanner } from '@/components/finance-status-banner';
 import { haptics } from '@/lib/haptics';
 import { colors } from '@/theme/colors';
 
@@ -17,7 +18,7 @@ export default function TabsLayout() {
   // Kept in normal flow (not absolute) so no screen padding changes are needed.
   const glass = isLiquidGlassAvailable();
   return (
-    <>
+    <View style={{ flex: 1 }}>
     <NotificationScheduler />
     <WidgetSync />
     <Tabs
@@ -36,6 +37,7 @@ export default function TabsLayout() {
       <Tabs.Screen name="transactions" options={{ title: 'Activity', tabBarButtonTestID: 'activity-tab', tabBarIcon: ({ color }) => <TabIcon name="list.bullet" color={color} /> }} />
       <Tabs.Screen name="settings" options={{ title: 'Settings', tabBarButtonTestID: 'settings-tab', tabBarIcon: ({ color }) => <TabIcon name="gearshape.fill" color={color} /> }} />
     </Tabs>
-    </>
+    <FinanceStatusBanner />
+    </View>
   );
 }

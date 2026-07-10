@@ -2,33 +2,34 @@ import React, { useMemo, useState } from 'react';
 import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, SectionList, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useSetAccountOverride, useTransactions } from '@/api/hooks/finance.hooks';
+import { useAccounts, useSetAccountOverride, useTransactions } from '@/api/hooks/finance.hooks';
 import { DemoRibbon } from '@/components/screen';
 import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { Transaction } from '@/api/generated/types';
+import { financeToday, previousMonth } from '@/lib/date-only';
 import { haptics } from '@/lib/haptics';
 import { colors, fmtDay, fmtMoney } from '@/theme/colors';
 
-const pad = (n: number) => String(n).padStart(2, '0');
-
 // Last ~3 calendar months of activity for this account.
 function windowStart(): string {
-  const n = new Date();
-  const d = new Date(n.getFullYear(), n.getMonth() - 2, 1);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`;
+  const current = financeToday().slice(0, 7);
+  return `${previousMonth(previousMonth(current))}-01`;
 }
 
 export default function AccountDetail() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const p = useLocalSearchParams<{ id: string; name?: string; balance?: string; hidden?: string }>();
-  const balance = p.balance != null && p.balance !== '' ? Number(p.balance) : null;
 
+  const accounts = useAccounts();
   const txns = useTransactions({ accountId: p.id, start: windowStart(), collapse: true });
   const override = useSetAccountOverride();
+  const account = (accounts.data ?? []).find((item) => item.id === p.id);
+  const balance = account?.balance ?? (p.balance != null && p.balance !== '' ? Number(p.balance) : null);
 
-  const [title, setTitle] = useState(p.name || 'Account');
+  const [nameOverride, setNameOverride] = useState<string | null>(null);
+  const title = nameOverride ?? account?.name ?? p.name ?? 'Account';
   const [editing, setEditing] = useState(false);
   const [nameText, setNameText] = useState(p.name || '');
   const [hidden, setHidden] = useState(p.hidden === '1');
@@ -38,7 +39,7 @@ export default function AccountDetail() {
       { id: p.id, name: nameText, hidden },
       {
         onSuccess: () => {
-          setTitle(nameText.trim() || p.name || 'Account');
+          setNameOverride(nameText.trim() || account?.name || p.name || 'Account');
           setEditing(false);
         },
         onError: (e) => Alert.alert('Could not save', e.error || 'Please try again.'),
@@ -63,29 +64,13 @@ export default function AccountDetail() {
   const openDetail = (t: Transaction) =>
     router.push({
       pathname: '/transaction/[id]',
-      params: {
-        id: t.id,
-        payee: t.payee || '',
-        amount: String(t.amount),
-        date: t.date,
-        account: t.account,
-        accountId: t.accountId,
-        category: t.category || '',
-        categoryId: t.categoryId || '',
-        notes: t.notes || '',
-        isLeg: t.isLeg ? '1' : '',
-        parentId: t.parentId || '',
-        cleared: t.cleared === false ? '0' : '1',
-        isSplit: t.isSplit ? '1' : '',
-        splitCount: t.splitCount ? String(t.splitCount) : '',
-        imported: t.imported ? '1' : '',
-      },
+      params: { id: t.id, date: t.date, accountId: t.accountId },
     });
 
   const renderItem = ({ item }: { item: Transaction }) => {
     const income = item.amount > 0;
     return (
-      <Pressable style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]} onPress={() => openDetail(item)}>
+      <Pressable testID={`account-transaction-${item.id}`} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]} onPress={() => openDetail(item)}>
         <Avatar label={item.payee} category={item.isSplit ? undefined : item.category ?? undefined} size={38} />
         <View style={styles.mid}>
           <View style={styles.payeeLine}>
@@ -103,12 +88,12 @@ export default function AccountDetail() {
   };
 
   return (
-    <View style={styles.root}>
+    <View testID="account-detail-screen" style={styles.root}>
       <Stack.Screen
         options={{
           title,
           headerRight: () => (
-            <Pressable onPress={() => { haptics.tap(); setNameText(title); setEditing(true); }} hitSlop={8}>
+            <Pressable testID="account-edit-button" onPress={() => { haptics.tap(); setNameText(title); setHidden(!!account?.hidden); setEditing(true); }} hitSlop={8}>
               <Text style={styles.editBtn}>Edit</Text>
             </Pressable>
           ),
@@ -147,10 +132,11 @@ export default function AccountDetail() {
       <Modal visible={editing} animationType="slide" transparent onRequestClose={() => setEditing(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
           <Pressable style={styles.modalBg} onPress={() => setEditing(false)}>
-            <Pressable style={[styles.sheet, { paddingBottom: insets.bottom + 24 }]} onPress={() => {}}>
+            <Pressable testID="account-edit-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 24 }]} onPress={() => {}}>
               <Text style={styles.sheetTitle}>Edit account</Text>
               <Text style={styles.label}>Display name</Text>
               <TextInput
+                testID="account-name-input"
                 style={styles.input}
                 value={nameText}
                 onChangeText={setNameText}
@@ -164,9 +150,9 @@ export default function AccountDetail() {
                   <Text style={styles.hideLabel}>Hide account</Text>
                   <Text style={styles.hintText}>Removes it from lists and net worth.</Text>
                 </View>
-                <Switch value={hidden} onValueChange={setHidden} trackColor={{ true: colors.accent }} />
+                <Switch testID="account-hidden-switch" value={hidden} onValueChange={setHidden} trackColor={{ true: colors.accent }} />
               </View>
-              <Pressable style={({ pressed }) => [styles.saveBtn, override.isPending && { opacity: 0.5 }, pressed && { opacity: 0.85 }]} onPress={saveOverride} disabled={override.isPending}>
+              <Pressable testID="account-save-button" style={({ pressed }) => [styles.saveBtn, override.isPending && { opacity: 0.5 }, pressed && { opacity: 0.85 }]} onPress={saveOverride} disabled={override.isPending}>
                 <Text style={styles.saveText}>{override.isPending ? 'Saving…' : 'Save'}</Text>
               </Pressable>
             </Pressable>

@@ -25,17 +25,18 @@ export function DemoRibbon() {
   );
 }
 
-export function Screen({ title, accent, right, refreshing, onRefresh, children }: {
+export function Screen({ title, accent, right, refreshing, onRefresh, children, testID }: {
   title: string;
   accent?: string;
   right?: React.ReactNode;
   refreshing?: boolean;
   onRefresh?: () => void;
   children: React.ReactNode;
+  testID?: string;
 }) {
   const insets = useSafeAreaInsets();
   return (
-    <View style={styles.root}>
+    <View style={styles.root} testID={testID}>
       <View style={[styles.header, { paddingTop: insets.top + 6 }]}>
         <Text style={styles.logo}>
           {title}
@@ -60,14 +61,15 @@ export function Screen({ title, accent, right, refreshing, onRefresh, children }
 }
 
 // For pushed (stack) routes that render under the native back-button header.
-export function PushScreen({ refreshing, onRefresh, children }: {
+export function PushScreen({ refreshing, onRefresh, children, testID }: {
   refreshing?: boolean;
   onRefresh?: () => void;
   children: React.ReactNode;
+  testID?: string;
 }) {
   const insets = useSafeAreaInsets();
   return (
-    <View style={styles.root}>
+    <View style={styles.root} testID={testID}>
       <DemoRibbon />
       <ScrollView
         style={styles.scroll}

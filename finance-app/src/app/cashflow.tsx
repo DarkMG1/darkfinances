@@ -21,7 +21,7 @@ export default function CashFlow() {
   const spend = months.map((m) => m.spend);
 
   return (
-    <PushScreen refreshing={trends.isFetching} onRefresh={trends.refetch}>
+    <PushScreen testID="cashflow-screen" refreshing={trends.isFetching} onRefresh={trends.refetch}>
       {trends.isLoading ? (
         <Loading />
       ) : trends.isError && months.length === 0 ? (
@@ -31,12 +31,12 @@ export default function CashFlow() {
       ) : (
         <>
           <View style={styles.statsRow}>
-            <StatCard label="Money In" value={cur ? fmtPos(cur.income) : '—'} valueColor={colors.green} />
-            <StatCard label="Money Out" value={cur ? fmtPos(cur.spend) : '—'} valueColor={colors.red} />
-            <StatCard label="Net" value={cur ? fmtMoney(cur.net) : '—'} valueColor={cur && cur.net >= 0 ? colors.green : colors.red} />
+            <StatCard testID="cashflow-money-in" label="Money In" value={cur ? fmtPos(cur.income) : '—'} valueColor={colors.green} />
+            <StatCard testID="cashflow-money-out" label="Money Out" value={cur ? fmtPos(cur.spend) : '—'} valueColor={colors.red} />
+            <StatCard testID="cashflow-net" label="Net" value={cur ? fmtMoney(cur.net) : '—'} valueColor={cur && cur.net >= 0 ? colors.green : colors.red} />
           </View>
 
-          <Pressable onPress={() => { haptics.tap(); router.push('/forecast' as never); }} style={({ pressed }) => [styles.forecastCard, pressed && { opacity: 0.65 }]}>
+          <Pressable testID="cashflow-forecast-link" onPress={() => { haptics.tap(); router.push('/forecast' as never); }} style={({ pressed }) => [styles.forecastCard, pressed && { opacity: 0.65 }]}>
             <View style={[styles.forecastIcon, { backgroundColor: colors.accentLight + '22' }]}>
               <SymbolView name="chart.line.uptrend.xyaxis" tintColor={colors.accentLight} size={22} resizeMode="scaleAspectFit" />
             </View>
@@ -61,7 +61,7 @@ export default function CashFlow() {
           <Card style={{ marginTop: 12 }}>
             <CardTitle>Monthly Net</CardTitle>
             {[...months].reverse().map((m) => (
-              <View key={m.month} style={styles.row}>
+              <View key={m.month} testID={`cashflow-month-row-${m.month}`} style={styles.row}>
                 <Text style={styles.month}>{monthLabel(m.month)}</Text>
                 <Text style={styles.rowIn}>+{fmtPos(m.income)}</Text>
                 <Text style={styles.rowOut}>-{fmtPos(m.spend)}</Text>

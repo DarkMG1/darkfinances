@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { Image } from 'expo-image';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
@@ -30,7 +30,7 @@ import {
 import { ReimbTxnRef, Transaction } from '@/api/generated/types';
 import { Card, CardTitle, TagChips } from '@/components/ui';
 import { haptics } from '@/lib/haptics';
-import { CapturedReceipt, pickReceiptFromLibrary, saveReceiptLocal, scanReceiptFromCamera } from '@/lib/receipts';
+import { CapturedReceipt, pickReceiptFromLibrary, scanReceiptFromCamera } from '@/lib/receipts';
 import { categoryIcon } from '@/theme/categoryIcons';
 import { cadenceLabel, colors, dueLabel, fmtDay, fmtMoney, fmtPos, monthLabel, NoteTag, parseNoteTags, tagKind, toTagToken } from '@/theme/colors';
 
@@ -52,9 +52,9 @@ const fmtMenuDay = (d: string) => {
 
 export default function TransactionDetail() {
   const p = useLocalSearchParams<{
-    id: string; payee: string; amount: string; date: string; account: string; accountId: string;
-    category: string; categoryId: string; notes: string; isLeg: string; parentId: string; cleared: string;
-    isSplit: string; splitCount: string; imported: string;
+    id: string; payee?: string; amount?: string; date?: string; account?: string; accountId?: string;
+    category?: string; categoryId?: string; notes?: string; isLeg?: string; parentId?: string; cleared?: string;
+    isSplit?: string; splitCount?: string; imported?: string;
   }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -69,36 +69,41 @@ export default function TransactionDetail() {
   const setPayee = useSetPayee();
   const setDate = useSetDate();
 
-  const isLeg = p.isLeg === '1';
-  const isSplit = p.isSplit === '1';
-  const amount = Number(p.amount) || 0;
+  const detail = useTransaction(p.id, p.accountId, p.date);
+  const canonical = detail.data;
+  const txnId = canonical?.id ?? p.id;
+  const accountId = canonical?.accountId ?? p.accountId ?? '';
+  const accountName = canonical?.account ?? p.account ?? '';
+  const parentId = canonical?.parentId ?? p.parentId ?? null;
+  const canonicalPayee = canonical?.payee ?? p.payee ?? '';
+  const isLeg = canonical?.isLeg ?? p.isLeg === '1';
+  const isSplit = canonical?.isSplit ?? p.isSplit === '1';
+  const amount = canonical?.amount ?? (Number(p.amount) || 0);
   const income = amount > 0;
-  const pending = p.cleared === '0'; // cleared:false = bank hasn't posted it yet
+  const pending = canonical ? !canonical.cleared : p.cleared === '0'; // cleared:false = bank hasn't posted it yet
   // Only user-created rows are deletable — bank-imported ones aren't (Rocket Money parity).
-  const canDelete = !isLeg && p.imported !== '1';
+  const canDelete = !isLeg && (canonical ? !canonical.imported : p.imported !== '1');
 
-  // For a split, pull the legs so we can show them and route to the editor.
-  const detail = useTransaction(isSplit ? p.id : undefined, p.accountId, p.date);
   const splitLegs = detail.data?.legs ?? [];
   const splitCount = Number(p.splitCount) || splitLegs.length;
   const goSplit = () => {
     haptics.tap();
-    router.push({ pathname: '/split/[id]', params: { id: p.id, accountId: p.accountId, date: p.date } });
+    router.push({ pathname: '/split/[id]', params: { id: txnId, accountId, date: currentDate } });
   };
 
-  const [payeeName, setPayeeNameLocal] = useState(p.payee || '');
+  const [payeeName, setPayeeNameLocal] = useState(canonicalPayee);
   const [renaming, setRenaming] = useState(false);
-  const [renameText, setRenameText] = useState(p.payee || '');
+  const [renameText, setRenameText] = useState(canonicalPayee);
   const [dating, setDating] = useState(false);
-  const [txnDate, setTxnDate] = useState(p.date || '');
-  const [dateText, setDateText] = useState(p.date || ymd(new Date()));
+  const [txnDate, setTxnDate] = useState(canonical?.date ?? p.date ?? '');
+  const [dateText, setDateText] = useState(canonical?.date ?? p.date ?? ymd(new Date()));
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const d = parseYmd(p.date || ymd(new Date()));
     return new Date(d.getFullYear(), d.getMonth(), 1);
   });
   const [monthPicking, setMonthPicking] = useState(false);
-  const [category, setCategoryName] = useState(p.category || '');
-  const [categoryId, setCategoryId] = useState(p.categoryId || '');
+  const [category, setCategoryName] = useState(canonical?.category ?? p.category ?? '');
+  const [categoryId, setCategoryId] = useState(canonical?.categoryId ?? p.categoryId ?? '');
   const parsedNotes = useMemo(() => parseNoteTags(p.notes), [p.notes]);
   const [noteText, setNoteText] = useState(parsedNotes.text);
   const [tags, setTags] = useState<NoteTag[]>(parsedNotes.tags);
@@ -109,60 +114,119 @@ export default function TransactionDetail() {
   const [baseText, setBaseText] = useState(parsedNotes.text);
   const [baseRaws, setBaseRaws] = useState<string[]>(parsedNotes.tags.map((t) => t.raw));
   // Tags present at load may drive attribution — confirm before removing.
-  const originalRaws = useRef(new Set(parsedNotes.tags.map((t) => t.raw.toLowerCase()))).current;
+  const originalRawsRef = useRef(new Set(parsedNotes.tags.map((t) => t.raw.toLowerCase())));
+  const originalRaws = originalRawsRef.current;
   const allTags = useTags();
   const [picking, setPicking] = useState(false);
   const [linking, setLinking] = useState(false);
   const [linkQuery, setLinkQuery] = useState('');
-  const currentDate = txnDate || p.date || '';
+  const loadedIdentity = useRef<string | null>(null);
+  useEffect(() => {
+    if (!canonical) return;
+    const identity = `${canonical.id}|${canonical.date}`;
+    if (loadedIdentity.current === identity) return;
+    loadedIdentity.current = identity;
+    const nextParsed = parseNoteTags(canonical.notes);
+    setPayeeNameLocal(canonical.payee);
+    setRenameText(canonical.payee);
+    setTxnDate(canonical.date);
+    setDateText(canonical.date);
+    const parsedDate = parseYmd(canonical.date);
+    setCalendarMonth(new Date(parsedDate.getFullYear(), parsedDate.getMonth(), 1));
+    setCategoryName(canonical.category || '');
+    setCategoryId(canonical.categoryId || '');
+    setNoteText(nextParsed.text);
+    setTags(nextParsed.tags);
+    setShowTags(nextParsed.tags.length > 0);
+    setShowNotes(!!nextParsed.text);
+    setBaseText(nextParsed.text);
+    setBaseRaws(nextParsed.tags.map((tag) => tag.raw));
+    originalRawsRef.current = new Set(nextParsed.tags.map((tag) => tag.raw.toLowerCase()));
+  }, [canonical]);
+  const currentDate = txnDate || canonical?.date || p.date || '';
 
-  const links = useReimbLinks(p.id);
+  const links = useReimbLinks(txnId);
   const addLink = useAddReimbLink();
   const delLink = useDeleteReimbLink();
   const search = useSearch(linkQuery);
 
-  const thisRef: ReimbTxnRef = { id: p.id, date: currentDate || null, payee: p.payee || '', amount };
+  const thisRef: ReimbTxnRef = {
+    id: txnId,
+    date: currentDate || null,
+    payee: payeeName,
+    amount,
+    accountId,
+    account: accountName,
+    imported: canonical?.imported,
+  };
   // For an inflow we show the expenses it repays; for an expense, the inflows that repaid it.
   const linked = (income ? links.data?.asInflow : links.data?.asExpense) ?? [];
   // The picker lists the opposite sign: an inflow links to expenses, vice versa.
-  const candidates = (search.data?.transactions ?? []).filter((t) => t.id !== p.id && (income ? t.amount < 0 : t.amount > 0));
+  const candidates = (search.data?.transactions ?? []).filter((t) => t.id !== txnId && (income ? t.amount < 0 : t.amount > 0));
 
   const openTxn = (t: ReimbTxnRef) =>
     router.push({
       pathname: '/transaction/[id]',
-      params: { id: t.id, payee: t.payee, amount: String(t.amount), date: t.date ?? '', account: '', accountId: '', category: '', categoryId: '', notes: '', isLeg: '0', parentId: '' },
+      params: { id: t.id, date: t.date ?? '', accountId: t.accountId ?? '' },
     });
 
   const createLink = (t: Transaction) => {
-    const ref: ReimbTxnRef = { id: t.id, date: t.date, payee: t.payee, amount: t.amount };
+    const ref: ReimbTxnRef = {
+      id: t.id,
+      date: t.date,
+      payee: t.payee,
+      amount: t.amount,
+      accountId: t.accountId,
+      account: t.account,
+      imported: t.imported,
+    };
     const vars = income ? { inflow: thisRef, expense: ref } : { inflow: ref, expense: thisRef };
     addLink.mutate(vars, { onSuccess: () => { setLinking(false); setLinkQuery(''); } });
   };
   const removeLink = (other: ReimbTxnRef) =>
-    delLink.mutate(income ? { inflowId: p.id, expenseId: other.id } : { inflowId: other.id, expenseId: p.id });
+    delLink.mutate(income ? { inflowId: txnId, expenseId: other.id } : { inflowId: other.id, expenseId: txnId });
 
-  const sub = (recurring.data?.items ?? []).find((i) => norm(p.payee) === i.key || norm(p.payee).includes(i.key));
+  const sub = (recurring.data?.items ?? []).find((i) => norm(payeeName) === i.key || norm(payeeName).includes(i.key));
+
+  const followReplacement = (result?: { id?: string }) => {
+    if (!result?.id || result.id === txnId) return;
+    router.replace({
+      pathname: '/transaction/[id]',
+      params: { id: result.id, accountId, date: currentDate },
+    });
+  };
 
   const pickCategory = (cid: string, categoryName: string) => {
-    setCategory.mutate({ id: p.id, categoryId: cid, isLeg, parentId: p.parentId || null, accountId: p.accountId, date: currentDate });
+    const previous = { category, categoryId };
     setCategoryName(categoryName);
     setCategoryId(cid);
     setPicking(false);
+    setCategory.mutate(
+      { id: txnId, categoryId: cid, isLeg, parentId, accountId, date: currentDate },
+      {
+        onSuccess: followReplacement,
+        onError: (error) => {
+          setCategoryName(previous.category);
+          setCategoryId(previous.categoryId);
+          Alert.alert('Could not change category', error.error || 'Please try again.');
+        },
+      },
+    );
   };
 
   // --- Rules, mark-as-recurring (power features). Splitting lives on its own screen.
-  const canSplit = !isLeg && !isSplit && !!p.accountId && !!currentDate && amount !== 0;
-  const canMarkRecurring = !isLeg && amount < 0 && !!p.payee && !sub;
+  const canSplit = !isLeg && !isSplit && !!accountId && !!currentDate && amount !== 0;
+  const canMarkRecurring = !isLeg && amount < 0 && !!payeeName && !sub;
 
   const applyRuleForPayee = () => {
     if (!categoryId) return;
     saveRule.mutate(
-      { match: p.payee, categoryId, categoryName: category },
+      { match: payeeName, categoryId, categoryName: category },
       {
         onSuccess: (r) =>
           Alert.alert(
             'Rule saved',
-            `“${p.payee}” will always be categorized as ${category}.` +
+            `“${payeeName}” will always be categorized as ${category}.` +
               (r?.applied ? `\n\nApplied to ${r.applied} past transaction${r.applied === 1 ? '' : 's'}.` : ''),
           ),
         onError: (e) => Alert.alert('Could not save rule', e.error || 'Please try again.'),
@@ -171,9 +235,9 @@ export default function TransactionDetail() {
   };
   const doMarkRecurring = () => {
     markRec.mutate(
-      { payee: p.payee },
+      { payee: payeeName },
       {
-        onSuccess: () => Alert.alert('Marked as recurring', `“${p.payee}” will appear in Subscriptions once it has at least two charges.`),
+        onSuccess: () => Alert.alert('Marked as recurring', `“${payeeName}” will appear in Subscriptions once it has at least two charges.`),
         onError: (e) => Alert.alert('Could not mark recurring', e.error || 'Please try again.'),
       }
     );
@@ -192,7 +256,7 @@ export default function TransactionDetail() {
           style: 'destructive',
           onPress: () =>
             del.mutate(
-              { id: p.id, accountId: p.accountId, date: currentDate },
+              { id: txnId, accountId, date: currentDate },
               {
                 onSuccess: () => { haptics.success(); router.back(); },
                 onError: (e) => Alert.alert('Could not delete', e.error || 'Please try again.'),
@@ -203,7 +267,7 @@ export default function TransactionDetail() {
     );
   };
   // Receipts — scan/attach, view full-screen, delete. OCR runs on-device (Vision).
-  const receipts = useReceipts(p.id);
+  const receipts = useReceipts(txnId);
   const addReceipt = useAddReceipt();
   const delReceipt = useDeleteReceipt();
   const receiptSource = useReceiptImageSource();
@@ -215,19 +279,31 @@ export default function TransactionDetail() {
     if (!cap) { setScanning(false); return; }
     if (!cap.base64) { setScanning(false); Alert.alert('Could not read image', 'Please try again.'); return; }
     addReceipt.mutate(
-      { txnId: p.id, imageBase64: cap.base64, mime: cap.mime, ocrText: cap.ocrText, ocrLines: cap.ocrLines, amount: cap.amount, date: cap.date, source: cap.source ?? 'camera' },
+      { txnId, accountId, transactionDate: currentDate, imageBase64: cap.base64, mime: cap.mime, ocrText: cap.ocrText, ocrLines: cap.ocrLines, amount: cap.amount, date: cap.date, source: cap.source ?? 'camera' },
       {
-        onSuccess: async (rec) => { if (rec?.id) await saveReceiptLocal(cap.uri, rec.id); setScanning(false); haptics.success(); },
+        onSuccess: () => { setScanning(false); haptics.success(); },
         onError: (e) => { setScanning(false); Alert.alert('Upload failed', e.error || 'Please try again.'); },
       }
     );
   };
+  const reviewCapture = (cap: CapturedReceipt | null) => {
+    setScanning(false);
+    if (!cap) return;
+    const details = [
+      cap.amount != null ? `Detected total: ${fmtPos(cap.amount)}` : 'No total detected',
+      cap.date ? `Detected date: ${fmtDay(cap.date)}` : 'No date detected',
+    ].join('\n');
+    Alert.alert('Receipt ready', `${details}\n\nUpload this resized receipt to your server?`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Upload', onPress: () => { setScanning(true); uploadCapture(cap); } },
+    ]);
+  };
   const startScan = () => {
     if (scanning) return;
     haptics.tap();
-    Alert.alert('Add receipt', 'Text is read on-device — nothing leaves your phone until you save.', [
-      { text: 'Take Photo', onPress: async () => { setScanning(true); try { uploadCapture(await scanReceiptFromCamera()); } catch (e: any) { setScanning(false); Alert.alert('Camera unavailable', e?.message || 'Please try again.'); } } },
-      { text: 'Choose from Library', onPress: async () => { setScanning(true); try { uploadCapture(await pickReceiptFromLibrary()); } catch (e: any) { setScanning(false); Alert.alert('Library unavailable', e?.message || 'Please try again.'); } } },
+    Alert.alert('Add receipt', 'The image is resized and text is read on-device, then the receipt is uploaded to your server.', [
+      { text: 'Take Photo', onPress: async () => { setScanning(true); try { reviewCapture(await scanReceiptFromCamera()); } catch (e: any) { setScanning(false); Alert.alert('Camera unavailable', e?.message || 'Please try again.'); } } },
+      { text: 'Choose from Library', onPress: async () => { setScanning(true); try { reviewCapture(await pickReceiptFromLibrary()); } catch (e: any) { setScanning(false); Alert.alert('Library unavailable', e?.message || 'Please try again.'); } } },
       { text: 'Cancel', style: 'cancel' },
     ]);
   };
@@ -252,17 +328,25 @@ export default function TransactionDetail() {
   const moveToReimb = () => {
     if (!reimbCat) return;
     haptics.tap();
-    setCategory.mutate(
-      { id: p.id, categoryId: reimbCat.id, isLeg, parentId: p.parentId || null, accountId: p.accountId, date: currentDate },
-      { onSuccess: () => haptics.success(), onError: (e) => Alert.alert('Could not move', e.error || 'Please try again.') }
-    );
+    const previous = { category, categoryId };
     setCategoryName(reimbCat.name);
     setCategoryId(reimbCat.id);
+    setCategory.mutate(
+      { id: txnId, categoryId: reimbCat.id, isLeg, parentId, accountId, date: currentDate },
+      {
+        onSuccess: followReplacement,
+        onError: (e) => {
+          setCategoryName(previous.category);
+          setCategoryId(previous.categoryId);
+          Alert.alert('Could not move', e.error || 'Please try again.');
+        },
+      }
+    );
   };
 
   // Change date — dating a refund back to the purchase month makes it net that
   // month's spending. Split legs follow their parent, so only non-legs qualify.
-  const canEditDate = !isLeg && !!p.id;
+  const canEditDate = !isLeg && !!txnId;
   const lastMonthLastDay = () => {
     const now = new Date();
     return ymd(new Date(now.getFullYear(), now.getMonth(), 0));
@@ -281,9 +365,15 @@ export default function TransactionDetail() {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(next)) { Alert.alert('Invalid date', 'Use the format YYYY-MM-DD, e.g. 2026-06-30.'); return; }
     if (next === currentDate) { setDating(false); return; }
     setDate.mutate(
-      { id: p.id, date: next, isLeg },
+      { id: txnId, date: next, isLeg },
       {
-        onSuccess: () => { haptics.success(); setTxnDate(next); setDateText(next); setDating(false); },
+        onSuccess: () => {
+          haptics.success();
+          setTxnDate(next);
+          setDateText(next);
+          setDating(false);
+          router.replace({ pathname: '/transaction/[id]', params: { id: txnId, accountId, date: next } });
+        },
         onError: (e) => { setDateText(currentDate || ymd(new Date())); Alert.alert('Could not change date', e.error || 'Please try again.'); },
       }
     );
@@ -298,8 +388,11 @@ export default function TransactionDetail() {
     const prev = payeeName;
     setPayeeNameLocal(next); // optimistic
     setPayee.mutate(
-      { id: p.id, payee: next, isLeg, parentId: p.parentId || null, accountId: p.accountId, date: currentDate },
-      { onSuccess: () => haptics.success(), onError: (e) => { setPayeeNameLocal(prev); Alert.alert('Could not rename', e.error || 'Please try again.'); } }
+      { id: txnId, payee: next, isLeg, parentId, accountId, date: currentDate },
+      {
+        onSuccess: followReplacement,
+        onError: (e) => { setPayeeNameLocal(prev); Alert.alert('Could not rename', e.error || 'Please try again.'); },
+      }
     );
   };
 
@@ -311,8 +404,14 @@ export default function TransactionDetail() {
   const recombineNotes = () => [noteText.trim(), ...tags.map((t) => t.raw)].join(' ').replace(/\s{2,}/g, ' ').trim();
   const save = () =>
     setNotes.mutate(
-      { id: p.id, notes: recombineNotes(), isLeg, parentId: p.parentId || null, accountId: p.accountId, date: currentDate },
-      { onSuccess: () => { setBaseText(noteText.trim()); setBaseRaws(rawsOf(tags)); } }
+      { id: txnId, notes: recombineNotes(), isLeg, parentId, accountId, date: currentDate },
+      {
+        onSuccess: (result) => {
+          setBaseText(noteText.trim());
+          setBaseRaws(rawsOf(tags));
+          followReplacement(result);
+        },
+      }
     );
 
   const addTag = (input: string) => {
@@ -353,7 +452,7 @@ export default function TransactionDetail() {
     const month = calendarMonth.getMonth();
     const firstWeekday = new Date(year, month, 1).getDay();
     const daysInMonth = new Date(year, month + 1, 0).getDate();
-    const cells: Array<string | null> = Array(firstWeekday).fill(null);
+    const cells: (string | null)[] = Array(firstWeekday).fill(null);
     for (let day = 1; day <= daysInMonth; day += 1) cells.push(ymd(new Date(year, month, day)));
     while (cells.length % 7) cells.push(null);
     return cells;
@@ -370,7 +469,27 @@ export default function TransactionDetail() {
     doSetDate(next);
   };
   const catMeta = categoryIcon(category || payeeName);
-  const heroBg = income ? '#214d36' : '#733e2d';
+  const amountColor = income ? colors.green : colors.text;
+
+  if (!canonical) {
+    const message = !p.date
+      ? 'This transaction link is missing its date.'
+      : detail.isError
+        ? detail.error?.error || 'Could not load the latest transaction.'
+        : 'Loading transaction…';
+    return (
+      <View testID="transaction-detail-screen" style={styles.loadBox}>
+        <Stack.Screen options={{ headerShown: false }} />
+        {!detail.isError && p.date ? <ActivityIndicator color={colors.accentLight} /> : null}
+        <Text style={styles.loadText}>{message}</Text>
+        {detail.isError ? (
+          <Pressable style={styles.retryButton} onPress={() => detail.refetch()}>
+            <Text style={styles.retryText}>Try again</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    );
+  }
 
   return (
     <ScrollView
@@ -386,7 +505,7 @@ export default function TransactionDetail() {
         }}
       />
 
-      <View style={[styles.menuHero, { backgroundColor: heroBg, paddingTop: insets.top + 14 }]}>
+      <View style={[styles.menuHero, { paddingTop: insets.top + 14 }]}>
         <View style={styles.menuTopBar}>
           <Pressable onPress={save} disabled={!dirty || setNotes.isPending} hitSlop={8} style={styles.topSide}>
             {dirty ? <Text style={styles.headerSave}>{setNotes.isPending ? 'Saving…' : 'Save'}</Text> : null}
@@ -415,11 +534,11 @@ export default function TransactionDetail() {
         ) : (
           <Text style={styles.payee}>{payeeName || '—'}</Text>
         )}
-        <Text style={[styles.amount, { color: colors.text }]}>{income ? '+' : ''}{fmtMoney(amount)}</Text>
-        {p.payee ? (
+        <Text style={[styles.amount, { color: amountColor }]}>{income ? '+' : ''}{fmtMoney(amount)}</Text>
+        {payeeName ? (
           <View style={styles.statementBlock}>
             <Text style={styles.statementLabel}>Statement Description</Text>
-            <Text style={styles.statementText}>{String(p.payee).toUpperCase()}</Text>
+            <Text style={styles.statementText}>{payeeName.toUpperCase()}</Text>
           </View>
         ) : null}
         {!isSplit ? (
@@ -450,8 +569,9 @@ export default function TransactionDetail() {
       ) : null}
 
       <MenuGroup testID="transaction-action-menu">
-        {canRename ? <MenuActionRow icon="pencil" label="Rename" onPress={openRename} /> : null}
+        {canRename ? <MenuActionRow testID="transaction-rename-row" icon="pencil" label="Rename" onPress={openRename} /> : null}
         <MenuSwitchRow
+          testID="transaction-recurring-switch-row"
           icon="arrow.clockwise.circle"
           label="Is Recurring?"
           value={!!sub}
@@ -463,6 +583,7 @@ export default function TransactionDetail() {
         />
         {canMoveReimb ? (
           <MenuActionRow
+            testID="transaction-move-reimbursement-row"
             icon="person.2.fill"
             label="Move to Reimbursements"
             right={setCategory.isPending ? 'Moving…' : 'Not personal spend'}
@@ -471,23 +592,26 @@ export default function TransactionDetail() {
             last
           />
         ) : (
-          <MenuActionRow icon="nosign" label={income ? 'Deposit' : 'Personal spend'} right="Included" disabled last />
+          <MenuActionRow testID="transaction-personal-spend-row" icon="nosign" label={income ? 'Deposit' : 'Personal spend'} right="Included" disabled last />
         )}
       </MenuGroup>
 
-      <MenuGroup>
+      <MenuGroup testID="transaction-secondary-menu">
         <MenuActionRow
+          testID="transaction-tags-row"
           icon="tag"
           label={tags.length ? `Tags (${tags.length})` : 'Add Tags'}
           onPress={() => { setShowTags(!showTags); haptics.tap(); }}
         />
         <MenuActionRow
+          testID="transaction-notes-row"
           icon="note.text"
           label={noteText.trim() ? 'Edit Note' : 'Add Note'}
           onPress={() => { setShowNotes(!showNotes); haptics.tap(); }}
         />
         {!isLeg && categoryId ? (
           <MenuActionRow
+            testID="transaction-create-rule-row"
             icon="bolt.circle"
             label="Create Rule"
             right={saveRule.isPending ? 'Saving…' : category}
@@ -496,21 +620,21 @@ export default function TransactionDetail() {
           />
         ) : null}
         {canSplit ? (
-          <MenuActionRow icon="arrow.triangle.branch" label="Split" onPress={goSplit} />
+          <MenuActionRow testID="transaction-split-row" icon="arrow.triangle.branch" label="Split" onPress={goSplit} />
         ) : null}
-        <MenuActionRow icon="doc.viewfinder" label={receiptList.length ? `Receipts (${receiptList.length})` : 'Add Receipt'} onPress={startScan} disabled={scanning} last />
+        <MenuActionRow testID="transaction-receipt-row" icon="doc.viewfinder" label={receiptList.length ? `Receipts (${receiptList.length})` : 'Add Receipt'} onPress={startScan} disabled={scanning} last />
       </MenuGroup>
 
       <CardTitle style={styles.sectionTitle}>{income ? 'Repayment for' : 'Repaid by'}</CardTitle>
       <Card style={styles.list}>
         {linked.length ? (
           linked.map((t) => (
-            <View key={t.id} style={styles.linkRow}>
-              <Pressable style={({ pressed }) => [styles.linkMain, pressed && { opacity: 0.6 }]} onPress={() => openTxn(t)}>
+            <View key={t.id} testID={`transaction-linked-row-${t.id}`} style={styles.linkRow}>
+              <Pressable testID={`transaction-linked-open-${t.id}`} style={({ pressed }) => [styles.linkMain, pressed && { opacity: 0.6 }]} onPress={() => openTxn(t)}>
                 <Text style={styles.linkPayee} numberOfLines={1}>{t.payee || '(no payee)'}</Text>
                 <Text style={styles.linkSub}>{t.date ? fmtDay(t.date) : ''} · {fmtPos(Math.abs(t.amount))}</Text>
               </Pressable>
-              <Pressable hitSlop={10} onPress={() => removeLink(t)} disabled={delLink.isPending} style={({ pressed }) => pressed && { opacity: 0.5 }}>
+              <Pressable testID={`transaction-linked-unlink-${t.id}`} hitSlop={10} onPress={() => removeLink(t)} disabled={delLink.isPending} style={({ pressed }) => pressed && { opacity: 0.5 }}>
                 <Text style={styles.unlink}>Unlink</Text>
               </Pressable>
             </View>
@@ -518,7 +642,7 @@ export default function TransactionDetail() {
         ) : (
           <Text style={styles.linkEmpty}>{income ? 'Not linked to any expense yet.' : 'No linked repayment yet.'}</Text>
         )}
-        <Pressable style={({ pressed }) => [styles.linkBtn, pressed && { opacity: 0.6 }]} onPress={() => { haptics.tap(); setLinking(true); }}>
+        <Pressable testID="transaction-link-repayment-button" style={({ pressed }) => [styles.linkBtn, pressed && { opacity: 0.6 }]} onPress={() => { haptics.tap(); setLinking(true); }}>
           <Text style={styles.linkBtnText}>{income ? '+ Link to an expense' : '+ Link a repayment'}</Text>
         </Pressable>
       </Card>
@@ -529,7 +653,7 @@ export default function TransactionDetail() {
           <Card style={styles.list}>
             {splitLegs.length ? (
               splitLegs.map((l, i) => (
-                <View key={l.id ?? i} style={styles.legInfoRow}>
+                <View key={l.id ?? i} testID={`transaction-split-leg-${i}`} style={styles.legInfoRow}>
                   <View style={{ flex: 1, minWidth: 0 }}>
                     <Text style={styles.legInfoName} numberOfLines={1}>{l.name || l.category || 'Uncategorized'}</Text>
                     {l.name && l.category ? <Text style={styles.legInfoSub} numberOfLines={1}>{l.category}</Text> : null}
@@ -540,7 +664,7 @@ export default function TransactionDetail() {
             ) : (
               <Text style={styles.linkEmpty}>{detail.isLoading ? 'Loading…' : 'No legs found.'}</Text>
             )}
-            <Pressable style={({ pressed }) => [styles.linkBtn, pressed && { opacity: 0.6 }]} onPress={goSplit}>
+            <Pressable testID="transaction-edit-split-button" style={({ pressed }) => [styles.linkBtn, pressed && { opacity: 0.6 }]} onPress={goSplit}>
               <Text style={styles.linkBtnText}>Edit split · {fmtPos(Math.abs(amount))} into {splitCount}</Text>
             </Pressable>
           </Card>
@@ -562,6 +686,7 @@ export default function TransactionDetail() {
         <View style={styles.tagAddRow}>
           <Text style={styles.tagHash}>#</Text>
           <TextInput
+            testID="transaction-tag-input"
             style={styles.tagInput}
             value={tagInput}
             onChangeText={setTagInput}
@@ -573,7 +698,7 @@ export default function TransactionDetail() {
             onSubmitEditing={() => addTag(tagInput)}
           />
           {tagInput.trim() ? (
-            <Pressable onPress={() => addTag(tagInput)} style={({ pressed }) => [styles.tagAddBtn, pressed && { opacity: 0.7 }]}>
+            <Pressable testID="transaction-tag-add-button" onPress={() => addTag(tagInput)} style={({ pressed }) => [styles.tagAddBtn, pressed && { opacity: 0.7 }]}>
               <Text style={styles.tagAddBtnText}>Add</Text>
             </Pressable>
           ) : null}
@@ -581,7 +706,7 @@ export default function TransactionDetail() {
         {tagSuggestions.length ? (
           <View style={styles.suggestRow}>
             {tagSuggestions.map((s) => (
-              <Pressable key={s.raw} onPress={() => addTag(s.raw)} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
+              <Pressable testID={`transaction-tag-suggestion-${s.token}`} key={s.raw} onPress={() => addTag(s.raw)} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
                 <Text style={styles.suggestText}>#{s.token}</Text>
               </Pressable>
             ))}
@@ -592,7 +717,7 @@ export default function TransactionDetail() {
             <Text style={styles.tripLabel}>Add to a trip</Text>
             <View style={styles.suggestRow}>
               {eventChips.map((e) => (
-                <Pressable key={e.slug} onPress={() => addTag(`ev-${e.slug}`)} style={({ pressed }) => [styles.tripChip, pressed && { opacity: 0.6 }]}>
+                <Pressable testID={`transaction-event-chip-${e.slug}`} key={e.slug} onPress={() => addTag(`ev-${e.slug}`)} style={({ pressed }) => [styles.tripChip, pressed && { opacity: 0.6 }]}>
                   <Text style={styles.tripChipText} numberOfLines={1}>{e.name}</Text>
                 </Pressable>
               ))}
@@ -609,6 +734,7 @@ export default function TransactionDetail() {
       <CardTitle style={styles.sectionTitle}>Notes</CardTitle>
       <Card>
         <TextInput
+          testID="transaction-notes-input"
           style={styles.notes}
           value={noteText}
           onChangeText={setNoteText}
@@ -628,12 +754,12 @@ export default function TransactionDetail() {
             vertical ScrollView caused scroll/layout jank on New Arch. */}
         <View style={styles.receiptRow}>
           {receiptList.map((r) => (
-            <Pressable key={r.id} onPress={() => { haptics.tap(); setViewerId(r.id); }} style={({ pressed }) => [styles.thumb, pressed && { opacity: 0.7 }]}>
+            <Pressable testID={`transaction-receipt-${r.id}`} key={r.id} onPress={() => { haptics.tap(); setViewerId(r.id); }} style={({ pressed }) => [styles.thumb, pressed && { opacity: 0.7 }]}>
               <Image source={receiptSource(r.id)} style={styles.thumbImg} contentFit="cover" transition={120} cachePolicy="memory-disk" />
               {r.amount != null ? <Text style={styles.thumbAmt}>{fmtPos(r.amount)}</Text> : null}
             </Pressable>
           ))}
-          <Pressable onPress={startScan} disabled={scanning} style={({ pressed }) => [styles.thumbAdd, pressed && { opacity: 0.7 }, scanning && { opacity: 0.5 }]}>
+          <Pressable testID="transaction-receipt-scan-button" onPress={startScan} disabled={scanning} style={({ pressed }) => [styles.thumbAdd, pressed && { opacity: 0.7 }, scanning && { opacity: 0.5 }]}>
             {scanning ? <ActivityIndicator color={colors.accentLight} /> : (
               <>
                 <Text style={styles.thumbAddPlus}>+</Text>
@@ -650,28 +776,28 @@ export default function TransactionDetail() {
       ) : null}
 
       {canHistory ? (
-        <Pressable onPress={goHistory} style={({ pressed }) => [styles.historyBtn, pressed && { opacity: 0.7 }]}>
+        <Pressable testID="transaction-history-button" onPress={goHistory} style={({ pressed }) => [styles.historyBtn, pressed && { opacity: 0.7 }]}>
           <Text style={styles.historyText}>See History{histCount != null ? ` (${histCount})` : ''}</Text>
           <Text style={styles.historyArrow}>›</Text>
         </Pressable>
       ) : null}
 
       <View style={styles.metaBlock}>
-        {p.account ? (
+        {accountName ? (
           <View style={styles.metaItem}>
             <Text style={styles.metaLabel}>Account</Text>
-            <Text style={styles.metaValue}>{p.account}</Text>
+            <Text style={styles.metaValue}>{accountName}</Text>
           </View>
         ) : null}
         <View style={styles.metaItem}>
-          <Text style={styles.metaLabel}>Other Dates</Text>
-          <Text style={styles.metaMuted}>Transacted: {currentDate || 'Unknown'}</Text>
-          <Text style={styles.metaMuted}>Posted: {currentDate || 'Unknown'}</Text>
+          <Text style={styles.metaLabel}>Ledger Date</Text>
+          <Text style={styles.metaMuted}>{currentDate || 'Unknown'}</Text>
         </View>
       </View>
 
       {canDelete ? (
         <Pressable
+          testID="transaction-delete-button"
           onPress={doDelete}
           disabled={del.isPending}
           style={({ pressed }) => [styles.deleteBtn, del.isPending && { opacity: 0.5 }, pressed && { opacity: 0.7 }]}
@@ -684,14 +810,14 @@ export default function TransactionDetail() {
 
       <Modal visible={picking} animationType="slide" transparent onRequestClose={() => setPicking(false)}>
         <Pressable style={styles.modalBg} onPress={() => setPicking(false)}>
-          <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
+          <View testID="transaction-category-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Set category</Text>
             <FlatList
               data={categories.data ?? []}
               keyExtractor={(c) => c.id}
               style={{ maxHeight: 400 }}
               renderItem={({ item }) => (
-                <Pressable style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => pickCategory(item.id, item.name)}>
+                <Pressable testID={`transaction-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => pickCategory(item.id, item.name)}>
                   <Text style={styles.catOptionText}>{item.name}</Text>
                   <Text style={styles.catOptionGroup}>{item.group}</Text>
                 </Pressable>
@@ -704,9 +830,10 @@ export default function TransactionDetail() {
       <Modal visible={linking} animationType="slide" transparent onRequestClose={() => setLinking(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
           <Pressable style={styles.modalBg} onPress={() => setLinking(false)}>
-            <Pressable style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
+            <Pressable testID="transaction-link-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
               <Text style={styles.sheetTitle}>{income ? 'Pick the expense this repays' : 'Pick the repayment'}</Text>
               <TextInput
+                testID="transaction-link-search-input"
                 style={styles.searchInput}
                 value={linkQuery}
                 onChangeText={setLinkQuery}
@@ -725,7 +852,7 @@ export default function TransactionDetail() {
                   <Text style={styles.linkEmpty}>{linkQuery.trim().length < 2 ? 'Type at least 2 characters to search.' : 'No matching transactions.'}</Text>
                 }
                 renderItem={({ item }) => (
-                  <Pressable style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => createLink(item)} disabled={addLink.isPending}>
+                  <Pressable testID={`transaction-link-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => createLink(item)} disabled={addLink.isPending}>
                     <View style={{ flex: 1, minWidth: 0 }}>
                       <Text style={styles.catOptionText} numberOfLines={1}>{item.payee || '(no payee)'}</Text>
                       <Text style={styles.catOptionGroup}>{fmtDay(item.date)} · {item.account}</Text>
@@ -742,9 +869,10 @@ export default function TransactionDetail() {
       <Modal visible={renaming} animationType="slide" transparent onRequestClose={() => setRenaming(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
           <Pressable style={styles.modalBg} onPress={() => setRenaming(false)}>
-            <Pressable style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
+            <Pressable testID="transaction-rename-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
               <Text style={styles.sheetTitle}>Rename transaction</Text>
               <TextInput
+                testID="transaction-rename-input"
                 style={styles.searchInput}
                 value={renameText}
                 onChangeText={setRenameText}
@@ -755,7 +883,7 @@ export default function TransactionDetail() {
                 returnKeyType="done"
                 onSubmitEditing={doRename}
               />
-              <Pressable style={styles.renameSave} onPress={doRename} disabled={setPayee.isPending}>
+              <Pressable testID="transaction-rename-save-button" style={styles.renameSave} onPress={doRename} disabled={setPayee.isPending}>
                 <Text style={styles.renameSaveText}>{setPayee.isPending ? 'Saving…' : 'Save'}</Text>
               </Pressable>
               <Text style={styles.tagHint}>The original bank description is kept for matching future charges.</Text>
@@ -766,19 +894,20 @@ export default function TransactionDetail() {
 
       <Modal visible={dating} animationType="slide" transparent onRequestClose={() => setDating(false)}>
         <Pressable style={styles.modalBg} onPress={() => setDating(false)}>
-          <Pressable style={[styles.sheet, styles.calendarSheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
+          <Pressable testID="transaction-date-sheet" style={[styles.sheet, styles.calendarSheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
             <View style={styles.calendarSheetHeader}>
               <View>
                 <Text style={styles.sheetTitle}>Transaction date</Text>
                 <Text style={styles.calendarSub}>{selectedDay ? fmtDay(selectedDay) : 'Pick a date'}</Text>
               </View>
-              <Pressable onPress={() => setDating(false)} hitSlop={10}>
+              <Pressable testID="transaction-date-done-button" onPress={() => setDating(false)} hitSlop={10}>
                 <Text style={styles.calendarDone}>Done</Text>
               </Pressable>
             </View>
 
             <View style={styles.calendarNav}>
               <Pressable
+                testID="transaction-date-prev-button"
                 onPress={() =>
                   monthPicking
                     ? setCalendarMonth(new Date(calendarMonth.getFullYear() - 1, calendarMonth.getMonth(), 1))
@@ -789,6 +918,7 @@ export default function TransactionDetail() {
                 <Text style={styles.calendarNavText}>‹</Text>
               </Pressable>
               <Pressable
+                testID="transaction-date-title-button"
                 onPress={() => { setMonthPicking(!monthPicking); haptics.tap(); }}
                 style={({ pressed }) => [styles.calendarTitleBtn, pressed && { opacity: 0.7 }]}
               >
@@ -796,6 +926,7 @@ export default function TransactionDetail() {
                 <Text style={styles.calendarTitleCaret}>{monthPicking ? '⌃' : '⌄'}</Text>
               </Pressable>
               <Pressable
+                testID="transaction-date-next-button"
                 onPress={() =>
                   monthPicking
                     ? setCalendarMonth(new Date(calendarMonth.getFullYear() + 1, calendarMonth.getMonth(), 1))
@@ -813,6 +944,7 @@ export default function TransactionDetail() {
                   const active = idx === calendarMonth.getMonth();
                   return (
                     <Pressable
+                      testID={`transaction-date-month-${idx}${active ? '-selected' : ''}`}
                       key={name}
                       onPress={() => { setCalendarMonth(new Date(calendarMonth.getFullYear(), idx, 1)); setMonthPicking(false); haptics.tap(); }}
                       style={({ pressed }) => [styles.monthCell, active && styles.monthCellActive, pressed && { opacity: 0.7 }]}
@@ -835,6 +967,7 @@ export default function TransactionDetail() {
                     const today = !!day && day === todayKey;
                     return (
                       <Pressable
+                        testID={day ? `transaction-date-day-${Number(day.slice(8))}${active ? '-selected' : ''}` : undefined}
                         key={day ?? `blank-${idx}`}
                         disabled={!day || setDate.isPending}
                         onPress={() => day && doSetDate(day)}
@@ -854,10 +987,10 @@ export default function TransactionDetail() {
             )}
 
             <View style={styles.suggestRow}>
-              <Pressable onPress={() => pickShortcutDate(todayKey)} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
+              <Pressable testID="transaction-date-today-button" onPress={() => pickShortcutDate(todayKey)} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
                 <Text style={styles.suggestText}>Today</Text>
               </Pressable>
-              <Pressable onPress={() => pickShortcutDate(lastMonthLastDay())} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
+              <Pressable testID="transaction-date-last-month-button" onPress={() => pickShortcutDate(lastMonthLastDay())} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
                 <Text style={styles.suggestText}>End of last month</Text>
               </Pressable>
             </View>
@@ -889,7 +1022,7 @@ export default function TransactionDetail() {
                     {r.amount != null ? fmtPos(r.amount) : ''}{r.amount != null && r.date ? ' · ' : ''}{r.date || ''}
                   </Text>
                 ) : null}
-                <Pressable onPress={() => removeReceipt(r.id)} disabled={delReceipt.isPending} style={({ pressed }) => [styles.viewerDelete, pressed && { opacity: 0.7 }]}>
+                <Pressable testID="transaction-receipt-delete-button" onPress={() => removeReceipt(r.id)} disabled={delReceipt.isPending} style={({ pressed }) => [styles.viewerDelete, pressed && { opacity: 0.7 }]}>
                   <Text style={styles.viewerDeleteText}>{delReceipt.isPending ? 'Deleting…' : 'Delete receipt'}</Text>
                 </Pressable>
               </View>
@@ -907,6 +1040,7 @@ function MenuGroup({ children, testID }: { children: React.ReactNode; testID?: s
 }
 
 function MenuActionRow({
+  testID,
   icon,
   label,
   right,
@@ -914,6 +1048,7 @@ function MenuActionRow({
   disabled,
   last,
 }: {
+  testID?: string;
   icon: SymbolViewProps['name'];
   label: string;
   right?: string;
@@ -922,8 +1057,10 @@ function MenuActionRow({
   last?: boolean;
 }) {
   return (
-    <Pressable onPress={onPress} disabled={disabled || !onPress} style={({ pressed }) => [styles.menuRow, last && styles.menuRowLast, disabled && { opacity: 0.55 }, pressed && { opacity: 0.65 }]}>
-      <SymbolView name={icon} tintColor={colors.text} size={23} resizeMode="scaleAspectFit" style={styles.menuRowIcon} />
+    <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={right ? `${label}, ${right}` : label} onPress={onPress} disabled={disabled || !onPress} style={({ pressed }) => [styles.menuRow, last && styles.menuRowLast, disabled && { opacity: 0.55 }, pressed && { opacity: 0.65 }]}>
+      <View style={styles.menuIconBubble}>
+        <SymbolView name={icon} tintColor={colors.accentLight} size={15} resizeMode="scaleAspectFit" />
+      </View>
       <Text style={styles.menuRowLabel} numberOfLines={1}>{label}</Text>
       {right ? <Text style={styles.menuRowRight} numberOfLines={1}>{right}</Text> : null}
       {onPress && !disabled ? <SymbolView name="chevron.right" tintColor={colors.muted} size={12} resizeMode="scaleAspectFit" /> : null}
@@ -932,12 +1069,14 @@ function MenuActionRow({
 }
 
 function MenuSwitchRow({
+  testID,
   icon,
   label,
   value,
   disabled,
   onValueChange,
 }: {
+  testID?: string;
   icon: SymbolViewProps['name'];
   label: string;
   value: boolean;
@@ -945,8 +1084,10 @@ function MenuSwitchRow({
   onValueChange: () => void;
 }) {
   return (
-    <View style={styles.menuRow}>
-      <SymbolView name={icon} tintColor={colors.text} size={23} resizeMode="scaleAspectFit" style={styles.menuRowIcon} />
+    <View testID={testID} style={styles.menuRow}>
+      <View style={styles.menuIconBubble}>
+        <SymbolView name={icon} tintColor={colors.accentLight} size={15} resizeMode="scaleAspectFit" />
+      </View>
       <Text style={styles.menuRowLabel}>{label}</Text>
       <Switch
         value={value}
@@ -962,38 +1103,42 @@ function MenuSwitchRow({
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  menuHero: { alignItems: 'center', paddingHorizontal: 20, paddingBottom: 28, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.08)' },
-  menuTopBar: { width: '100%', minHeight: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
-  topSide: { width: 72, minHeight: 36, alignItems: 'center', justifyContent: 'center' },
+  loadBox: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 12, padding: 28 },
+  loadText: { color: colors.muted, fontSize: 14, textAlign: 'center' },
+  retryButton: { backgroundColor: colors.accent, borderRadius: 10, paddingHorizontal: 18, paddingVertical: 10 },
+  retryText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  menuHero: { alignItems: 'center', marginHorizontal: 16, marginTop: 8, paddingHorizontal: 16, paddingBottom: 18, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18 },
+  menuTopBar: { width: '100%', minHeight: 32, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
+  topSide: { width: 68, minHeight: 32, alignItems: 'center', justifyContent: 'center' },
   closeBtn: { alignItems: 'flex-end' },
-  topDateBtn: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16 },
-  topDate: { color: colors.text, fontSize: 17, fontWeight: '800' },
-  menuBody: { paddingHorizontal: 18, paddingTop: 18 },
-  pendingBubble: { backgroundColor: '#fff', borderRadius: 999, paddingHorizontal: 18, paddingVertical: 9, marginBottom: 28 },
-  pendingBubbleText: { color: '#201f24', fontSize: 15, fontWeight: '800' },
-  amount: { fontSize: 38, fontWeight: '800', letterSpacing: -1.5 },
-  payee: { color: colors.text, fontSize: 19, fontWeight: '800', marginTop: 8, textAlign: 'center' },
-  statementBlock: { alignItems: 'center', marginTop: 22 },
-  statementLabel: { color: colors.text, opacity: 0.9, fontSize: 13, fontWeight: '800' },
-  statementText: { color: colors.text, opacity: 0.85, fontSize: 13, fontWeight: '700', letterSpacing: 0.4, marginTop: 3 },
-  categoryPill: { flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: 'rgba(255,255,255,0.85)', borderRadius: 999, paddingHorizontal: 17, paddingVertical: 11, marginTop: 28 },
-  categoryPillText: { color: colors.text, fontSize: 15, fontWeight: '800' },
-  menuGroup: { backgroundColor: '#242426', borderRadius: 22, overflow: 'hidden', marginBottom: 18 },
-  menuRow: { minHeight: 65, flexDirection: 'row', alignItems: 'center', gap: 18, paddingHorizontal: 24, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  topDateBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  topDate: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  menuBody: { paddingHorizontal: 16, paddingTop: 14 },
+  pendingBubble: { backgroundColor: 'rgba(234,179,8,0.14)', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6, marginBottom: 16 },
+  pendingBubbleText: { color: colors.yellow, fontSize: 12, fontWeight: '800' },
+  amount: { fontSize: 34, fontWeight: '800', letterSpacing: -1.2 },
+  payee: { color: colors.text, fontSize: 17, fontWeight: '800', marginTop: 6, textAlign: 'center' },
+  statementBlock: { alignItems: 'center', marginTop: 14, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  statementLabel: { color: colors.muted, fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.6 },
+  statementText: { color: colors.text, fontSize: 12, fontWeight: '700', letterSpacing: 0.35, marginTop: 3 },
+  categoryPill: { flexDirection: 'row', alignItems: 'center', gap: 7, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, borderRadius: 999, paddingHorizontal: 13, paddingVertical: 8, marginTop: 16 },
+  categoryPillText: { color: colors.text, fontSize: 13, fontWeight: '800' },
+  menuGroup: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: 14, overflow: 'hidden', marginBottom: 12 },
+  menuRow: { minHeight: 50, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   menuRowLast: { borderBottomWidth: 0 },
-  menuRowIcon: { width: 26 },
-  menuRowLabel: { color: colors.text, fontSize: 18, fontWeight: '600', flex: 1 },
-  menuRowRight: { color: colors.text, opacity: 0.9, fontSize: 16, fontWeight: '800', maxWidth: 150 },
-  historyBtn: { marginTop: 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderWidth: 1, borderColor: colors.text, borderRadius: 999, paddingVertical: 14 },
-  historyText: { color: colors.text, fontSize: 17, fontWeight: '800' },
-  historyArrow: { color: colors.text, fontSize: 18, fontWeight: '700' },
-  metaBlock: { marginTop: 20, gap: 18 },
+  menuIconBubble: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(124,110,247,0.14)' },
+  menuRowLabel: { color: colors.text, fontSize: 14, fontWeight: '600', flex: 1 },
+  menuRowRight: { color: colors.muted, fontSize: 12, fontWeight: '800', maxWidth: 140 },
+  historyBtn: { marginTop: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, borderRadius: 14, paddingVertical: 11 },
+  historyText: { color: colors.accentLight, fontSize: 14, fontWeight: '800' },
+  historyArrow: { color: colors.accentLight, fontSize: 16, fontWeight: '700' },
+  metaBlock: { marginTop: 18, gap: 14 },
   metaItem: { gap: 2 },
   metaLabel: { color: colors.text, fontSize: 13, fontWeight: '900' },
   metaValue: { color: colors.text, opacity: 0.9, fontSize: 13, fontWeight: '700', textDecorationLine: 'underline' },
   metaMuted: { color: colors.text, opacity: 0.62, fontSize: 13, fontWeight: '600' },
-  deleteBtn: { marginTop: 12, borderWidth: 1, borderColor: colors.red, borderRadius: 12, paddingVertical: 13, alignItems: 'center' },
-  deleteText: { color: colors.red, fontSize: 15, fontWeight: '700' },
+  deleteBtn: { marginTop: 12, borderWidth: 1, borderColor: 'rgba(239,68,68,0.45)', backgroundColor: 'rgba(239,68,68,0.08)', borderRadius: 12, paddingVertical: 11, alignItems: 'center' },
+  deleteText: { color: colors.red, fontSize: 14, fontWeight: '700' },
   receiptRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 10, paddingVertical: 4 },
   thumb: { width: 76, height: 76, borderRadius: 10, overflow: 'hidden', backgroundColor: colors.surface2, justifyContent: 'flex-end' },
   thumbImg: { width: '100%', height: '100%' },
@@ -1010,11 +1155,11 @@ const styles = StyleSheet.create({
   viewerMetaText: { color: '#fff', fontSize: 15, fontWeight: '700' },
   viewerDelete: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: colors.red },
   viewerDeleteText: { color: colors.red, fontSize: 14, fontWeight: '700' },
-  subBanner: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(124,110,247,0.1)', borderColor: colors.accent, borderWidth: 1, borderRadius: 12, padding: 12, marginBottom: 8 },
+  subBanner: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(124,110,247,0.1)', borderColor: colors.border, borderWidth: 1, borderRadius: 12, padding: 10, marginBottom: 10 },
   subText: { color: colors.accentLight, fontSize: 13, fontWeight: '600', flex: 1 },
   subArrow: { color: colors.accentLight, fontSize: 20, fontWeight: '700' },
   list: { paddingVertical: 2 },
-  sectionTitle: { marginTop: 22 },
+  sectionTitle: { marginTop: 18, marginBottom: 10 },
   linkRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   linkMain: { flex: 1, minWidth: 0 },
   linkPayee: { color: colors.text, fontSize: 14, fontWeight: '600' },

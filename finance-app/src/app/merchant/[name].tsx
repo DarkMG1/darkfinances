@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
@@ -7,6 +7,7 @@ import { PushScreen } from '@/components/screen';
 import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/components/ui';
 import { MonthNavigator } from '@/components/charts';
 import { SkeletonList } from '@/components/skeleton';
+import { financeToday } from '@/lib/date-only';
 import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -24,8 +25,7 @@ export default function MerchantDetail() {
   const [selected, setSelected] = useState('');
   const hist = useMerchantHistory(name, months);
 
-  const now = new Date();
-  const currentKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const currentKey = financeToday().slice(0, 7);
 
   const series = useMemo(
     () => (hist.data?.months ?? []).map((m) => ({ month: m.month, spend: m.total })),
@@ -33,17 +33,12 @@ export default function MerchantDetail() {
   );
 
   // Default to the most recent month that actually has spend (falls back to current).
-  useEffect(() => {
-    if (!hist.data || selected) return;
-    const withSpend = [...hist.data.months].reverse().find((m) => m.count > 0);
-    setSelected(withSpend?.month ?? currentKey);
-  }, [hist.data]);
-
-  const selMonth = hist.data?.months.find((m) => m.month === selected);
+  const selectedMonth = selected || [...(hist.data?.months ?? [])].reverse().find((m) => m.count > 0)?.month || currentKey;
+  const selMonth = hist.data?.months.find((m) => m.month === selectedMonth);
   const rows = selMonth?.items ?? [];
 
   return (
-    <PushScreen refreshing={hist.isFetching} onRefresh={hist.refetch}>
+    <PushScreen testID="merchant-detail-screen" refreshing={hist.isFetching} onRefresh={hist.refetch}>
       <Stack.Screen options={{ title: name || 'Merchant' }} />
       {hist.isLoading && !hist.data ? (
         <SkeletonList hero rows={7} />
@@ -53,19 +48,20 @@ export default function MerchantDetail() {
         <>
           <View style={styles.hero}>
             <Avatar label={name} size={52} style={{ marginBottom: 10 }} />
-            <Text style={styles.heroValue}>{fmtPos(hist.data?.total ?? 0)}</Text>
+            <Text style={styles.heroValue}>{fmtMoney(hist.data?.total ?? 0)}</Text>
             <Text style={styles.heroSub}>
-              {hist.data?.count ?? 0} charge{(hist.data?.count ?? 0) === 1 ? '' : 's'}
-              {hist.data?.avg ? ` · ${fmtPos(hist.data.avg)} avg` : ''}
+              {hist.data?.count ?? 0} transaction{(hist.data?.count ?? 0) === 1 ? '' : 's'}
+              {hist.data?.avg ? ` · ${fmtMoney(hist.data.avg)} net avg` : ''}
               {` · last ${months}mo`}
             </Text>
           </View>
 
           <Card style={{ marginBottom: 14 }}>
-            <MonthNavigator months={series} selected={selected} onSelect={setSelected} currentKey={currentKey} />
+            <MonthNavigator months={series} selected={selectedMonth} onSelect={setSelected} currentKey={currentKey} />
             <View style={styles.rangeRow}>
               {RANGES.map((r) => (
                 <Pressable
+                  testID={`merchant-range-${r.label.toLowerCase()}${months === r.v ? '-selected' : ''}`}
                   key={r.label}
                   onPress={() => setMonths(r.v)}
                   style={({ pressed }) => [styles.range, months === r.v && styles.rangeActive, pressed && { opacity: 0.7 }]}
@@ -78,7 +74,7 @@ export default function MerchantDetail() {
 
           <View style={styles.monthHead}>
             <Text style={styles.monthTitle}>{selMonth ? monthTitle(selMonth.month) : ''}</Text>
-            {selMonth ? <Text style={styles.monthTotal}>{fmtPos(selMonth.total)}</Text> : null}
+            {selMonth ? <Text style={styles.monthTotal}>{fmtMoney(selMonth.total)}</Text> : null}
           </View>
 
           {rows.length === 0 ? (
@@ -88,24 +84,12 @@ export default function MerchantDetail() {
               {rows.map((t, i) => (
                 <Animated.View key={t.id} entering={FadeInDown.duration(180).delay(Math.min(i * 18, 180))}>
                   <Pressable
+                    testID={`merchant-transaction-${t.id}`}
                     style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}
                     onPress={() =>
                       router.push({
                         pathname: '/transaction/[id]',
-                        params: {
-                          id: t.id,
-                          payee: t.payee || '',
-                          amount: String(t.amount),
-                          date: t.date,
-                          account: t.account,
-                          accountId: t.accountId,
-                          category: t.category || '',
-                          categoryId: t.categoryId || '',
-                          notes: t.notes || '',
-                          isLeg: t.isLeg ? '1' : '',
-                          parentId: t.parentId || '',
-                          cleared: t.cleared === false ? '0' : '1',
-                        },
+                        params: { id: t.id, date: t.date, accountId: t.accountId },
                       })
                     }
                   >

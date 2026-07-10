@@ -10,7 +10,7 @@ export default function DebtScreen() {
   const data = investments.data;
 
   return (
-    <PushScreen refreshing={investments.isFetching} onRefresh={investments.refetch}>
+    <PushScreen testID="debt-screen" refreshing={investments.isFetching} onRefresh={investments.refetch}>
       {investments.isLoading && !data ? (
         <Loading />
       ) : investments.isError && !data ? (
@@ -32,7 +32,7 @@ export default function DebtScreen() {
 
           <Card>
             {data.debts.map((d) => (
-              <View key={d.id} style={styles.row}>
+              <View key={d.id} testID={`debt-row-${d.id}`} style={styles.row}>
                 <Avatar label={d.name} size={36} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.name}>{d.name}</Text>

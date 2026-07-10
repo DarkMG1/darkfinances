@@ -6,6 +6,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { useRecurring, useSetRecurringOverride } from '@/api/hooks/finance.hooks';
 import { AreaChart } from '@/components/charts';
 import { Card, CardTitle, ErrorState, Loading } from '@/components/ui';
+import { financeToday } from '@/lib/date-only';
 import { cancelInfoFor } from '@/theme/cancelDirectory';
 import { cadenceLabel, colors, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
@@ -21,7 +22,7 @@ export default function RecurringDetail() {
 
   if (recurring.isLoading && !recurring.data) {
     return (
-      <View style={styles.root}>
+      <View testID="recurring-detail-screen" style={styles.root}>
         <Stack.Screen options={{ title: 'Subscription' }} />
         <Loading />
       </View>
@@ -29,7 +30,7 @@ export default function RecurringDetail() {
   }
   if (recurring.isError && !recurring.data) {
     return (
-      <View style={styles.root}>
+      <View testID="recurring-detail-screen" style={styles.root}>
         <Stack.Screen options={{ title: 'Subscription' }} />
         <ErrorState error={recurring.error?.error} onRetry={recurring.refetch} />
       </View>
@@ -37,7 +38,7 @@ export default function RecurringDetail() {
   }
   if (!item) {
     return (
-      <View style={[styles.root, styles.center]}>
+      <View testID="recurring-detail-screen" style={[styles.root, styles.center]}>
         <Stack.Screen options={{ title: 'Subscription' }} />
         <Text style={styles.muted}>Subscription not found.</Text>
       </View>
@@ -55,7 +56,7 @@ export default function RecurringDetail() {
   const openCancel = () => WebBrowser.openBrowserAsync(cancelInfo.url).catch(() => {});
 
   return (
-    <ScrollView style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}>
+    <ScrollView testID="recurring-detail-screen" style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}>
       <Stack.Screen options={{ title: item.payee }} />
 
       <View style={styles.hero}>
@@ -91,10 +92,10 @@ export default function RecurringDetail() {
 
       <CardTitle style={{ marginTop: 16 }}>Type</CardTitle>
       <View style={styles.segment}>
-        <Pressable style={[styles.segBtn, !item.isBill && styles.segActive]} onPress={() => setIsBill(false)} disabled={override.isPending}>
+        <Pressable testID="recurring-type-subscription-button" style={[styles.segBtn, !item.isBill && styles.segActive]} onPress={() => setIsBill(false)} disabled={override.isPending}>
           <Text style={[styles.segText, !item.isBill && styles.segTextActive]}>Subscription</Text>
         </Pressable>
-        <Pressable style={[styles.segBtn, item.isBill && styles.segActive]} onPress={() => setIsBill(true)} disabled={override.isPending}>
+        <Pressable testID="recurring-type-bill-button" style={[styles.segBtn, item.isBill && styles.segActive]} onPress={() => setIsBill(true)} disabled={override.isPending}>
           <Text style={[styles.segText, item.isBill && styles.segTextActive]}>Bill</Text>
         </Pressable>
       </View>
@@ -110,16 +111,16 @@ export default function RecurringDetail() {
             <Stat label="Confirmation" value={item.cancellation?.confirmationDate ? fmtDay(item.cancellation.confirmationDate) : '—'} last />
           </Card>
           <View style={styles.workflowGrid}>
-            <Pressable style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, cancellation: { status: 'in_progress' } })} disabled={override.isPending}>
+            <Pressable testID="recurring-start-cancellation-button" style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, cancellation: { status: 'in_progress' } })} disabled={override.isPending}>
               <Text style={styles.workflowText}>Start cancellation</Text>
             </Pressable>
-            <Pressable style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, cancellation: { refundRequested: !item.cancellation?.refundRequested } })} disabled={override.isPending}>
+            <Pressable testID="recurring-refund-button" style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, cancellation: { refundRequested: !item.cancellation?.refundRequested } })} disabled={override.isPending}>
               <Text style={styles.workflowText}>{item.cancellation?.refundRequested ? 'Clear refund' : 'Request refund'}</Text>
             </Pressable>
-            <Pressable style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, cancellation: { watchNextRenewal: !item.cancellation?.watchNextRenewal } })} disabled={override.isPending}>
+            <Pressable testID="recurring-watch-renewal-button" style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, cancellation: { watchNextRenewal: !item.cancellation?.watchNextRenewal } })} disabled={override.isPending}>
               <Text style={styles.workflowText}>{item.cancellation?.watchNextRenewal ? 'Stop watching' : 'Watch renewal'}</Text>
             </Pressable>
-            <Pressable style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, status: 'cancelled', cancellation: { status: 'confirmed', confirmationDate: new Date().toISOString().slice(0, 10) } })} disabled={override.isPending}>
+            <Pressable testID="recurring-confirm-cancelled-button" style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, status: 'cancelled', cancellation: { status: 'confirmed', confirmationDate: financeToday() } })} disabled={override.isPending}>
               <Text style={styles.workflowText}>Confirm cancelled</Text>
             </Pressable>
           </View>
@@ -128,21 +129,21 @@ export default function RecurringDetail() {
 
       <View style={styles.actions}>
         {item.forced ? (
-          <Pressable style={({ pressed }) => [styles.btn, styles.btnGhost, pressed && { opacity: 0.8 }]} onPress={unforce} disabled={override.isPending}>
+          <Pressable testID="recurring-remove-button" style={({ pressed }) => [styles.btn, styles.btnGhost, pressed && { opacity: 0.8 }]} onPress={unforce} disabled={override.isPending}>
             <Text style={[styles.btnText, { color: colors.muted }]}>Remove from recurring</Text>
           </Pressable>
         ) : null}
         {!item.isBill ? (
-          <Pressable style={({ pressed }) => [styles.btn, styles.btnPrimary, pressed && { opacity: 0.85 }]} onPress={openCancel}>
+          <Pressable testID="recurring-how-to-cancel-button" style={({ pressed }) => [styles.btn, styles.btnPrimary, pressed && { opacity: 0.85 }]} onPress={openCancel}>
             <Text style={[styles.btnText, { color: '#fff' }]}>How to cancel{cancelInfo.known ? '' : ' (search)'}</Text>
           </Pressable>
         ) : null}
-        <Pressable style={({ pressed }) => [styles.btn, cancelled ? styles.btnPrimary : styles.btnDanger, pressed && { opacity: 0.8 }]} onPress={setCancelled} disabled={override.isPending}>
+        <Pressable testID="recurring-toggle-cancelled-button" style={({ pressed }) => [styles.btn, cancelled ? styles.btnPrimary : styles.btnDanger, pressed && { opacity: 0.8 }]} onPress={setCancelled} disabled={override.isPending}>
           <Text style={[styles.btnText, { color: cancelled ? '#fff' : colors.red }]}>
             {cancelled ? 'Mark as active' : 'Mark as cancelled'}
           </Text>
         </Pressable>
-        <Pressable style={({ pressed }) => [styles.btn, styles.btnGhost, pressed && { opacity: 0.8 }]} onPress={hide} disabled={override.isPending}>
+        <Pressable testID="recurring-hide-button" style={({ pressed }) => [styles.btn, styles.btnGhost, pressed && { opacity: 0.8 }]} onPress={hide} disabled={override.isPending}>
           <Text style={[styles.btnText, { color: colors.muted }]}>Hide from list</Text>
         </Pressable>
       </View>
