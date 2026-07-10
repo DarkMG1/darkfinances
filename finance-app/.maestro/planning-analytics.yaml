@@ -1,0 +1,90 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- openLink: darkfinances:///budgets
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: budgets-screen
+- assertVisible:
+    id: budgets-screen
+- openLink: darkfinances:///cashflow
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: cashflow-screen
+- assertVisible:
+    id: cashflow-money-in
+- tapOn:
+    id: cashflow-forecast-link
+- assertVisible:
+    id: forecast-screen
+- assertVisible:
+    id: forecast-range-90-selected
+- tapOn:
+    id: forecast-range-30
+- assertVisible:
+    id: forecast-range-30-selected
+- assertVisible:
+    id: forecast-event-0
+- openLink: darkfinances:///reports
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: reports-screen
+- assertVisible: Monthly Review
+- openLink: darkfinances:///income
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: income-screen
+- assertVisible:
+    id: income-stream-acme-corp-payroll
+- openLink: darkfinances:///networth
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: networth-screen
+- assertVisible:
+    id: networth-range-1y-selected
+- tapOn:
+    id: networth-range-3m
+- assertVisible:
+    id: networth-range-3m-selected
+- assertVisible:
+    id: networth-investments-link
+- tapOn:
+    id: networth-investments-link
+- assertVisible:
+    id: investments-screen
+- assertVisible:
+    id: investments-holding-VTI
+- openLink: darkfinances:///debt
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: debt-screen
+- assertVisible:
+    id: debt-row-debt-student
+- openLink: darkfinances:///networth
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: networth-screen
+- scroll
+- scroll
+- tapOn:
+    id: networth-add-asset-button
+- assertVisible:
+    id: networth-manual-sheet

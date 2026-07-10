@@ -5,27 +5,37 @@ appId: dev.darkmg1.finances
 - tapOn:
     id: onboarding-demo-button
     optional: true
+- openLink: darkfinances:///spending
 - tapOn:
-    point: 38%,95%
+    text: Open
+    optional: true
 - assertVisible:
     id: spending-screen
 - assertVisible: Spending
+- assertVisible:
+    id: spending-period-month-selected
 - tapOn:
     id: spending-period-week
 - assertVisible:
-    id: spending-screen
+    id: spending-period-week-selected
 - tapOn:
     id: spending-period-quarter
 - assertVisible:
-    id: spending-screen
+    id: spending-period-quarter-selected
 - tapOn:
     id: spending-period-year
 - assertVisible:
-    id: spending-screen
+    id: spending-period-year-selected
 - tapOn:
     id: spending-period-month
+- assertVisible:
+    id: spending-period-month-selected
 - assertVisible: Income
 - assertVisible: Total Spend
+- assertNotVisible:
+    id: spending-summary-spending-row
+- tapOn:
+    id: spending-total-row
 - assertVisible:
     id: spending-summary-spending-row
 - assertVisible:
@@ -45,9 +55,32 @@ appId: dev.darkmg1.finances
 - scroll
 - assertVisible: Your Budget
 - assertVisible: Breakdown
+- assertVisible:
+    id: spending-breakdown-circle
+- assertVisible:
+    id: spending-breakdown-segment-categories-selected
+- tapOn:
+    id: spending-breakdown-segment-tags
+- assertVisible:
+    id: spending-breakdown-segment-tags-selected
+- assertVisible:
+    id: spending-breakdown-tags-list
+- assertVisible:
+    id: spending-breakdown-tag-row-0
+- tapOn:
+    id: spending-breakdown-tag-row-0
+- assertVisible:
+    id: tag-detail-screen
+- openLink: darkfinances:///spending
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: spending-screen
 - takeScreenshot: spending-budget-breakdown
 - scroll
 - assertVisible: Largest Purchases
+- scroll
 - assertVisible: Non-Spending
 - takeScreenshot: spending-lower-sections
 

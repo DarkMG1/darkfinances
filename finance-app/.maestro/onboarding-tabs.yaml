@@ -1,0 +1,34 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- assertVisible:
+    id: onboarding-screen
+- assertVisible: Connect to your server
+- tapOn:
+    id: onboarding-connect-button
+- assertVisible: Enter both server URL and token
+- tapOn:
+    id: onboarding-demo-button
+- assertVisible:
+    id: home-screen
+- assertVisible:
+    id: home-networth-hero
+- openLink: darkfinances:///spending
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: spending-screen
+- openLink: darkfinances:///transactions
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: activity-screen
+- openLink: darkfinances:///settings
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: settings-screen

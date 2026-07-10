@@ -1,0 +1,28 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- openLink: darkfinances:///merchant/Amazon
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: merchant-detail-screen
+- assertVisible:
+    id: merchant-range-1y-selected
+- tapOn:
+    id: merchant-range-6m
+- assertVisible:
+    id: merchant-range-6m-selected
+- assertVisible: Amazon
+- openLink: darkfinances:///tag/alex
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: tag-detail-screen
+- assertVisible:
+    id: tag-detail-screen

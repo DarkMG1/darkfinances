@@ -1,0 +1,38 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- openLink: darkfinances:///rules
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: rules-screen
+- assertVisible:
+    id: rules-row-rule-demo-coffee
+- openLink: darkfinances:///events
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: events-screen
+- assertVisible:
+    id: events-row-cabo
+- tapOn:
+    id: events-name-input
+- inputText: Maestro Trip
+- tapOn:
+    id: events-members-input
+- inputText: alex, sam
+- tapOn:
+    id: events-group-input
+- inputText: Demo Group
+- tapOn:
+    id: events-create-button
+- tapOn:
+    text: OK
+    optional: true
+- assertVisible: Maestro Trip

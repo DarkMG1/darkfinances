@@ -6,12 +6,14 @@
   "build": {
     "production": {
       "channel": "production",
+      "environment": "production",
       "ios": {
         "simulator": false
       }
     },
     "preview": {
       "channel": "preview",
+      "environment": "preview",
       "distribution": "internal"
     }
   }

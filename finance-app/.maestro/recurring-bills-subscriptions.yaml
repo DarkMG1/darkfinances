@@ -1,0 +1,50 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- openLink: darkfinances:///bills
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: bills-screen
+- assertVisible: Upcoming Bills
+- assertVisible:
+    id: bills-row-skyline-apartments
+    optional: true
+- openLink: darkfinances:///subscriptions
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: subscriptions-screen
+- assertVisible:
+    id: subscriptions-row-netflix
+- tapOn:
+    id: subscriptions-row-netflix
+- assertVisible:
+    id: recurring-detail-screen
+- scroll
+- assertVisible:
+    id: recurring-type-subscription-button
+- tapOn:
+    id: recurring-type-bill-button
+- assertVisible:
+    id: recurring-detail-screen
+- tapOn:
+    id: recurring-type-subscription-button
+- scroll
+- assertVisible:
+    id: recurring-start-cancellation-button
+- tapOn:
+    id: recurring-start-cancellation-button
+- tapOn:
+    id: recurring-watch-renewal-button
+- scroll
+- assertVisible:
+    id: recurring-toggle-cancelled-button
+- assertVisible:
+    id: recurring-hide-button

@@ -5,7 +5,7 @@ appId: dev.darkmg1.finances
 - assertVisible: Use demo data
 - tapOn:
     text: Use demo data
-- openLink: darkfinances:///category/Bills%20%26%20Utilities
+- openLink: darkfinances:///category/Bills%20%26%20Utilities?bucket=bills
 - tapOn:
     text: Open
     optional: true

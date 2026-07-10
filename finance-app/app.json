@@ -2,7 +2,7 @@
   "expo": {
     "name": "Finances",
     "slug": "darkfinances",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "darkfinances",
@@ -23,7 +23,7 @@
     "ios": {
       "icon": "./assets/expo.icon",
       "supportsTablet": true,
-      "buildNumber": "3",
+      "buildNumber": "4",
       "bundleIdentifier": "dev.darkmg1.finances",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
@@ -50,6 +50,7 @@
     },
     "plugins": [
       "expo-router",
+      "./plugins/with-ios-privacy-shield",
       [
         "expo-splash-screen",
         {
@@ -92,10 +93,21 @@
               "displayName": "Finances",
               "description": "Net worth and your next bill at a glance.",
               "ios": {
-                "supportedFamilies": ["systemSmall", "systemMedium"]
+                "supportedFamilies": [
+                  "systemSmall",
+                  "systemMedium"
+                ]
               }
             }
           ]
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "buildReactNativeFromSource": true
+          }
         }
       ]
     ],

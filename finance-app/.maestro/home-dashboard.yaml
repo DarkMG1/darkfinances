@@ -1,0 +1,54 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- assertVisible:
+    id: home-screen
+- assertVisible:
+    id: home-networth-hero
+- scroll
+- assertVisible:
+    id: home-stat-spent
+- assertVisible:
+    id: home-stat-income
+- assertVisible:
+    id: home-stat-net
+- assertVisible:
+    id: home-action-cash-flow
+- assertVisible:
+    id: home-action-budgets
+- assertVisible:
+    id: home-action-reports
+- assertVisible:
+    id: home-review-banner
+- tapOn:
+    id: home-review-banner
+- assertVisible:
+    id: review-screen
+- openLink: darkfinances:///
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: home-screen
+- scroll
+- assertVisible:
+    id: home-account-acc-check
+- tapOn:
+    id: home-account-acc-check
+- assertVisible:
+    id: account-detail-screen
+- openLink: darkfinances:///
+- tapOn:
+    text: Open
+    optional: true
+- scroll
+- assertVisible:
+    id: home-sync-button
+- tapOn:
+    id: home-sync-button
+- assertVisible:
+    id: home-screen

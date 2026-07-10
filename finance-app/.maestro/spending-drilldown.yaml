@@ -5,18 +5,93 @@ appId: dev.darkmg1.finances
 - tapOn:
     id: onboarding-demo-button
     optional: true
+- openLink: darkfinances:///spending
 - tapOn:
-    point: 38%,95%
+    text: Open
+    optional: true
 - assertVisible:
     id: spending-screen
+- tapOn:
+    id: spending-total-row
 - tapOn:
     id: spending-summary-spending-row
 - assertVisible:
     id: category-detail-screen
+- assertVisible: This month
+- assertVisible:
+    id: category-month-bar-2026-07-selected
+- tapOn:
+    id: category-month-bar-2026-06
+- assertVisible:
+    id: category-month-bar-2026-06-selected
+- assertVisible: Last month
+- tapOn:
+    id: category-month-bar-2026-07
+- assertVisible: This month
 - assertVisible: Transactions
 - assertVisible:
     id: category-sort-control
+- tapOn:
+    id: category-sort-control
+- assertVisible:
+    id: category-sort-sheet
+- assertVisible:
+    id: category-sort-option-newest
+- assertVisible:
+    text: "Date: Newest"
+- assertVisible:
+    id: category-sort-option-oldest
+- assertVisible:
+    text: "Date: Oldest"
+- assertVisible:
+    id: category-sort-option-amountHigh
+- assertVisible:
+    text: "Amount: Highest"
+- assertVisible:
+    id: category-sort-option-amountLow
+- assertVisible:
+    text: "Amount: Lowest"
+- tapOn:
+    id: category-sort-option-amountHigh
+- tapOn:
+    id: category-sort-control
+- tapOn:
+    id: category-sort-option-amountLow
+- tapOn:
+    id: category-sort-control
+- tapOn:
+    id: category-sort-option-oldest
+- tapOn:
+    id: category-sort-control
+- tapOn:
+    id: category-sort-option-newest
 - assertVisible:
     id: category-total-footer
+- openLink: darkfinances:///category/Spending?bucket=spending&start=2026-06-01&end=2026-06-30&label=Jun%202026
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: category-detail-screen
+- assertVisible: Last month
+- openLink: darkfinances:///category/Spending?bucket=spending&start=2026-05-01&end=2026-05-31&label=May%202026
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: category-detail-screen
+- assertVisible: May 2026
+- openLink: darkfinances:///spending
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: spending-screen
+- tapOn:
+    id: spending-income-row
+- assertVisible:
+    id: category-detail-screen
+- assertVisible: Earnings
+- assertVisible: This month
 - takeScreenshot: spending-drilldown
 

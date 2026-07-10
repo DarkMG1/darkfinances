@@ -5,10 +5,14 @@ appId: dev.darkmg1.finances
 - tapOn:
     id: onboarding-demo-button
     optional: true
+- openLink: darkfinances:///spending
 - tapOn:
-    point: 38%,95%
+    text: Open
+    optional: true
 - assertVisible:
     id: spending-screen
+- tapOn:
+    id: spending-total-row
 - tapOn:
     id: spending-summary-spending-row
 - assertVisible:
@@ -23,5 +27,13 @@ appId: dev.darkmg1.finances
     id: transaction-category-pill
 - assertVisible:
     id: transaction-action-menu
+- assertVisible:
+    id: transaction-secondary-menu
+- assertVisible:
+    id: transaction-tags-row
+- assertVisible:
+    id: transaction-notes-row
+- assertVisible:
+    id: transaction-split-row
 - takeScreenshot: transaction-detail
 

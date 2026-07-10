@@ -1,0 +1,73 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- openLink: darkfinances:///review
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: review-screen
+- assertVisible:
+    id: review-task-review-uncat
+- assertVisible:
+    id: review-task-review-large
+- tapOn:
+    id: review-task-review-large
+- assertVisible:
+    id: transaction-detail-screen
+- openLink: darkfinances:///reconcile
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: reconcile-screen
+- assertVisible:
+    id: reconcile-item-0
+- tapOn:
+    id: reconcile-item-toggle-0
+- assertVisible:
+    id: reconcile-close-month-button
+- tapOn:
+    id: reconcile-prev-month
+- assertVisible:
+    id: reconcile-screen
+- openLink: darkfinances:///reimbursement
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: reimbursement-screen
+- assertVisible:
+    id: reimbursement-range-mtd-selected
+- tapOn:
+    id: reimbursement-range-7d
+- assertVisible:
+    id: reimbursement-range-7d-selected
+- tapOn:
+    id: reimbursement-range-life
+- assertVisible:
+    id: reimbursement-range-life-selected
+- assertVisible:
+    id: reimbursement-suggestion-0
+    optional: true
+- tapOn:
+    id: reimbursement-suggestion-dismiss-0
+    optional: true
+- assertVisible:
+    id: reimbursement-screen
+- assertVisible:
+    id: reimbursement-person-alex
+- tapOn:
+    id: reimbursement-person-alex
+- scrollUntilVisible:
+    element:
+      id: reimbursement-person-alex-leg-0
+    direction: DOWN
+- scroll
+- assertVisible:
+    id: reimbursement-bucket-0
+    optional: true

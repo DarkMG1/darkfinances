@@ -1,0 +1,39 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- openLink: darkfinances:///transactions
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: activity-screen
+- tapOn:
+    id: activity-add-transaction-button
+- assertVisible:
+    id: add-transaction-screen
+- assertVisible:
+    id: add-transaction-type-expense-selected
+- tapOn:
+    id: add-transaction-amount-input
+- inputText: 12.34
+- tapOn:
+    id: add-transaction-payee-input
+- inputText: Maestro Coffee
+- tapOn:
+    id: add-transaction-notes-input
+- inputText: "#work"
+- tapOn:
+    point: 50%,20%
+- tapOn:
+    id: add-transaction-submit-button
+- waitForAnimationToEnd
+- assertVisible:
+    id: activity-screen
+- tapOn:
+    id: activity-search-input
+- inputText: Maestro Coffee
+- assertVisible: Maestro Coffee

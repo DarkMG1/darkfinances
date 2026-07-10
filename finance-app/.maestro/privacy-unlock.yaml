@@ -1,0 +1,36 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- assertVisible:
+    id: home-screen
+- openLink: darkfinances:///settings
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: settings-screen
+- tapOn:
+    id: settings-face-id-switch
+- assertVisible:
+    id: settings-screen
+- openLink: darkfinances:///
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: home-screen
+- pressKey: HOME
+- waitForAnimationToEnd
+- launchApp
+- assertVisible:
+    id: privacy-lock-overlay
+- extendedWaitUntil:
+    notVisible:
+      id: privacy-lock-overlay
+    timeout: 8000
+- assertVisible:
+    id: home-screen

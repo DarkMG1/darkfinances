@@ -1,0 +1,66 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- openLink: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: transaction-detail-screen
+- tapOn:
+    id: transaction-date-button
+- assertVisible:
+    id: transaction-date-sheet
+- assertVisible:
+    id: transaction-date-today-button
+- tapOn:
+    id: transaction-date-done-button
+- tapOn:
+    id: transaction-category-pill
+- assertVisible:
+    id: transaction-category-sheet
+- tapOn:
+    point: 50%,20%
+- openLink: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: transaction-detail-screen
+- tapOn:
+    id: transaction-tags-row
+- scroll
+- assertVisible:
+    id: transaction-tag-input
+- tapOn:
+    id: transaction-tag-input
+- inputText: maestro
+- tapOn:
+    id: transaction-tag-add-button
+- tapOn:
+    point: 50%,20%
+- openLink: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: transaction-detail-screen
+- scroll
+- assertVisible:
+    id: transaction-split-row
+- openLink: darkfinances:///split/tx-60?accountId=acc-credit&date=2026-06-29
+- tapOn:
+    text: Open
+    optional: true
+- extendedWaitUntil:
+    visible:
+      id: split-editor-screen
+    timeout: 8000
+- assertVisible:
+    id: split-mode-picker
+- assertVisible:
+    id: split-add-leg-button

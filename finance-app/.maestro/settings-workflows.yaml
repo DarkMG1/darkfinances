@@ -1,0 +1,59 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- openLink: darkfinances:///settings
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: settings-screen
+- assertVisible:
+    id: settings-server-url-input
+- assertVisible:
+    id: settings-token-input
+- tapOn:
+    id: settings-test-connection-button
+- assertVisible:
+    id: settings-screen
+- assertVisible:
+    id: settings-demo-mode-switch
+- assertVisible:
+    id: settings-face-id-switch
+- scroll
+- assertVisible:
+    id: settings-dashboard-accounts-switch
+- tapOn:
+    id: settings-dashboard-accounts-switch
+- tapOn:
+    id: settings-dashboard-accounts-switch
+- assertVisible:
+    id: settings-rules-row
+- assertVisible:
+    id: settings-events-row
+- scroll
+- assertVisible:
+    id: settings-reconcile-row
+- scroll
+- assertVisible:
+    id: settings-notif-bills
+- tapOn:
+    id: settings-notif-bills
+- tapOn:
+    id: settings-notif-bills
+- tapOn:
+    id: settings-notif-large-charge
+- assertVisible:
+    id: settings-large-charge-threshold-input
+- tapOn:
+    id: settings-large-charge-threshold-input
+- eraseText
+- inputText: 450
+- tapOn:
+    id: settings-check-updates-button
+    optional: true
+- assertVisible:
+    id: settings-screen
