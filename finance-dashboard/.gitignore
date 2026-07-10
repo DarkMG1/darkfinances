@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+.sessions/
 
 # Environment / secrets
 .env
@@ -29,6 +30,8 @@ account-overrides.json
 manual-assets.json
 reconciliation.json
 receipts/
+*.last-good
+*.corrupt-*
 
 # Personal reference scripts (not part of the app)
 .reference/

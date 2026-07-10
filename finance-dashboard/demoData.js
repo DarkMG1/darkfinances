@@ -11,6 +11,14 @@ function daysAgo(n) { const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d
 function addDays(dateStr, days) { const [y, m, dd] = dateStr.split('-').map(Number); const d = new Date(y, m - 1, dd); d.setDate(d.getDate() + days); return ymd(d); }
 function mulberry32(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 const recurKey = (p) => (p || '').toLowerCase().replace(/[#*]?\d{3,}/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+const currentMonth = () => monthKey(new Date());
+const categoryById = (id) => categories().find((c) => c.id === id) || null;
+const categoryByName = (name) => categories().find((c) => c.name.toLowerCase() === String(name || '').toLowerCase()) || null;
+const monthStart = (month) => `${month}-01`;
+const monthEnd = (month) => {
+  const [y, m] = String(month).split('-').map(Number);
+  return ymd(new Date(y, m, 0));
+};
 
 // ---- Accounts -------------------------------------------------------------
 const ACCOUNTS = [
@@ -146,14 +154,37 @@ function goals() {
 }
 
 // ---- Spending (this month + prev) -----------------------------------------
-function spending() {
-  const cur = { Rent: 2100, Groceries: 512.34, Dining: 328.9, Coffee: 58.5, Gas: 132.2, Rideshare: 46.8, Electric: 94.4, Internet: 69.99, Phone: 85, Streaming: 27.48, Software: 54.99, Cloud: 2.99, Shopping: 243.1, Electronics: 129, Gym: 24.99, Pharmacy: 18.5, Entertainment: 64.99 };
-  const prev = { Rent: 2100, Groceries: 478.1, Dining: 286.4, Coffee: 61.2, Gas: 118.5, Rideshare: 33.0, Electric: 88.2, Internet: 69.99, Phone: 85, Streaming: 27.48, Software: 54.99, Cloud: 2.99, Shopping: 312.7, Gym: 24.99, Pharmacy: 42.1, Entertainment: 39.99 };
-  const sum = (o) => round2(Object.values(o).reduce((s, x) => s + x, 0));
+function summarizeTxns(start, end) {
+  const out = {};
+  let totalIncome = 0;
+  for (const t of transactions()) {
+    if (start && t.date < start) continue;
+    if (end && t.date > end) continue;
+    if (t.amount > 0) totalIncome += t.amount;
+    else if (t.category) out[t.category] = round2((out[t.category] || 0) + Math.abs(t.amount));
+  }
+  return { spending: out, totalSpend: round2(Object.values(out).reduce((s, x) => s + x, 0)), totalIncome: round2(totalIncome) };
+}
+function spending(opts = {}) {
+  const now = new Date();
+  let start = opts.start;
+  let end = opts.end;
+  let key = opts.month || currentMonth();
+  if (!start || !end) {
+    key = opts.month || currentMonth();
+    start = monthStart(key);
+    end = opts.month ? monthEnd(key) : ymd(now);
+  }
+  const ms = Date.parse(`${start}T00:00:00`);
+  const me = Date.parse(`${end}T00:00:00`);
+  const span = Number.isFinite(ms) && Number.isFinite(me) ? Math.max(1, Math.round((me - ms) / 86400000) + 1) : 30;
+  const prevEnd = new Date(ms - 86400000);
+  const prevStart = new Date(prevEnd);
+  prevStart.setDate(prevEnd.getDate() - span + 1);
   return {
-    current: { spending: cur, totalSpend: sum(cur), totalIncome: 6538.2 },
-    prev: { spending: prev, totalSpend: sum(prev), totalIncome: 6500 },
-    month: monthKey(new Date()),
+    current: summarizeTxns(start, end),
+    prev: summarizeTxns(ymd(prevStart), ymd(prevEnd)),
+    month: key || start.slice(0, 7),
   };
 }
 
@@ -175,9 +206,30 @@ function trends(n = 12) {
 }
 
 // ---- Budgets --------------------------------------------------------------
-function bcat(name, budgeted, spent) { return { id: catId(name), name, budgeted, spent, balance: round2(budgeted - spent), pct: budgeted ? Math.round((spent / budgeted) * 100) : null, over: spent > budgeted }; }
+function bcat(name, budgeted, spent) {
+  const remaining = round2(budgeted - spent);
+  const pct = budgeted ? Math.round((spent / budgeted) * 100) : null;
+  const over = spent > budgeted;
+  return {
+    id: catId(name), name, budgeted, target: budgeted, spent, remaining,
+    projected: round2(spent * 1.08), expectedToDate: round2(budgeted * 0.5),
+    dailyPace: round2(spent / Math.max(1, new Date().getDate())), balance: remaining, pct, over,
+    status: over ? 'over' : pct && pct > 85 ? 'watch' : 'on_track',
+    rolloverMode: 'none', rolloverAmount: 0, annualTarget: null, trueExpenseCadence: null,
+    snoozedMonth: null, priority: null, linkedGoal: null,
+  };
+}
 function bgroup(name, cats) {
-  return { id: 'grp-' + name.toLowerCase().replace(/[^a-z]+/g, '-'), name, budgeted: round2(cats.reduce((s, c) => s + c.budgeted, 0)), spent: round2(cats.reduce((s, c) => s + c.spent, 0)), categories: cats };
+  const budgeted = round2(cats.reduce((s, c) => s + c.budgeted, 0));
+  const spent = round2(cats.reduce((s, c) => s + c.spent, 0));
+  const remaining = round2(budgeted - spent);
+  const projected = round2(cats.reduce((s, c) => s + c.projected, 0));
+  return {
+    id: 'grp-' + name.toLowerCase().replace(/[^a-z]+/g, '-'), name,
+    budgeted, target: budgeted, spent, remaining, projected,
+    status: remaining < 0 ? 'over' : spent / Math.max(1, budgeted) > 0.85 ? 'watch' : 'on_track',
+    categories: cats,
+  };
 }
 function budgets() {
   const groups = [
@@ -190,7 +242,19 @@ function budgets() {
     bgroup('Health', [bcat('Gym', 25, 24.99), bcat('Pharmacy', 40, 18.5)]),
     bgroup('Entertainment', [bcat('Entertainment', 100, 64.99)]),
   ];
-  return { month: monthKey(new Date()), supported: true, totalBudgeted: round2(groups.reduce((s, g) => s + g.budgeted, 0)), totalSpent: round2(groups.reduce((s, g) => s + g.spent, 0)), groups };
+  const totalBudgeted = round2(groups.reduce((s, g) => s + g.budgeted, 0));
+  const totalSpent = round2(groups.reduce((s, g) => s + g.spent, 0));
+  const totalProjected = round2(groups.reduce((s, g) => s + g.projected, 0));
+  const totalRemaining = round2(totalBudgeted - totalSpent);
+  const now = new Date();
+  return {
+    month: monthKey(now), supported: true,
+    totalBudgeted, totalTarget: totalBudgeted, totalSpent, totalRemaining, totalProjected,
+    daysInMonth: new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate(),
+    daysElapsed: now.getDate(),
+    status: totalRemaining < 0 ? 'over' : 'on_track',
+    groups,
+  };
 }
 
 // ---- Reimbursement --------------------------------------------------------
@@ -212,19 +276,20 @@ function reimbursement() {
 
 // ---- Insights -------------------------------------------------------------
 function insights() {
+  const month = currentMonth();
+  const curTxns = transactions().filter((t) => t.date.slice(0, 7) === month);
+  const expenses = curTxns.filter((t) => t.amount < 0);
+  const byPayee = {};
+  for (const t of expenses) {
+    if (!byPayee[t.payee]) byPayee[t.payee] = { payee: t.payee, total: 0, count: 0, category: t.category };
+    byPayee[t.payee].total = round2(byPayee[t.payee].total + Math.abs(t.amount));
+    byPayee[t.payee].count += 1;
+  }
   return {
-    month: monthKey(new Date()),
-    largestCharges: [
-      { id: 'lc-1', date: ymd(daysAgo(2)), payee: 'Skyline Apartments', amount: -2100, category: 'Rent', account: 'Everyday Checking', accountId: 'acc-check', categoryId: null, notes: '', isLeg: false, parentId: null },
-      { id: 'lc-2', date: ymd(daysAgo(17)), payee: 'Apple Store', amount: -129, category: 'Electronics', account: 'Sapphire Card', accountId: 'acc-credit', categoryId: null, notes: '', isLeg: false, parentId: null },
-      { id: 'lc-3', date: ymd(daysAgo(9)), payee: 'City Power & Light', amount: -94.4, category: 'Electric', account: 'Everyday Checking', accountId: 'acc-check', categoryId: null, notes: '', isLeg: false, parentId: null },
-      { id: 'lc-4', date: ymd(daysAgo(6)), payee: 'Verizon Wireless', amount: -85, category: 'Phone', account: 'Sapphire Card', accountId: 'acc-credit', categoryId: null, notes: '', isLeg: false, parentId: null },
-      { id: 'lc-5', date: ymd(daysAgo(12)), payee: 'Adobe Creative Cloud', amount: -54.99, category: 'Software', account: 'Sapphire Card', accountId: 'acc-credit', categoryId: null, notes: '', isLeg: false, parentId: null },
-    ],
-    uncategorized: [
-      { date: ymd(daysAgo(5)), payee: 'Square *Vendor', amount: -22.4 },
-      { date: ymd(daysAgo(18)), payee: 'Venmo', amount: -30 },
-    ],
+    month,
+    largestCharges: expenses.slice().sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount)).slice(0, 5),
+    topMerchants: Object.values(byPayee).sort((a, b) => b.total - a.total).slice(0, 5),
+    uncategorized: curTxns.filter((t) => !t.category).map((t) => ({ date: t.date, payee: t.payee, amount: t.amount })),
     recurring: [
       { payee: 'Netflix', category: 'Streaming', monthsSeen: 8, estimated: 15.49 },
       { payee: 'Spotify', category: 'Streaming', monthsSeen: 10, estimated: 11.99 },
@@ -251,14 +316,14 @@ function tags() {
 
 // ---- Transactions ---------------------------------------------------------
 let _txns = null;
+let _nextTxn = 1;
 function transactions() {
   if (_txns) return _txns;
   const rnd = mulberry32(42);
   const tx = [];
-  let id = 1;
   const acctName = (accId) => (ACCOUNTS.find((a) => a.id === accId) || ACCOUNTS[0]).name;
-  const push = (daysBack, payee, amount, cat, accId) => {
-    tx.push({ id: 'tx-' + id++, parentId: null, isLeg: false, date: ymd(daysAgo(daysBack)), payee, account: acctName(accId), accountId: accId, cleared: true, amount: round2(amount), category: cat, categoryId: cat ? catId(cat) : null, notes: '' });
+  const push = (daysBack, payee, amount, cat, accId, notes = '') => {
+    tx.push({ id: 'tx-' + _nextTxn++, parentId: null, isLeg: false, date: ymd(daysAgo(daysBack)), payee, account: acctName(accId), accountId: accId, cleared: true, amount: round2(amount), category: cat, categoryId: cat ? catId(cat) : null, notes, imported: true });
   };
   for (const db of [1, 15, 31, 46]) push(db, 'Acme Corp Payroll', 3250, 'Salary', 'acc-check');
   push(2, 'Ally Bank Interest', 38.2, 'Interest', 'acc-save');
@@ -273,7 +338,7 @@ function transactions() {
   push(2, 'City Fiber Internet', -69.99, 'Internet', 'acc-credit');
   push(3, 'City Power & Light', -94.4, 'Electric', 'acc-check');
   const groc = ['Whole Foods', "Trader Joe's", 'Costco', 'Safeway'];
-  for (let w = 0; w < 8; w++) push(3 + w * 7 + Math.floor(rnd() * 2), groc[w % groc.length], -(40 + Math.round(rnd() * 80)), 'Groceries', 'acc-credit');
+  for (let w = 0; w < 8; w++) push(3 + w * 7 + Math.floor(rnd() * 2), groc[w % groc.length], -(40 + Math.round(rnd() * 80)), 'Groceries', 'acc-credit', w < 2 ? '#ev-cabo #reimbursable' : '');
   for (let i = 0; i < 14; i++) push(Math.floor(rnd() * 55), 'Blue Bottle Coffee', -(4 + Math.round(rnd() * 4)), 'Coffee', 'acc-credit');
   const din = ['Chipotle', 'Sushi Ya', 'Olive Garden', 'Thai Basil', 'Shake Shack'];
   for (let i = 0; i < 12; i++) push(Math.floor(rnd() * 58), din[i % din.length], -(14 + Math.round(rnd() * 32)), 'Dining', 'acc-credit');
@@ -282,14 +347,239 @@ function transactions() {
   push(7, 'Amazon', -64.3, 'Shopping', 'acc-credit');
   push(21, 'Amazon', -38.99, 'Shopping', 'acc-credit');
   push(17, 'Apple Store', -129, 'Electronics', 'acc-credit');
-  push(11, 'AMC Theatres', -32.5, 'Entertainment', 'acc-credit');
+  push(11, 'AMC Theatres', -32.5, 'Entertainment', 'acc-credit', '#alex');
   push(26, 'Steam', -19.99, 'Entertainment', 'acc-credit');
   push(13, 'CVS Pharmacy', -18.5, 'Pharmacy', 'acc-credit');
-  push(5, 'Square *Vendor', -22.4, null, 'acc-credit');
-  push(18, 'Venmo', -30, null, 'acc-check');
+  push(5, 'Square *Vendor', -22.4, null, 'acc-credit', '#work');
+  push(18, 'Venmo', -30, null, 'acc-check', '#alex');
   tx.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   _txns = tx;
   return tx;
 }
 
-module.exports = { accounts, transactions, spending, trends, budgets, reimbursement, insights, categories, recurring, bills, income, goals, tags };
+const demoState = {
+  goals: null,
+  manualAssets: [
+    { id: 'manual-car', name: 'Demo Car', value: 14500, kind: 'asset', updated: ymd(daysAgo(1)) },
+    { id: 'manual-loan', name: 'Personal Loan', value: 3200, kind: 'liability', updated: ymd(daysAgo(1)) },
+  ],
+  rules: [{ id: 'rule-demo-coffee', match: 'Blue Bottle', categoryId: catId('Coffee'), categoryName: 'Coffee', created: ymd(daysAgo(4)) }],
+  events: [
+    { slug: 'cabo', name: 'Cabo Weekend', start: ymd(daysAgo(12)), members: ['alex', 'sam', 'jordan'], group: 'Demo Splitwise Group', created: ymd(daysAgo(20)), taggedCount: 2 },
+    { slug: 'tahoe-trip', name: 'Tahoe Trip', start: ymd(daysAgo(22)), members: ['alex', 'sam'], group: 'Demo Tahoe', created: ymd(daysAgo(28)), taggedCount: 1 },
+  ],
+  receipts: [{ id: 'receipt-demo-1', txnId: 'tx-5', mime: 'image/png', size: 1280, ocrText: 'Demo receipt total 15.49', ocrLines: ['Netflix', 'Total 15.49'], amount: 15.49, date: ymd(daysAgo(8)), source: 'demo', uploadedAt: new Date().toISOString() }],
+  links: [],
+  dismissedSuggestions: new Set(),
+  reconEnabled: true,
+  reconDone: {},
+};
+
+function currentGoals() {
+  if (!demoState.goals) demoState.goals = goals();
+  return demoState.goals;
+}
+function manualAssets() {
+  const items = demoState.manualAssets.map((m) => ({ ...m }));
+  const assets = round2(items.filter((m) => m.kind === 'asset').reduce((s, m) => s + m.value, 0));
+  const liabilities = round2(items.filter((m) => m.kind === 'liability').reduce((s, m) => s + m.value, 0));
+  return { items, assets, liabilities, net: round2(assets - liabilities) };
+}
+function investments() {
+  const holdings = [
+    { symbol: 'VTI', name: 'Vanguard Total Stock Market', account: 'Brokerage', assetClass: 'US Stocks', quantity: 82.4, price: 310.25, value: 25564.6, costBasis: 21800, gainLoss: 3764.6, gainLossPct: 17.3 },
+    { symbol: 'VXUS', name: 'Vanguard Total International', account: 'Brokerage', assetClass: 'International', quantity: 72.1, price: 69.25, value: 4992.93, costBasis: 4680, gainLoss: 312.93, gainLossPct: 6.7 },
+    { symbol: 'BND', name: 'Vanguard Total Bond', account: 'Roth IRA', assetClass: 'Bonds', quantity: 52, price: 72.4, value: 3764.8, costBasis: 3900, gainLoss: -135.2, gainLossPct: -3.5 },
+  ];
+  const totals = {
+    value: round2(holdings.reduce((s, h) => s + h.value, 0)),
+    costBasis: round2(holdings.reduce((s, h) => s + (h.costBasis || 0), 0)),
+    gainLoss: round2(holdings.reduce((s, h) => s + (h.gainLoss || 0), 0)),
+  };
+  const byAssetClass = {};
+  const byAccount = {};
+  for (const h of holdings) {
+    byAssetClass[h.assetClass] = round2((byAssetClass[h.assetClass] || 0) + h.value);
+    byAccount[h.account] = round2((byAccount[h.account] || 0) + h.value);
+  }
+  const debts = [
+    { id: 'debt-student', name: 'Student Loan', balance: 8400, apr: 5.8, minPayment: 175, dueDate: addDays(ymd(new Date()), 18), strategy: 'avalanche', months: 54, totalInterest: 1320, payoffDate: addDays(ymd(new Date()), 54 * 30) },
+    { id: 'debt-auto', name: 'Auto Loan', balance: 6200, apr: 4.2, minPayment: 240, dueDate: addDays(ymd(new Date()), 9), strategy: 'snowball', months: 28, totalInterest: 410, payoffDate: addDays(ymd(new Date()), 28 * 30) },
+  ];
+  const debtTotals = { balance: round2(debts.reduce((s, d) => s + d.balance, 0)), minPayment: round2(debts.reduce((s, d) => s + d.minPayment, 0)), weightedApr: 5.1 };
+  return { generatedAt: new Date().toISOString(), holdings, totals, allocation: { byAssetClass, byAccount }, debts, debtTotals };
+}
+function forecast(days = 90) {
+  const start = ymd(new Date());
+  const end = addDays(start, days);
+  const base = accounts().filter((a) => !a.offbudget && a.balance > 0).reduce((s, a) => s + a.balance, 0);
+  const events = [
+    { date: addDays(start, 7), label: 'Acme Corp Payroll', amount: 3250, kind: 'income' },
+    { date: addDays(start, 13), label: 'Skyline Apartments', amount: -2100, kind: 'bill' },
+    { date: addDays(start, 21), label: 'Budgeted spending', amount: -950, kind: 'budget' },
+    { date: addDays(start, 28), label: 'Alex reimbursement', amount: 142.5, kind: 'reimbursement' },
+  ].filter((e) => e.date <= end);
+  const points = [];
+  let bal = base;
+  for (let d = 0; d <= days; d += Math.max(1, Math.round(days / 12))) {
+    const date = addDays(start, d);
+    const todays = events.filter((e) => e.date <= date);
+    bal = round2(base + todays.reduce((s, e) => s + e.amount, 0) - d * 22);
+    points.push({ date, balance: bal, inflow: round2(todays.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)), outflow: round2(Math.abs(todays.filter((e) => e.amount < 0).reduce((s, e) => s + e.amount, 0))) });
+  }
+  const lowest = points.reduce((a, p) => (p.balance < a.balance ? p : a), points[0]);
+  return { generatedAt: new Date().toISOString(), range: { start, end, days }, startBalance: round2(base), endingBalance: points[points.length - 1].balance, lowest: { date: lowest.date, balance: lowest.balance }, totals: { inflow: round2(events.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)), outflow: round2(Math.abs(events.filter((e) => e.amount < 0).reduce((s, e) => s + e.amount, 0))) }, points, events, warnings: lowest.balance < 1000 ? ['Projected cash gets low this period.'] : [] };
+}
+function reports() {
+  const sp = spending();
+  const tx = transactions();
+  return {
+    generatedAt: new Date().toISOString(),
+    month: currentMonth(),
+    saved: [{ id: 'demo-monthly', title: 'Monthly Review', subtitle: 'Demo summary ready' }],
+    monthlyReview: { income: sp.current.totalIncome, spend: sp.current.totalSpend, net: round2(sp.current.totalIncome - sp.current.totalSpend), transactionCount: tx.length, largest: insights().largestCharges.slice(0, 3), uncategorized: tx.filter((t) => !t.category).slice(0, 3) },
+    categoryTrends: Object.entries(sp.current.spending).slice(0, 6).map(([name, spend]) => ({ name, spend, pct: Math.round((spend / Math.max(1, sp.current.totalSpend)) * 100) })),
+    merchantTrends: insights().topMerchants,
+    tagSummary: tags().tags,
+    cashFlow: trends(12).months,
+  };
+}
+function review() {
+  const tx = transactions();
+  const uncategorized = tx.find((t) => !t.category);
+  const large = tx.find((t) => Math.abs(t.amount) > 1000 && t.amount < 0);
+  const tasks = [
+    uncategorized ? { id: 'review-uncat', kind: 'uncategorized', priority: 95, title: 'Categorize transaction', subtitle: 'Needs a category', action: 'categorize', amount: Math.abs(uncategorized.amount), date: uncategorized.date, transaction: uncategorized } : null,
+    large ? { id: 'review-large', kind: 'large_charge', priority: 85, title: 'Large charge', subtitle: 'Review unusually large spending', action: 'open_transaction', amount: Math.abs(large.amount), date: large.date, transaction: large } : null,
+    { id: 'review-reconcile', kind: 'reconciliation', priority: 70, title: 'Close last month', subtitle: 'Monthly reconciliation is pending', action: 'open_reconcile', amount: 0, date: null, month: currentMonth() },
+  ].filter(Boolean);
+  return { generatedAt: new Date().toISOString(), month: currentMonth(), count: tasks.length, counts: { uncategorized: uncategorized ? 1 : 0, large_charge: large ? 1 : 0, reconciliation: 1 }, tasks };
+}
+function events() { return { events: demoState.events.map((e) => ({ ...e, members: [...e.members] })) }; }
+function rules() { return { rules: demoState.rules.map((r) => ({ ...r })), catalog: [{ label: 'Streaming services', type: 'subscription' }, { label: 'Coffee shops', type: 'merchant' }] }; }
+function merchantHistory({ payee = '', months = 12 } = {}) {
+  const m = Math.min(36, Math.max(1, Number(months) || 12));
+  const out = [];
+  const now = new Date();
+  for (let i = m - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const key = monthKey(d);
+    const items = transactions().filter((t) => t.payee.toLowerCase() === String(payee).toLowerCase() && t.date.slice(0, 7) === key);
+    out.push({ month: key, total: round2(items.reduce((s, t) => s + Math.abs(t.amount), 0)), count: items.length, items });
+  }
+  const all = out.flatMap((x) => x.items);
+  const total = round2(all.reduce((s, t) => s + Math.abs(t.amount), 0));
+  return { payee, count: all.length, total, avg: all.length ? round2(total / all.length) : 0, monthsSeen: out.filter((x) => x.count).length, months: out };
+}
+function transactionDetail(id) {
+  const t = transactions().find((x) => x.id === id) || transactions()[0];
+  return { ...t, imported: t.imported !== false, isSplit: !!t.isSplit, legs: t.legs || [] };
+}
+function reconciliation(month = currentMonth()) {
+  const items = transactions().filter((t) => t.date.slice(0, 7) === month).slice(0, 10).map((t, i) => ({ id: t.id, date: t.date, payee: t.payee, amount: t.amount, category: t.category || 'Uncategorized', account: t.account, accountId: t.accountId, reconciled: i < 2 }));
+  const done = !!demoState.reconDone[month];
+  const reconciledCount = done ? items.length : items.filter((i) => i.reconciled).length;
+  return { enabled: demoState.reconEnabled, month, done, doneAt: done ? new Date().toISOString() : null, total: items.length, reconciledCount, remaining: items.length - reconciledCount, items: done ? items.map((i) => ({ ...i, reconciled: true })) : items };
+}
+function reconcilePending() {
+  const month = currentMonth();
+  const r = reconciliation(month);
+  return { enabled: demoState.reconEnabled, pending: r.done ? null : month, total: r.total, reconciledCount: r.reconciledCount, remaining: r.remaining };
+}
+function repaymentSuggestions() {
+  const inflow = { id: 'tx-repay-demo', date: ymd(daysAgo(4)), payee: 'Venmo Alex', amount: 142.5 };
+  const expense = { id: 'tx-expense-demo', date: ymd(daysAgo(20)), payee: 'Tahoe cabin share', amount: -112.5 };
+  const suggestions = demoState.dismissedSuggestions.has('demo-sugg-alex') ? [] : [{ id: 'demo-sugg-alex', inflow, person: 'alex', owed: 142.5, allocations: [{ expense, amount: 112.5 }], matched: 112.5, remainder: 30, kind: 'over', score: 93, reason: 'Incoming Venmo looks like Alex paying back shared trip expenses.', createdAt: new Date().toISOString() }];
+  return { suggestions, count: suggestions.length, generatedAt: new Date().toISOString(), range: { from: ymd(daysAgo(60)), to: ymd(new Date()) } };
+}
+function receipts(txnId) { return { receipts: demoState.receipts.filter((r) => !txnId || r.txnId === txnId).map((r) => ({ ...r })) }; }
+function reimbLinks(id) {
+  const links = demoState.links.filter((l) => !id || l.inflow.id === id || l.expense.id === id);
+  return {
+    asInflow: links.filter((l) => !id || l.inflow.id === id).map((l) => ({ ...l.expense, allocated: l.allocated })),
+    asExpense: links.filter((l) => !id || l.expense.id === id).map((l) => ({ ...l.inflow, allocated: l.allocated })),
+  };
+}
+
+function saveGoal(input = {}) {
+  const list = currentGoals();
+  const id = input.id || `goal-demo-${Date.now()}`;
+  const cur = input.accountId ? accounts().find((a) => a.id === input.accountId)?.balance || 0 : 0;
+  const row = { id, name: input.name || 'Demo Goal', target: Number(input.target) || 1000, accountId: input.accountId || null, deadline: input.deadline || null, current: round2(Math.max(0, cur)), pct: Math.round((Math.max(0, cur) / Math.max(1, Number(input.target) || 1000)) * 100) };
+  const idx = list.findIndex((g) => g.id === id);
+  if (idx >= 0) list[idx] = row; else list.push(row);
+  return { ok: true, id };
+}
+function deleteGoal(id) { demoState.goals = currentGoals().filter((g) => g.id !== id); return { ok: true, removed: 1 }; }
+function saveManualAsset(input = {}) {
+  const id = input.id || `manual-demo-${Date.now()}`;
+  const row = { id, name: input.name || 'Demo asset', value: round2(Number(input.value) || 0), kind: input.kind === 'liability' ? 'liability' : 'asset', updated: ymd(new Date()) };
+  const idx = demoState.manualAssets.findIndex((m) => m.id === id);
+  if (idx >= 0) demoState.manualAssets[idx] = row; else demoState.manualAssets.push(row);
+  return { ok: true, id };
+}
+function deleteManualAsset(id) { demoState.manualAssets = demoState.manualAssets.filter((m) => m.id !== id); return { ok: true, removed: 1 }; }
+function saveRule(input = {}) {
+  const id = `rule-demo-${Date.now()}`;
+  const row = { id, match: input.match || 'Demo', categoryId: input.categoryId || catId('Shopping'), categoryName: input.categoryName || categoryById(input.categoryId)?.name || 'Shopping', created: ymd(new Date()) };
+  demoState.rules.push(row);
+  return { ok: true, id, applied: 1 };
+}
+function deleteRule(id) { demoState.rules = demoState.rules.filter((r) => r.id !== id); return { ok: true, removed: 1 }; }
+function saveEvent(input = {}) {
+  const slug = input.slug || String(input.name || 'demo-event').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `event-${Date.now()}`;
+  const event = { slug, name: input.name || 'Demo Event', start: input.start || ymd(new Date()), members: String(input.members || '').split(',').map((s) => s.trim()).filter(Boolean), group: input.group || '', created: ymd(new Date()), taggedCount: 0 };
+  const idx = demoState.events.findIndex((e) => e.slug === slug);
+  if (idx >= 0) demoState.events[idx] = event; else demoState.events.push(event);
+  return { ok: true, event };
+}
+function deleteEvent(slug) { demoState.events = demoState.events.filter((e) => e.slug !== slug); return { ok: true, removed: 1 }; }
+function createTransaction(input = {}) {
+  const account = accounts().find((a) => a.id === input.accountId) || accounts()[0];
+  const cat = categoryById(input.categoryId);
+  const row = { id: `tx-${_nextTxn++}`, parentId: null, isLeg: false, date: input.date || ymd(new Date()), payee: input.payee || 'Manual transaction', account: account.name, accountId: account.id, cleared: true, amount: round2(Number(input.amount) || 0), category: cat?.name || null, categoryId: cat?.id || null, notes: input.notes || '', imported: false };
+  transactions().unshift(row);
+  return { ok: true, id: row.id };
+}
+function updateTransaction(id, patch = {}) {
+  const t = transactions().find((x) => x.id === id);
+  if (!t) return { ok: true, mode: 'demo' };
+  if (patch.categoryId !== undefined) { const c = categoryById(patch.categoryId); t.categoryId = c?.id || null; t.category = c?.name || null; }
+  if (patch.notes !== undefined) t.notes = patch.notes;
+  if (patch.payee !== undefined) t.payee = patch.payee;
+  if (patch.date !== undefined) t.date = patch.date;
+  return { ok: true, mode: 'demo', date: t.date };
+}
+function splitTransaction(id, legs = []) {
+  const t = transactions().find((x) => x.id === id);
+  if (!t) return { ok: true, legs: 0 };
+  t.isSplit = true;
+  t.splitCount = legs.length;
+  t.legs = legs.map((l, i) => ({ id: l.id || `${id}-leg-${i + 1}`, amount: l.amount, categoryId: l.categoryId || null, category: categoryById(l.categoryId)?.name || null, name: l.name || '', notes: l.notes || '' }));
+  return { ok: true, legs: t.legs.length };
+}
+function unsplitTransaction(id, categoryId) {
+  const t = transactions().find((x) => x.id === id);
+  if (t) { t.isSplit = false; t.splitCount = undefined; t.legs = []; if (categoryId !== undefined) updateTransaction(id, { categoryId }); }
+  return { ok: true };
+}
+function deleteTransaction(id) { _txns = transactions().filter((t) => t.id !== id); return { ok: true, removed: 1 }; }
+function addReimbLink(body = {}) { demoState.links.push({ inflow: body.inflow, expense: body.expense, allocated: Math.min(Math.abs(body.inflow?.amount || 0), Math.abs(body.expense?.amount || 0)) }); return { ok: true, id: 'demo-link' }; }
+function deleteReimbLink(body = {}) { demoState.links = demoState.links.filter((l) => l.inflow.id !== body.inflowId || l.expense.id !== body.expenseId); return { ok: true, removed: 1 }; }
+function confirmRepayment(id) { demoState.dismissedSuggestions.add(id); return { ok: true, linked: 1, inflowId: 'tx-repay-demo' }; }
+function dismissRepayment(id) { demoState.dismissedSuggestions.add(id); return { ok: true, dismissed: id }; }
+function setReconcileItem({ month, id, reconciled }) { return { ok: true, id, month, reconciled }; }
+function setReconcileMonth({ month, done }) { demoState.reconDone[month || currentMonth()] = !!done; return { ok: true }; }
+function setReconcileEnabled({ enabled }) { demoState.reconEnabled = !!enabled; return { ok: true }; }
+function addReceipt(body = {}) { const r = { id: `receipt-demo-${Date.now()}`, txnId: body.txnId, mime: body.mime || 'image/png', size: 1000, ocrText: body.ocrText || 'Demo receipt', ocrLines: body.ocrLines || [], amount: body.amount ?? null, date: body.date ?? null, source: body.source || 'demo', uploadedAt: new Date().toISOString() }; demoState.receipts.push(r); return r; }
+function deleteReceipt(id) { demoState.receipts = demoState.receipts.filter((r) => r.id !== id); return { ok: true, removed: 1 }; }
+
+module.exports = {
+  accounts, transactions, spending, trends, budgets, reimbursement, insights, categories, recurring, bills, income,
+  goals: currentGoals, tags, manualAssets, investments, forecast, reports, review, events, rules, merchantHistory,
+  transactionDetail, reconciliation, reconcilePending, repaymentSuggestions, receipts, reimbLinks,
+  saveGoal, deleteGoal, saveManualAsset, deleteManualAsset, saveRule, deleteRule, saveEvent, deleteEvent,
+  createTransaction, updateTransaction, splitTransaction, unsplitTransaction, deleteTransaction,
+  addReimbLink, deleteReimbLink, confirmRepayment, dismissRepayment, setReconcileItem, setReconcileMonth,
+  setReconcileEnabled, addReceipt, deleteReceipt,
+};

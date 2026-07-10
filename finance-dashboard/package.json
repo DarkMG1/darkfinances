@@ -5,8 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check dataModule.js && node --check server.js",
-    "test": "npm run check"
+    "check": "node --check dataModule.js && node --check demoData.js && node --check server.js && node --check scripts/actual-clone-smoke.js && node --check lib/date-only.js && node --check lib/errors.js && node --check lib/json-store.js && node --check lib/serial-queue.js && node --check lib/transaction-references.js && node --check lib/validation.js",
+    "lint": "eslint .",
+    "test": "npm run check && node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",
@@ -17,6 +18,14 @@
     "@simplewebauthn/server": "^13.3.2",
     "express": "^5.2.1",
     "express-session": "^1.19.0",
-    "node-cache": "^5.1.2"
+    "node-cache": "^5.1.2",
+    "safe-regex2": "^5.1.1",
+    "session-file-store": "^1.5.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "eslint": "^9.39.4",
+    "globals": "^14.0.0"
   }
 }

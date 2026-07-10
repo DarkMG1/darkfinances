@@ -579,7 +579,9 @@
     const daysUntil = (d) => { const n = new Date(); n.setHours(0, 0, 0, 0); const [y, m, day] = d.split('-').map(Number); return Math.round((new Date(y, m - 1, day) - n) / 86400000); };
     const dueLabel = (d) => { const n = daysUntil(d); if (n < 0) return `${-n}d overdue`; if (n === 0) return 'today'; if (n === 1) return 'tomorrow'; if (n < 14) return `in ${n}d`; return fmtDay(d); };
     const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
-    const esc = (s) => String(s == null ? '' : s).replace(/'/g, "\\'");
+    const html = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (ch) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[ch]);
 
     function accountBadge(name) {
       const n = name.toLowerCase();
@@ -626,9 +628,9 @@
         const active = state.accountFilter && state.accountFilter.id === a.id;
         const div = document.createElement('div');
         div.className = 'account-card' + (active ? ' active' : '');
-        div.innerHTML = `<div class="account-name">${a.name}</div>
+        div.innerHTML = `<div class="account-name">${html(a.name)}</div>
           <div class="account-balance ${a.balance < 0 ? 'negative' : ''}">${fmt(a.balance)}</div>
-          <span class="account-type-badge ${cls}">${type}</span>`;
+          <span class="account-type-badge ${cls}">${html(type)}</span>`;
         div.onclick = () => toggleAccountFilter(a);
         grid.appendChild(div);
       });
@@ -691,13 +693,17 @@
       });
 
       const max = values[0] || 1;
-      document.getElementById('categoryList').innerHTML = entries.slice(0, 8).map(([cat, amt], i) => `
-        <div class="category-row" onclick="setCategoryFilter('${cat.replace(/'/g, "\\'")}')">
+      const categoryList = document.getElementById('categoryList');
+      categoryList.innerHTML = entries.slice(0, 8).map(([cat, amt], i) => `
+        <div class="category-row" data-category="${html(cat)}">
           <div class="cat-dot" style="background:${CATEGORY_COLORS[i % CATEGORY_COLORS.length]}"></div>
-          <div class="cat-name">${cat}</div>
+          <div class="cat-name">${html(cat)}</div>
           <div class="cat-bar-wrap"><div class="cat-bar" style="width:${(amt / max * 100).toFixed(0)}%;background:${CATEGORY_COLORS[i % CATEGORY_COLORS.length]}"></div></div>
           <div class="cat-amount">${fmtPos(amt)}</div>
         </div>`).join('') || '<div class="empty-state">No spending this month</div>';
+      categoryList.querySelectorAll('[data-category]').forEach((row) => {
+        row.addEventListener('click', () => setCategoryFilter(row.dataset.category));
+      });
     }
 
     // ---- Trends ---------------------------------------------------------------
@@ -757,13 +763,13 @@
       for (const g of data.groups) {
         const groupMax = Math.max(...g.categories.map(c => c.spent), 1);
         html += `<div class="budget-group">
-          <div class="budget-group-head"><span>${g.name}</span><span class="muted">${hasTargets ? fmtPos(g.spent) + ' / ' + fmtPos(g.budgeted) : fmtPos(g.spent)}</span></div>`;
+          <div class="budget-group-head"><span>${html(g.name)}</span><span class="muted">${hasTargets ? fmtPos(g.spent) + ' / ' + fmtPos(g.budgeted) : fmtPos(g.spent)}</span></div>`;
         for (const c of g.categories) {
           const pct = hasTargets && c.budgeted > 0 ? Math.min(100, (c.spent / c.budgeted) * 100) : (c.spent / groupMax * 100);
           const cls = hasTargets && c.over ? 'over' : (hasTargets && pct > 85 ? 'warn' : '');
           const right = hasTargets && c.budgeted > 0 ? `${fmtPos(c.spent)} / ${fmtPos(c.budgeted)}` : fmtPos(c.spent);
           html += `<div class="budget-row">
-            <div class="budget-row-top"><span class="b-name">${c.name}</span><span class="b-amt">${right}${hasTargets && c.over ? ' · over' : ''}</span></div>
+            <div class="budget-row-top"><span class="b-name">${html(c.name)}</span><span class="b-amt">${right}${hasTargets && c.over ? ' · over' : ''}</span></div>
             <div class="bar-track"><div class="bar-fill ${cls}" style="width:${pct.toFixed(0)}%"></div></div>
           </div>`;
         }
@@ -786,7 +792,7 @@
         const sub = parts.join(' · ') || `${(p.legs || []).length} item${(p.legs || []).length === 1 ? '' : 's'}`;
         return `
         <div class="owe-row">
-          <div><div class="owe-name">${p.slug}</div><div class="owe-sub">${sub}</div></div>
+          <div><div class="owe-name">${html(p.slug)}</div><div class="owe-sub">${html(sub)}</div></div>
           <div class="owe-amt owed">${fmtPos(p.owed)}</div>
         </div>`;
       }).join('');
@@ -804,11 +810,11 @@
         const open = e.status === 'open';
         const pill = open
           ? `<span class="status-pill pill-open">open</span>`
-          : `<span class="status-pill pill-paid">${e.status.replace(/_/g, ' ')}</span>`;
+          : `<span class="status-pill pill-paid">${html(e.status.replace(/_/g, ' '))}</span>`;
         const right = open
           ? `${fmtPos(Math.abs(e.net))} ${pill}`
           : `${e.settledDate ? `<span class="e-settled">settled ${fmtDay(e.settledDate)}</span>` : ''}${pill}`;
-        return `<div class="event-row${isOld(e) ? ' event-old' : ''}"><span class="e-name">${e.event}</span><span>${right}</span></div>`;
+        return `<div class="event-row${isOld(e) ? ' event-old' : ''}"><span class="e-name">${html(e.event)}</span><span>${right}</span></div>`;
       };
 
       const oldCount = events.filter(isOld).length;
@@ -828,17 +834,17 @@
     async function loadInsights() {
       const data = await (await fetch('/api/insights' + monthQS())).json();
       document.getElementById('largestList').innerHTML = data.largestCharges.length ? data.largestCharges.map(c => `
-        <div class="insight-item"><div class="insight-main"><div class="insight-name">${c.payee}</div><div class="insight-sub">${formatDate(c.date)} · ${c.category}</div></div>
+        <div class="insight-item"><div class="insight-main"><div class="insight-name">${html(c.payee)}</div><div class="insight-sub">${html(formatDate(c.date))} · ${html(c.category)}</div></div>
         <div class="insight-amt">${fmtPos(Math.abs(c.amount))}</div></div>`).join('') : '<div class="empty-state">None</div>';
 
       const uncatEl = document.getElementById('uncatList');
       uncatEl.innerHTML = data.uncategorized.length ? data.uncategorized.map(u => `
-        <div class="insight-item"><div class="insight-main"><div class="insight-name">${u.payee}</div><div class="insight-sub">${formatDate(u.date)}</div></div>
+        <div class="insight-item"><div class="insight-main"><div class="insight-name">${html(u.payee)}</div><div class="insight-sub">${html(formatDate(u.date))}</div></div>
         <div class="insight-amt">${fmtPos(Math.abs(u.amount))}</div></div>`).join('') : '<div class="empty-state">All categorized ✓</div>';
 
       const anomEl = document.getElementById('anomalyList');
       anomEl.innerHTML = data.anomalies.length ? data.anomalies.map(a => `
-        <div class="insight-item"><div class="insight-main"><div class="insight-name">${a.category}</div><div class="insight-sub">avg ${fmtPos(a.avg)}/mo</div></div>
+        <div class="insight-item"><div class="insight-main"><div class="insight-name">${html(a.category)}</div><div class="insight-sub">avg ${fmtPos(a.avg)}/mo</div></div>
         <div class="insight-amt">${fmtPos(a.current)} <span class="anomaly-up">${a.deltaPct != null ? '+' + a.deltaPct + '%' : ''}</span></div></div>`).join('') : '<div class="empty-state">Nothing unusual ✓</div>';
 
       const im = document.getElementById('insightsMeta');
@@ -858,18 +864,18 @@
       const items = data.items || [];
       if (!items.length) { card.innerHTML = '<div class="empty-state">No recurring charges detected</div>'; return; }
       const rowHtml = (it) => {
-        const k = esc(it.key);
+        const k = String(it.key || '');
         const hike = it.priceChange
           ? `<div class="hike ${it.priceChange.pct > 0 ? 'up' : 'down'}">${it.priceChange.pct > 0 ? '▲' : '▼'} ${Math.abs(it.priceChange.pct)}%</div>` : '';
         const status = it.status === 'active' ? dueLabel(it.nextRenewal) : (it.status === 'cancelled' ? 'cancelled' : 'inactive');
         const toggle = it.status === 'cancelled'
-          ? `<button class="sub-action" onclick="subOverride('${k}',{status:'active'})">reactivate</button>`
-          : `<button class="sub-action" onclick="subOverride('${k}',{status:'cancelled'})">cancel</button>`;
+          ? `<button class="sub-action" data-sub-key="${html(k)}" data-sub-status="active">reactivate</button>`
+          : `<button class="sub-action" data-sub-key="${html(k)}" data-sub-status="cancelled">cancel</button>`;
         return `<div class="sub-row ${it.status !== 'active' ? 'inactive' : ''}">
-          <div class="sub-icon">${(it.payee || '?').slice(0, 1).toUpperCase()}</div>
-          <div class="sub-main"><div class="sub-payee">${it.payee}</div><div class="sub-sub">${cadenceLabel(it.cadence)} · ${it.category} · ${status}</div></div>
+          <div class="sub-icon">${html((it.payee || '?').slice(0, 1).toUpperCase())}</div>
+          <div class="sub-main"><div class="sub-payee">${html(it.payee)}</div><div class="sub-sub">${html(cadenceLabel(it.cadence))} · ${html(it.category)} · ${html(status)}</div></div>
           <div class="sub-right"><div class="sub-amt">${fmtPos(it.amount)}</div>${hike}</div>
-          <div class="sub-actions">${toggle}<button class="sub-action" onclick="subOverride('${k}',{hidden:true})">hide</button></div>
+          <div class="sub-actions">${toggle}<button class="sub-action" data-sub-key="${html(k)}" data-sub-hidden="true">hide</button></div>
         </div>`;
       };
       const active = items.filter(i => i.status === 'active');
@@ -878,6 +884,14 @@
       if (active.length) html += `<div class="sub-group-label">Active · ${fmtPos(data.monthlyTotal)}/mo</div>` + active.map(rowHtml).join('');
       if (inactive.length) html += `<div class="sub-group-label">Inactive &amp; Cancelled</div>` + inactive.map(rowHtml).join('');
       card.innerHTML = html;
+      card.querySelectorAll('[data-sub-key]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const body = button.dataset.subHidden === 'true'
+            ? { hidden: true }
+            : { status: button.dataset.subStatus };
+          subOverride(button.dataset.subKey, body);
+        });
+      });
     }
     async function subOverride(key, body) {
       await fetch(`/api/recurring/${encodeURIComponent(key)}/override`, {
@@ -897,9 +911,9 @@
       const buckets = [{ t: 'This week', items: [] }, { t: 'Next week', items: [] }, { t: 'Later', items: [] }];
       bills.forEach(b => { const d = daysUntil(b.dueDate); (d <= 7 ? buckets[0] : d <= 14 ? buckets[1] : buckets[2]).items.push(b); });
       card.innerHTML = buckets.filter(x => x.items.length).map(x =>
-        `<div class="bill-bucket">${x.t}</div>` + x.items.map(b => `
-          <div class="bill-row"><div class="bill-due">${dueLabel(b.dueDate)}</div>
-            <div class="bill-main"><div class="bill-payee">${cap(b.payee)}</div><div class="bill-cat">${b.category} · ${cadenceLabel(b.cadence)}</div></div>
+        `<div class="bill-bucket">${html(x.t)}</div>` + x.items.map(b => `
+          <div class="bill-row"><div class="bill-due">${html(dueLabel(b.dueDate))}</div>
+            <div class="bill-main"><div class="bill-payee">${html(cap(b.payee))}</div><div class="bill-cat">${html(b.category)} · ${html(cadenceLabel(b.cadence))}</div></div>
             <div class="bill-amt">${fmtPos(b.amount)}</div></div>`).join('')
       ).join('');
     }
@@ -913,7 +927,7 @@
       card.innerHTML = goalsData.map((g, i) => {
         const pct = g.pct != null ? Math.max(0, Math.min(100, g.pct)) : 0;
         return `<div class="goal-row" onclick="openGoalForm(${i})">
-          <div class="goal-head"><span class="goal-name">${g.name}</span><span class="goal-pct">${g.pct != null ? g.pct + '%' : ''}</span></div>
+          <div class="goal-head"><span class="goal-name">${html(g.name)}</span><span class="goal-pct">${g.pct != null ? html(g.pct + '%') : ''}</span></div>
           <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
           <div class="goal-sub">${fmtPos(g.current)} of ${fmtPos(g.target)}</div>
         </div>`;
@@ -926,7 +940,7 @@
       document.getElementById('goalName').value = g ? g.name : '';
       document.getElementById('goalTarget').value = g ? g.target : '';
       const sel = document.getElementById('goalAccount');
-      sel.innerHTML = '<option value="">Manual (no account)</option>' + accounts.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+      sel.innerHTML = '<option value="">Manual (no account)</option>' + accounts.map(a => `<option value="${html(a.id)}">${html(a.name)}</option>`).join('');
       sel.value = (g && g.accountId) ? g.accountId : '';
       document.getElementById('goalDeleteBtn').style.display = g ? 'block' : 'none';
       document.getElementById('goalModal').classList.add('open');
@@ -981,8 +995,8 @@
     function renderActiveFilters() {
       const el = document.getElementById('activeFilters');
       let html = '';
-      if (state.accountFilter) html += `<span class="chip">${state.accountFilter.name}<button onclick="clearFilter('account')">×</button></span>`;
-      if (state.categoryFilter) html += `<span class="chip">${state.categoryFilter}<button onclick="clearFilter('category')">×</button></span>`;
+      if (state.accountFilter) html += `<span class="chip">${html(state.accountFilter.name)}<button onclick="clearFilter('account')">×</button></span>`;
+      if (state.categoryFilter) html += `<span class="chip">${html(state.categoryFilter)}<button onclick="clearFilter('category')">×</button></span>`;
       el.innerHTML = html;
     }
 
@@ -1007,17 +1021,23 @@
       body.innerHTML = shown.map((t, i) => {
         const isIncome = t.amount > 0;
         let catCell;
-        if (t.category) catCell = `<span class="txn-cat-badge" onclick="setCategoryFilter('${t.category.replace(/'/g, "\\'")}')">${t.category}</span>`;
-        else if (!t.isLeg) catCell = `<span class="categorize-link" onclick="startCategorize(${i})">+ categorize</span>`;
+        if (t.category) catCell = `<span class="txn-cat-badge" data-category="${html(t.category)}">${html(t.category)}</span>`;
+        else if (!t.isLeg) catCell = `<span class="categorize-link" data-categorize-index="${i}">+ categorize</span>`;
         else catCell = `<span style="color:var(--muted);font-size:12px">— split</span>`;
         return `<tr data-idx="${i}">
-          <td class="txn-date">${formatDate(t.date)}</td>
-          <td><div class="txn-payee">${t.payee || '—'}</div>${t.notes ? `<div style="font-size:11px;color:var(--muted);margin-top:1px">${t.notes}</div>` : ''}</td>
-          <td class="txn-account">${t.account}</td>
+          <td class="txn-date">${html(formatDate(t.date))}</td>
+          <td><div class="txn-payee">${html(t.payee || '—')}</div>${t.notes ? `<div style="font-size:11px;color:var(--muted);margin-top:1px">${html(t.notes)}</div>` : ''}</td>
+          <td class="txn-account">${html(t.account)}</td>
           <td class="cat-cell">${catCell}</td>
           <td class="txn-amount ${isIncome ? 'income' : ''}">${isIncome ? '+' : ''}${fmt(t.amount)}</td>
         </tr>`;
       }).join('');
+      body.querySelectorAll('[data-category]').forEach((badge) => {
+        badge.addEventListener('click', () => setCategoryFilter(badge.dataset.category));
+      });
+      body.querySelectorAll('[data-categorize-index]').forEach((link) => {
+        link.addEventListener('click', () => startCategorize(Number(link.dataset.categorizeIndex)));
+      });
       document.getElementById('loadMoreBtn').style.display = filtered.length > state.txnPage ? 'block' : 'none';
     }
 
@@ -1035,9 +1055,11 @@
       const t = filtered[idx];
       const cell = document.querySelector(`tr[data-idx="${idx}"] .cat-cell`);
       if (!cell || !t) return;
-      const opts = categories.map(c => `<option value="${c.id}">${c.group} · ${c.name}</option>`).join('');
-      cell.innerHTML = `<select class="cat-select" onchange="commitCategorize('${t.id}', this.value, this)"><option value="">Select…</option>${opts}</select>`;
-      cell.querySelector('select').focus();
+      const opts = categories.map(c => `<option value="${html(c.id)}">${html(c.group)} · ${html(c.name)}</option>`).join('');
+      cell.innerHTML = `<select class="cat-select"><option value="">Select…</option>${opts}</select>`;
+      const select = cell.querySelector('select');
+      select.addEventListener('change', () => commitCategorize(t.id, select.value, select));
+      select.focus();
     }
     async function commitCategorize(id, categoryId, sel) {
       if (!categoryId) return;

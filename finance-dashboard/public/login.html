@@ -86,6 +86,9 @@
       Sign in with passkey
     </button>
     <div class="status" id="status"></div>
+    <div class="register-link" id="registerLink" style="display:none">
+      <a href="#" id="registerBtn">Securely register this device</a>
+    </div>
   </div>
 
   <script>
@@ -112,6 +115,7 @@
       try {
         const optRes = await fetch('/auth/login/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         const options = await optRes.json();
+        if (!optRes.ok) throw new Error(options.error || 'Could not start authentication');
         options.challenge = fromB64url(options.challenge);
         if (options.allowCredentials) {
           options.allowCredentials = options.allowCredentials.map(c => ({ ...c, id: fromB64url(c.id) }));
@@ -148,8 +152,23 @@
       btn.disabled = true;
       setStatus('Setting up passkey...');
       try {
+        const code = window.prompt('Enter the one-time enrollment code');
+        if (!code) {
+          setStatus('Enrollment cancelled');
+          btn.disabled = false;
+          return;
+        }
+        const authRes = await fetch('/auth/enroll/authorize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code }),
+        });
+        const authResult = await authRes.json();
+        if (!authRes.ok) throw new Error(authResult.error || 'Enrollment authorization failed');
+
         const optRes = await fetch('/auth/register/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         const options = await optRes.json();
+        if (!optRes.ok) throw new Error(options.error || 'Could not start registration');
         options.challenge = fromB64url(options.challenge);
         options.user.id = fromB64url(options.user.id);
         if (options.excludeCredentials) {
@@ -183,12 +202,19 @@
 
     async function init() {
       const res = await fetch('/auth/status');
-      const { registered } = await res.json();
+      const { registered, enrollmentAvailable } = await res.json();
       if (!registered) {
-        document.getElementById('registerLink').style.display = 'block';
-        setStatus('No passkey registered yet — register one below');
+        document.getElementById('registerLink').style.display = enrollmentAvailable ? 'block' : 'none';
+        document.getElementById('signInBtn').style.display = 'none';
+        setStatus(enrollmentAvailable
+          ? 'No passkey registered — use the one-time enrollment code below'
+          : 'No passkey registered and enrollment is currently closed');
       }
     }
+    document.getElementById('registerBtn').addEventListener('click', (event) => {
+      event.preventDefault();
+      register();
+    });
     init();
   </script>
 </body>

@@ -2,8 +2,13 @@ const express = require('express');
 const NodeCache = require('node-cache');
 const path = require('path');
 const session = require('express-session');
+const FileStore = require('session-file-store')(session);
 const fs = require('fs');
 const crypto = require('crypto');
+const { AppError, classifyError } = require('./lib/errors');
+const { FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
+const { SerialQueue } = require('./lib/serial-queue');
+const { parse, schemas } = require('./lib/validation');
 
 const {
   generateRegistrationOptions,
@@ -14,13 +19,23 @@ const {
 
 const app = express();
 const cache = new NodeCache({ stdTTL: 300 }); // 5 min cache
+const mutationQueue = new SerialQueue('finance-mutations');
+const runtimeHealth = {
+  startedAt: new Date().toISOString(),
+  fatalErrorAt: null,
+};
 
 // Defense-in-depth: the Actual API occasionally rejects a batch write out-of-band
-// (a promise that escapes the awaited call). Without a handler Node promotes that to
-// an uncaught exception and the whole finance service dies. Log and keep serving;
-// the resilient budget loader + systemd still handle genuinely fatal states.
+// (a promise that escapes the awaited call). Continuing after an unknown write
+// failure can expose partial state, so mark the process unhealthy and let systemd
+// replace it instead of serving potentially inconsistent data.
 process.on('unhandledRejection', (err) => {
+  runtimeHealth.fatalErrorAt = new Date().toISOString();
   console.error('[unhandledRejection]', (err && err.stack) || err);
+  if (process.env.NODE_ENV !== 'test') {
+    const timer = setTimeout(() => process.exit(1), 100);
+    timer.unref();
+  }
 });
 
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || `http://localhost:${process.env.PORT || 5007}`;
@@ -32,28 +47,123 @@ const RP_ID = process.env.WEBAUTHN_RP_ID || (() => {
 const ORIGIN = process.env.WEBAUTHN_ORIGIN || PUBLIC_ORIGIN;
 const PASSKEY_USER_NAME = process.env.PASSKEY_USER_NAME || 'owner';
 const PASSKEY_USER_DISPLAY_NAME = process.env.PASSKEY_USER_DISPLAY_NAME || PASSKEY_USER_NAME;
-const CREDS_FILE = path.join(__dirname, 'passkey-credentials.json');
+const CREDS_FILE = process.env.PASSKEY_CREDENTIALS_FILE || path.join(__dirname, 'passkey-credentials.json');
+const SESSION_DIR = process.env.SESSION_DIR || path.join(__dirname, '.sessions');
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const ENROLLMENT_TOKEN_HASH = String(process.env.PASSKEY_ENROLLMENT_TOKEN_HASH || '').toLowerCase();
+const ENROLLMENT_EXPIRES_AT = Number(process.env.PASSKEY_ENROLLMENT_EXPIRES_AT || 0);
+const SELFTEST = process.env.SELFTEST === '1';
+const publicHostname = (() => {
+  try { return new URL(PUBLIC_ORIGIN).hostname; } catch (_) { return ''; }
+})();
+const localOrigin = publicHostname === 'localhost' || publicHostname === '127.0.0.1' || publicHostname === '::1';
+
+if (!process.env.SESSION_SECRET && !localOrigin) {
+  throw new Error('SESSION_SECRET is required for a non-local deployment');
+}
+if (SELFTEST && !localOrigin) {
+  throw new Error('SELFTEST may only be used with a loopback PUBLIC_ORIGIN');
+}
 
 function loadCreds() {
   if (!fs.existsSync(CREDS_FILE)) return [];
-  return JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8'));
+  const parsed = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8'));
+  if (!Array.isArray(parsed)) throw new Error('Passkey credential store is invalid');
+  return parsed;
 }
 function saveCreds(creds) {
-  fs.writeFileSync(CREDS_FILE, JSON.stringify(creds, null, 2));
+  const tmp = `${CREDS_FILE}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
+  fs.renameSync(tmp, CREDS_FILE);
+}
+function requestClaimsDemo(req) {
+  return req.get('X-Demo-Mode') === '1' || req.query.demo === '1' || req.query.demo === 'true';
+}
+function safeEqualHex(actual, expected) {
+  if (!/^[a-f0-9]{64}$/.test(actual) || !/^[a-f0-9]{64}$/.test(expected)) return false;
+  return crypto.timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expected, 'hex'));
+}
+function enrollmentAvailable() {
+  return /^[a-f0-9]{64}$/.test(ENROLLMENT_TOKEN_HASH) && ENROLLMENT_EXPIRES_AT > Date.now();
+}
+function enrollmentAuthorized(req, creds) {
+  if (req.session?.authenticated) return true;
+  return creds.length === 0 &&
+    req.session?.enrollmentAuthorized === true &&
+    Number(req.session.enrollmentExpiresAt || 0) > Date.now();
+}
+
+const rateBuckets = new Map();
+function rateLimit(name, max, windowMs) {
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = `${name}:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+    let bucket = rateBuckets.get(key);
+    if (!bucket || bucket.resetAt <= now) bucket = { count: 0, resetAt: now + windowMs };
+    bucket.count += 1;
+    rateBuckets.set(key, bucket);
+    if (rateBuckets.size > 5000) {
+      for (const [k, value] of rateBuckets) if (value.resetAt <= now) rateBuckets.delete(k);
+    }
+    if (bucket.count > max) {
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
+      return res.status(429).json({ error: 'Too many requests' });
+    }
+    return next();
+  };
 }
 
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '25mb' })); // receipts upload raw image bytes as base64
+app.disable('x-powered-by');
+fs.mkdirSync(SESSION_DIR, { recursive: true, mode: 0o700 });
+fs.chmodSync(SESSION_DIR, 0o700);
+app.use((req, res, next) => {
+  req.requestId = crypto.randomUUID();
+  res.setHeader('X-Request-Id', req.requestId);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; " +
+      "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+      "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'"
+  );
+  next();
+});
+
+const defaultJsonParser = express.json({ limit: '1mb' });
+const receiptJsonParser = express.json({ limit: '25mb' });
+const isReceiptUpload = (req) =>
+  req.method === 'POST' && (req.path === '/api/receipts' || req.path === '/api/v1/receipts');
+app.use((req, res, next) => isReceiptUpload(req) ? next() : defaultJsonParser(req, res, next));
 app.use(session({
+  store: new FileStore({
+    path: SESSION_DIR,
+    ttl: 7 * 24 * 60 * 60,
+    retries: 0,
+    reapInterval: 60 * 60,
+    logFn: (message) => console.error('[session-store]', message),
+  }),
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: 'auto', httpOnly: true, maxAge: 7 * 24 * 60 * 60 * 1000, sameSite: 'none' },
+  cookie: { secure: !localOrigin, httpOnly: true, maxAge: 7 * 24 * 60 * 60 * 1000, sameSite: 'lax' },
 }));
 
-// SELFTEST (default OFF) bypasses passkey auth for local endpoint verification only.
-const SELFTEST = process.env.SELFTEST === '1';
+app.use((req, res, next) => {
+  const origin = req.get('Origin');
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && origin !== ORIGIN) {
+    return res.status(403).json({ error: 'Origin not allowed' });
+  }
+  next();
+});
+app.use((req, res, next) => requestClaimsDemo(req)
+  ? rateLimit('demo', 240, 60_000)(req, res, next)
+  : next());
 
 function requireAuth(req, res, next) {
   if (SELFTEST) return next();
@@ -68,31 +178,61 @@ app.get('/login', (req, res) => {
 
 app.get('/auth/status', (req, res) => {
   const creds = loadCreds();
-  res.json({ registered: creds.length > 0, authenticated: !!req.session.authenticated });
-});
-
-// Registration (disabled after initial setup)
-app.post('/auth/register/start', (req, res) => res.status(403).json({ error: 'Registration closed' }));
-app.post('/auth/register/finish', (req, res) => res.status(403).json({ error: 'Registration closed' }));
-app.post('/auth/register/start_DISABLED', async (req, res) => {
-  const creds = loadCreds();
-  const userId = crypto.randomBytes(16);
-  const options = await generateRegistrationOptions({
-    rpName: RP_NAME,
-    rpID: RP_ID,
-    userID: userId,
-    userName: PASSKEY_USER_NAME,
-    userDisplayName: PASSKEY_USER_DISPLAY_NAME,
-    attestationType: 'none',
-    excludeCredentials: creds.map(c => ({ id: Buffer.from(c.credentialID, 'base64url'), type: 'public-key' })),
-    authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
+  res.json({
+    registered: creds.length > 0,
+    authenticated: !!req.session.authenticated,
+    enrollmentAvailable: creds.length === 0 && enrollmentAvailable(),
   });
-  req.session.regChallenge = options.challenge;
-  res.json(options);
 });
 
-app.post('/auth/register/finish_DISABLED', async (req, res) => {
+const loginLimiter = rateLimit('passkey-login', 30, 10 * 60_000);
+const enrollmentLimiter = rateLimit('passkey-enrollment', 10, 10 * 60_000);
+
+// First enrollment requires a short-lived out-of-band code. Once one credential
+// exists, further enrollment requires an already-authenticated browser session.
+app.post('/auth/enroll/authorize', enrollmentLimiter, (req, res) => {
   try {
+    const creds = loadCreds();
+    if (creds.length > 0) return res.status(409).json({ error: 'A passkey is already registered' });
+    if (!enrollmentAvailable()) return res.status(403).json({ error: 'Enrollment is closed' });
+    const suppliedHash = crypto.createHash('sha256').update(String(req.body?.code || '')).digest('hex');
+    if (!safeEqualHex(suppliedHash, ENROLLMENT_TOKEN_HASH)) {
+      return res.status(403).json({ error: 'Invalid enrollment code' });
+    }
+    req.session.enrollmentAuthorized = true;
+    req.session.enrollmentExpiresAt = ENROLLMENT_EXPIRES_AT;
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'Could not authorize enrollment' });
+  }
+});
+
+app.post('/auth/register/start', enrollmentLimiter, async (req, res) => {
+  try {
+    const creds = loadCreds();
+    if (!enrollmentAuthorized(req, creds)) return res.status(403).json({ error: 'Registration closed' });
+    const options = await generateRegistrationOptions({
+      rpName: RP_NAME,
+      rpID: RP_ID,
+      userID: crypto.randomBytes(16),
+      userName: PASSKEY_USER_NAME,
+      userDisplayName: PASSKEY_USER_DISPLAY_NAME,
+      attestationType: 'none',
+      excludeCredentials: creds.map(c => ({ id: c.credentialID, type: 'public-key', transports: c.transports || [] })),
+      authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
+    });
+    req.session.regChallenge = options.challenge;
+    return res.json(options);
+  } catch (e) {
+    return res.status(500).json({ error: 'Could not start registration' });
+  }
+});
+
+app.post('/auth/register/finish', enrollmentLimiter, async (req, res) => {
+  try {
+    const creds = loadCreds();
+    if (!enrollmentAuthorized(req, creds)) return res.status(403).json({ error: 'Registration closed' });
+    if (!req.session.regChallenge) return res.status(400).json({ error: 'Registration challenge expired' });
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: req.session.regChallenge,
@@ -101,34 +241,49 @@ app.post('/auth/register/finish_DISABLED', async (req, res) => {
     });
     if (!verification.verified) return res.status(400).json({ error: 'Verification failed' });
     const { credential } = verification.registrationInfo;
-    const creds = loadCreds();
+    if (creds.some((c) => c.credentialID === credential.id)) {
+      return res.status(409).json({ error: 'Credential already registered' });
+    }
     creds.push({
       credentialID: credential.id,
       credentialPublicKey: Buffer.from(credential.publicKey).toString('base64'),
       counter: credential.counter,
       transports: req.body.response?.transports || [],
+      createdAt: new Date().toISOString(),
+      lastUsedAt: null,
     });
     saveCreds(creds);
     req.session.authenticated = true;
     delete req.session.regChallenge;
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    delete req.session.enrollmentAuthorized;
+    delete req.session.enrollmentExpiresAt;
+    return res.json({ ok: true });
+  } catch (e) {
+    delete req.session.regChallenge;
+    return res.status(400).json({ error: 'Registration verification failed' });
+  }
 });
 
 // Authentication
-app.post('/auth/login/start', async (req, res) => {
-  const creds = loadCreds();
-  const options = await generateAuthenticationOptions({
-    rpID: RP_ID,
-    userVerification: 'required',
-    allowCredentials: creds.map(c => ({ id: c.credentialID, transports: c.transports })),
-  });
-  req.session.authChallenge = options.challenge;
-  res.json(options);
+app.post('/auth/login/start', loginLimiter, async (req, res) => {
+  try {
+    const creds = loadCreds();
+    if (!creds.length) return res.status(409).json({ error: 'No passkey is registered' });
+    const options = await generateAuthenticationOptions({
+      rpID: RP_ID,
+      userVerification: 'required',
+      allowCredentials: creds.map(c => ({ id: c.credentialID, transports: c.transports || [] })),
+    });
+    req.session.authChallenge = options.challenge;
+    return res.json(options);
+  } catch (e) {
+    return res.status(500).json({ error: 'Could not start authentication' });
+  }
 });
 
-app.post('/auth/login/finish', async (req, res) => {
+app.post('/auth/login/finish', loginLimiter, async (req, res) => {
   try {
+    if (!req.session.authChallenge) return res.status(400).json({ error: 'Authentication challenge expired' });
     const creds = loadCreds();
     const credId = req.body.id;
     const cred = creds.find(c => c.credentialID === credId);
@@ -147,16 +302,19 @@ app.post('/auth/login/finish', async (req, res) => {
     });
     if (!verification.verified) return res.status(400).json({ error: 'Verification failed' });
     cred.counter = verification.authenticationInfo.newCounter;
+    cred.lastUsedAt = new Date().toISOString();
     saveCreds(creds);
     req.session.authenticated = true;
     delete req.session.authChallenge;
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    return res.json({ ok: true });
+  } catch (e) {
+    delete req.session.authChallenge;
+    return res.status(400).json({ error: 'Authentication verification failed' });
+  }
 });
 
 app.post('/auth/logout', (req, res) => {
-  req.session.destroy();
-  res.json({ ok: true });
+  req.session.destroy(() => res.json({ ok: true }));
 });
 
 // All Actual Budget reads/computations live in the shared data module so the web
@@ -167,7 +325,7 @@ const data = require('./dataModule');
 // finances). It never touches Actual; the middleware below short-circuits any
 // request flagged demo (header X-Demo-Mode:1 or ?demo=1) before the resolvers run.
 const demo = require('./demoData');
-function isDemo(req) { return req.get('X-Demo-Mode') === '1' || req.query.demo === '1' || req.query.demo === 'true'; }
+function isDemo(req) { return requestClaimsDemo(req); }
 function demoMiddleware(v1mode) {
   return (req, res, next) => {
     if (!isDemo(req)) return next();
@@ -175,28 +333,54 @@ function demoMiddleware(v1mode) {
     const send = (payload) => res.json(v1mode ? { data: payload } : payload);
     const p = req.path.replace(/^\/api\/v1\//, '').replace(/^\/api\//, '').replace(/^\//, '');
     if (req.method === 'POST' || req.method === 'DELETE') {
-      if (p.startsWith('goals')) return send({ ok: true, id: 'demo-' + Date.now() });
-      if (p.includes('/category') || p.includes('/notes')) return send({ ok: true, mode: 'demo' });
-      if (p.includes('/override')) return send({ ok: true, key: req.params.key || 'demo' });
-      return send({ ok: true });
+      // Public demo writes are intentionally non-persistent. This keeps showcase
+      // flows harmless and prevents cross-user state, OCR, or HTML injection.
+      return send({ ok: true, demo: true });
     }
     if (p === 'report.csv') {
-      const esc = (v) => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
       const lines = ['Monthly report (DEMO),sample', '', 'Date,Payee,Account,Category,Amount,Notes'];
-      for (const t of demo.transactions()) lines.push([t.date, esc(t.payee), esc(t.account), esc(t.category || ''), t.amount, esc(t.notes || '')].join(','));
+      for (const t of demo.transactions()) lines.push([t.date, csvEscape(t.payee), csvEscape(t.account), csvEscape(t.category || ''), t.amount, csvEscape(t.notes || '')].join(','));
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', 'attachment; filename="finance-demo.csv"');
       return res.send(lines.join('\n'));
     }
+    const txnById = p.match(/^transactions\/([^/]+)$/);
+    if (txnById) return send(demo.transactionDetail(decodeURIComponent(txnById[1])));
+    if (p === 'merchant-history') return send(demo.merchantHistory({ payee: req.query.payee, months: req.query.months }));
+    if (p === 'reconciliation') return send(demo.reconciliation(req.query.month ? String(req.query.month) : undefined));
+    if (p === 'reconciliation/pending') return send(demo.reconcilePending());
+    if (p === 'repayments/suggestions') return send(demo.repaymentSuggestions());
+    if (p === 'reimbursement-ledger') return send(demo.reimbursementLedger ? demo.reimbursementLedger(req.query.month) : { month: new Date().toISOString().slice(0, 7), range: {}, totals: {}, people: [], months: [] });
+    if (p === 'events') return send(demo.events());
+    if (p === 'receipts') return send(demo.receipts(req.query.txnId ? String(req.query.txnId) : undefined));
     switch (p) {
       case 'ping': return send({ ok: true, ts: Date.now() });
       case 'accounts': return send(demo.accounts());
       case 'transactions': {
         let r = demo.transactions();
-        const { category, start, end } = req.query;
+        const { category, bucket, start, end } = req.query;
+        const budgetOnly = req.query.budgetOnly === '1' || req.query.budgetOnly === 'true';
+        const groupByCategory = Object.fromEntries(demo.categories().map((c) => [String(c.name || '').toLowerCase(), String(c.group || '').toLowerCase()]));
+        const bucketFor = (t) => {
+          const cat = String(t.category || '').toLowerCase();
+          const group = groupByCategory[cat] || '';
+          const key = `${cat} ${group}`;
+          if (!cat || cat === 'reimbursement' || group === 'income' || group === 'money movement') return null;
+          if (t.amount > 0) return null;
+          if (/rent|housing|electric|internet|phone|utilities?|water|sewer|trash|insurance|loan|mortgage/.test(key)) return 'bills';
+          if (/subscription|streaming|software|cloud/.test(key)) return 'subscriptions';
+          return 'spending';
+        };
+        if (bucket) {
+          const wantBucket = String(bucket).toLowerCase();
+          r = r.filter((t) => bucketFor(t) === wantBucket);
+        }
+        if (budgetOnly) {
+          const accountByName = Object.fromEntries(demo.accounts().map((a) => [String(a.name || '').toLowerCase(), a]));
+          r = r.filter((t) => !accountByName[String(t.account || '').toLowerCase()]?.offbudget);
+        }
         if (category) {
           const want = String(category).toLowerCase();
-          const groupByCategory = Object.fromEntries(demo.categories().map((c) => [String(c.name || '').toLowerCase(), String(c.group || '').toLowerCase()]));
           r = r.filter((t) => {
             const cat = String(t.category || '').toLowerCase();
             return cat === want || groupByCategory[cat] === want;
@@ -206,16 +390,16 @@ function demoMiddleware(v1mode) {
         if (end) r = r.filter((t) => t.date <= end);
         return send(r);
       }
-      case 'spending': return send(demo.spending());
+      case 'spending': return send(demo.spending({ month: req.query.month, start: req.query.start, end: req.query.end }));
       case 'trends': return send(demo.trends(parseInt(req.query.months, 10) || 12));
       case 'budgets': return send(demo.budgets());
       case 'reimbursement': return send(demo.reimbursement());
-      case 'review': return send({ generatedAt: new Date().toISOString(), month: new Date().toISOString().slice(0, 7), count: 0, counts: {}, tasks: [] });
+      case 'review': return send(demo.review());
       case 'insights': return send(demo.insights());
       case 'categories': return send(demo.categories());
       case 'recurring': return send(demo.recurring());
       case 'bills': return send(demo.bills());
-      case 'forecast': return send({ generatedAt: new Date().toISOString(), range: { start: new Date().toISOString().slice(0, 10), end: new Date().toISOString().slice(0, 10), days: 30 }, startBalance: 0, endingBalance: 0, lowest: { date: new Date().toISOString().slice(0, 10), balance: 0 }, totals: { inflow: 0, outflow: 0 }, points: [], events: [], warnings: [] });
+      case 'forecast': return send(demo.forecast(parseInt(req.query.days, 10) || 90));
       case 'income': return send(demo.income());
       case 'search': {
         const needle = (req.query.q || '').toLowerCase().trim();
@@ -228,16 +412,15 @@ function demoMiddleware(v1mode) {
         return send({ transactions: r.slice(0, 200), total: r.length, truncated: r.length > 200 });
       }
       case 'tags': return send(demo.tags());
-      case 'rules': return send({ rules: [] });
-      case 'manual-assets': return send({ items: [], assets: 0, liabilities: 0, net: 0 });
-      case 'investments': return send({ generatedAt: new Date().toISOString(), holdings: [], totals: { value: 0, costBasis: 0, gainLoss: 0 }, allocation: { byAssetClass: {}, byAccount: {} }, debts: [], debtTotals: { balance: 0, minPayment: 0, weightedApr: 0 } });
-      case 'reports': return send({ generatedAt: new Date().toISOString(), month: new Date().toISOString().slice(0, 7), saved: [], monthlyReview: { income: 0, spend: 0, net: 0, transactionCount: 0, largest: [], uncategorized: [] }, categoryTrends: [], merchantTrends: [], tagSummary: [], cashFlow: [] });
+      case 'rules': return send(demo.rules());
+      case 'manual-assets': return send(demo.manualAssets());
+      case 'investments': return send(demo.investments());
+      case 'reports': return send(demo.reports());
       case 'goals': return send(demo.goals());
       case 'owes-config': return send({ expected: {}, debtorPatterns: {}, tripStart: {}, swNet: [], settledExt: [] });
-      case 'reimb-links': return send(req.query.id ? { asInflow: [], asExpense: [] } : { links: [] });
+      case 'reimb-links': return send(demo.reimbLinks(req.query.id ? String(req.query.id) : undefined));
       default: {
-        if (DEMO_ONLY) return send({ ok: true, demo: true });
-        return next();
+        return res.status(404).json({ error: 'Demo endpoint not found' });
       }
     }
   };
@@ -293,12 +476,14 @@ const monthOf = (req) => req.query.month;
 const resolvers = {
   accounts: () => cached('accounts', () => data.getAccounts()),
   transactions: (req) => {
-    const { accountId, start, end, category } = req.query;
+    const { accountId, start, end, category, bucket } = req.query;
+    const budgetOnly = req.query.budgetOnly === '1' || req.query.budgetOnly === 'true';
     const collapse = req.query.collapse === '1' || req.query.collapse === 'true';
-    const startDate = start || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
-    const endDate = end || new Date().toISOString().slice(0, 10);
-    const key = `txns-${accountId || 'all'}-${startDate}-${endDate}-${category || 'all'}-${collapse ? 'c' : 'x'}`;
-    return cached(key, () => data.getTransactions({ accountId, start: startDate, end: endDate, category, collapse }), 120);
+    const today = todayYMD();
+    const startDate = start || `${today.slice(0, 7)}-01`;
+    const endDate = end || today;
+    const key = `txns-${accountId || 'all'}-${startDate}-${endDate}-${category || 'all'}-${bucket || 'none'}-${budgetOnly ? 'budget' : 'all'}-${collapse ? 'c' : 'x'}`;
+    return cached(key, () => data.getTransactions({ accountId, start: startDate, end: endDate, category, bucket, budgetOnly, collapse }), 120);
   },
   txnById: (req) => {
     const { id } = req.params;
@@ -365,103 +550,119 @@ const resolvers = {
 };
 
 async function setRecurring(req) {
-  const { key } = req.params;
-  const { status, hidden, forced, isBill, cancellation } = req.body || {};
+  const { key } = parse(schemas.keyParam, req.params, 'recurring key');
+  const { status, hidden, forced, isBill, cancellation } = parse(schemas.recurringOverride, req.body, 'recurring override');
   const result = data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation });
   cache.flushAll();
   return result;
 }
 async function markRecurring(req) {
-  const { payee, isBill } = req.body || {};
+  const { payee, isBill } = parse(schemas.markRecurring, req.body, 'recurring merchant');
   const result = data.markRecurring({ payee, isBill });
   cache.flushAll();
   return result;
 }
 async function splitTxn(req) {
-  const { id } = req.params;
-  const { accountId, date, legs } = req.body || {};
+  const { id } = parse(schemas.idParam, req.params, 'transaction id');
+  const { accountId, date, legs } = parse(schemas.splitTransaction, req.body, 'transaction split');
   const result = await data.splitTransaction({ id, accountId, date, legs });
-  await data.syncNow().catch(() => {});
+  await data.syncNow();
   cache.flushAll();
   return result;
 }
 async function unsplitTxn(req) {
-  const { id } = req.params;
-  const { accountId, date, categoryId } = req.body || {};
+  const { id } = parse(schemas.idParam, req.params, 'transaction id');
+  const { accountId, date, categoryId } = parse(schemas.unsplitTransaction, req.body, 'remove split');
   const result = await data.removeSplit({ id, accountId, date, categoryId });
-  await data.syncNow().catch(() => {});
+  await data.syncNow();
   cache.flushAll();
   return result;
 }
 async function setPayeeH(req) {
-  const { id } = req.params;
-  const { payee, isLeg, parentId, accountId, date } = req.body || {};
+  const { id } = parse(schemas.idParam, req.params, 'transaction id');
+  const { payee, isLeg, parentId, accountId, date } = parse(schemas.setPayee, req.body, 'transaction payee');
   const result = await data.setPayee({ id, payee, isLeg, parentId, accountId, date });
-  await data.syncNow().catch(() => {});
+  await data.syncNow();
   cache.flushAll();
   return result;
 }
 async function bankSyncH() {
   const result = await data.bankSync();
-  await data.applyRules().catch(() => {}); // categorize anything newly pulled
-  await data.sweepReimbursementTags().catch(() => {}); // file configured reimbursement tags into Reimbursement
-  const phantom = await data.cleanupPhantoms().catch((e) => ({ error: e.message }));
-  await data.syncNow().catch(() => {}); // persist any phantom deletes to the Actual server
+  if (!result.ok) {
+    cache.flushAll();
+    return { ...result, phantom: { skipped: true, reason: 'bank sync did not complete' } };
+  }
+  await data.applyRules(); // categorize anything newly pulled
+  await data.sweepReimbursementTags(); // file configured reimbursement tags into Reimbursement
+  const phantom = await data.cleanupPhantoms();
+  await data.syncNow(); // persist any phantom deletes to the Actual server
   cache.flushAll();
   return { ...result, phantom };
 }
 async function phantomCleanupH(req) {
-  const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
-  const num = (name) => req.query[name] != null ? Number(req.query[name]) : undefined;
+  const query = parse(schemas.phantomCleanupQuery, req.query, 'phantom cleanup query');
+  const dryRun = query.dryRun === '1' || query.dryRun === 'true';
   const r = await data.cleanupPhantoms({
     dryRun,
-    window: num('window'),
-    agedDays: num('agedDays'),
-    observeDays: num('observeDays'),
-    holdAgedDays: num('holdAgedDays'),
-    holdObserveDays: num('holdObserveDays'),
+    window: query.window,
+    agedDays: query.agedDays,
+    observeDays: query.observeDays,
+    holdAgedDays: query.holdAgedDays,
+    holdObserveDays: query.holdObserveDays,
   });
-  if (!dryRun) { await data.syncNow().catch(() => {}); cache.flushAll(); }
+  if (!dryRun) { await data.syncNow(); cache.flushAll(); }
   return r;
 }
 const phantomLogH = (req) => Promise.resolve(data.getPhantomLog({ limit: Number(req.query.limit) || 100 }));
 // Receipts
-async function addReceiptH(req) { return data.addReceipt(req.body || {}); }
+async function addReceiptH(req) {
+  const receipt = parse(schemas.receipt, req.body, 'receipt');
+  await data.getTransactionById({ id: receipt.txnId, accountId: receipt.accountId, date: receipt.transactionDate });
+  return data.addReceipt(receipt);
+}
 const receiptsH = (req) => Promise.resolve(data.getReceipts({ txnId: req.query.txnId }));
-async function deleteReceiptH(req) { return data.deleteReceipt({ id: req.params.id }); }
+async function deleteReceiptH(req) {
+  const { id } = parse(schemas.idParam, req.params, 'receipt id');
+  return data.deleteReceipt({ id });
+}
 // Raw image stream (auth already enforced by the router). expo-image sends the
 // token via headers, so this just serves the file bytes with the right type.
 function receiptImageH(req, res) {
   try {
     const f = data.getReceiptFile({ id: req.params.id });
     if (!f) return res.status(404).json({ error: 'not found' });
-    res.type(f.mime || 'image/jpeg');
+    const mime = String(f.mime || '').toLowerCase();
+    const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
+    if (!allowed.has(mime)) return res.status(415).json({ error: 'unsupported receipt image type' });
+    res.type(mime);
+    res.setHeader('Content-Disposition', 'inline; filename="receipt-image"');
     res.setHeader('Cache-Control', 'private, max-age=86400');
     return res.sendFile(f.path);
-  } catch (e) { return res.status(500).json({ error: e.message }); }
+  } catch (e) { return sendApiError(req, res, e); }
 }
 async function sweepReimbH(req) {
-  const { tags, from, to } = (req && req.body) || {};
+  const { tags, from, to } = parse(schemas.reimbursementSweep, req.body, 'reimbursement sweep');
   const result = await data.sweepReimbursementTags({ tags, from, to });
-  await data.syncNow().catch(() => {});
+  await data.syncNow();
   cache.flushAll();
   return result;
 }
 async function deleteTxn(req) {
-  const { id } = req.params;
-  const { accountId, date } = req.query;
+  const { id } = parse(schemas.idParam, req.params, 'transaction id');
+  const { accountId, date } = parse(schemas.deleteTransactionQuery, req.query, 'transaction delete query');
   const result = await data.deleteTransaction({ id, accountId, date });
-  await data.syncNow().catch(() => {}); // persist the delete back to the Actual server
+  await data.syncNow(); // persist the delete back to the Actual server
   cache.flushAll(); // removing a transaction shifts balances/spending/insights
   return result;
 }
 async function saveRuleH(req) {
-  const result = await data.saveRule(req.body || {});
+  const result = await data.saveRule(parse(schemas.rule, req.body, 'categorization rule'));
   cache.flushAll();
   return result;
 }
 async function deleteRuleH(req) {
-  const result = data.deleteRule({ id: req.params.id });
+  const { id } = parse(schemas.idParam, req.params, 'rule id');
+  const result = data.deleteRule({ id });
   cache.flushAll();
   return result;
 }
@@ -479,84 +680,87 @@ async function eventsH() {
   return cached('events', () => data.getEvents(), 60);
 }
 async function saveEventH(req) {
-  const result = data.saveEvent(req.body || {});
+  const result = data.saveEvent(parse(schemas.event, req.body, 'event'));
   cache.del('events');
   return result;
 }
 async function deleteEventH(req) {
-  const result = data.deleteEvent({ slug: req.params.slug });
+  const { slug } = parse(schemas.slugParam, req.params, 'event slug');
+  const result = data.deleteEvent({ slug });
   cache.del('events');
   return result;
 }
 async function setAccountOverrideH(req) {
-  const { id } = req.params;
-  const { name, hidden } = req.body || {};
+  const { id } = parse(schemas.idParam, req.params, 'account id');
+  const { name, hidden } = parse(schemas.accountOverride, req.body, 'account override');
   const result = data.setAccountOverride({ id, name, hidden });
   cache.del('accounts');
   return result;
 }
 async function saveManualAssetH(req) {
-  const result = data.saveManualAsset(req.body || {});
+  const result = data.saveManualAsset(parse(schemas.manualAsset, req.body, 'manual asset'));
   cache.del('manual-assets');
   return result;
 }
 async function deleteManualAssetH(req) {
-  const result = data.deleteManualAsset({ id: req.params.id });
+  const { id } = parse(schemas.idParam, req.params, 'manual asset id');
+  const result = data.deleteManualAsset({ id });
   cache.del('manual-assets');
   return result;
 }
 async function setNotes(req) {
-  const { id } = req.params;
-  const { notes, isLeg, parentId, accountId, date } = req.body || {};
+  const { id } = parse(schemas.idParam, req.params, 'transaction id');
+  const { notes, isLeg, parentId, accountId, date } = parse(schemas.setNotes, req.body, 'transaction notes');
   const result = await data.setTransactionNotes({ id, notes, isLeg, parentId, accountId, date });
-  await data.syncNow().catch(() => {});
+  await data.syncNow();
   cache.flushAll();
   return result;
 }
 async function setDateH(req) {
-  const { id } = req.params;
-  const { date, isLeg } = req.body || {};
+  const { id } = parse(schemas.idParam, req.params, 'transaction id');
+  const { date, isLeg } = parse(schemas.setDate, req.body, 'transaction date');
   const result = await data.setTransactionDate({ id, date, isLeg });
-  await data.syncNow().catch(() => {});
+  await data.syncNow();
   cache.flushAll();
   return result;
 }
 async function saveGoal(req) {
-  const result = data.saveGoal(req.body || {});
+  const result = data.saveGoal(parse(schemas.goal, req.body, 'goal'));
   cache.del('goals');
   return result;
 }
 async function deleteGoal(req) {
-  const result = data.deleteGoal(req.params.id);
+  const { id } = parse(schemas.idParam, req.params, 'goal id');
+  const result = data.deleteGoal(id);
   cache.del('goals');
   return result;
 }
 
 async function setCategory(req) {
-  const { id } = req.params;
-  const { categoryId, isLeg, parentId, accountId, date } = req.body || {};
+  const { id } = parse(schemas.idParam, req.params, 'transaction id');
+  const { categoryId, isLeg, parentId, accountId, date } = parse(schemas.setCategory, req.body, 'transaction category');
   const result = await data.setTransactionCategory({ id, categoryId, isLeg, parentId, accountId, date });
-  await data.syncNow().catch(() => {}); // persist the write back to the Actual server
+  await data.syncNow(); // persist the write back to the Actual server
   cache.flushAll();
   return result;
 }
 // Manual refresh: pull the latest deltas from the Actual server, clear stale
 // HTTP cache, then immediately re-warm the hot keys so the UI repopulates fast.
 async function doRefresh() {
-  await data.syncNow().catch((e) => console.error('refresh sync failed:', e.message));
+  await data.syncNow();
   // A pending split that posted at a new amount: absorb the delta into its master leg.
-  await data.reconcileSplits().catch((e) => console.error('split reconcile failed:', e.message));
+  const splits = await data.reconcileSplits();
   // Auto-categorize any newly-pulled transactions that match a saved rule.
-  await data.applyRules().catch((e) => console.error('applyRules failed:', e.message));
+  const rules = await data.applyRules();
   // Mirror my share of friend-paid Splitwise items into the spend ledger.
-  await data.syncSplitwiseShareExpenses().catch((e) => console.error('splitwise share sync failed:', e.message));
+  const splitwise = await data.syncSplitwiseShareExpenses();
   cache.flushAll();
   await warmCache();
-  return { ok: true };
+  return { ok: true, splits, rules, splitwise };
 }
 
 async function markBill(req) {
-  const { id, key, dueDate, paid } = req.body || {};
+  const { id, key, dueDate, paid } = parse(schemas.markBill, req.body, 'bill state');
   const result = data.setBillPaid({ id, key, dueDate, paid });
   cache.flushAll(); // bills are cached per horizon
   return result;
@@ -569,40 +773,46 @@ async function setOwes(req) {
 }
 
 async function createTxn(req) {
-  const result = await data.createTransaction(req.body || {});
+  const result = await data.createTransaction(parse(schemas.createTransaction, req.body, 'transaction'));
   cache.flushAll(); // a new transaction shifts balances/spending/insights
   return result;
 }
 
 async function setBudget(req) {
-  const { month, categoryId, amount } = req.body || {};
+  const { month, categoryId, amount } = parse(schemas.budget, req.body, 'budget amount');
   const result = await data.setBudgetAmount({ month, categoryId, amount });
-  await data.syncNow().catch(() => {}); // persist the write back to the Actual server
+  await data.syncNow(); // persist the write back to the Actual server
   cache.flushAll(); // budget targets feed budgets + insights
   return result;
 }
 
 const reimbLinks = (req) => Promise.resolve(data.getReimbLinks({ id: req.query.id }));
 async function addLink(req) {
-  const r = data.addReimbLink(req.body || {});
+  const r = data.addReimbLink(parse(schemas.reimbLink, req.body, 'reimbursement link'));
   cache.flushAll(); // suggestions net against links
   return r;
 }
 async function confirmRepaymentH(req) {
-  const r = await data.confirmRepayment({ id: req.params.id, from: req.query.from, to: req.query.to });
-  await data.syncNow().catch(() => {}); // persist the inflow's new category to the Actual server
+  const { id } = parse(schemas.idParam, req.params, 'repayment id');
+  const r = await data.confirmRepayment({ id, from: req.query.from, to: req.query.to });
+  await data.syncNow(); // persist the inflow's new category to the Actual server
   cache.flushAll();
   return r;
 }
 async function dismissRepaymentH(req) {
-  const r = data.dismissRepayment({ id: req.params.id, inflowId: req.body && req.body.inflowId });
+  const { id } = parse(schemas.idParam, req.params, 'repayment id');
+  const inflowId = req.body?.inflowId == null
+    ? undefined
+    : parse(schemas.idParam, { id: req.body.inflowId }, 'repayment inflow id').id;
+  const r = data.dismissRepayment({ id, inflowId });
   cache.flushAll();
   return r;
 }
 async function delLink(req) {
   const inflowId = (req.body && req.body.inflowId) || req.query.inflowId;
   const expenseId = (req.body && req.body.expenseId) || req.query.expenseId;
-  const r = data.deleteReimbLink({ inflowId, expenseId });
+  const parsed = parse(schemas.deleteReimbLink, { inflowId, expenseId }, 'reimbursement unlink');
+  const r = data.deleteReimbLink(parsed);
   cache.flushAll();
   return r;
 }
@@ -610,12 +820,16 @@ async function delLink(req) {
 // Reconciliation — read fresh (not cached) so checkboxes reflect instantly.
 const reconciliationH = (req) => data.getReconciliation({ month: monthOf(req) });
 const reconcilePendingH = () => data.getReconcilePending();
-const setReconItemH = (req) => Promise.resolve(data.setReconcileItem(req.body || {}));
-const setReconMonthH = (req) => Promise.resolve(data.setReconcileMonth(req.body || {}));
-const setReconEnabledH = (req) => Promise.resolve(data.setReconcileEnabled(req.body || {}));
+const setReconItemH = (req) => Promise.resolve(data.setReconcileItem(parse(schemas.reconcileItem, req.body, 'reconciliation item')));
+const setReconMonthH = (req) => Promise.resolve(data.setReconcileMonth(parse(schemas.reconcileMonth, req.body, 'reconciliation month')));
+const setReconEnabledH = (req) => Promise.resolve(data.setReconcileEnabled(parse(schemas.reconcileEnabled, req.body, 'reconciliation setting')));
 
 // Monthly CSV export (raw text/csv, used by web download + app share sheet).
-function csvEscape(v) { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function csvEscape(v) {
+  let s = String(v == null ? '' : v);
+  if (/^[=+\-@]/.test(s.trimStart())) s = `'${s}`;
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
 async function reportCsv(req, res) {
   try {
     const rep = await data.getMonthlyReport({ month: req.query.month });
@@ -634,12 +848,33 @@ async function reportCsv(req, res) {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="finance-${rep.month}.csv"`);
     res.send(lines.join('\n'));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendApiError(req, res, e); }
 }
 
 // Raw responders for the legacy web API; enveloped {data}/{error} responders for v1.
-const raw = (fn) => async (req, res) => { try { res.json(await fn(req)); } catch (e) { res.status(500).json({ error: e.message }); } };
-const env = (fn) => async (req, res) => { try { res.json({ data: await fn(req) }); } catch (e) { res.status(500).json({ error: e.message }); } };
+function sendApiError(req, res, error) {
+  const classified = classifyError(error);
+  if (classified.status >= 500) {
+    console.error(`[request:${req.requestId}]`, (error && error.stack) || error);
+  }
+  const body = {
+    error: classified.expose ? classified.message : 'Request failed',
+    code: classified.code,
+    requestId: req.requestId,
+  };
+  if (error && Array.isArray(error.issues)) body.issues = error.issues;
+  return res.status(classified.status).json(body);
+}
+const runHandler = (req, fn) =>
+  ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)
+    ? mutationQueue.run(() => fn(req))
+    : fn(req);
+const raw = (fn) => async (req, res) => {
+  try { res.json(await runHandler(req, fn)); } catch (e) { sendApiError(req, res, e); }
+};
+const env = (fn) => async (req, res) => {
+  try { res.json({ data: await runHandler(req, fn) }); } catch (e) { sendApiError(req, res, e); }
+};
 
 // ---- Legacy unversioned API (web dashboard, passkey session) ----------------
 app.get('/api/accounts', raw(resolvers.accounts));
@@ -673,7 +908,7 @@ app.post('/api/bank-sync', raw(bankSyncH));
 app.post('/api/reimbursements/sweep', raw(sweepReimbH));
 app.post('/api/phantom/cleanup', raw(phantomCleanupH));
 app.get('/api/phantom/log', raw(phantomLogH));
-app.post('/api/receipts', raw(addReceiptH));
+app.post('/api/receipts', receiptJsonParser, raw(addReceiptH));
 app.get('/api/receipts', raw(receiptsH));
 app.get('/api/receipts/:id/image', receiptImageH);
 app.delete('/api/receipts/:id', raw(deleteReceiptH));
@@ -723,7 +958,9 @@ function v1Auth(req, res, next) {
 
 const v1 = express.Router();
 v1.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', req.get('Origin') || '*');
+  const origin = req.get('Origin');
+  if (origin && origin !== ORIGIN) return res.status(403).json({ error: 'Origin not allowed' });
+  if (origin === ORIGIN) res.header('Access-Control-Allow-Origin', ORIGIN);
   res.header('Vary', 'Origin');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Finance-Token, X-Demo-Mode');
   res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -732,7 +969,24 @@ v1.use((req, res, next) => {
 });
 v1.use(v1Auth);
 v1.use(demoMiddleware(true)); // demo mode for native clients (after token/session auth)
-v1.get('/ping', env(async () => ({ ok: true, ts: Date.now() })));
+v1.get('/ping', env(async () => {
+  const actual = data.getHealth();
+  if (runtimeHealth.fatalErrorAt || !actual.ready) {
+    throw new AppError('Finance data is not ready', {
+      code: 'NOT_READY',
+      status: 503,
+      expose: true,
+    });
+  }
+  return {
+    ok: true,
+    ts: Date.now(),
+    startedAt: runtimeHealth.startedAt,
+    financeTimeZone: FINANCE_TIME_ZONE,
+    actual,
+    queuedMutations: mutationQueue.size,
+  };
+}));
 v1.get('/accounts', env(resolvers.accounts));
 v1.get('/transactions', env(resolvers.transactions));
 v1.post('/transactions', env(createTxn));
@@ -766,7 +1020,7 @@ v1.post('/bank-sync', env(bankSyncH));
 v1.post('/reimbursements/sweep', env(sweepReimbH));
 v1.post('/phantom/cleanup', env(phantomCleanupH));
 v1.get('/phantom/log', env(phantomLogH));
-v1.post('/receipts', env(addReceiptH));
+v1.post('/receipts', receiptJsonParser, env(addReceiptH));
 v1.get('/receipts', env(receiptsH));
 v1.get('/receipts/:id/image', receiptImageH); // raw bytes (auth via router)
 v1.delete('/receipts/:id', env(deleteReceiptH));
@@ -809,9 +1063,11 @@ app.use('/api/v1', v1);
 const SYNC_INTERVAL_MS = 10 * 60 * 1000; // every 10 min
 async function periodicSync() {
   try {
-    await data.syncNow();
-    cache.flushAll();
-    await warmCache(); // repopulate hot keys so the next request isn't a cold recompute
+    await mutationQueue.run(async () => {
+      await data.syncNow();
+      cache.flushAll();
+      await warmCache(); // repopulate hot keys so the next request isn't a cold recompute
+    });
   } catch (e) {
     console.error('Periodic sync failed:', e.message);
   }
@@ -831,5 +1087,9 @@ app.listen(PORT, '127.0.0.1', () => {
       await warmCache(); // pre-warm once at startup so the first page loads are fast
       setInterval(periodicSync, SYNC_INTERVAL_MS);
     })
-    .catch(e => console.error('Initial API load failed:', e.message));
+    .catch(e => {
+      runtimeHealth.fatalErrorAt = new Date().toISOString();
+      console.error('Initial API load failed:', e.message);
+      if (process.env.NODE_ENV !== 'test') process.exit(1);
+    });
 });
