@@ -1,10 +1,284 @@
-# Operations
+# DarkFinances Operations
 
-- `actual-compose.yml` pins Actual Server to the same version as `@actual-app/api`.
-- `systemd/` contains the reviewed user units deployed under `~/.config/systemd/user/`.
-- `bin/backup-dashboard-runtime.sh` backs up non-Actual sidecars and receipts with mode `0600`.
-- `bin/restore-dashboard-runtime.sh` is dry-run by default and refuses to restore while the dashboard is running.
-- `bin/finance-sync-alert.sh` discovers the existing finance Telegram destination from OpenClaw without storing it in git.
-- `logrotate-darkfinances.conf` bounds finance logs that can contain transaction metadata.
+This directory contains reviewed production assets for running Actual Budget, Finance Dashboard, bank
+sync, backups, restore, alerts, and log rotation on a private Linux host.
 
-After changing units, run `systemd-analyze --user verify`, `systemctl --user daemon-reload`, and the relevant service smoke tests.
+These files are templates, not a turnkey public-cloud deployment. Review paths, usernames, credentials,
+reverse-proxy settings, and alert delivery before installation.
+
+## Contents
+
+| Path | Purpose |
+| --- | --- |
+| `actual-compose.yml` | Actual Server container pinned to the version expected by this repository. |
+| `systemd/finance-dashboard.service` | Private user service for the Express dashboard. |
+| `systemd/actual-sync.service` | One-shot scheduled bank-sync service. |
+| `systemd/actual-sync.timer` | Twice-daily Pacific-time bank-sync schedule. |
+| `systemd/finance-sync-failure@.service` | `OnFailure` bridge to the alert script. |
+| `bin/backup-dashboard-runtime.sh` | Private archive of dashboard JSON sidecars and receipts. |
+| `bin/restore-dashboard-runtime.sh` | Dry-run-first, CONFIRM-gated sidecar restore. |
+| `bin/finance-sync-alert.sh` | Telegram alert delivery through an existing OpenClaw destination. |
+| `logrotate-darkfinances.conf` | Rotation policy for finance logs that may contain transaction metadata. |
+
+## Operational assumptions
+
+- Services run as an unprivileged dedicated user.
+- Actual and Finance Dashboard listen on loopback and are exposed only through a trusted HTTPS reverse
+  proxy/private access layer.
+- The repository is deployed as `~/finance-dashboard` and supporting tools as `~/actual-tools`.
+- Service secrets live in `~/.openclaw/finance-dashboard.env` with mode `0600`.
+- User systemd is available and, if needed after logout, lingering is enabled for the service account.
+- Finance date boundaries and schedules use `America/Los_Angeles`.
+
+Adjust the unit files if your layout differs. Do not add secrets directly to unit files.
+
+## 1. Deploy Actual Server
+
+The Compose file pins Actual Server to `26.7.0`, matching `finance-dashboard`'s `@actual-app/api`.
+
+```bash
+mkdir -p "$HOME/actual/data"
+cp ops/actual-compose.yml "$HOME/actual/compose.yml"
+docker compose -f "$HOME/actual/compose.yml" pull
+docker compose -f "$HOME/actual/compose.yml" up -d
+docker compose -f "$HOME/actual/compose.yml" ps
+```
+
+The container publishes only `127.0.0.1:5006`. Preserve `$HOME/actual/data` across upgrades and include
+it in your independent Actual backup strategy.
+
+Version alignment matters across:
+
+1. `actualbudget/actual-server` in Compose.
+2. `@actual-app/api` in `finance-dashboard/package.json`.
+3. Any standalone/global `@actual-app/api` used by scheduled bank-sync or tools.
+
+Do not upgrade only one layer. Schema errors during download/sync commonly indicate a mismatch.
+
+## 2. Configure Finance Dashboard
+
+Create the private environment file from `finance-dashboard/.env.example`. At minimum configure:
+
+```dotenv
+ACTUAL_SERVER_URL=http://127.0.0.1:5006
+ACTUAL_PASSWORD=...
+ACTUAL_SYNC_ID=...
+ACTUAL_DATA_DIR=/home/<user>/.cache/actual-dashboard
+FINANCE_API_TOKEN=...
+SESSION_SECRET=...
+PUBLIC_ORIGIN=https://finances.example.com
+FINANCE_TIME_ZONE=America/Los_Angeles
+TZ=America/Los_Angeles
+```
+
+Install it privately:
+
+```bash
+mkdir -p -m 700 "$HOME/.openclaw"
+install -m 600 /path/to/finance-dashboard.env "$HOME/.openclaw/finance-dashboard.env"
+```
+
+Set `SESSION_DIR` and sidecar paths in the environment if they do not live under
+`$HOME/finance-dashboard`. Configure first-passkey enrollment only for the short provisioning window
+described in [`../finance-dashboard/README.md`](../finance-dashboard/README.md).
+
+## 3. Install the dashboard service
+
+```bash
+mkdir -p "$HOME/.config/systemd/user"
+install -m 600 ops/systemd/finance-dashboard.service \
+  "$HOME/.config/systemd/user/finance-dashboard.service"
+systemd-analyze --user verify "$HOME/.config/systemd/user/finance-dashboard.service"
+systemctl --user daemon-reload
+systemctl --user enable --now finance-dashboard.service
+```
+
+Verify startup and readiness:
+
+```bash
+systemctl --user status finance-dashboard.service
+journalctl --user -u finance-dashboard.service --since today
+curl -fsS -H "X-Finance-Token: $FINANCE_API_TOKEN" \
+  http://127.0.0.1:5007/api/v1/ping
+```
+
+An HTTP `503` from ping means the process is reachable but Actual data is not ready. Investigate the
+journal before restarting repeatedly.
+
+## 4. Install scheduled bank sync
+
+The service expects a deployment-specific executable at:
+
+```text
+~/.local/bin/actual-sync.sh
+```
+
+That script is intentionally not checked in because its bank provider and credentials are
+deployment-specific. It must:
+
+- Exit nonzero on download, bank-sync, or upload/sync failure.
+- Use a private disposable cache.
+- Avoid printing credentials.
+- Use an `@actual-app/api` version compatible with the server.
+
+Install the reviewed units:
+
+```bash
+mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user"
+install -m 600 ops/systemd/actual-sync.service \
+  "$HOME/.config/systemd/user/actual-sync.service"
+install -m 600 ops/systemd/actual-sync.timer \
+  "$HOME/.config/systemd/user/actual-sync.timer"
+systemd-analyze --user verify \
+  "$HOME/.config/systemd/user/actual-sync.service" \
+  "$HOME/.config/systemd/user/actual-sync.timer"
+systemctl --user daemon-reload
+systemctl --user enable --now actual-sync.timer
+systemctl --user start actual-sync.service
+```
+
+The timer runs at 10:00 and 22:00 in `America/Los_Angeles`, is persistent across downtime, and adds up
+to five minutes of randomized delay.
+
+Check it with:
+
+```bash
+systemctl --user list-timers actual-sync.timer
+systemctl --user status actual-sync.service
+journalctl --user -u actual-sync.service --since today
+```
+
+## 5. Configure failure alerts
+
+The provided alert script uses `openclaw cron list --json` to reuse the Telegram target from the
+existing `finance-morning` job. It does not store that target in git.
+
+```bash
+install -m 700 ops/bin/finance-sync-alert.sh "$HOME/.local/bin/finance-sync-alert.sh"
+install -m 600 ops/systemd/finance-sync-failure@.service \
+  "$HOME/.config/systemd/user/finance-sync-failure@.service"
+systemctl --user daemon-reload
+ALERT_DRY_RUN=1 "$HOME/.local/bin/finance-sync-alert.sh" actual-sync.service
+```
+
+The dry run still requires OpenClaw and a discoverable destination. If you do not use OpenClaw,
+replace `finance-sync-alert.sh` with your alert provider or remove `OnFailure` from the sync service.
+A broken alert handler must not be mistaken for a successful bank sync; inspect both units.
+
+## Back up dashboard runtime state
+
+Install and run:
+
+```bash
+install -m 700 ops/bin/backup-dashboard-runtime.sh \
+  "$HOME/.local/bin/backup-dashboard-runtime.sh"
+"$HOME/.local/bin/backup-dashboard-runtime.sh"
+```
+
+Defaults:
+
+- Dashboard: `$HOME/finance-dashboard`
+- Destination: `$HOME/darkfinances-backups`
+- Archive mode: `0600`
+- Checksum: adjacent `.sha256`
+
+Override paths with `FINANCE_DASHBOARD_DIR` and `DARKFINANCES_BACKUP_DIR`.
+
+The archive includes known dashboard JSON sidecars, passkey credentials, receipt metadata, and receipt
+images. It does **not** include:
+
+- The Actual data volume/budget.
+- The dashboard environment file or `SESSION_SECRET`.
+- Browser session files.
+- Reverse-proxy certificates/config.
+- Source code.
+
+Back those up separately using appropriate encrypted storage. Restored passkey credentials require the
+same WebAuthn relying-party ID/origin. Keep `SESSION_SECRET` stable in a secret manager; changing it
+invalidates any browser sessions preserved elsewhere.
+
+Verify an archive:
+
+```bash
+sha256sum -c dashboard-runtime-<timestamp>.tgz.sha256
+tar -tzf dashboard-runtime-<timestamp>.tgz
+```
+
+## Restore dashboard runtime state
+
+Install the restore helper next to the backup helper:
+
+```bash
+install -m 700 ops/bin/restore-dashboard-runtime.sh \
+  "$HOME/.local/bin/restore-dashboard-runtime.sh"
+```
+
+Preview first:
+
+```bash
+"$HOME/.local/bin/restore-dashboard-runtime.sh" /path/to/dashboard-runtime-<timestamp>.tgz
+```
+
+Dry run prints archive contents and exits without writing. To restore:
+
+```bash
+systemctl --user stop finance-dashboard.service
+CONFIRM=1 "$HOME/.local/bin/restore-dashboard-runtime.sh" \
+  /path/to/dashboard-runtime-<timestamp>.tgz
+systemctl --user start finance-dashboard.service
+```
+
+The helper:
+
+- Refuses to restore while the dashboard service is active.
+- Rejects absolute paths and path traversal in the archive.
+- Creates a fresh pre-restore backup.
+- Restores private modes on JSON and receipt files.
+
+Afterward, verify `/api/v1/ping`, browser passkey login, the app, receipts, reimbursements, and
+reconciliation state.
+
+## Log rotation
+
+`logrotate-darkfinances.conf` rotates matching logs daily or at 5 MB, retains 14 compressed
+generations, and creates files with mode `0600`.
+
+The checked-in file contains deployment-specific `/home/dark/...` paths and `su dark dark`. Edit both
+for your service account before installing:
+
+```bash
+sudo install -m 644 /path/to/reviewed-logrotate.conf \
+  /etc/logrotate.d/darkfinances
+sudo logrotate -d /etc/logrotate.d/darkfinances
+```
+
+Use `-d` for a non-writing debug pass. Finance logs can contain transaction metadata; restrict
+ownership and avoid forwarding them to untrusted log services.
+
+## Deploying changes safely
+
+Before replacing a live version:
+
+1. Run `npm run check` from the repository root.
+2. Back up dashboard runtime state and Actual independently.
+3. Confirm Actual server/client version alignment.
+4. Stage private environment or unit changes with correct modes.
+5. Run `systemd-analyze --user verify` for changed units.
+6. Restart only affected services.
+7. Check service status, journal errors, authenticated ping, browser login, and a read-only app view.
+8. For mutation changes, smoke test against an isolated Actual clone before production.
+
+If a deployment fails, preserve logs and runtime state before rollback. Do not delete Actual caches or
+sidecars blindly; corruption recovery may depend on `.last-good` files.
+
+## Security checklist
+
+- Keep all finance listeners on loopback.
+- Terminate TLS at a trusted reverse proxy, set the exact `PUBLIC_ORIGIN`, and add HSTS there.
+- Use long independent values for `FINANCE_API_TOKEN` and `SESSION_SECRET`.
+- Keep environment, session, sidecar, receipt, log, and backup permissions private.
+- Leave passkey enrollment variables unset except during short enrollment windows.
+- Never expose demo headers as a route to live resolvers.
+- Test backups and restore previews regularly.
+- Monitor `actual-sync.timer` and alert delivery.
+- Keep secrets and generated financial data out of git.

@@ -1,83 +1,231 @@
-# DarkFinances — Dashboard API
+# Finance Dashboard
 
-A self-hosted personal-finance API that sits on top of [Actual Budget](https://actualbudget.org/).
-It aggregates spending, trends, budgets, recurring bills, income, net worth, receipts, and a
-lifetime **Who-Owes-Me** reimbursement ledger (with optional Splitwise + Venmo integration). It
-powers the [DarkFinances mobile app](../finance-app) but is a plain JSON API you can use on its own.
+Finance Dashboard is the private server component of DarkFinances. It provides:
 
-> Personal-finance software for you and your data only. Nothing here phones home; all state lives
-> in your Actual server plus a handful of local JSON files.
+- A passkey-protected browser dashboard.
+- A versioned JSON API for the mobile app.
+- Finance calculations and reports derived from Actual Budget.
+- Serialized, validated transaction and sidecar mutations.
+- Isolated synthetic demo data for development and UI testing.
 
-## Features
+The process binds to `127.0.0.1` only. Put a trusted HTTPS reverse proxy in front of it for remote
+access; do not bind it directly to a public interface.
 
-- **Spending & trends** — category rollups, month-over-month, refunds netted correctly.
-- **Who-Owes-Me** — a lifetime, per-person reimbursement ledger. Card fronts count as spending,
-  paybacks net down to your share, and your share of friend-paid Splitwise items is mirrored into a
-  synthetic spend ledger so your numbers stay honest.
-- **Auto-categorization** — your own payee rules (`rules.json`) plus a built-in merchant catalog
-  (Rocket-Money style) that fills anything your rules don't.
-- **Trips & events** — group charges with an `#ev-<slug>` tag; link a Splitwise group to auto-pull
-  its debts.
-- **Splits** — split a transaction across categories; a pending split that posts at a new amount is
-  auto-reconciled into its remainder leg.
-- **Reconciliation** — optional month-end review flow.
-- **Receipts** — attach images with on-device OCR (from the app).
+## Data ownership
+
+Actual Budget is authoritative for accounts, transactions, categories, schedules, and balances.
+Dashboard-specific state lives in private JSON sidecars next to this package unless a path override is
+configured.
+
+Important guarantees:
+
+- All write requests are validated with Zod.
+- Backend mutations run through one serial queue.
+- Actual writes sync before the API reports success.
+- Split/edit/unsplit rebuilds migrate dependent receipt, reimbursement, and reconciliation references.
+- A failed rebuild attempts rollback instead of leaving half-applied state.
+- JSON sidecars use atomic replacement, last-good copies, and corruption quarantine.
+- Finance date-only calculations use `FINANCE_TIME_ZONE` (default: `America/Los_Angeles`).
 
 ## Requirements
 
-- Node.js 18+
-- A running [Actual Budget](https://actualbudget.org/) server and the `@actual-app/api` package
-- (Optional) Splitwise API credentials for Who-Owes-Me from Splitwise groups
+- Node.js 24 recommended.
+- A reachable Actual Budget server.
+- An Actual version compatible with the installed `@actual-app/api`.
+- HTTPS for non-loopback browser/passkey deployments.
 
-## Setup
+## Install
+
+From the repository root:
 
 ```bash
 npm install
-cp .env.example .env               # fill in your Actual server + API token
-cp personal-config.example.json personal-config.json   # your people/aliases (optional)
-cp owes-config.example.json owes-config.json           # reimbursement config (optional)
-node server.js
+cp finance-dashboard/.env.example finance-dashboard/.env
+cp finance-dashboard/personal-config.example.json finance-dashboard/personal-config.json
+cp finance-dashboard/owes-config.example.json finance-dashboard/owes-config.json
 ```
 
-The server listens on `PORT` (default `5007`). Every request must send your `FINANCE_API_TOKEN`
-via the `X-Finance-Token` header.
+Optional feature configuration:
+
+```bash
+cp finance-dashboard/budget-settings.example.json finance-dashboard/budget-settings.json
+cp finance-dashboard/investment-holdings.example.json finance-dashboard/investment-holdings.json
+cp finance-dashboard/debt-planner.example.json finance-dashboard/debt-planner.json
+```
+
+Populated configuration and runtime state are gitignored.
 
 ## Configuration
 
-All secrets come from environment variables — see [`.env.example`](./.env.example). No credentials
-are ever committed.
+The server reads process environment variables; it does not automatically load `.env`.
 
-Personal, non-secret data lives in gitignored JSON files (templates provided):
+Required for a live server:
 
-| File | Purpose |
+| Variable | Purpose |
 | --- | --- |
-| `personal-config.json` | Your roster: names/aliases → person slugs used by Who-Owes-Me. |
-| `owes-config.json` | Reimbursement baseline: expected amounts, debtor patterns, trip starts. |
-| `events.json` | Trips/events (also written by the app and `actual-tools/trip-quickadd.js`). |
-| `owes-truth.json` | Splitwise snapshot (generated by `actual-tools/owes-snapshot.js`). |
-| `venmo-truth.json` | Venmo debts (generated by `actual-tools/venmo-import.js`). |
+| `ACTUAL_SERVER_URL` | URL of the self-hosted Actual server. |
+| `ACTUAL_PASSWORD` | Password used to open the budget file. |
+| `ACTUAL_SYNC_ID` | Budget Sync ID from Actual Settings → Advanced. |
+| `ACTUAL_DATA_DIR` | Private local cache directory for the downloaded budget. |
+| `FINANCE_API_TOKEN` | Long random secret sent by native clients as `X-Finance-Token`. |
+| `SESSION_SECRET` | Stable random session-signing secret; mandatory outside loopback development. |
+| `PUBLIC_ORIGIN` | Canonical browser origin, such as `https://finances.example.com`. |
 
-Runtime data (rules, goals, receipts, overrides, reconciliation, …) is also stored as gitignored
-JSON next to the code.
+Recommended:
 
-## API sketch
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `5007` | Loopback listener port. |
+| `SESSION_DIR` | `finance-dashboard/.sessions` | Persistent file-backed browser sessions. |
+| `FINANCE_TIME_ZONE` | `TZ`, then `America/Los_Angeles` | Timezone for financial date boundaries. |
+| `WEBAUTHN_RP_ID` | Hostname from `PUBLIC_ORIGIN` | Passkey relying-party ID. |
+| `WEBAUTHN_ORIGIN` | `PUBLIC_ORIGIN` | Allowed WebAuthn and browser request origin. |
+| `PASSKEY_CREDENTIALS_FILE` | `passkey-credentials.json` | Private passkey credential store. |
 
-All routes are under `/api/v1` and require the `X-Finance-Token` header:
+`.env.example` documents optional Splitwise credentials, sidecar path overrides, category patterns,
+review thresholds, and reimbursement cutoffs.
 
+Generate suitable secrets with:
+
+```bash
+openssl rand -hex 32
 ```
-GET  /accounts            GET  /spending           GET  /trends
-GET  /transactions        GET  /reimbursement      GET  /budgets
-GET  /rules               POST /rules              POST /rules/apply
-GET  /events              POST /events             DELETE /events/:slug
-POST /splitwise/sync-shares
-POST /refresh
+
+## Start locally
+
+From the repository root:
+
+```bash
+set -a
+source finance-dashboard/.env
+set +a
+npm --prefix finance-dashboard start
 ```
 
-## Related
+Open `http://localhost:5007` for loopback development. A live server exits if the initial Actual load
+fails; clients should use the readiness endpoint rather than assuming that an open TCP port is healthy.
 
-- [`finance-app`](../finance-app) — the React Native / Expo mobile client.
-- [`actual-tools`](../actual-tools) — Splitwise/Venmo importers + snapshot generators.
+## Authentication
+
+### Native app
+
+The mobile app sends either:
+
+```http
+X-Finance-Token: <FINANCE_API_TOKEN>
+```
+
+or `Authorization: Bearer <FINANCE_API_TOKEN>` to `/api/v1/*`. Token comparisons are timing-safe.
+
+### Browser passkey
+
+Browser sessions authenticate through WebAuthn. First enrollment is closed by default and requires a
+short-lived out-of-band code.
+
+Generate a one-time code and its SHA-256 hash:
+
+```bash
+ENROLLMENT_CODE="$(openssl rand -hex 12)"
+printf 'Enrollment code: %s\n' "$ENROLLMENT_CODE"
+printf '%s' "$ENROLLMENT_CODE" | shasum -a 256
+```
+
+Set the 64-character digest as `PASSKEY_ENROLLMENT_TOKEN_HASH` and a future Unix timestamp in
+milliseconds as `PASSKEY_ENROLLMENT_EXPIRES_AT`, then restart the server. For example, a 15-minute
+window can be generated with:
+
+```bash
+node -e 'console.log(Date.now() + 15 * 60 * 1000)'
+```
+
+Visit `/login`, enter the original code, and register the passkey. Once a credential exists, anonymous
+enrollment is rejected even if the variables remain set. Remove both enrollment variables and restart
+after provisioning. Additional credentials require an already authenticated browser session.
+
+Back up `passkey-credentials.json`, `SESSION_SECRET`, and the private sidecars. Losing the credential
+file can lock browser users out.
+
+## API behavior
+
+- Native endpoints are under `/api/v1`.
+- `/api/v1/ping` returns HTTP `200` only after Actual data is ready; otherwise it returns `503`.
+- Successful ping output includes the finance timezone, process start time, Actual health, and queued
+  mutation count.
+- API failures use stable error codes where possible and include an `X-Request-Id`/`requestId` for log
+  correlation.
+- Request bodies are limited to 1 MB, except validated receipt uploads.
+- Browser writes reject requests that carry an `Origin` different from the configured origin; session
+  cookies are `SameSite=Lax`, secure outside loopback, and HTTP-only.
+- CORS allows only the configured browser origin; native requests do not need a browser origin.
+
+## Demo mode
+
+The public demo surface is synthetic and non-persistent. Demo requests never fall through to live
+resolvers, and writes return simulated success without touching Actual or sidecars.
+
+Start a demo-only process with no Actual connection:
+
+```bash
+DEMO_ONLY=1 npm start
+```
+
+Run that command from `finance-dashboard`. Native clients select demo mode with `X-Demo-Mode: 1`.
+Unhandled demo endpoints fail closed. Demo requests and expensive finance routes are rate-limited.
+
+Do not use `SELFTEST=1` as an authentication bypass outside automated loopback tests; the server rejects
+it when `PUBLIC_ORIGIN` is non-local.
+
+## Runtime sidecars
+
+Depending on enabled features, runtime state can include:
+
+- `personal-config.json`
+- `budget-settings.json`
+- `investment-holdings.json`
+- `debt-planner.json`
+- `owes-config.json` and `owes-truth.json`
+- `venmo-truth.json`
+- `events.json`
+- `receipts.json` and `receipts/`
+- rules, reconciliation, reimbursement-link, override, and goal stores
+- `passkey-credentials.json` and `.sessions/`
+
+These files may contain sensitive financial or identity information. Keep them private and never commit
+them. [`../ops/bin/backup-dashboard-runtime.sh`](../ops/bin/backup-dashboard-runtime.sh) backs up the
+known durable sidecars, passkey credentials, and receipts; it intentionally excludes browser sessions
+and the environment/`SESSION_SECRET`, which require separate handling.
+
+## Tests
+
+From this directory:
+
+```bash
+npm test
+npm run lint
+```
+
+The tests cover request security, enrollment, demo isolation, schemas, dates, reports, snapshot
+validation, JSON recovery, serial execution, and transaction replacement/rollback.
+
+For a destructive mutation smoke test, use an isolated Actual clone only:
+
+```bash
+CONFIRM=1 \
+ACTUAL_SERVER_URL=http://127.0.0.1:15006 \
+ACTUAL_PASSWORD=... \
+ACTUAL_SYNC_ID=... \
+ACTUAL_DATA_DIR=/tmp/actual-dashboard-smoke \
+node scripts/actual-clone-smoke.js
+```
+
+The script creates, splits, edits, unsplits, and deletes test transactions. Never point it at the
+production budget.
+
+## Production operations
+
+The reviewed service unit, environment-file contract, backups, restore safeguards, and deployment
+checks are documented in [`../ops/README.md`](../ops/README.md).
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT. See [`LICENSE`](./LICENSE).
