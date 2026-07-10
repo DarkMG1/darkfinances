@@ -1,0 +1,11 @@
+[Unit]
+Description=Actual Budget bank sync (SimpleFIN)
+Wants=network-online.target
+After=network-online.target
+OnFailure=finance-sync-failure@%n.service
+
+[Service]
+Type=oneshot
+Environment=TZ=America/Los_Angeles
+UMask=0077
+ExecStart=%h/.local/bin/actual-sync.sh

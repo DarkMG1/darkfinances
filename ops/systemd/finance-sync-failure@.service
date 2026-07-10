@@ -1,0 +1,7 @@
+[Unit]
+Description=Notify owner that %i failed
+
+[Service]
+Type=oneshot
+Environment=TZ=America/Los_Angeles
+ExecStart=%h/.local/bin/finance-sync-alert.sh %i

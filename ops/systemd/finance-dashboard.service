@@ -1,0 +1,15 @@
+[Unit]
+Description=Finance Dashboard
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/finance-dashboard
+ExecStart=/usr/bin/node %h/finance-dashboard/server.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+EnvironmentFile=%h/.openclaw/finance-dashboard.env
+
+[Install]
+WantedBy=default.target

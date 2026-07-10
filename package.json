@@ -7,10 +7,11 @@
     "finance-app"
   ],
   "scripts": {
-    "check": "npm run check:dashboard && npm run check:app && npm run check:tools",
-    "check:dashboard": "npm --prefix finance-dashboard test",
-    "check:app": "npm --prefix finance-app run typecheck",
-    "check:tools": "node --check actual-tools/owes-snapshot.js && node --check actual-tools/splitwise-lib.js",
+    "check": "npm run check:dashboard && npm run check:app && npm run check:tools && npm run check:ops",
+    "check:dashboard": "npm --prefix finance-dashboard test && npm --prefix finance-dashboard run lint",
+    "check:app": "npm --prefix finance-app test && npm --prefix finance-app run lint",
+    "check:tools": "for file in actual-tools/*.js; do node --check \"$file\"; done && node --test actual-tools/test/*.test.js",
+    "check:ops": "for file in ops/bin/*.sh; do bash -n \"$file\"; done && node --test ops/test/*.test.js",
     "test:e2e:ios": "npm --prefix finance-app run test:e2e:ios"
   }
 }

@@ -1,0 +1,11 @@
+[Unit]
+Description=Actual Budget bank sync (twice daily, Pacific time)
+
+[Timer]
+OnCalendar=*-*-* 10:00:00 America/Los_Angeles
+OnCalendar=*-*-* 22:00:00 America/Los_Angeles
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
