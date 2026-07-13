@@ -337,6 +337,13 @@
       <div class="nw-change" id="netWorthChange"></div>
     </div>
 
+    <!-- Safe to Spend -->
+    <div class="card mb-4">
+      <div class="card-title">Safe to Spend</div>
+      <div class="stat-value" id="safeToSpendValue">Loading…</div>
+      <div class="stat-sub" id="safeToSpendDetail">Checking decision inputs</div>
+    </div>
+
     <!-- Accounts -->
     <div class="section-label">Accounts <span class="note" style="text-transform:none;letter-spacing:0">tap to filter transactions</span></div>
     <div class="accounts-grid" id="accountsGrid">
@@ -676,6 +683,29 @@
       const diff = state.netWorth - state.trendFirstNW;
       ch.textContent = `${diff >= 0 ? '▲' : '▼'} ${fmt(Math.abs(diff))} over ${state.trendMonths} mo`;
       ch.style.color = diff >= 0 ? 'var(--green)' : 'var(--red)';
+    }
+
+    function renderSafeToSpend(metric) {
+      const available = metric?.complete === true && Number.isFinite(metric.value);
+      const value = document.getElementById('safeToSpendValue');
+      const detail = document.getElementById('safeToSpendDetail');
+      value.textContent = available ? fmt(metric.value) : 'Unavailable';
+      value.style.color = available && metric.value < 0 ? 'var(--red)' : available ? 'var(--text)' : 'var(--yellow)';
+      detail.textContent = available
+        ? (metric.provenance?.method || 'Decision inputs complete')
+        : 'Required inputs are missing or unresolved; no estimate is shown.';
+    }
+
+    async function loadToday() {
+      try {
+        const response = await fetch('/api/v1/today');
+        if (!response.ok) throw new Error('Today unavailable');
+        const payload = await response.json();
+        renderSafeToSpend(payload?.data?.liquidity?.safeToSpend);
+      } catch (error) {
+        renderSafeToSpend(null);
+        throw error;
+      }
     }
 
     // ---- Spending (month-driven) ---------------------------------------------
@@ -1151,6 +1181,7 @@
       buildMonthPicker(); applyDemoIndicator(); applyMonthTags();
       await Promise.all([
         loadSection(loadCategories, []),
+        loadSection(loadToday, []),
         loadSection(loadAccounts, ['accountsGrid']),
         loadSection(loadSpending, ['categoryList']),
         loadSection(loadTrends, []),
