@@ -158,8 +158,10 @@ app.use((req, res, next) => {
 
 const defaultJsonParser = express.json({ limit: '1mb' });
 const receiptJsonParser = express.json({ limit: '25mb' });
+const isVersionedApiPath = (value) => /^\/api\/v1(?:\/|$)/i.test(value || '');
+const isVersionedApiRequest = (req) => isVersionedApiPath(req.baseUrl) || isVersionedApiPath(req.originalUrl);
 const isReceiptUpload = (req) =>
-  req.method === 'POST' && (req.path === '/api/receipts' || req.path === '/api/v1/receipts');
+  req.method === 'POST' && /^\/api(?:\/v1)?\/receipts\/?$/i.test(req.path);
 app.use((req, res, next) => isReceiptUpload(req) ? next() : defaultJsonParser(req, res, next));
 app.use(session({
   store: new FileStore({
@@ -347,36 +349,60 @@ const data = require('./dataModule');
 // request flagged demo (header X-Demo-Mode:1 or ?demo=1) before the resolvers run.
 const demo = require('./demoData');
 function isDemo(req) { return requestClaimsDemo(req); }
+const MONEY_REQUEST_BOUNDARIES = [
+  { pattern: /^\/transactions\/?$/i, schema: schemas.createTransaction, label: 'transaction' },
+  { pattern: /^\/transactions\/[^/]+\/split\/?$/i, schema: schemas.splitTransaction, label: 'transaction split' },
+  { pattern: /^\/budgets\/?$/i, schema: schemas.budget, label: 'budget amount' },
+  { pattern: /^\/manual-assets\/?$/i, schema: schemas.manualAsset, label: 'manual asset' },
+  { pattern: /^\/goals\/?$/i, schema: schemas.goal, label: 'goal' },
+  { pattern: /^\/receipts\/?$/i, schema: schemas.receipt, label: 'receipt' },
+  { pattern: /^\/reimb-links\/?$/i, schema: schemas.reimbLink, label: 'reimbursement link' },
+  { pattern: /^\/owes-config\/?$/i, schema: schemas.owesConfig, label: 'reimbursement configuration' },
+];
+function validateMoneyRequestBoundary(req, res, next) {
+  if (req.method !== 'POST') return next();
+  const idempotencyKey = req.get('Idempotency-Key') || '';
+  if (isVersionedApiRequest(req) && !isDemo(req) && !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey)) return next();
+  const requestPath = req.path.replace(/^\/api(?:\/v1)?(?=\/|$)/i, '') || '/';
+  const boundary = MONEY_REQUEST_BOUNDARIES.find(({ pattern }) => pattern.test(requestPath));
+  if (!boundary) return next();
+  try {
+    parse(boundary.schema, req.body, boundary.label);
+    return next();
+  } catch (error) {
+    return sendApiError(req, res, error);
+  }
+}
 function demoMiddleware(v1mode) {
   return (req, res, next) => {
     if (!isDemo(req)) return next();
-    if (!v1mode && req.path.startsWith('/api/v1')) return next(); // let the v1 router envelope it
+    if (!v1mode && isVersionedApiPath(req.path)) return next(); // let the v1 router envelope it
     const send = (payload) => res.json(v1mode ? { data: payload } : payload);
-    const p = req.path.replace(/^\/api\/v1\//, '').replace(/^\/api\//, '').replace(/^\//, '');
+    const p = req.path.replace(/^\/api\/v1\//i, '').replace(/^\/api\//i, '').replace(/^\//, '');
     if (req.method === 'POST' || req.method === 'DELETE') {
       // Public demo writes are intentionally non-persistent. This keeps showcase
       // flows harmless and prevents cross-user state, OCR, or HTML injection.
       const knownWrite = [
-        /^transactions$/,
-        /^transactions\/[^/]+(?:\/(?:category|notes|date|payee|split|unsplit))?$/,
-        /^bank-sync$/,
-        /^reimbursements\/sweep$/,
-        /^phantom\/cleanup$/,
-        /^receipts(?:\/[^/]+)?$/,
-        /^rules(?:\/apply|\/[^/]+)?$/,
-        /^splitwise\/sync-shares$/,
-        /^events(?:\/[^/]+)?$/,
-        /^accounts\/[^/]+\/override$/,
-        /^manual-assets(?:\/[^/]+)?$/,
-        /^recurring\/(?:mark|[^/]+\/override)$/,
-        /^bills\/paid$/,
-        /^owes-config$/,
-        /^reimb-links$/,
-        /^repayments\/[^/]+\/(?:confirm|dismiss)$/,
-        /^reconciliation\/(?:item|month|enabled)$/,
-        /^review\/dispositions$/,
-        /^goals(?:\/[^/]+)?$/,
-        /^refresh$/,
+        /^transactions$/i,
+        /^transactions\/[^/]+(?:\/(?:category|notes|date|payee|split|unsplit))?$/i,
+        /^bank-sync$/i,
+        /^reimbursements\/sweep$/i,
+        /^phantom\/cleanup$/i,
+        /^receipts(?:\/[^/]+)?$/i,
+        /^rules(?:\/apply|\/[^/]+)?$/i,
+        /^splitwise\/sync-shares$/i,
+        /^events(?:\/[^/]+)?$/i,
+        /^accounts\/[^/]+\/override$/i,
+        /^manual-assets(?:\/[^/]+)?$/i,
+        /^recurring\/(?:mark|[^/]+\/override)$/i,
+        /^bills\/paid$/i,
+        /^owes-config$/i,
+        /^reimb-links$/i,
+        /^repayments\/[^/]+\/(?:confirm|dismiss)$/i,
+        /^reconciliation\/(?:item|month|enabled)$/i,
+        /^review\/dispositions$/i,
+        /^goals(?:\/[^/]+)?$/i,
+        /^refresh$/i,
       ].some((pattern) => pattern.test(p));
       if (!knownWrite) return res.status(404).json({ error: 'Demo endpoint not found' });
       return send({ ok: true, demo: true });
@@ -507,7 +533,7 @@ async function warmCache() {
 // Session-only gate for the web app + static assets. /api/v1/* runs its own
 // (session-OR-token) auth below so native clients can use a bearer token.
 app.use((req, res, next) => {
-  if (req.path === '/demo' || req.path.startsWith('/login') || req.path.startsWith('/auth/') || req.path.startsWith('/api/v1')) return next();
+  if (req.path === '/demo' || req.path.startsWith('/login') || req.path.startsWith('/auth/') || isVersionedApiPath(req.path)) return next();
   requireAuth(req, res, next);
 });
 
@@ -515,6 +541,12 @@ app.get('/demo', (req, res) => res.sendFile(path.join(__dirname, 'public', 'inde
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Demo mode for the legacy web API (runs after the passkey gate above).
+app.use((req, res, next) => isReceiptUpload(req) && !isVersionedApiPath(req.path)
+  ? receiptJsonParser(req, res, next)
+  : next());
+app.use((req, res, next) => isVersionedApiPath(req.path)
+  ? next()
+  : validateMoneyRequestBoundary(req, res, next));
 app.use(demoMiddleware(false));
 
 // ---- Endpoint resolvers (shared by legacy /api and versioned /api/v1) -------
@@ -828,7 +860,7 @@ async function markBill(req) {
 }
 
 async function setOwes(req) {
-  const result = data.setOwesConfig(req.body || {});
+  const result = data.setOwesConfig(parse(schemas.owesConfig, req.body, 'reimbursement configuration'));
   cache.flushAll(); // reimbursement aggregations depend on this config
   return result;
 }
@@ -935,7 +967,7 @@ const raw = (fn) => async (req, res) => {
 };
 const env = (fn) => async (req, res) => {
   const mutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
-  const versioned = req.baseUrl === '/api/v1';
+  const versioned = isVersionedApiRequest(req);
   const idempotencyKey = mutation && versioned && !isDemo(req) ? req.get('Idempotency-Key') : null;
   let started = false;
   try {
@@ -1014,7 +1046,7 @@ app.post('/api/bank-sync', raw(bankSyncH));
 app.post('/api/reimbursements/sweep', raw(sweepReimbH));
 app.post('/api/phantom/cleanup', raw(phantomCleanupH));
 app.get('/api/phantom/log', raw(phantomLogH));
-app.post('/api/receipts', receiptJsonParser, raw(addReceiptH));
+app.post('/api/receipts', raw(addReceiptH));
 app.get('/api/receipts', raw(receiptsH));
 app.get('/api/receipts/:id/image', receiptImageH);
 app.delete('/api/receipts/:id', raw(deleteReceiptH));
@@ -1074,6 +1106,10 @@ v1.use((req, res, next) => {
   next();
 });
 v1.use(v1Auth);
+v1.use((req, res, next) => req.method === 'POST' && /^\/receipts\/?$/i.test(req.path)
+  ? receiptJsonParser(req, res, next)
+  : next());
+v1.use(validateMoneyRequestBoundary);
 v1.use(demoMiddleware(true)); // demo mode for native clients (after token/session auth)
 v1.get('/operations/:key', env(async (req) => {
   const operation = operationJournal.get(req.params.key);
@@ -1140,7 +1176,7 @@ v1.post('/bank-sync', env(bankSyncH));
 v1.post('/reimbursements/sweep', env(sweepReimbH));
 v1.post('/phantom/cleanup', env(phantomCleanupH));
 v1.get('/phantom/log', env(phantomLogH));
-v1.post('/receipts', receiptJsonParser, env(addReceiptH));
+v1.post('/receipts', env(addReceiptH));
 v1.get('/receipts', env(receiptsH));
 v1.get('/receipts/:id/image', receiptImageH); // raw bytes (auth via router)
 v1.delete('/receipts/:id', env(deleteReceiptH));

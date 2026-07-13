@@ -14,9 +14,14 @@ const patterns = {
 
 test('money service conserves integer cents and rejects fractional cents', () => {
   assert.equal(toCents(12.34), 1234);
+  assert.equal(toCents(0.29), 29);
+  assert.equal(toCents(-0.01), -1);
   assert.equal(fromCents(-501), -5.01);
   assert.equal(sumCents([-10033, 502, 9531]), 0);
   assert.throws(() => toCents(12.345), /two decimal/);
+  assert.throws(() => toCents(0.0100000001), /two decimal/);
+  assert.throws(() => toCents('12.34'), /finite number/);
+  assert.throws(() => toCents(-0), /negative zero/);
 });
 
 test('classification excludes movement and reimbursement without float drift', () => {

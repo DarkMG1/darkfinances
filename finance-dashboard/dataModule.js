@@ -28,7 +28,7 @@ const {
 const { readJsonFile, writeJsonFile } = require('./lib/json-store');
 const { rewriteTransactionReferences } = require('./lib/transaction-references');
 const { buildCategoryInfo, transactionLeaves, summarizeCents } = require('./lib/domain/classification');
-const { fromCents } = require('./lib/domain/money');
+const { fromCents, toCents } = require('./lib/domain/money');
 const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
 const { metricValue } = require('./lib/metric-provenance');
 const {
@@ -449,7 +449,7 @@ function getManualAssets() {
 
 function saveManualAsset({ id, name, value, kind } = {}) {
   const nm = (name || '').trim();
-  const val = Math.abs(Number(value) || 0);
+  const val = fromCents(Math.abs(toCents(value)));
   if (!nm) throw new Error('name required');
   if (!val) throw new Error('value must be greater than 0');
   const k = kind === 'liability' ? 'liability' : 'asset';
@@ -674,11 +674,11 @@ async function getTransactions({ accountId, start, end, category, bucket, budget
 // by name. addTransactions (not importTransactions) so Actual's import dedup
 // can't silently drop a legitimate manual entry.
 async function createTransaction({ accountId, amount, payee, date, categoryId, notes } = {}) {
+  if (!accountId) throw new Error('accountId required');
+  const cents = toCents(amount);
+  if (cents === 0) throw new Error('a non-zero amount is required');
+  const name = (payee || '').trim();
   return withApi(async (api) => {
-    if (!accountId) throw new Error('accountId required');
-    const amt = Number(amount);
-    if (!isFinite(amt) || amt === 0) throw new Error('a non-zero amount is required');
-    const name = (payee || '').trim();
     let payeeId;
     if (name) {
       try {
@@ -689,7 +689,7 @@ async function createTransaction({ accountId, amount, payee, date, categoryId, n
     }
     const txn = {
       date: date || todayYMD(),
-      amount: Math.round(amt * 100), // dollars -> integer cents
+      amount: cents,
       payee: payeeId || undefined,
       category: categoryId || undefined,
       notes: notes || (payeeId ? undefined : name) || undefined,
@@ -987,8 +987,8 @@ async function getBudgets({ month } = {}) {
 async function setBudgetAmount({ month, categoryId, amount } = {}) {
   if (!categoryId) throw new Error('categoryId required');
   const m = month || todayYMD().slice(0, 7);
-  const cents = Math.round(Number(amount) * 100);
-  if (!Number.isFinite(cents) || cents < 0) throw new Error('amount must be a number >= 0');
+  const cents = toCents(amount);
+  if (cents < 0) throw new Error('amount must be a number >= 0');
   return withApi(async (api) => {
     await api.setBudgetAmount(m, categoryId, cents);
     const settings = loadBudgetSettings();
@@ -996,7 +996,7 @@ async function setBudgetAmount({ month, categoryId, amount } = {}) {
       delete settings.categories[categoryId].monthlyTarget;
       writeJsonSafe(BUDGET_SETTINGS_PATH, settings);
     }
-    return { ok: true, month: m, categoryId, amount: cents / 100 };
+    return { ok: true, month: m, categoryId, amount: fromCents(cents) };
   });
 }
 
@@ -1050,8 +1050,9 @@ function attribute(label, notes) {
 }
 
 // Defaults preserve prior hardcoded behavior when owes-config.json is absent.
-// Amounts are in integer cents (e.g. 25488 = $254.88). Debtor patterns are
-// stored as strings (case-insensitive) so the config stays plain JSON.
+// Expected baseline amounts are in integer cents (e.g. 25488 = $254.88).
+// Debtor patterns are stored as strings (case-insensitive) so the config stays
+// plain JSON.
 // Generic fallback used only when owes-config.json is absent (public repo). Your
 // real amounts/patterns/trips live in the gitignored owes-config.json; see
 // owes-config.example.json. Keeping this empty means no personal data ships in code.
@@ -1087,7 +1088,8 @@ function loadOwesConfig() {
   const autoReimbTags = (Array.isArray(cfg.autoReimbTags) ? cfg.autoReimbTags : DEFAULT_OWES.autoReimbTags).map((s) => String(s).toLowerCase());
   // Manual per-person trip overrides that WIN over the auto Splitwise snapshot
   // (which can lag or miss a group — e.g. a settle-up that wasn't actually paid).
-  // Shape: { slug: [{ event, amount }] }. amount 0 clears that event's debt.
+  // Shape: { slug: [{ event, amount }] }. Amounts are dollars, matching the
+  // owes-truth bySlug contract; amount 0 clears that event's debt.
   const manualTrips = cfg.manualTrips && typeof cfg.manualTrips === 'object' ? cfg.manualTrips : {};
   const debtorRe = {};
   for (const [slug, src] of Object.entries(patterns)) {
@@ -1257,7 +1259,7 @@ function txnRef(t) {
     id: String(t.id),
     date: t.date || null,
     payee: t.payee || '',
-    amount: Number(t.amount) || 0,
+    amount: fromCents(toCents(t.amount)),
     accountId: t.accountId || null,
     account: t.account || '',
     imported: !!t.imported,
@@ -1283,8 +1285,8 @@ function addReimbLink({ inflow, expense, amount, person } = {}) {
   const inf = txnRef(inflow);
   const exp = txnRef(expense);
   if (inf.id === exp.id) throw new Error('cannot link a transaction to itself');
+  const alloc = amount == null ? null : fromCents(Math.abs(toCents(amount)));
   const store = readReimbLinks();
-  const alloc = amount != null && Number.isFinite(Number(amount)) ? round2(Math.abs(Number(amount))) : null;
   const existing = store.links.find((l) => l.inflow.id === inf.id && l.expense.id === exp.id);
   if (existing) {
     if (alloc != null) existing.amount = alloc;
@@ -3369,20 +3371,20 @@ async function getTransactionById({ id, accountId, date } = {}) {
 // and every parent/leg field. The replacement receives new IDs, so all sidecar
 // references are migrated before the operation reports success.
 async function splitTransaction({ id, accountId, date, legs } = {}) {
+  if (!accountId || !date) throw new Error('accountId and date required');
+  if (!Array.isArray(legs) || legs.length < 2) throw new Error('at least 2 legs required');
+  const norm = legs.map((l) => {
+    const cents = toCents(l.amount);
+    if (cents === 0) throw new Error('each leg needs a non-zero amount');
+    return { id: l.id || null, cents, categoryId: l.categoryId || null, name: (l.name || '').trim(), notes: (l.notes || '').trim() };
+  });
   return withApi(async (api) => {
-    if (!accountId || !date) throw new Error('accountId and date required');
-    if (!Array.isArray(legs) || legs.length < 2) throw new Error('at least 2 legs required');
     const txns = await api.getTransactions(accountId, date, date);
     const target = txns.find((t) => t.id === id);
     if (!target) throw new Error('transaction not found');
     if (target.parent_id) throw new Error('edit the whole split, not a single leg');
     const total = target.amount; // integer cents (sign preserved)
 
-    const norm = legs.map((l) => {
-      const cents = Math.round(Number(l.amount) * 100);
-      if (!Number.isFinite(cents) || cents === 0) throw new Error('each leg needs a non-zero amount');
-      return { id: l.id || null, cents, categoryId: l.categoryId || null, name: (l.name || '').trim(), notes: (l.notes || '').trim() };
-    });
     const sum = norm.reduce((s, x) => s + x.cents, 0);
     if (sum !== total) throw new Error(`legs must sum to ${(total / 100).toFixed(2)} (got ${(sum / 100).toFixed(2)})`);
     for (const l of norm) l.payeeId = l.name ? await resolvePayeeId(api, l.name) : null;
@@ -3691,6 +3693,7 @@ function decodeImageBase64(value) {
 function addReceipt({ txnId, imageBase64, mime, ocrText, ocrLines, amount, date, source } = {}) {
   if (!txnId) throw new Error('txnId required');
   if (!imageBase64) throw new Error('imageBase64 required');
+  const normalizedAmount = amount == null ? null : fromCents(toCents(amount));
   const buf = decodeImageBase64(imageBase64);
   if (buf.length > 25 * 1024 * 1024) throw new Error('image too large (max 25MB)');
   const m = (mime || 'image/jpeg').toLowerCase();
@@ -3728,7 +3731,7 @@ function addReceipt({ txnId, imageBase64, mime, ocrText, ocrLines, amount, date,
     id, txnId: String(txnId), file: `${id}.${ext}`, mime: detected, size: buf.length,
     ocrText: typeof ocrText === 'string' ? ocrText.slice(0, 8000) : '',
     ocrLines: Array.isArray(ocrLines) ? ocrLines.slice(0, 200) : [],
-    amount: Number.isFinite(Number(amount)) ? round2(Number(amount)) : null,
+    amount: normalizedAmount,
     date: date || null,
     source: source || 'camera',
     sha256,
@@ -4345,10 +4348,14 @@ async function getGoals() {
 }
 
 async function saveGoal(goal = {}) {
-  if (!goal.name || !(goal.target > 0)) throw new Error('name and positive target required');
+  const target = fromCents(toCents(goal.target));
+  const current = goal.current === undefined ? 0 : fromCents(toCents(goal.current));
+  if (!goal.name || !(target > 0)) throw new Error('name and positive target required');
+  if (current < 0) throw new Error('current must be non-negative');
+  const input = { ...goal, target, current };
   return withApi(async (api) => {
     const goals = readJsonSafe(GOALS_PATH, []);
-    const normalized = { ...goal, current: round2(Math.max(0, Number(goal.current) || 0)) };
+    const normalized = { ...input };
     if (normalized.accountId) {
       const accounts = await api.getAccounts();
       const account = accounts.find((candidate) => candidate.id === normalized.accountId && !candidate.closed);

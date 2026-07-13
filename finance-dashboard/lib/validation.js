@@ -1,11 +1,35 @@
 const { z } = require('zod');
 const { RequestValidationError } = require('./errors');
+const { toCents } = require('./domain/money');
 
 const nonEmpty = (max = 200) => z.string().trim().min(1).max(max);
 const optionalText = (max = 8000) => z.string().max(max).optional().nullable();
 const identifier = nonEmpty(200);
-const finiteNumber = z.coerce.number().finite();
-const money = finiteNumber.refine((value) => Math.abs(value) <= 100_000_000, 'amount is outside the supported range');
+const MAX_MONEY_DOLLARS = 100_000_000;
+const MAX_MONEY_CENTS = MAX_MONEY_DOLLARS * 100;
+const money = z.number({ invalid_type_error: 'money value must be a JSON number' })
+  .finite('money value must be finite')
+  .refine((value) => !Object.is(value, -0), 'money value must not be negative zero')
+  .refine((value) => Math.abs(value) <= MAX_MONEY_DOLLARS, 'money value is outside the supported range')
+  .refine((value) => {
+    try {
+      toCents(value);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }, 'money value must use whole cents');
+const nonNegativeCentAmount = z.number({ invalid_type_error: 'cent amount must be a JSON number' })
+  .int('cent amount must be an integer')
+  .min(0, 'cent amount must be non-negative')
+  .max(MAX_MONEY_CENTS, 'cent amount is outside the supported range')
+  .refine((value) => !Object.is(value, -0), 'cent amount must not be negative zero');
+const owesConfig = z.object({
+  expected: z.record(z.record(nonNegativeCentAmount)).optional(),
+  manualTrips: z.record(z.array(z.object({
+    amount: money.refine((value) => value >= 0, 'amount must be non-negative'),
+  }).passthrough())).optional(),
+}).passthrough();
 
 function validDateOnly(value) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
@@ -184,6 +208,8 @@ const schemas = {
     dueDate: dateOnly.optional(),
     paid: z.boolean(),
   }).strict().refine((value) => Boolean(value.id || (value.key && value.dueDate)), 'bill id or key and dueDate are required'),
+
+  owesConfig,
 
   receipt: z.object({
     txnId: identifier,
