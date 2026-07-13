@@ -34,3 +34,17 @@ test('a rejected mutation does not poison later work', async () => {
   await assert.rejects(failed, /expected/);
   assert.equal(await recovered, 'ok');
 });
+
+test('close rejects new work while drain waits for accepted work', async () => {
+  const queue = new SerialQueue('writes');
+  let finished = false;
+  queue.run(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    finished = true;
+  });
+  queue.close();
+  await assert.rejects(queue.run(async () => {}), /closed/);
+  await queue.drain(100);
+  assert.equal(finished, true);
+  assert.equal(queue.size, 0);
+});

@@ -1,6 +1,6 @@
 import { useMutation, UseMutationOptions, useQuery, UseQueryOptions } from '@tanstack/react-query';
 import { getServerAuthHeaders } from '@/api/client/server-auth';
-import { getServerBaseUrl } from '@/api/client/server-url';
+import { getServerBaseUrl, normalizeServerUrl } from '@/api/client/server-url';
 import { HttpMethod } from '@/api/generated/endpoints';
 import { haptics } from '@/lib/haptics';
 import { registerFinanceRequest } from '@/lib/request-lifecycle';
@@ -27,6 +27,41 @@ interface QueryArgs<D> {
   demo?: boolean;
   signal?: AbortSignal;
   timeoutMs?: number;
+  idempotencyKey?: string;
+}
+
+let mutationSequence = 0;
+function createIdempotencyKey(): string {
+  mutationSequence = (mutationSequence + 1) % 1_000_000;
+  return `ios-${Date.now().toString(36)}-${mutationSequence.toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+async function recoverOperation<T>(
+  serverUrl: string | null | undefined,
+  token: string | null | undefined,
+  demo: boolean | undefined,
+  key: string,
+): Promise<T> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 750));
+    const response = await fetch(`${getServerBaseUrl(serverUrl)}/api/v1/operations/${encodeURIComponent(key)}`, {
+      headers: {
+        ...getServerAuthHeaders(token),
+        ...(demo ? { 'X-Demo-Mode': '1' } : {}),
+      },
+    });
+    const envelope = await response.json() as {
+      data?: { status: string; result?: T; error?: { code?: string; message?: string } };
+      error?: string;
+      code?: string;
+    };
+    if (!response.ok) throw createError(envelope.error || 'Could not check operation outcome', response.status, envelope.code);
+    if (envelope.data?.status === 'completed') return envelope.data.result as T;
+    if (envelope.data?.status === 'failed') {
+      throw createError(envelope.data.error?.message || 'Operation failed', 409, envelope.data.error?.code);
+    }
+  }
+  throw createError('Request outcome is still unknown. Check the operation before retrying.', 409, 'OUTCOME_UNKNOWN');
 }
 
 // Core fetch wrapper. Unwraps the { data } / { error } envelope returned by /api/v1.
@@ -40,6 +75,7 @@ export async function buildQuery<T, D = unknown>({
   demo,
   signal,
   timeoutMs,
+  idempotencyKey,
 }: QueryArgs<D>): Promise<T | undefined> {
   const url = new URL(getServerBaseUrl(serverUrl) + endpoint);
   if (params && method === 'GET') {
@@ -64,9 +100,11 @@ export async function buildQuery<T, D = unknown>({
 
   const options: RequestInit = {
     method,
+    cache: 'no-store',
     headers: {
       ...getServerAuthHeaders(token),
       ...(demo ? { 'X-Demo-Mode': '1' } : {}),
+      ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
     },
     signal: controller.signal,
   };
@@ -99,6 +137,9 @@ export async function buildQuery<T, D = unknown>({
     }
     return parsed?.data;
   } catch (error) {
+    if (timedOut && idempotencyKey) {
+      return recoverOperation<T>(serverUrl, token, demo, idempotencyKey);
+    }
     if (timedOut) throw createError('Request timed out. Check your connection and try again.', 408, 'TIMEOUT');
     throw error;
   } finally {
@@ -160,6 +201,7 @@ export function useFinanceMutation<R = void, V = void>({
         endpoint: typeof endpoint === 'function' ? endpoint(variables) : endpoint,
         method,
         data: variables,
+        idempotencyKey: demo ? undefined : createIdempotencyKey(),
       }),
     ...options,
     // Centralized haptic feedback so every write (link, note, category, goal, add
@@ -178,6 +220,29 @@ export function useFinanceMutation<R = void, V = void>({
 
 // Imperative connection test used by onboarding/settings.
 export async function testConnection(serverUrl: string, token: string, demo = false): Promise<boolean> {
-  const res = await buildQuery<{ ok: boolean }>({ serverUrl, token, demo, endpoint: '/api/v1/ping', method: 'GET' });
+  const normalizedUrl = normalizeServerUrl(serverUrl);
+  const res = await buildQuery<{ ok: boolean }>({ serverUrl: normalizedUrl, token, demo, endpoint: '/api/v1/ping', method: 'GET' });
   return !!res?.ok;
+}
+
+export interface VerifiedServerConfig {
+  serverUrl: string;
+  token: string;
+  demo: boolean;
+}
+
+export async function verifyConnectionConfig(input: {
+  serverUrl: string;
+  token: string;
+  demo?: boolean;
+}): Promise<VerifiedServerConfig> {
+  const candidate: VerifiedServerConfig = {
+    serverUrl: normalizeServerUrl(input.serverUrl),
+    token: input.token.trim(),
+    demo: !!input.demo,
+  };
+  if (!candidate.token) throw createError('Enter an API token.');
+  const ok = await testConnection(candidate.serverUrl, candidate.token, candidate.demo);
+  if (!ok) throw createError(candidate.demo ? 'Demo server did not confirm' : 'Server did not confirm');
+  return candidate;
 }

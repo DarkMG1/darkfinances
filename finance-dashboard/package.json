@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check dataModule.js && node --check demoData.js && node --check server.js && node --check scripts/actual-clone-smoke.js && node --check lib/date-only.js && node --check lib/errors.js && node --check lib/json-store.js && node --check lib/serial-queue.js && node --check lib/transaction-references.js && node --check lib/validation.js",
+    "check": "node --check dataModule.js && node --check demoData.js && node --check server.js && node --check scripts/actual-clone-smoke.js && for file in lib/*.js lib/domain/*.js; do node --check \"$file\"; done",
     "lint": "eslint .",
     "test": "npm run check && node --test test/*.test.js"
   },
@@ -14,7 +14,7 @@
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
-    "@actual-app/api": "^26.7.0",
+    "@actual-app/api": "26.7.0",
     "@simplewebauthn/server": "^13.3.2",
     "express": "^5.2.1",
     "express-session": "^1.19.0",

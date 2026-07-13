@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const { AppError, classifyError } = require('./lib/errors');
 const { FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { SerialQueue } = require('./lib/serial-queue');
+const { OperationJournal } = require('./lib/operation-journal');
 const { parse, schemas } = require('./lib/validation');
 
 const {
@@ -20,10 +21,28 @@ const {
 const app = express();
 const cache = new NodeCache({ stdTTL: 300 }); // 5 min cache
 const mutationQueue = new SerialQueue('finance-mutations');
+const operationJournal = new OperationJournal();
+const RELEASE_MANIFEST_PATH = process.env.RELEASE_MANIFEST_PATH || path.join(__dirname, 'release-manifest.json');
 const runtimeHealth = {
   startedAt: new Date().toISOString(),
   fatalErrorAt: null,
 };
+
+function releaseIdentity() {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(RELEASE_MANIFEST_PATH, 'utf8'));
+    return {
+      commit: manifest.repository?.commitShort || null,
+      dirty: manifest.repository?.dirty === true,
+      lockSha256: manifest.lockfile?.sha256 || null,
+      contract: manifest.contract?.fingerprint || null,
+      appVersion: manifest.app?.version || null,
+      builtAt: manifest.builtAt || null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 // Defense-in-depth: the Actual API occasionally rejects a batch write out-of-band
 // (a promise that escapes the awaited call). Continuing after an unknown write
@@ -116,6 +135,7 @@ function rateLimit(name, max, windowMs) {
 
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
+app.disable('etag');
 fs.mkdirSync(SESSION_DIR, { recursive: true, mode: 0o700 });
 fs.chmodSync(SESSION_DIR, 0o700);
 app.use((req, res, next) => {
@@ -125,6 +145,7 @@ app.use((req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; " +
@@ -335,6 +356,29 @@ function demoMiddleware(v1mode) {
     if (req.method === 'POST' || req.method === 'DELETE') {
       // Public demo writes are intentionally non-persistent. This keeps showcase
       // flows harmless and prevents cross-user state, OCR, or HTML injection.
+      const knownWrite = [
+        /^transactions$/,
+        /^transactions\/[^/]+(?:\/(?:category|notes|date|payee|split|unsplit))?$/,
+        /^bank-sync$/,
+        /^reimbursements\/sweep$/,
+        /^phantom\/cleanup$/,
+        /^receipts(?:\/[^/]+)?$/,
+        /^rules(?:\/apply|\/[^/]+)?$/,
+        /^splitwise\/sync-shares$/,
+        /^events(?:\/[^/]+)?$/,
+        /^accounts\/[^/]+\/override$/,
+        /^manual-assets(?:\/[^/]+)?$/,
+        /^recurring\/(?:mark|[^/]+\/override)$/,
+        /^bills\/paid$/,
+        /^owes-config$/,
+        /^reimb-links$/,
+        /^repayments\/[^/]+\/(?:confirm|dismiss)$/,
+        /^reconciliation\/(?:item|month|enabled)$/,
+        /^review\/dispositions$/,
+        /^goals(?:\/[^/]+)?$/,
+        /^refresh$/,
+      ].some((pattern) => pattern.test(p));
+      if (!knownWrite) return res.status(404).json({ error: 'Demo endpoint not found' });
       return send({ ok: true, demo: true });
     }
     if (p === 'report.csv') {
@@ -356,6 +400,7 @@ function demoMiddleware(v1mode) {
     switch (p) {
       case 'ping': return send({ ok: true, ts: Date.now() });
       case 'accounts': return send(demo.accounts());
+      case 'today': return send(demo.today());
       case 'transactions': {
         let r = demo.transactions();
         const { category, bucket, start, end } = req.query;
@@ -462,10 +507,11 @@ async function warmCache() {
 // Session-only gate for the web app + static assets. /api/v1/* runs its own
 // (session-OR-token) auth below so native clients can use a bearer token.
 app.use((req, res, next) => {
-  if (req.path.startsWith('/login') || req.path.startsWith('/auth/') || req.path.startsWith('/api/v1')) return next();
+  if (req.path === '/demo' || req.path.startsWith('/login') || req.path.startsWith('/auth/') || req.path.startsWith('/api/v1')) return next();
   requireAuth(req, res, next);
 });
 
+app.get('/demo', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Demo mode for the legacy web API (runs after the passkey gate above).
@@ -475,6 +521,7 @@ app.use(demoMiddleware(false));
 const monthOf = (req) => req.query.month;
 const resolvers = {
   accounts: () => cached('accounts', () => data.getAccounts()),
+  today: () => cached('today', () => mutationQueue.run(() => data.getToday()), 30),
   transactions: (req) => {
     const { accountId, start, end, category, bucket } = req.query;
     const budgetOnly = req.query.budgetOnly === '1' || req.query.budgetOnly === 'true';
@@ -592,12 +639,16 @@ async function bankSyncH() {
     cache.flushAll();
     return { ...result, phantom: { skipped: true, reason: 'bank sync did not complete' } };
   }
-  await data.applyRules(); // categorize anything newly pulled
-  await data.sweepReimbursementTags(); // file configured reimbursement tags into Reimbursement
-  const phantom = await data.cleanupPhantoms();
-  await data.syncNow(); // persist any phantom deletes to the Actual server
+  const phantom = await data.cleanupPhantoms({ dryRun: true });
   cache.flushAll();
-  return { ...result, phantom };
+  return {
+    ...result,
+    phantom,
+    automation: {
+      applied: false,
+      reason: 'bank sync imports data only; categorization and cleanup require explicit confirmation',
+    },
+  };
 }
 async function phantomCleanupH(req) {
   const query = parse(schemas.phantomCleanupQuery, req.query, 'phantom cleanup query');
@@ -692,9 +743,14 @@ async function deleteEventH(req) {
 }
 async function setAccountOverrideH(req) {
   const { id } = parse(schemas.idParam, req.params, 'account id');
-  const { name, hidden } = parse(schemas.accountOverride, req.body, 'account override');
-  const result = data.setAccountOverride({ id, name, hidden });
-  cache.del('accounts');
+  const { name, hidden, role } = parse(schemas.accountOverride, req.body, 'account override');
+  const result = data.setAccountOverride({ id, name, hidden, role });
+  cache.del(['accounts', 'today']);
+  return result;
+}
+async function setReviewDispositionH(req) {
+  const result = data.setReviewDisposition(parse(schemas.reviewDisposition, req.body, 'review disposition'));
+  cache.del(['today', 'review-current']);
   return result;
 }
 async function saveManualAssetH(req) {
@@ -725,7 +781,7 @@ async function setDateH(req) {
   return result;
 }
 async function saveGoal(req) {
-  const result = data.saveGoal(parse(schemas.goal, req.body, 'goal'));
+  const result = await data.saveGoal(parse(schemas.goal, req.body, 'goal'));
   cache.del('goals');
   return result;
 }
@@ -748,15 +804,20 @@ async function setCategory(req) {
 // HTTP cache, then immediately re-warm the hot keys so the UI repopulates fast.
 async function doRefresh() {
   await data.syncNow();
-  // A pending split that posted at a new amount: absorb the delta into its master leg.
+  // Detect split deltas without changing the user's allocation.
   const splits = await data.reconcileSplits();
-  // Auto-categorize any newly-pulled transactions that match a saved rule.
-  const rules = await data.applyRules();
-  // Mirror my share of friend-paid Splitwise items into the spend ledger.
-  const splitwise = await data.syncSplitwiseShareExpenses();
+  const phantom = await data.cleanupPhantoms({ dryRun: true });
   cache.flushAll();
   await warmCache();
-  return { ok: true, splits, rules, splitwise };
+  return {
+    ok: true,
+    splits,
+    phantom,
+    automation: {
+      applied: false,
+      reason: 'refresh is read-only; financial mutations require explicit endpoints',
+    },
+  };
 }
 
 async function markBill(req) {
@@ -873,7 +934,52 @@ const raw = (fn) => async (req, res) => {
   try { res.json(await runHandler(req, fn)); } catch (e) { sendApiError(req, res, e); }
 };
 const env = (fn) => async (req, res) => {
-  try { res.json({ data: await runHandler(req, fn) }); } catch (e) { sendApiError(req, res, e); }
+  const mutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+  const versioned = req.baseUrl === '/api/v1';
+  const idempotencyKey = mutation && versioned && !isDemo(req) ? req.get('Idempotency-Key') : null;
+  let started = false;
+  try {
+    if (idempotencyKey !== null) {
+      const { existing } = operationJournal.start(idempotencyKey, {
+        method: req.method,
+        route: req.originalUrl.split('?')[0],
+        body: req.body,
+      });
+      if (existing?.status === 'completed') return res.json({ data: existing.result, operation: { key: idempotencyKey, replayed: true } });
+      if (existing?.status === 'started') {
+        throw new AppError('The previous request outcome is unknown; check operation status before retrying', {
+          code: 'OUTCOME_UNKNOWN',
+          status: 409,
+          expose: true,
+        });
+      }
+      if (existing?.status === 'failed') {
+        throw new AppError(existing.error?.message || 'The previous operation failed', {
+          code: existing.error?.code || 'OPERATION_FAILED',
+          status: 409,
+          expose: true,
+        });
+      }
+      started = true;
+    } else if (mutation && versioned && !isDemo(req)) {
+      throw new AppError('A valid Idempotency-Key header is required', {
+        code: 'IDEMPOTENCY_KEY_REQUIRED',
+        status: 400,
+        expose: true,
+      });
+    }
+    const result = await runHandler(req, fn);
+    if (started) operationJournal.complete(idempotencyKey, result);
+    return res.json({ data: result, ...(started ? { operation: { key: idempotencyKey } } : {}) });
+  } catch (e) {
+    if (started) {
+      try { operationJournal.fail(idempotencyKey, e); } catch (journalError) {
+        runtimeHealth.fatalErrorAt = new Date().toISOString();
+        console.error('[operation-journal]', journalError);
+      }
+    }
+    return sendApiError(req, res, e);
+  }
 };
 
 // ---- Legacy unversioned API (web dashboard, passkey session) ----------------
@@ -962,13 +1068,24 @@ v1.use((req, res, next) => {
   if (origin && origin !== ORIGIN) return res.status(403).json({ error: 'Origin not allowed' });
   if (origin === ORIGIN) res.header('Access-Control-Allow-Origin', ORIGIN);
   res.header('Vary', 'Origin');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Finance-Token, X-Demo-Mode');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Finance-Token, X-Demo-Mode, Idempotency-Key');
   res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 v1.use(v1Auth);
 v1.use(demoMiddleware(true)); // demo mode for native clients (after token/session auth)
+v1.get('/operations/:key', env(async (req) => {
+  const operation = operationJournal.get(req.params.key);
+  if (!operation) {
+    throw new AppError('Operation not found', {
+      code: 'OPERATION_NOT_FOUND',
+      status: 404,
+      expose: true,
+    });
+  }
+  return operation;
+}));
 v1.get('/ping', env(async () => {
   const actual = data.getHealth();
   if (runtimeHealth.fatalErrorAt || !actual.ready) {
@@ -985,9 +1102,11 @@ v1.get('/ping', env(async () => {
     financeTimeZone: FINANCE_TIME_ZONE,
     actual,
     queuedMutations: mutationQueue.size,
+    release: releaseIdentity(),
   };
 }));
 v1.get('/accounts', env(resolvers.accounts));
+v1.get('/today', env(resolvers.today));
 v1.get('/transactions', env(resolvers.transactions));
 v1.post('/transactions', env(createTxn));
 v1.get('/spending', env(resolvers.spending));
@@ -996,6 +1115,7 @@ v1.get('/budgets', env(resolvers.budgets));
 v1.post('/budgets', env(setBudget));
 v1.get('/reimbursement', env(resolvers.reimbursement));
 v1.get('/review', env(resolvers.review));
+v1.post('/review/dispositions', env(setReviewDispositionH));
 v1.get('/reimbursement-ledger', env(resolvers.reimbursementLedger));
 v1.get('/insights', env(resolvers.insights));
 v1.get('/merchant-history', env(resolvers.merchantHistory));
@@ -1075,7 +1195,8 @@ async function periodicSync() {
 
 const PORT = parseInt(process.env.PORT, 10) || 5007;
 const DEMO_ONLY = process.env.DEMO_ONLY === '1';
-app.listen(PORT, '127.0.0.1', () => {
+let periodicSyncTimer;
+const httpServer = app.listen(PORT, '127.0.0.1', () => {
   console.log(`Finance dashboard running on http://127.0.0.1:${PORT}`);
   if (DEMO_ONLY) {
     console.log('Demo-only mode enabled; skipping Actual startup sync');
@@ -1085,7 +1206,7 @@ app.listen(PORT, '127.0.0.1', () => {
   data.initApi()
     .then(async () => {
       await warmCache(); // pre-warm once at startup so the first page loads are fast
-      setInterval(periodicSync, SYNC_INTERVAL_MS);
+      periodicSyncTimer = setInterval(periodicSync, SYNC_INTERVAL_MS);
     })
     .catch(e => {
       runtimeHealth.fatalErrorAt = new Date().toISOString();
@@ -1093,3 +1214,30 @@ app.listen(PORT, '127.0.0.1', () => {
       if (process.env.NODE_ENV !== 'test') process.exit(1);
     });
 });
+
+let shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}; draining finance writes`);
+  if (periodicSyncTimer) clearInterval(periodicSyncTimer);
+  mutationQueue.close();
+  httpServer.close();
+  const forcedExit = setTimeout(() => {
+    console.error('Graceful shutdown timed out');
+    process.exit(1);
+  }, 15_000);
+  forcedExit.unref();
+  try {
+    await mutationQueue.drain(10_000);
+    await data.shutdownApi();
+    clearTimeout(forcedExit);
+    process.exit(0);
+  } catch (error) {
+    console.error('Graceful shutdown failed:', error);
+    clearTimeout(forcedExit);
+    process.exit(1);
+  }
+}
+process.once('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+process.once('SIGINT', () => { void gracefulShutdown('SIGINT'); });

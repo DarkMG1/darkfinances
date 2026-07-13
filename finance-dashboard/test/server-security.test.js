@@ -58,6 +58,7 @@ test('server security boundaries fail closed', async (t) => {
       FINANCE_API_TOKEN: 'test-api-token',
       SESSION_SECRET: 'test-session-secret-with-sufficient-length',
       SESSION_DIR: path.join(dir, 'sessions'),
+      OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
       PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
       PASSKEY_ENROLLMENT_TOKEN_HASH: crypto.createHash('sha256').update(code).digest('hex'),
       PASSKEY_ENROLLMENT_EXPIRES_AT: String(Date.now() + 60_000),
@@ -79,9 +80,25 @@ test('server security boundaries fail closed', async (t) => {
   assert.ok(Array.isArray(result.body.data));
   assert.equal(result.response.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(result.response.headers.get('x-frame-options'), 'DENY');
+  assert.equal(result.response.headers.get('cache-control'), 'no-store');
+  assert.equal(result.response.headers.get('etag'), null);
+  result = await request(base, '/api/v1/today', { headers: { 'X-Demo-Mode': '1' } });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.data.complete, true);
+  assert.equal(result.body.data.liquidity.safeToSpend.complete, true);
+  assert.equal(result.body.data.revision.startsWith('demo-'), true);
 
   result = await request(base, '/api/v1/phantom/log', { headers: { 'X-Demo-Mode': '1' } });
   assert.equal(result.response.status, 404);
+  result = await request(base, '/api/v1/not-a-real-write', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Demo-Mode': '1' },
+    body: '{}',
+  });
+  assert.equal(result.response.status, 404);
+  result = await request(base, '/demo', { redirect: 'manual' });
+  assert.equal(result.response.status, 200);
+  assert.match(String(result.body), /demoOnlyPage/);
   result = await request(base, '/api/v1/transactions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Demo-Mode': '1' },
@@ -138,18 +155,26 @@ test('server security boundaries fail closed', async (t) => {
     body: JSON.stringify({ accountId: 'account', amount: 0 }),
   });
   assert.equal(result.response.status, 400);
+  assert.equal(result.body.code, 'IDEMPOTENCY_KEY_REQUIRED');
+
+  result = await request(base, '/api/v1/transactions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Finance-Token': 'test-api-token', 'Idempotency-Key': 'test-create-invalid' },
+    body: JSON.stringify({ accountId: 'account', amount: 0 }),
+  });
+  assert.equal(result.response.status, 400);
   assert.equal(result.body.code, 'INVALID_REQUEST');
 
   result = await request(base, '/api/v1/transactions/txn', {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json', 'X-Finance-Token': 'test-api-token' },
+    headers: { 'Content-Type': 'application/json', 'X-Finance-Token': 'test-api-token', 'Idempotency-Key': 'test-delete-invalid' },
     body: JSON.stringify({ id: 'txn' }),
   });
   assert.equal(result.response.status, 400);
 
   result = await request(base, '/api/v1/receipts', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Finance-Token': 'test-api-token' },
+    headers: { 'Content-Type': 'application/json', 'X-Finance-Token': 'test-api-token', 'Idempotency-Key': 'test-receipt-invalid' },
     body: JSON.stringify({ txnId: 'txn', imageBase64: 'PHNjcmlwdD4=', mime: 'text/html' }),
   });
   assert.equal(result.response.status, 400);

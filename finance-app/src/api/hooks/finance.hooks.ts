@@ -7,6 +7,7 @@ import { useServerConfig } from '@/state/server';
 import { API_ENDPOINTS } from '@/api/generated/endpoints';
 import {
   Account,
+  AccountRole,
   Bills,
   Budgets,
   CategorizeResult,
@@ -41,12 +42,14 @@ import {
   SearchResult,
   Spending,
   Tags,
+  Today,
   Transaction,
   TransactionDetail,
   Trends,
 } from '@/api/generated/types';
 
 const TRANSACTION_DERIVED_KEYS = [
+  API_ENDPOINTS.today.key,
   API_ENDPOINTS.accounts.key,
   API_ENDPOINTS.transactions.key,
   API_ENDPOINTS.transactionById.key,
@@ -88,12 +91,22 @@ export function usePing() {
   });
 }
 
-export function useAccounts() {
+export function useToday() {
+  return useFinanceQuery<Today>({
+    endpoint: API_ENDPOINTS.today.endpoint,
+    method: API_ENDPOINTS.today.method,
+    queryKey: [API_ENDPOINTS.today.key],
+    staleTime: 30_000,
+  });
+}
+
+export function useAccounts(options?: { enabled?: boolean }) {
   return useFinanceQuery<Account[]>({
     endpoint: API_ENDPOINTS.accounts.endpoint,
     method: API_ENDPOINTS.accounts.method,
     queryKey: [API_ENDPOINTS.accounts.key],
     staleTime: 60_000,
+    enabled: options?.enabled,
   });
 }
 
@@ -135,7 +148,10 @@ export function useMerchantHistory(payee?: string, months = 12) {
   });
 }
 
-export function useSpending(input?: string | { month?: string; start?: string; end?: string }) {
+export function useSpending(
+  input?: string | { month?: string; start?: string; end?: string },
+  options?: { enabled?: boolean },
+) {
   const params = typeof input === 'string' ? (input ? { month: input } : undefined) : input;
   return useFinanceQuery<Spending>({
     endpoint: API_ENDPOINTS.spending.endpoint,
@@ -143,16 +159,18 @@ export function useSpending(input?: string | { month?: string; start?: string; e
     params,
     queryKey: [API_ENDPOINTS.spending.key, params?.month ?? 'current', params?.start ?? '', params?.end ?? ''],
     staleTime: 60_000,
+    enabled: options?.enabled,
   });
 }
 
-export function useTrends(months = 12) {
+export function useTrends(months = 12, options?: { enabled?: boolean }) {
   return useFinanceQuery<Trends>({
     endpoint: API_ENDPOINTS.trends.endpoint,
     method: API_ENDPOINTS.trends.method,
     params: { months },
     queryKey: [API_ENDPOINTS.trends.key, months],
     staleTime: 300_000,
+    enabled: options?.enabled,
   });
 }
 
@@ -186,6 +204,25 @@ export function useReview(month?: string) {
     params: month ? { month } : undefined,
     queryKey: [API_ENDPOINTS.review.key, month ?? 'current'],
     staleTime: 60_000,
+  });
+}
+
+export function useSetReviewDisposition() {
+  const qc = useQueryClient();
+  return useFinanceMutation<OkResult, {
+    id: string;
+    disposition: 'acknowledge' | 'snooze' | 'dismiss' | 'resolved' | 'clear';
+    until?: string | null;
+    note?: string | null;
+  }>({
+    endpoint: API_ENDPOINTS.setReviewDisposition.endpoint,
+    method: API_ENDPOINTS.setReviewDisposition.method,
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
+        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.today.key] }),
+      ]);
+    },
   });
 }
 
@@ -312,13 +349,14 @@ export function useRecurring(window?: number) {
   });
 }
 
-export function useBills(days?: number) {
+export function useBills(days?: number, options?: { enabled?: boolean }) {
   return useFinanceQuery<Bills>({
     endpoint: API_ENDPOINTS.bills.endpoint,
     method: API_ENDPOINTS.bills.method,
     params: days ? { days } : undefined,
     queryKey: [API_ENDPOINTS.bills.key, days ?? 'default'],
     staleTime: 300_000,
+    enabled: options?.enabled,
   });
 }
 
@@ -551,7 +589,7 @@ export function useSetPayee() {
 // Manual "Sync with bank" — pull fresh transactions then refresh everything.
 export function useBankSync() {
   const qc = useQueryClient();
-  return useFinanceMutation<{ ok: boolean; warning?: string | null; at?: string; phantom?: { deletedCount: number } | null }, void>({
+  return useFinanceMutation<{ ok: boolean; warning?: string | null; at?: string; phantom?: { deletedCount: number; dryRun?: boolean } | null }, void>({
     endpoint: API_ENDPOINTS.bankSync.endpoint,
     method: 'POST',
     onSuccess: async () => {
@@ -877,12 +915,13 @@ export function useDeleteGoal() {
   });
 }
 
-export function useManualAssets() {
+export function useManualAssets(options?: { enabled?: boolean }) {
   return useFinanceQuery<ManualAssets>({
     endpoint: API_ENDPOINTS.manualAssets.endpoint,
     method: API_ENDPOINTS.manualAssets.method,
     queryKey: [API_ENDPOINTS.manualAssets.key],
     staleTime: 60_000,
+    enabled: options?.enabled,
   });
 }
 
@@ -937,6 +976,7 @@ export interface SetAccountOverrideVars {
   id: string;
   name?: string;
   hidden?: boolean;
+  role?: AccountRole | null;
 }
 export function useSetAccountOverride() {
   const qc = useQueryClient();

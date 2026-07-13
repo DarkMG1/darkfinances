@@ -52,3 +52,22 @@ test('malformed base64 is rejected without creating an image', () => {
     /invalid base64/
   );
 });
+
+test('duplicate receipt images are rejected by content hash', () => {
+  const receipt = data.addReceipt({
+    txnId: 'txn-4',
+    imageBase64: pngBytes.toString('base64'),
+    mime: 'image/png',
+    ocrText: 'TOTAL 12.34',
+  });
+  assert.equal(receipt.evidenceStatus, 'needs-review');
+  assert.throws(
+    () => data.addReceipt({
+      txnId: 'txn-5',
+      imageBase64: pngBytes.toString('base64'),
+      mime: 'image/png',
+    }),
+    /duplicate receipt image/
+  );
+  data.deleteReceipt({ id: receipt.id });
+});

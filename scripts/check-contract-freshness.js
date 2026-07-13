@@ -1,0 +1,44 @@
+#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const { contractFingerprint } = require('./release-manifest');
+
+const root = path.resolve(__dirname, '..');
+const stampPath = path.join(root, 'finance-app', 'src', 'api', 'generated', '.contract-fingerprint');
+
+function fail(message) {
+  console.error(`contract-freshness: ${message}`);
+  process.exit(1);
+}
+
+const current = contractFingerprint();
+if (!fs.existsSync(stampPath)) {
+  fs.writeFileSync(stampPath, `${current}\n`);
+  console.log(`contract-freshness: initialized stamp ${current}`);
+  process.exit(0);
+}
+
+const stamped = fs.readFileSync(stampPath, 'utf8').trim();
+if (stamped !== current) {
+  fail(`generated contract is stale (stamp=${stamped}, current=${current}). Regenerate endpoints/types and update ${path.relative(root, stampPath)}`);
+}
+
+const server = fs.readFileSync(path.join(root, 'finance-dashboard', 'server.js'), 'utf8');
+const generated = fs.readFileSync(path.join(root, 'finance-app', 'src', 'api', 'generated', 'endpoints.ts'), 'utf8');
+
+function routes(source, pattern) {
+  return [...source.matchAll(pattern)]
+    .map((match) => `${match[1].toUpperCase()} /api/v1${match[2]}`)
+    .sort();
+}
+
+const serverRoutes = routes(server, /\bv1\.(get|post|delete|put|patch)\('([^']+)'/g);
+const generatedRoutes = [...generated.matchAll(/\bdef\('([^']+)', '(GET|POST|DELETE|PUT|PATCH)'/g)]
+  .map((match) => `${match[2]} ${match[1]}`)
+  .sort();
+
+if (JSON.stringify(serverRoutes) !== JSON.stringify(generatedRoutes)) {
+  fail('generated endpoints.ts does not match finance-dashboard/server.js routes');
+}
+
+console.log(`contract-freshness: ok (${current}, ${serverRoutes.length} routes)`);

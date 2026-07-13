@@ -157,6 +157,11 @@ file can lock browser users out.
 - Browser writes reject requests that carry an `Origin` different from the configured origin; session
   cookies are `SameSite=Lax`, secure outside loopback, and HTTP-only.
 - CORS allows only the configured browser origin; native requests do not need a browser origin.
+- Every authenticated `/api/v1` write requires a unique `Idempotency-Key`. Completed results replay
+  safely; an operation left `started` after a crash remains outcome-unknown and is inspectable at
+  `GET /api/v1/operations/:key` rather than being applied twice.
+- Bank sync and `/refresh` import/read data only. They return previews for split deltas and stale pending
+  charges; categorization, cleanup, reimbursement, and Splitwise-mirror writes require explicit actions.
 
 ## Demo mode
 
@@ -188,6 +193,7 @@ Depending on enabled features, runtime state can include:
 - `events.json`
 - `receipts.json` and `receipts/`
 - rules, reconciliation, reimbursement-link, override, and goal stores
+- `review-state.json` and `operation-journal.json`
 - `passkey-credentials.json` and `.sessions/`
 
 These files may contain sensitive financial or identity information. Keep them private and never commit
@@ -211,6 +217,7 @@ For a destructive mutation smoke test, use an isolated Actual clone only:
 
 ```bash
 CONFIRM=1 \
+CLONE_MUTATION_TEST=1 \
 ACTUAL_SERVER_URL=http://127.0.0.1:15006 \
 ACTUAL_PASSWORD=... \
 ACTUAL_SYNC_ID=... \

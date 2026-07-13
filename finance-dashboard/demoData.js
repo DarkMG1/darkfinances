@@ -22,11 +22,11 @@ const monthEnd = (month) => {
 
 // ---- Accounts -------------------------------------------------------------
 const ACCOUNTS = [
-  { id: 'acc-check', name: 'Everyday Checking', offbudget: false, balance: 4820.55 },
-  { id: 'acc-save', name: 'High-Yield Savings', offbudget: false, balance: 18450.00 },
-  { id: 'acc-credit', name: 'Sapphire Card', offbudget: false, balance: -1240.30 },
-  { id: 'acc-invest', name: 'Brokerage', offbudget: true, balance: 32160.75 },
-  { id: 'acc-roth', name: 'Roth IRA', offbudget: true, balance: 21300.00 },
+  { id: 'acc-check', name: 'Everyday Checking', offbudget: false, balance: 4820.55, role: 'operating_cash', roleSource: 'explicit' },
+  { id: 'acc-save', name: 'High-Yield Savings', offbudget: false, balance: 18450.00, role: 'protected_savings', roleSource: 'explicit' },
+  { id: 'acc-credit', name: 'Sapphire Card', offbudget: false, balance: -1240.30, role: 'credit_card', roleSource: 'explicit' },
+  { id: 'acc-invest', name: 'Brokerage', offbudget: true, balance: 32160.75, role: 'investment', roleSource: 'explicit' },
+  { id: 'acc-roth', name: 'Roth IRA', offbudget: true, balance: 21300.00, role: 'investment', roleSource: 'explicit' },
 ];
 const accounts = () => ACCOUNTS.map((a) => ({ ...a }));
 
@@ -101,6 +101,45 @@ function bills() {
   }
   within.sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1));
   return { bills: within, total: round2(within.reduce((s, b) => s + b.amount, 0)), count: within.length, unpaidCount: within.length, horizonDays: 45 };
+}
+
+function today() {
+  const asOf = new Date().toISOString();
+  const allAccounts = accounts();
+  const cash = allAccounts.filter((account) => account.role === 'operating_cash');
+  const cashValue = round2(cash.reduce((sum, account) => sum + account.balance, 0));
+  const upcoming = bills();
+  const currentSpending = spending({});
+  const inbox = review();
+  return {
+    asOf,
+    financeDate: ymd(new Date()),
+    revision: `demo-${currentMonth()}`,
+    complete: true,
+    incompleteReasons: [],
+    health: { ready: true, initializedAt: asOf, lastSyncAt: asOf, lastErrorAt: null, lastError: null },
+    accounts: allAccounts,
+    spending: currentSpending,
+    liquidity: {
+      safeToSpend: {
+        value: round2(cashValue - upcoming.total),
+        valueCents: Math.round((cashValue - upcoming.total) * 100),
+        complete: true,
+        incompleteReasons: [],
+        provenance: {
+          metric: 'safe_to_spend',
+          asOf,
+          financeDate: ymd(new Date()),
+          sources: cash.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
+          method: 'demo operating cash minus upcoming bills',
+          excludes: ['possible reimbursements'],
+        },
+      },
+    },
+    obligations: { bills: upcoming.bills.slice(0, 5), nextIncome: income().streams[0] || null, source: 'inferred' },
+    review: inbox,
+    activity: { recent: transactions().slice(0, 8) },
+  };
 }
 
 // ---- Income / paycheck streams -------------------------------------------
@@ -576,7 +615,7 @@ function deleteReceipt(id) { demoState.receipts = demoState.receipts.filter((r) 
 
 module.exports = {
   accounts, transactions, spending, trends, budgets, reimbursement, insights, categories, recurring, bills, income,
-  goals: currentGoals, tags, manualAssets, investments, forecast, reports, review, events, rules, merchantHistory,
+  goals: currentGoals, tags, manualAssets, investments, forecast, reports, review, today, events, rules, merchantHistory,
   transactionDetail, reconciliation, reconcilePending, repaymentSuggestions, receipts, reimbLinks,
   saveGoal, deleteGoal, saveManualAsset, deleteManualAsset, saveRule, deleteRule, saveEvent, deleteEvent,
   createTransaction, updateTransaction, splitTransaction, unsplitTransaction, deleteTransaction,

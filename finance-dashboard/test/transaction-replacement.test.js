@@ -13,10 +13,12 @@ for (const [key, name] of Object.entries({
   REIMB_SUGGEST_PATH: 'suggestions.json',
   RECON_PATH: 'reconciliation.json',
   PHANTOM_SEEN_PATH: 'phantom-seen.json',
+  TRANSACTION_SAGAS_PATH: 'transaction-sagas.json',
 })) process.env[key] = path.join(dir, name);
 
 const {
   addableTransaction,
+  recoverTransactionSagas,
   replaceActualTransaction,
   transactionReplacementMap,
 } = require('../dataModule');
@@ -112,4 +114,45 @@ test('failed replacement restores the original financial row and reports its rec
   assert.equal(rows.length, 1);
   assert.equal(rows[0].amount, original.amount);
   assert.equal(rows[0].imported_id, original.imported_id);
+});
+
+test('startup recovery finishes sidecar migration after replacement commit', async () => {
+  const replacement = {
+    ...addableTransaction(original),
+    id: 'replacement-after-crash',
+    is_parent: false,
+    subtransactions: [],
+  };
+  fs.writeFileSync(process.env.RECEIPTS_PATH, JSON.stringify({
+    byTxn: {
+      [original.id]: [{ id: 'receipt-1', txnId: original.id, file: 'receipt.jpg' }],
+    },
+  }));
+  fs.writeFileSync(process.env.TRANSACTION_SAGAS_PATH, JSON.stringify({
+    schemaVersion: 1,
+    sagas: {
+      crash: {
+        id: 'crash',
+        status: 'original-deleted',
+        accountId: 'account',
+        original,
+        replacement: addableTransaction(original),
+        requestedLegs: null,
+        beforeIds: [original.id],
+        startedAt: '2026-07-09T00:00:00.000Z',
+        updatedAt: '2026-07-09T00:00:01.000Z',
+      },
+    },
+  }));
+  let synced = false;
+  await recoverTransactionSagas({
+    async getTransactions() { return [structuredClone(replacement)]; },
+    async sync() { synced = true; },
+  });
+  const receipts = JSON.parse(fs.readFileSync(process.env.RECEIPTS_PATH, 'utf8'));
+  assert.equal(receipts.byTxn[original.id], undefined);
+  assert.equal(receipts.byTxn[replacement.id][0].txnId, replacement.id);
+  const saga = JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas.crash;
+  assert.equal(saga.status, 'completed');
+  assert.equal(synced, true);
 });

@@ -27,40 +27,45 @@ const {
 } = require('./lib/date-only');
 const { readJsonFile, writeJsonFile } = require('./lib/json-store');
 const { rewriteTransactionReferences } = require('./lib/transaction-references');
+const { buildCategoryInfo, transactionLeaves, summarizeCents } = require('./lib/domain/classification');
+const { fromCents } = require('./lib/domain/money');
+const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
+const { metricValue } = require('./lib/metric-provenance');
+const { statePath } = require('./lib/state-registry');
 const ACTUAL_API_PATH = process.env.ACTUAL_API_PATH || '@actual-app/api';
 const api = require(ACTUAL_API_PATH);
 
 // Sidecar JSON for per-user state Actual Budget can't hold (subscription
 // overrides, savings goals). Lives next to this module; the systemd service
 // user owns ~/finance-dashboard so these are writable.
-const OVERRIDES_PATH = process.env.RECURRING_OVERRIDES_PATH || path.join(__dirname, 'recurring-overrides.json');
-const GOALS_PATH = process.env.GOALS_PATH || path.join(__dirname, 'goals.json');
-const BILLS_PAID_PATH = process.env.BILLS_PAID_PATH || path.join(__dirname, 'bills-paid.json');
+const OVERRIDES_PATH = statePath('recurringOverrides');
+const GOALS_PATH = statePath('goals');
+const BILLS_PAID_PATH = statePath('billsPaid');
 // Optional richer budgeting metadata keyed by category id or category name.
-const BUDGET_SETTINGS_PATH = process.env.BUDGET_SETTINGS_PATH || path.join(__dirname, 'budget-settings.json');
+const BUDGET_SETTINGS_PATH = statePath('budgetSettings');
 // "Who owes me" ground truth (Splitwise expected amounts, trips, debtor name
 // patterns). Editable by deployment tooling or the user without a code change.
-const OWES_CONFIG_PATH = process.env.OWES_CONFIG_PATH || path.join(__dirname, 'owes-config.json');
+const OWES_CONFIG_PATH = statePath('owesConfig');
 // Authoritative "who owes me" snapshot (Splitwise pairwise truth) produced by
 // actual-tools/owes-snapshot.js. The dashboard READS this; it never recomputes
 // per-person trip debts from line items (that approach always drifted — see
 // the project reimbursement docs). Missing file => fall back to the legacy baseline.
-const OWES_TRUTH_PATH = process.env.OWES_TRUTH_PATH || path.join(__dirname, 'owes-truth.json');
+const OWES_TRUTH_PATH = statePath('owesTruth');
 // Venmo debts imported from a statement CSV (actual-tools/venmo-import.js). Same
 // { bySlug: { slug: [{event, amount}] } } shape as owes-truth, merged into
 // who-owes-me alongside Splitwise. Absent => Venmo simply contributes nothing.
-const VENMO_TRUTH_PATH = process.env.VENMO_TRUTH_PATH || path.join(__dirname, 'venmo-truth.json');
+const VENMO_TRUTH_PATH = statePath('venmoTruth');
 // Events / trips: user-created groupings (name, members, Splitwise group) that a
 // transaction tag (#ev-<slug>) ties into. owes-snapshot.js reads this same file so
 // a trip created in the app auto-pulls its Splitwise group into who-owes-me.
-const EVENTS_PATH = process.env.EVENTS_PATH || path.join(__dirname, 'events.json');
+const EVENTS_PATH = statePath('events');
 // Manual reimbursement links: maps a repayment inflow (e.g. a Zelle payback) to
 // the expense(s) it repays. Actual has no native txn-to-txn link, so we store
 // display snapshots of both sides here.
-const REIMB_LINKS_PATH = process.env.REIMB_LINKS_PATH || path.join(__dirname, 'reimb-links.json');
+const REIMB_LINKS_PATH = statePath('reimbursementLinks');
 // Auto-matcher: suggested repayment→expense matches awaiting your confirmation,
 // plus a dismissed set so we never re-surface ones you've waved off.
-const REIMB_SUGGEST_PATH = process.env.REIMB_SUGGEST_PATH || path.join(__dirname, 'reimb-suggest.json');
+const REIMB_SUGGEST_PATH = statePath('reimbursementSuggestions');
 // Optional deployment-specific cutoffs. By default the app behaves normally:
 // direct reimbursement debt scans all history, and suggestions start Jan 1 of
 // the current year. Personal deployments can set these env vars to hide already
@@ -71,26 +76,28 @@ const REIMB_LEDGER_CUTOFF_ACTIVE = !!process.env.REIMB_LEDGER_FROM;
 // Phantom pending cleanup: a strike ledger of pending imported charges we've seen
 // (so aged-out deletes only fire after we've watched one linger), plus an audit log
 // of everything the cleanup has removed.
-const PHANTOM_SEEN_PATH = process.env.PHANTOM_SEEN_PATH || path.join(__dirname, 'phantom-seen.json');
-const PHANTOM_LOG_PATH = process.env.PHANTOM_LOG_PATH || path.join(__dirname, 'phantom-log.json');
+const PHANTOM_SEEN_PATH = statePath('phantomSeen');
+const PHANTOM_LOG_PATH = statePath('phantomLog');
 // Receipts: metadata index (per transaction) + a directory of the raw image files,
 // so scanned receipts survive an app reinstall (server is the durable copy).
-const RECEIPTS_PATH = process.env.RECEIPTS_PATH || path.join(__dirname, 'receipts.json');
+const RECEIPTS_PATH = statePath('receipts');
 const RECEIPTS_DIR = process.env.RECEIPTS_DIR || path.join(__dirname, 'receipts');
 // Categorization rules ("always categorize payee X as Y"). Applied to
 // uncategorized transactions on create + on each SimpleFIN refresh.
-const RULES_PATH = process.env.RULES_PATH || path.join(__dirname, 'rules.json');
+const RULES_PATH = statePath('rules');
 // Per-account display overrides (rename / hide) — never touches Actual itself.
-const ACCOUNT_OVERRIDES_PATH = process.env.ACCOUNT_OVERRIDES_PATH || path.join(__dirname, 'account-overrides.json');
+const ACCOUNT_OVERRIDES_PATH = statePath('accountOverrides');
 // User-entered assets/liabilities that live outside Actual (car, home, cash,
 // crypto) and roll into net worth.
-const MANUAL_ASSETS_PATH = process.env.MANUAL_ASSETS_PATH || path.join(__dirname, 'manual-assets.json');
-const INVESTMENT_HOLDINGS_PATH = process.env.INVESTMENT_HOLDINGS_PATH || path.join(__dirname, 'investment-holdings.json');
-const DEBT_PLANNER_PATH = process.env.DEBT_PLANNER_PATH || path.join(__dirname, 'debt-planner.json');
+const MANUAL_ASSETS_PATH = statePath('manualAssets');
+const INVESTMENT_HOLDINGS_PATH = statePath('investmentHoldings');
+const DEBT_PLANNER_PATH = statePath('debtPlanner');
 // Monthly reconciliation: opt-in month-end review where each expense is checked
 // off and then the whole month is closed. Stores the enabled flag + per-month,
 // per-transaction reconcile marks so the app can nag until a month is cleared.
-const RECON_PATH = process.env.RECON_PATH || path.join(__dirname, 'reconciliation.json');
+const RECON_PATH = statePath('reconciliation');
+const REVIEW_STATE_PATH = statePath('reviewState');
+const TRANSACTION_SAGAS_PATH = statePath('transactionSagas');
 const readJsonSafe = (p, fallback, validate) => readJsonFile(p, fallback, validate);
 const writeJsonSafe = (p, obj) => writeJsonFile(p, obj);
 
@@ -120,6 +127,7 @@ async function initApi() {
     try {
       await loadBudgetResilient();
       apiReady = true;
+      await recoverTransactionSagas(api);
       apiHealth.initializedAt = new Date().toISOString();
       apiHealth.lastError = null;
     } catch (error) {
@@ -131,21 +139,37 @@ async function initApi() {
   return initPromise;
 }
 
-// Self-heal a diverged/corrupt local cache. An Actual `out-of-sync` dataDir
-// previously crash-looped the service forever. The Actual API can't re-init
-// cleanly within one process, so we don't retry in-process: we wipe the cache
-// (it's just a reconstructable mirror of the Actual server at config.serverURL)
-// and exit, letting systemd restart us once with a clean dir and a single fresh
-// download. A genuinely unreachable server simply keeps retrying until it's back.
+function isRecoverableActualCacheError(error) {
+  const message = String(error?.message || error || '');
+  return /out[\s_-]*of[\s_-]*sync|invalid[\s_-]*schema|SQLITE_CORRUPT|database disk image is malformed|no such table|migration.*(?:failed|mismatch)/i.test(message);
+}
+
+async function resetOwnedActualCache(dataDir) {
+  const resolved = path.resolve(dataDir || '');
+  const home = path.resolve(process.env.HOME || '');
+  if (!resolved || resolved === '/' || resolved === home || resolved.split(path.sep).filter(Boolean).length < 3) {
+    throw new Error(`Refusing unsafe Actual cache reset: ${resolved || '(empty)'}`);
+  }
+  const stat = await fs.promises.lstat(resolved);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid()) {
+    throw new Error(`Refusing unowned or non-directory Actual cache reset: ${resolved}`);
+  }
+  await fs.promises.rm(resolved, { recursive: true, force: true });
+  await fs.promises.mkdir(resolved, { recursive: true, mode: 0o700 });
+}
+
+// Self-heal only errors known to describe a disposable local cache. Auth,
+// connectivity, server, and configuration failures must preserve the cache for
+// diagnosis rather than deleting potentially useful state.
 async function loadBudgetResilient() {
   try {
     await api.init({ dataDir: config.dataDir, serverURL: config.serverURL, password: config.password });
     await api.downloadBudget(config.syncId);
   } catch (e) {
-    console.error('Budget load failed; wiping cache and restarting clean:', (e && e.message) || e);
-    try { await fs.promises.rm(config.dataDir, { recursive: true, force: true }); } catch (_) {}
-    try { await fs.promises.mkdir(config.dataDir, { recursive: true }); } catch (_) {}
-    process.exit(1);
+    if (!isRecoverableActualCacheError(e)) throw e;
+    console.error('Recoverable Actual cache failure; resetting owned cache:', (e && e.message) || e);
+    await resetOwnedActualCache(config.dataDir);
+    throw new Error('Actual cache was reset after a recoverable startup failure; restart required', { cause: e });
   }
 }
 
@@ -188,6 +212,14 @@ async function bankSync() {
 function resetApi() {
   apiReady = false;
   initPromise = null;
+}
+
+async function shutdownApi() {
+  if (apiReady) {
+    await api.sync();
+    if (typeof api.shutdown === 'function') await api.shutdown();
+  }
+  resetApi();
 }
 
 function getHealth() {
@@ -336,34 +368,17 @@ const TRANSFER_PAYEE = envRegex('TRANSFER_PAYEE_PATTERN', /^transfer\s*:?\s*(to|
 const SETTLE_UP_PAYEE = envRegex('SETTLE_UP_PAYEE_PATTERN', /splitwise|venmo|cash\s?app|zelle|paypal/i);
 
 function buildCatInfo(groups) {
-  const catInfo = {}; // id -> { name, group, kind, isIncome, isMovement }
-  for (const g of groups) {
-    const incomeGroup = g.is_income === true || INCOME_GROUP.test(g.name || '');
-    const mmGroup = MONEY_MOVEMENT_GROUP.test(g.name || '');
-    for (const c of g.categories || []) {
-      let kind = 'spend';
-      if (incomeGroup) kind = 'income';
-      else if (REIMB_CAT.test(c.name || '')) kind = 'reimb';
-      else if (mmGroup || MM_CAT.test(c.name || '')) kind = 'mm';
-      catInfo[c.id] = { name: c.name, group: g.name, kind, isIncome: incomeGroup, isMovement: mmGroup };
-    }
-  }
-  return catInfo;
+  return buildCategoryInfo(groups, {
+    incomeGroup: INCOME_GROUP,
+    moneyMovementGroup: MONEY_MOVEMENT_GROUP,
+    moneyMovementCategory: MM_CAT,
+    reimbursementCategory: REIMB_CAT,
+  });
 }
 
 // Flatten a transaction into classified leaves (split-aware). Drops parent shells.
 function leavesOf(t, parentTransfer) {
-  if (t.is_parent && Array.isArray(t.subtransactions) && t.subtransactions.length) {
-    return t.subtransactions.map((s, i) => ({
-      amount: s.amount, catId: s.category, notes: s.notes, transfer: !!s.transfer_id,
-      id: s.id || `${t.id}-${i}`, parentId: t.id, isLeg: true,
-    }));
-  }
-  if (!t.is_parent) return [{
-    amount: t.amount, catId: t.category, notes: t.notes, transfer: parentTransfer,
-    id: t.id, parentId: null, isLeg: false,
-  }];
-  return [];
+  return transactionLeaves(t, parentTransfer);
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +390,7 @@ async function getAccounts() {
     // (read straight from Actual), but it isn't real cash, so it must stay out of
     // the account list + the app's net-worth sum.
     const accounts = (await api.getAccounts()).filter((a) => !a.closed && (a.name || '').toLowerCase() !== SW_ACCOUNT_NAME.toLowerCase());
-    const overrides = readJsonSafe(ACCOUNT_OVERRIDES_PATH, {});
+    const overrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
     return Promise.all(
       accounts.map(async (a) => {
         const ov = overrides[a.id] || {};
@@ -385,15 +400,18 @@ async function getAccounts() {
           offbudget: !!a.offbudget,
           balance: (await api.getAccountBalance(a.id)) / 100,
           hidden: !!ov.hidden,
+          role: ov.role || 'unknown',
+          roleSource: ov.role ? 'explicit' : 'unknown',
         };
       })
     );
   });
 }
 
-function setAccountOverride({ id, name, hidden } = {}) {
+function setAccountOverride({ id, name, hidden, role } = {}) {
   if (!id) throw new Error('id required');
-  const overrides = readJsonSafe(ACCOUNT_OVERRIDES_PATH, {});
+  const store = readAccountOverrides(ACCOUNT_OVERRIDES_PATH);
+  const overrides = store.accounts;
   const cur = overrides[id] || {};
   if (name !== undefined) {
     const trimmed = (name || '').trim();
@@ -404,9 +422,13 @@ function setAccountOverride({ id, name, hidden } = {}) {
     if (hidden) cur.hidden = true;
     else delete cur.hidden;
   }
+  if (role !== undefined) {
+    if (role === null || role === 'unknown') delete cur.role;
+    else cur.role = role;
+  }
   if (Object.keys(cur).length) overrides[id] = cur;
   else delete overrides[id];
-  writeJsonSafe(ACCOUNT_OVERRIDES_PATH, overrides);
+  writeAccountOverrides(ACCOUNT_OVERRIDES_PATH, store);
   return { ok: true, id, override: overrides[id] || null };
 }
 
@@ -677,28 +699,12 @@ async function createTransaction({ accountId, amount, payee, date, categoryId, n
 }
 
 function summarize(leaves, catInfo) {
-  const spending = {};
-  let totalSpend = 0;
-  let totalIncome = 0;
-  for (const t of leaves) {
-    const meta = catInfo[t.catId];
-    const kind = meta ? meta.kind : 'uncat';
-    if (kind === 'mm' || kind === 'reimb') continue; // not spending
-    const amt = t.amount / 100;
-    if (kind === 'income') {
-      totalIncome += amt;
-      continue;
-    }
-    // Uncategorized inflows are almost always income/transfers that simply
-    // haven't been filed under an Income category — never let them net against
-    // (and deflate) real spending. Categorized refunds still net per-category.
-    if (kind === 'uncat' && amt > 0) continue;
-    const name = meta ? meta.name : 'Uncategorized';
-    totalSpend += -amt;
-    spending[name] = (spending[name] || 0) - amt;
-  }
-  for (const k of Object.keys(spending)) if (Math.abs(spending[k]) < 0.005) delete spending[k];
-  return { spending, totalSpend, totalIncome };
+  const result = summarizeCents(leaves, catInfo);
+  return {
+    spending: Object.fromEntries(Object.entries(result.spendingCents).map(([name, cents]) => [name, fromCents(cents)])),
+    totalSpend: fromCents(result.totalSpendCents),
+    totalIncome: fromCents(result.totalIncomeCents),
+  };
 }
 
 async function onBudgetLeaves(api, start, end, catInfo) {
@@ -970,7 +976,7 @@ async function setBudgetAmount({ month, categoryId, amount } = {}) {
 // personal-config.json (gitignored); see personal-config.example.json for the shape.
 // Absent => harmless generic placeholders (attribution simply won't match real people
 // until you add your own config). loadOwesConfig() also folds in owes-config.json.
-const PERSONAL_CONFIG_PATH = process.env.PERSONAL_CONFIG_PATH || path.join(__dirname, 'personal-config.json');
+const PERSONAL_CONFIG_PATH = statePath('personalConfig');
 const _roster = readJsonSafe(PERSONAL_CONFIG_PATH, null) || {};
 const PEOPLE = new Set(
   (Array.isArray(_roster.people) && _roster.people.length ? _roster.people : ['alex', 'sam', 'jordan', 'taylor'])
@@ -1062,17 +1068,42 @@ function loadOwesConfig() {
   return { expected, debtorRe, tripStart, swNet, settledExt, autoReimbTags, manualTrips, eventStatus, autoDetectExcludeEvents };
 }
 
-// Read the authoritative who-owes-me snapshot (Splitwise pairwise). Returns null
-// when absent/invalid so callers fall back to the legacy baseline. Shape:
-//   { generatedAt, source, events:[...], bySlug:{ slug:[{event,amount}] }, total }
-function loadOwesTruth() {
-  const t = readJsonSafe(OWES_TRUTH_PATH, null);
-  if (!t || typeof t !== 'object' || !t.bySlug || typeof t.bySlug !== 'object') return null;
-  const src = String(t.source || '');
-  if (src && !/^splitwise-pairwise\b/i.test(src)) {
-    return { ...t, warning: 'non-pairwise-snapshot-source' };
+// Only a complete, fresh schema-v2 pairwise snapshot can contribute current
+// Splitwise debt. A structurally valid stale snapshot is returned separately as
+// last-known context and is never substituted into current totals.
+function classifyOwesTruth(t, { now = Date.now(), maxAgeMs = Number(process.env.OWES_SNAPSHOT_MAX_AGE_MS) || 6 * 60 * 60 * 1000 } = {}) {
+  if (!t || typeof t !== 'object' || !t.bySlug || typeof t.bySlug !== 'object') {
+    return { current: null, lastKnown: null, warning: 'splitwise-snapshot-missing' };
   }
-  return t;
+  const src = String(t.source || '');
+  const manifest = t.manifest;
+  const complete = t.schemaVersion === 2 &&
+    /^splitwise-pairwise\b/i.test(src) &&
+    manifest &&
+    manifest.complete === true &&
+    manifest.itemizedComplete === true &&
+    manifest.resolvedEvents === manifest.expectedEvents &&
+    Array.isArray(manifest.failedEvents) &&
+    manifest.failedEvents.length === 0 &&
+    manifest.currency === (process.env.SPLITWISE_CURRENCY || 'USD');
+  if (!complete) {
+    return { current: null, lastKnown: null, warning: 'splitwise-snapshot-incomplete' };
+  }
+  const generatedAt = Date.parse(t.generatedAt || '');
+  if (!Number.isFinite(generatedAt) || generatedAt > now + 5 * 60 * 1000) {
+    return { current: null, lastKnown: null, warning: 'splitwise-snapshot-invalid-time' };
+  }
+  if (now - generatedAt > maxAgeMs) {
+    return { current: null, lastKnown: t, warning: 'splitwise-snapshot-stale' };
+  }
+  return { current: t, lastKnown: null, warning: null };
+}
+function loadOwesTruth(options) {
+  return classifyOwesTruth(readJsonSafe(OWES_TRUTH_PATH, null), options);
+}
+
+function directReimbursementLegs(legs) {
+  return (Array.isArray(legs) ? legs : []).filter((leg) => !(leg.event || /splitwise/i.test(leg.label || '')));
 }
 // Venmo sidecar — same shape as owes-truth. Null when absent/invalid.
 function loadVenmoTruth() {
@@ -1470,7 +1501,6 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
       tripStart: TRIP_START,
       swNet: SW_NET,
       settledExt: SETTLED_EXT,
-      manualTrips: MANUAL_TRIPS,
       eventStatus: EVENT_STATUS,
       autoDetectExcludeEvents: AUTO_DETECT_EXCLUDE_EVENTS,
     } = loadOwesConfig();
@@ -1654,24 +1684,26 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
     // Combined "who owes me" — AUTHORITATIVE. Trip/group debts come straight from
     // Splitwise's own pairwise balance via the owes-snapshot (see reimbursement docs:
     // NEVER reconstruct per-person trip debts from line items). Personal loans not
-    // in any Splitwise group (e.g. a Venmo loan) still come from the ledger. If the
-    // snapshot is unavailable we fall back to the legacy `expected` baseline.
-    const truth = loadOwesTruth();
+    // in any Splitwise group (e.g. a Venmo loan) still come from the ledger.
+    // Legacy/manual values are diagnostics only and never substitute for missing
+    // current pairwise truth.
+    const truthState = loadOwesTruth();
+    const truth = truthState.current;
     const tripBySlug = {}; // slug -> [{ event, remaining }]
-    let owesSource = 'splitwise-snapshot';
+    let owesSource = truth ? (truth.source || 'splitwise-snapshot') : 'ledger-only';
     const owesGeneratedAt = truth && truth.generatedAt ? truth.generatedAt : null;
-    const owesWarning = truth && truth.warning ? truth.warning : null;
+    const owesWarning = truthState.warning;
+    const lastKnownSplitwise = truthState.lastKnown ? {
+      generatedAt: truthState.lastKnown.generatedAt || null,
+      total: round2(Number(truthState.lastKnown.total) || 0),
+      bySlug: truthState.lastKnown.bySlug,
+      source: truthState.lastKnown.source || 'splitwise-snapshot',
+    } : null;
     if (truth) {
-      owesSource = truth.source || owesSource;
       for (const [slug, arr] of Object.entries(truth.bySlug))
         tripBySlug[slug] = (Array.isArray(arr) ? arr : [])
           .filter((t) => t && Number(t.amount) > 0.005)
           .map((t) => ({ event: t.event, remaining: round2(Number(t.amount)) }));
-    } else {
-      owesSource = 'legacy-baseline';
-      for (const e of expected)
-        for (const r of e.rows)
-          if (r.remaining > 0.5) (tripBySlug[r.slug] = tripBySlug[r.slug] || []).push({ event: e.event, remaining: r.remaining });
     }
 
     // Venmo debts (imported from a statement CSV) merge in as another source, so a
@@ -1692,32 +1724,10 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
       }
     }
 
-    // Manual overrides win over the auto snapshot (e.g. a Splitwise group that
-    // reports settled while the person actually still owes). { slug: [{event,amount}] }.
-    if (MANUAL_TRIPS && typeof MANUAL_TRIPS === 'object') {
-      for (const [slug, arr] of Object.entries(MANUAL_TRIPS)) {
-        if (!Array.isArray(arr)) continue;
-        const list = tripBySlug[slug] || [];
-        for (const m of arr) {
-          if (!m || !m.event) continue;
-          const amount = round2(Number(m.amount) || 0);
-          const i = list.findIndex((t) => t.event === m.event);
-          if (amount > 0.005) {
-            if (i >= 0) list[i] = { event: m.event, remaining: amount };
-            else list.push({ event: m.event, remaining: amount });
-          } else if (i >= 0) list.splice(i, 1);
-        }
-        if (list.length) { tripBySlug[slug] = list; owesSource = owesSource + '+manual'; } else delete tripBySlug[slug];
-      }
-    }
-
-    // A person is "Splitwise-governed" if ANY ledger leg is tied to a trip event or
-    // a Splitwise expense — then their debt comes ONLY from the authoritative
-    // snapshot above (never the ledger), which avoids double-counting cross-tagged
-    // settle-ups (e.g. gift fronts netted into a trip payback). People with purely
-    // personal, non-Splitwise legs (e.g. a direct loan) keep their ledger net.
-    const swGoverned = (p) => (byP[p] || []).some((l) => l.event || /splitwise/i.test(l.label || ''));
-    const personalNetOf = (p) => (swGoverned(p) ? 0 : (byP[p] || []).reduce((s, l) => s + l.amount, 0));
+    // Suppress only event/Splitwise legs. A person may also have an unrelated
+    // direct loan, which must remain visible alongside their pairwise trip debt.
+    const personalLegsOf = (p) => directReimbursementLegs(byP[p]);
+    const personalNetOf = (p) => personalLegsOf(p).reduce((s, l) => s + l.amount, 0);
 
     const owesSlugs = new Set([...persons, ...Object.keys(tripBySlug)]);
     const owes = [];
@@ -1728,9 +1738,7 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
       const trips = tripBySlug[slug] || [];
       const owed = round2(misc + trips.reduce((s, t) => s + t.remaining, 0));
       if (owed <= 0.5) continue;
-      const legs = swGoverned(slug)
-        ? []
-        : (byP[slug] || []).filter((l) => l.amount < 0).map((l) => ({
+      const legs = personalLegsOf(slug).filter((l) => l.amount < 0).map((l) => ({
           id: l.id, parentId: l.parentId, isLeg: l.isLeg, accountId: l.accountId, account: l.account,
           payee: l.payee, cleared: l.cleared, imported: l.imported, categoryId: l.categoryId,
           date: l.date, amount: d2(l.amount), label: l.label, notes: l.notes,
@@ -1768,6 +1776,7 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
       owesSource,
       owesGeneratedAt,
       owesWarning,
+      lastKnownSplitwise,
       people,
       events,
       expected,
@@ -2310,6 +2319,30 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
 // ---------------------------------------------------------------------------
 // Review inbox — one prioritized daily queue for the app home screen.
 // ---------------------------------------------------------------------------
+function readReviewState() {
+  const state = readJsonSafe(REVIEW_STATE_PATH, { schemaVersion: 1, dispositions: {} });
+  return state && state.schemaVersion === 1 && state.dispositions && typeof state.dispositions === 'object'
+    ? state
+    : { schemaVersion: 1, dispositions: {} };
+}
+
+function setReviewDisposition({ id, disposition, until, note } = {}) {
+  if (!id) throw new Error('review task id required');
+  const state = readReviewState();
+  if (disposition === 'clear') {
+    delete state.dispositions[id];
+  } else {
+    state.dispositions[id] = {
+      disposition,
+      at: new Date().toISOString(),
+      ...(until ? { until } : {}),
+      ...(note ? { note } : {}),
+    };
+  }
+  writeJsonSafe(REVIEW_STATE_PATH, state);
+  return { ok: true, id, disposition };
+}
+
 async function getReview({ month } = {}) {
   const m = month || todayYMD().slice(0, 7);
   const start = `${m}-01`;
@@ -2420,9 +2453,29 @@ async function getReview({ month } = {}) {
   }
 
   tasks.sort((a, b) => b.priority - a.priority || String(b.date || '').localeCompare(String(a.date || '')));
+  const state = readReviewState();
+  const now = Date.now();
+  const visibleTasks = tasks.filter((task) => {
+    const saved = state.dispositions[task.id];
+    if (!saved) return true;
+    if (saved.disposition === 'snooze') {
+      const until = Date.parse(saved.until || '');
+      if (Number.isFinite(until) && until > now) return false;
+      delete state.dispositions[task.id];
+      return true;
+    }
+    return !['acknowledge', 'dismiss', 'resolved'].includes(saved.disposition);
+  });
   const counts = {};
-  for (const t of tasks) counts[t.kind] = (counts[t.kind] || 0) + 1;
-  return { generatedAt: new Date().toISOString(), month: m, count: tasks.length, counts, tasks: tasks.slice(0, 50) };
+  for (const t of visibleTasks) counts[t.kind] = (counts[t.kind] || 0) + 1;
+  return {
+    generatedAt: new Date().toISOString(),
+    month: m,
+    count: visibleTasks.length,
+    hiddenCount: tasks.length - visibleTasks.length,
+    counts,
+    tasks: visibleTasks.slice(0, 50),
+  };
 }
 
 // List of categories for the inline categorize dropdown.
@@ -2813,19 +2866,12 @@ async function getForecast({ days = 90 } = {}) {
     getBudgets({}),
     getReimbursement({}),
   ]);
-  const nonLiquidName = /(credit|\bcard\b|visa|mastercard|amex|sapphire|freedom|explorer|\bloan\b|mortgage|\bdebt\b|\broth\b|\bira\b|broker|invest)/i;
-  const cashName = /(check|saving|cash|money market)/i;
-  const liquidAccounts = accounts.filter((account) =>
-    !account.hidden &&
-    !account.offbudget &&
-    !nonLiquidName.test(account.name || '') &&
-    (account.balance >= 0 || cashName.test(account.name || ''))
-  );
+  const liquidAccounts = accountsForMetric(accounts.filter((account) => !account.hidden), 'operating_cash');
   const startBalance = round2(liquidAccounts.reduce((sum, account) => sum + account.balance, 0));
   const events = [];
-  const pushEvent = (date, label, amount, kind) => {
+  const pushEvent = (date, label, amount, kind, provenance, sourceId = null) => {
     if (!date || date < today || date > horizon || !Number.isFinite(Number(amount)) || Math.abs(Number(amount)) < 0.005) return;
-    events.push({ date, label, amount: round2(Number(amount)), kind });
+    events.push({ date, label, amount: round2(Number(amount)), kind, provenance, sourceId });
   };
 
   const nextCadenceDate = (date, cadence) => {
@@ -2846,12 +2892,14 @@ async function getForecast({ days = 90 } = {}) {
     let guard = 0;
     while (due < today && guard < 64) { due = nextCadenceDate(due, s.cadence); guard++; }
     while (due <= horizon && guard < 128) {
-      pushEvent(due, s.payee || 'Income', Math.abs(s.amount), 'income');
+      pushEvent(due, s.payee || 'Income', Math.abs(s.amount), 'income', 'inferred', s.key);
       due = nextCadenceDate(due, s.cadence);
       guard++;
     }
   }
-  for (const b of bills.bills || []) if (!b.paid) pushEvent(b.dueDate, b.payee || 'Bill', -Math.abs(b.amount), 'bill');
+  for (const b of bills.bills || []) {
+    if (!b.paid) pushEvent(b.dueDate, b.payee || 'Bill', -Math.abs(b.amount), 'bill', b.matched ? 'known' : 'inferred', b.id);
+  }
 
   const genericCategories = (budgets.groups || []).flatMap((group) =>
     (group.categories || [])
@@ -2868,7 +2916,7 @@ async function getForecast({ days = 90 } = {}) {
     const dailyBudget = month === currentMonth
       ? currentGenericRemaining / currentDaysRemaining
       : genericTarget / Math.max(1, daysInMonth(month));
-    if (dailyBudget > 0.005) pushEvent(date, 'Planned non-bill spending', -dailyBudget, 'budget');
+    if (dailyBudget > 0.005) pushEvent(date, 'Planned non-bill spending', -dailyBudget, 'budget', 'planned');
   }
   const possibleReimbursement = reimb.totalOwed > 0.5
     ? { date: addDays(today, 14), amount: round2(reimb.totalOwed), includedInBalance: false }
@@ -2917,6 +2965,76 @@ async function getForecast({ days = 90 } = {}) {
       ...(lowest.balance < 0 ? [`Projected cash drops below $0 on ${lowest.date}`] : []),
       ...(possibleReimbursement ? ['Possible reimbursements are shown separately and are not counted as guaranteed cash.'] : []),
     ],
+  };
+}
+
+async function getToday() {
+  const financeDate = todayYMD();
+  const month = financeDate.slice(0, 7);
+  const monthEndDate = monthRange(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1).end;
+  const asOf = new Date().toISOString();
+  const [accounts, spending, budgets, bills, income, review, recent] = await Promise.all([
+    getAccounts(),
+    getSpending({ month }),
+    getBudgets({ month }),
+    getBills({ days: 45 }),
+    getIncome({}),
+    getReview({ month }),
+    getTransactions({ start: addDays(financeDate, -14), end: financeDate, collapse: true }),
+  ]);
+
+  const visibleAccounts = accounts.filter((account) => !account.hidden);
+  const unassigned = visibleAccounts.filter((account) => account.roleSource !== 'explicit' || account.role === 'unknown');
+  const operatingAccounts = accountsForMetric(visibleAccounts, 'operating_cash');
+  const cashCents = Math.round(operatingAccounts.reduce((sum, account) => sum + account.balance, 0) * 100);
+  const billCents = Math.round((bills.bills || [])
+    .filter((bill) => !bill.paid && bill.dueDate >= financeDate && bill.dueDate <= monthEndDate)
+    .reduce((sum, bill) => sum + bill.amount, 0) * 100);
+  const budgetCents = Math.round((budgets.groups || []).reduce(
+    (total, group) => total + (group.categories || [])
+      .filter((category) => !BILL_CAT.test(`${group.name || ''} ${category.name || ''}`))
+      .reduce((sum, category) => sum + Math.max(0, Number(category.remaining) || 0), 0),
+    0
+  ) * 100);
+  const safeCents = cashCents - billCents - budgetCents;
+  const safeToSpend = metricValue({
+    metric: 'safe_to_spend',
+    value: fromCents(safeCents),
+    valueCents: safeCents,
+    complete: unassigned.length === 0 && operatingAccounts.length > 0 && budgets.supported !== false,
+    asOf,
+    financeDate,
+    sources: operatingAccounts.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
+    method: 'operating cash minus unpaid bills due this month minus remaining non-bill budget',
+    excludes: ['protected savings', 'investments', 'credit availability', 'possible reimbursements', 'unfunded goals'],
+    incompleteReasons: [
+      ...(unassigned.length ? [`${unassigned.length} visible account role${unassigned.length === 1 ? '' : 's'} unassigned`] : []),
+      ...(!operatingAccounts.length ? ['no operating cash account assigned'] : []),
+      ...(budgets.supported === false ? ['budget data unavailable'] : []),
+    ],
+  });
+  const revision = crypto.createHash('sha256')
+    .update(`${apiHealth.lastSyncAt || apiHealth.initializedAt || ''}\0${financeDate}`)
+    .digest('hex')
+    .slice(0, 16);
+
+  return {
+    asOf,
+    financeDate,
+    revision,
+    complete: safeToSpend.complete,
+    incompleteReasons: safeToSpend.incompleteReasons,
+    health: getHealth(),
+    accounts,
+    spending,
+    liquidity: { safeToSpend },
+    obligations: {
+      bills: (bills.bills || []).filter((bill) => !bill.paid).slice(0, 5),
+      nextIncome: (income.streams || []).filter((stream) => stream.active).sort((a, b) => String(a.nextPay).localeCompare(String(b.nextPay)))[0] || null,
+      source: 'inferred',
+    },
+    review,
+    activity: { recent: recent.slice(0, 8) },
   };
 }
 
@@ -3004,17 +3122,106 @@ async function locateReplacement(api, accountId, date, beforeIds, expected) {
   ) || null;
 }
 
-async function replaceActualTransaction(api, { accountId, original, replacement }) {
+function readTransactionSagas() {
+  const state = readJsonSafe(TRANSACTION_SAGAS_PATH, { schemaVersion: 1, sagas: {} });
+  if (!state || state.schemaVersion !== 1 || !state.sagas || typeof state.sagas !== 'object') {
+    throw new Error('invalid transaction saga state');
+  }
+  return state;
+}
+
+function writeTransactionSaga(saga) {
+  const state = readTransactionSagas();
+  state.sagas[saga.id] = saga;
+  const ordered = Object.values(state.sagas)
+    .sort((a, b) => String(b.updatedAt || b.startedAt).localeCompare(String(a.updatedAt || a.startedAt)));
+  state.sagas = Object.fromEntries(ordered.slice(0, 100).map((entry) => [entry.id, entry]));
+  writeJsonSafe(TRANSACTION_SAGAS_PATH, state);
+}
+
+function updateTransactionSaga(saga, patch) {
+  Object.assign(saga, patch, { updatedAt: new Date().toISOString() });
+  writeTransactionSaga(saga);
+}
+
+async function recoverTransactionSagas(actualApi) {
+  const state = readTransactionSagas();
+  const active = Object.values(state.sagas).filter((saga) => !['completed', 'recovered', 'aborted'].includes(saga.status));
+  let changed = false;
+  for (const saga of active) {
+    const transactions = await actualApi.getTransactions(saga.accountId, saga.original.date, saga.original.date);
+    const originalPresent = transactions.some((transaction) => String(transaction.id) === String(saga.original.id));
+    if (originalPresent) {
+      updateTransactionSaga(saga, { status: 'aborted', recovery: 'original-still-present' });
+      continue;
+    }
+    const beforeIds = new Set(saga.beforeIds || []);
+    let replacementTransaction = transactions.find((transaction) =>
+      !beforeIds.has(String(transaction.id))
+      && transaction.date === saga.replacement.date
+      && transaction.amount === saga.replacement.amount
+      && (!saga.replacement.imported_id || transaction.imported_id === saga.replacement.imported_id)
+    );
+    if (replacementTransaction) {
+      const idMap = transactionReplacementMap(saga.original, replacementTransaction, saga.requestedLegs || undefined);
+      updateTransactionReferences(idMap);
+      updateTransactionSaga(saga, {
+        status: 'completed',
+        replacementId: String(replacementTransaction.id),
+        recovery: 'finished-reference-migration',
+      });
+      changed = true;
+      continue;
+    }
+    const idsBeforeRestore = new Set(transactions.map((transaction) => String(transaction.id)));
+    await actualApi.addTransactions(saga.accountId, [addableTransaction(saga.original)], { learnCategories: false, runTransfers: false });
+    replacementTransaction = await locateReplacement(
+      actualApi,
+      saga.accountId,
+      saga.original.date,
+      idsBeforeRestore,
+      addableTransaction(saga.original),
+    );
+    if (!replacementTransaction) throw new Error(`could not recover transaction saga ${saga.id}`);
+    updateTransactionReferences(transactionReplacementMap(saga.original, replacementTransaction));
+    updateTransactionSaga(saga, {
+      status: 'recovered',
+      recoveryTransactionId: String(replacementTransaction.id),
+      recovery: 'restored-original',
+    });
+    changed = true;
+  }
+  if (changed) await actualApi.sync();
+}
+
+async function replaceActualTransaction(api, { accountId, original, replacement, requestedLegs }) {
   if (original.transfer_id) throw new Error('transfer transactions cannot be rebuilt as splits');
   readTransactionReferenceStores(); // fail before deleting if any sidecar is unreadable
   const dayTransactions = await api.getTransactions(accountId, original.date, original.date);
   const beforeIds = new Set(dayTransactions.map((transaction) => String(transaction.id)));
+  const saga = {
+    id: `replace_${Date.now().toString(36)}_${crypto.randomBytes(6).toString('hex')}`,
+    status: 'prepared',
+    accountId: String(accountId),
+    original,
+    replacement,
+    requestedLegs: requestedLegs || null,
+    beforeIds: [...beforeIds],
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  writeTransactionSaga(saga);
   await api.deleteTransaction(original.id);
+  updateTransactionSaga(saga, { status: 'original-deleted' });
   let added = null;
   try {
     await api.addTransactions(accountId, [replacement], { learnCategories: false, runTransfers: false });
     added = await locateReplacement(api, accountId, original.date, beforeIds, replacement);
     if (!added) throw new Error('replacement transaction could not be identified');
+    updateTransactionSaga(saga, { status: 'replacement-added', replacementId: String(added.id) });
+    const idMap = transactionReplacementMap(original, added, requestedLegs);
+    const references = updateTransactionReferences(idMap);
+    updateTransactionSaga(saga, { status: 'completed', idMap, references });
     return added;
   } catch (error) {
     try {
@@ -3023,8 +3230,20 @@ async function replaceActualTransaction(api, { accountId, original, replacement 
       const restored = await locateReplacement(api, accountId, original.date, beforeIds, addableTransaction(original));
       if (restored) updateTransactionReferences(transactionReplacementMap(original, restored));
       error.recoveryTransactionId = restored?.id || null;
+      updateTransactionSaga(saga, {
+        status: 'recovered',
+        recoveryTransactionId: restored?.id ? String(restored.id) : null,
+        error: error.message,
+      });
     } catch (recoveryError) {
       error.recoveryError = recoveryError;
+      try {
+        updateTransactionSaga(saga, {
+          status: 'recovery-failed',
+          error: error.message,
+          recoveryError: recoveryError.message,
+        });
+      } catch (_) {}
     }
     throw error;
   }
@@ -3139,7 +3358,7 @@ async function splitTransaction({ id, accountId, date, legs } = {}) {
         payee: leg.payeeId || undefined,
       })),
     });
-    const added = await replaceActualTransaction(api, { accountId, original: target, replacement });
+    const added = await replaceActualTransaction(api, { accountId, original: target, replacement, requestedLegs: target.is_parent ? norm : undefined });
     const idMap = transactionReplacementMap(target, added, target.is_parent ? norm : undefined);
     const references = updateTransactionReferences(idMap);
     return {
@@ -3154,16 +3373,15 @@ async function splitTransaction({ id, accountId, date, legs } = {}) {
   });
 }
 
-// When a pending charge you'd already split later POSTS at a different amount, the
-// bank updates the parent total but the legs still sum to the old total. Rather than
-// force you to re-split, absorb the difference into the master (first/remainder) leg
-// so the split stays valid — exactly what you asked for. Idempotent; runs on refresh.
-async function reconcileSplitDeltas(api, { months = 3 } = {}) {
+// A pending split can post at a different amount. Discovery is read-only by
+// default: silently absorbing the delta into one leg destroys allocation intent.
+async function reconcileSplitDeltas(api, { months = 3, apply = false } = {}) {
   const today = todayYMD();
   const start = addDays(today, -Math.round(30.44 * months));
   const accounts = (await api.getAccounts()).filter((a) => !a.closed);
   let fixed = 0;
   const failures = [];
+  const pending = [];
   for (const a of accounts) {
     const txns = await api.getTransactions(a.id, start, today);
     for (const t of txns) {
@@ -3173,6 +3391,15 @@ async function reconcileSplitDeltas(api, { months = 3 } = {}) {
       if (delta === 0) continue;
       const master = t.subtransactions[0];
       const newMaster = (master.amount || 0) + delta;
+      pending.push({
+        id: String(t.id),
+        accountId: String(a.id),
+        date: t.date,
+        delta: fromCents(delta),
+        currentTotal: fromCents(t.amount),
+        proposedFirstLeg: fromCents(newMaster),
+      });
+      if (!apply) continue;
       // A 0-amount leg is invalid in Actual, and flipping the master's sign would
       // mean the posted total no longer resembles the original split — skip & log.
       if (newMaster === 0 || Math.sign(newMaster) !== Math.sign(t.amount)) {
@@ -3196,16 +3423,16 @@ async function reconcileSplitDeltas(api, { months = 3 } = {}) {
       }
     }
   }
-  return { fixed, failures };
+  return { fixed, failures, pending };
 }
-// Self-contained wrapper for the refresh pipeline.
-async function reconcileSplits() {
-  const result = await withApi((api) => reconcileSplitDeltas(api));
+// Self-contained wrapper for refresh (preview) and explicit confirmation (apply).
+async function reconcileSplits({ apply = false } = {}) {
+  const result = await withApi((api) => reconcileSplitDeltas(api, { apply }));
   if (result.fixed) await syncNow();
   if (result.failures.length) {
     throw new Error(`failed to reconcile ${result.failures.length} split transaction(s)`);
   }
-  return { ok: true, fixed: result.fixed };
+  return { ok: true, fixed: result.fixed, pending: result.pending };
 }
 
 // Auto-file expenses that someone else actually pays (tagged #<person>) into
@@ -3434,6 +3661,12 @@ function addReceipt({ txnId, imageBase64, mime, ocrText, ocrLines, amount, date,
   const detected = detectedImageMime(buf);
   const compatibleHeif = detected && ['image/heic', 'image/heif'].includes(detected) && ['image/heic', 'image/heif'].includes(m);
   if (!detected || (detected !== m && !compatibleHeif)) throw new Error('receipt image bytes do not match the declared type');
+  const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+  const store = readReceipts();
+  for (const receipts of Object.values(store.byTxn)) {
+    const duplicate = receipts.find((receipt) => receipt.sha256 === sha256);
+    if (duplicate) throw new Error(`duplicate receipt image already stored as ${duplicate.id}`);
+  }
   const ext = EXT_FOR_MIME[detected];
   const id = `rcpt_${Date.now().toString(36)}_${crypto.randomBytes(6).toString('hex')}`;
   ensureReceiptsDir();
@@ -3461,9 +3694,10 @@ function addReceipt({ txnId, imageBase64, mime, ocrText, ocrLines, amount, date,
     amount: Number.isFinite(Number(amount)) ? round2(Number(amount)) : null,
     date: date || null,
     source: source || 'camera',
+    sha256,
+    evidenceStatus: ocrText || (Array.isArray(ocrLines) && ocrLines.length) ? 'needs-review' : 'unreadable',
     uploadedAt: new Date().toISOString(),
   };
-  const store = readReceipts();
   (store.byTxn[rec.txnId] = store.byTxn[rec.txnId] || []).push(rec);
   try {
     writeJsonSafe(RECEIPTS_PATH, store);
@@ -3475,7 +3709,7 @@ function addReceipt({ txnId, imageBase64, mime, ocrText, ocrLines, amount, date,
 }
 // Strip server-only fields for API responses (the file name stays internal).
 function publicReceipt(r) {
-  return { id: r.id, txnId: r.txnId, mime: r.mime, size: r.size, ocrText: r.ocrText, ocrLines: r.ocrLines, amount: r.amount, date: r.date, source: r.source, uploadedAt: r.uploadedAt };
+  return { id: r.id, txnId: r.txnId, mime: r.mime, size: r.size, ocrText: r.ocrText, ocrLines: r.ocrLines, amount: r.amount, date: r.date, source: r.source, evidenceStatus: r.evidenceStatus || 'unreadable', uploadedAt: r.uploadedAt };
 }
 function getReceipts({ txnId } = {}) {
   const store = readReceipts();
@@ -4040,7 +4274,8 @@ async function setTransactionDate({ id, date, isLeg }) {
 }
 
 // ---------------------------------------------------------------------------
-// Savings goals — sidecar JSON; progress tracks a linked account balance
+// Savings goals — funded allocations; linked accounts are capacity constraints,
+// never balances that multiple goals may each claim in full.
 // ---------------------------------------------------------------------------
 async function getGoals() {
   return withApi(async (api) => {
@@ -4050,29 +4285,56 @@ async function getGoals() {
     const balById = {};
     accounts.forEach((a, i) => { balById[a.id] = bals[i] / 100; });
     return goals.map((g) => {
-      const current = g.accountId && balById[g.accountId] != null ? balById[g.accountId] : (g.current || 0);
+      const current = Math.max(0, Number(g.current) || 0);
+      const remaining = Math.max(0, Number(g.target) - current);
+      let monthlyRequired = null;
+      if (g.deadline && /^\d{4}-\d{2}$/.test(g.deadline)) {
+        const now = todayYMD().slice(0, 7);
+        const [nowYear, nowMonth] = now.split('-').map(Number);
+        const [endYear, endMonth] = g.deadline.split('-').map(Number);
+        const months = Math.max(1, (endYear - nowYear) * 12 + endMonth - nowMonth + 1);
+        monthlyRequired = fromCents(Math.ceil(Math.round(remaining * 100) / months));
+      }
       return {
         ...g,
         current: round2(current),
         pct: g.target > 0 ? Math.min(999, Math.round((current / g.target) * 100)) : null,
+        fundingSource: g.accountId ? 'allocated-account' : 'manual',
+        availableInAccount: g.accountId && balById[g.accountId] != null ? Math.max(0, round2(balById[g.accountId])) : null,
+        monthlyRequired,
       };
     });
   });
 }
 
-function saveGoal(goal = {}) {
+async function saveGoal(goal = {}) {
   if (!goal.name || !(goal.target > 0)) throw new Error('name and positive target required');
-  const goals = readJsonSafe(GOALS_PATH, []);
-  if (goal.id) {
-    const i = goals.findIndex((g) => g.id === goal.id);
-    if (i >= 0) goals[i] = { ...goals[i], ...goal };
-    else goals.push(goal);
-  } else {
-    goal.id = 'g' + Date.now().toString(36);
-    goals.push(goal);
-  }
-  writeJsonSafe(GOALS_PATH, goals);
-  return { ok: true, id: goal.id };
+  return withApi(async (api) => {
+    const goals = readJsonSafe(GOALS_PATH, []);
+    const normalized = { ...goal, current: round2(Math.max(0, Number(goal.current) || 0)) };
+    if (normalized.accountId) {
+      const accounts = await api.getAccounts();
+      const account = accounts.find((candidate) => candidate.id === normalized.accountId && !candidate.closed);
+      if (!account) throw new Error('linked account not found');
+      const capacity = Math.max(0, (await api.getAccountBalance(account.id)) / 100);
+      const allocatedElsewhere = goals
+        .filter((candidate) => candidate.id !== normalized.id && candidate.accountId === normalized.accountId)
+        .reduce((sum, candidate) => sum + Math.max(0, Number(candidate.current) || 0), 0);
+      if (allocatedElsewhere + normalized.current > capacity + 0.005) {
+        throw new Error(`goal allocations exceed the linked account balance by ${round2(allocatedElsewhere + normalized.current - capacity)}`);
+      }
+    }
+    if (normalized.id) {
+      const i = goals.findIndex((candidate) => candidate.id === normalized.id);
+      if (i >= 0) goals[i] = { ...goals[i], ...normalized };
+      else goals.push(normalized);
+    } else {
+      normalized.id = 'g' + Date.now().toString(36);
+      goals.push(normalized);
+    }
+    writeJsonSafe(GOALS_PATH, goals);
+    return { ok: true, id: normalized.id };
+  });
 }
 
 function deleteGoal(id) {
@@ -4213,6 +4475,7 @@ module.exports = {
   syncNow,
   bankSync,
   resetApi,
+  shutdownApi,
   getAccounts,
   setAccountOverride,
   getManualAssets,
@@ -4226,12 +4489,15 @@ module.exports = {
   getBudgets,
   setBudgetAmount,
   getReimbursement,
+  classifyOwesTruth,
+  directReimbursementLegs,
   getOwesConfig,
   setOwesConfig,
   getReimbLinks,
   addReimbLink,
   deleteReimbLink,
   getReview,
+  setReviewDisposition,
   suggestRepayments,
   confirmRepayment,
   dismissRepayment,
@@ -4258,6 +4524,7 @@ module.exports = {
   addableTransaction,
   transactionReplacementMap,
   replaceActualTransaction,
+  recoverTransactionSagas,
   getMerchantHistory,
   deleteTransaction,
   setPayee,
@@ -4279,6 +4546,7 @@ module.exports = {
   getIncome,
   getBills,
   getForecast,
+  getToday,
   setBillPaid,
   searchTransactions,
   getTags,

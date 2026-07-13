@@ -1,6 +1,7 @@
 // Response types for the DarkFinances API (/api/v1/*). Mirrors dataModule.js output.
 
 export type Nullish<T> = T | null | undefined;
+export type AccountRole = 'operating_cash' | 'protected_savings' | 'credit_card' | 'loan' | 'investment' | 'excluded' | 'unknown';
 
 export interface Account {
   id: string;
@@ -8,6 +9,8 @@ export interface Account {
   offbudget: boolean;
   balance: number;
   hidden?: boolean;
+  role: AccountRole;
+  roleSource: 'explicit' | 'unknown';
 }
 
 export interface ManualAsset {
@@ -294,6 +297,12 @@ export interface Reimbursement {
   owesSource?: string;
   owesGeneratedAt?: string | null;
   owesWarning?: string | null;
+  lastKnownSplitwise?: {
+    generatedAt: string | null;
+    total: number;
+    bySlug: Record<string, { event: string; amount: number }[]>;
+    source: string;
+  } | null;
   ledgerCutoff?: string | null;
   people: ReimbPerson[];
   events: ReimbEvent[];
@@ -349,6 +358,7 @@ export interface ReviewInbox {
   generatedAt: string;
   month: string;
   count: number;
+  hiddenCount?: number;
   counts: Partial<Record<ReviewTaskKind, number>>;
   tasks: ReviewTask[];
 }
@@ -380,7 +390,7 @@ export interface Insights {
   anomalies: { category: string; current: number; avg: number; deltaPct: number | null }[];
 }
 
-export type Cadence = 'weekly' | 'biweekly' | 'monthly' | 'bimonthly' | 'quarterly' | 'semiannual' | 'annual';
+export type Cadence = 'weekly' | 'biweekly' | 'semimonthly' | 'monthly' | 'bimonthly' | 'quarterly' | 'semiannual' | 'annual';
 export type RecurringStatus = 'active' | 'inactive' | 'cancelled';
 
 export interface RecurringItem {
@@ -457,6 +467,8 @@ export interface ForecastEvent {
   label: string;
   amount: number;
   kind: 'income' | 'bill' | 'budget' | 'reimbursement';
+  provenance: 'known' | 'planned' | 'inferred' | 'possible';
+  sourceId?: string | null;
 }
 export interface ForecastPoint {
   date: string;
@@ -646,6 +658,7 @@ export interface Receipt {
   amount: number | null;
   date: string | null;
   source: string;
+  evidenceStatus: 'needs-review' | 'matched' | 'mismatch' | 'unreadable';
   uploadedAt: string;
 }
 export interface Receipts {
@@ -669,6 +682,9 @@ export interface Goal {
   deadline?: string | null;
   current: number;
   pct: number | null;
+  fundingSource?: 'allocated-account' | 'manual';
+  availableInAccount?: number | null;
+  monthlyRequired?: number | null;
 }
 export interface GoalInput {
   id?: string;
@@ -735,6 +751,14 @@ export interface Ping {
   startedAt?: string;
   financeTimeZone?: string;
   queuedMutations?: number;
+  release?: {
+    commit: string | null;
+    dirty: boolean;
+    lockSha256: string | null;
+    contract: string | null;
+    appVersion: string | null;
+    builtAt: string | null;
+  } | null;
   actual?: {
     ready: boolean;
     initializedAt?: string | null;
@@ -742,4 +766,34 @@ export interface Ping {
     lastErrorAt?: string | null;
     lastError?: string | null;
   };
+}
+
+export interface MetricProvenance {
+  metric: string;
+  asOf: string;
+  financeDate: string;
+  sources: { type: string; id?: string; role?: AccountRole }[];
+  method: string;
+  excludes: string[];
+}
+export interface MetricValue {
+  value: number | null;
+  valueCents: number | null;
+  complete: boolean;
+  incompleteReasons: string[];
+  provenance: MetricProvenance;
+}
+export interface Today {
+  asOf: string;
+  financeDate: string;
+  revision: string;
+  complete: boolean;
+  incompleteReasons: string[];
+  health: NonNullable<Ping['actual']>;
+  accounts: Account[];
+  spending: Spending;
+  liquidity: { safeToSpend: MetricValue };
+  obligations: { bills: Bill[]; nextIncome: IncomeStream | null; source: 'inferred' | 'confirmed' };
+  review: ReviewInbox;
+  activity: { recent: Transaction[] };
 }

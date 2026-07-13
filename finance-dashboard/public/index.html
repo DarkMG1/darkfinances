@@ -527,7 +527,8 @@
     // ---- Demo mode: route every /api call through ?demo=1 so the server returns
     // synthetic data. Toggle persists in localStorage; nothing real is exposed. ----
     const DEMO_KEY = 'df_demo';
-    let demoMode = localStorage.getItem(DEMO_KEY) === '1';
+    const demoOnlyPage = location.pathname === '/demo';
+    let demoMode = demoOnlyPage || localStorage.getItem(DEMO_KEY) === '1';
     (function () {
       const _fetch = window.fetch.bind(window);
       window.fetch = (url, opts) => {
@@ -538,6 +539,7 @@
       };
     })();
     function toggleDemo() {
+      if (demoOnlyPage) return;
       demoMode = !demoMode;
       localStorage.setItem(DEMO_KEY, demoMode ? '1' : '0');
       location.reload();
@@ -545,7 +547,14 @@
     function applyDemoIndicator() {
       document.body.classList.toggle('demo-on', demoMode);
       const b = document.getElementById('demoToggle');
-      if (b) { b.classList.toggle('demo-active', demoMode); b.textContent = demoMode ? 'Demo \u2713' : 'Demo'; }
+      if (b) {
+        b.classList.toggle('demo-active', demoMode);
+        b.textContent = demoMode ? 'Demo \u2713' : 'Demo';
+        if (demoOnlyPage) {
+          b.disabled = true;
+          b.title = 'This page always uses synthetic data';
+        }
+      }
     }
 
     const CATEGORY_COLORS = [
@@ -570,13 +579,27 @@
     const fmt = (n) => (n < 0 ? '-' : '') + '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const fmtPos = (n) => '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const fmtK = (n) => { const a = Math.abs(n); return (n < 0 ? '-$' : '$') + (a >= 1000 ? (a / 1000).toFixed(1) + 'k' : a.toFixed(0)); };
+    let financeTimeZone = 'America/Los_Angeles';
     const formatDate = (d) => { const [, m, day] = d.split('-'); return `${m}/${day}`; };
     const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const fmtDay = (d) => { if (!d) return ''; const [y, m, day] = d.split('-'); return `${MONTH_ABBR[+m - 1]} ${+day}`; };
     const monthLabel = (key) => { const [y, m] = key.split('-'); return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }); };
     const CADENCE_LABELS = { weekly: 'Weekly', biweekly: 'Every 2 weeks', semimonthly: 'Twice a month', monthly: 'Monthly', bimonthly: 'Every 2 months', quarterly: 'Quarterly', semiannual: 'Every 6 months', annual: 'Yearly' };
     const cadenceLabel = (c) => CADENCE_LABELS[c] || c;
-    const daysUntil = (d) => { const n = new Date(); n.setHours(0, 0, 0, 0); const [y, m, day] = d.split('-').map(Number); return Math.round((new Date(y, m - 1, day) - n) / 86400000); };
+    const financeParts = (value = new Date()) => Object.fromEntries(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: financeTimeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+      }).formatToParts(value).filter((p) => p.type !== 'literal').map((p) => [p.type, Number(p.value)])
+    );
+    const financeToday = () => {
+      const { year, month, day } = financeParts();
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    };
+    const ymdOrdinal = (d) => {
+      const [y, m, day] = d.split('-').map(Number);
+      return Math.floor(Date.UTC(y, m - 1, day) / 86400000);
+    };
+    const daysUntil = (d) => ymdOrdinal(d) - ymdOrdinal(financeToday());
     const dueLabel = (d) => { const n = daysUntil(d); if (n < 0) return `${-n}d overdue`; if (n === 0) return 'today'; if (n === 1) return 'tomorrow'; if (n < 14) return `in ${n}d`; return fmtDay(d); };
     const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
     const html = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (ch) => ({
@@ -592,33 +615,34 @@
     }
 
     function monthBounds() {
-      const now = new Date();
+      const today = financeToday();
+      const [todayYear, todayMonth, todayDay] = today.split('-').map(Number);
       let y, m;
-      if (state.month) { [y, m] = state.month.split('-').map(Number); m -= 1; } else { y = now.getFullYear(); m = now.getMonth(); }
+      if (state.month) { [y, m] = state.month.split('-').map(Number); m -= 1; } else { y = todayYear; m = todayMonth - 1; }
       const start = `${y}-${String(m + 1).padStart(2, '0')}-01`;
-      const isCurrent = (y === now.getFullYear() && m === now.getMonth());
-      const endD = isCurrent ? now : new Date(y, m + 1, 0);
-      const end = `${endD.getFullYear()}-${String(endD.getMonth() + 1).padStart(2, '0')}-${String(endD.getDate()).padStart(2, '0')}`;
+      const isCurrent = y === todayYear && m === todayMonth - 1;
+      const endDay = isCurrent ? todayDay : new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+      const end = `${y}-${String(m + 1).padStart(2, '0')}-${String(endDay).padStart(2, '0')}`;
       return { start, end };
     }
     const monthQS = () => (state.month ? `?month=${state.month}` : '');
 
     function buildMonthPicker() {
       const sel = document.getElementById('monthPicker');
-      const now = new Date();
-      let html = '';
+      const { year, month } = financeParts();
+      let markup = '';
       for (let i = 0; i < 12; i++) {
-        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        const d = new Date(Date.UTC(year, month - 1 - i, 1));
+        const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
         const label = i === 0 ? 'This month' : monthLabel(key);
-        html += `<option value="${i === 0 ? '' : key}">${label}</option>`;
+        markup += `<option value="${i === 0 ? '' : key}">${label}</option>`;
       }
-      sel.innerHTML = html;
+      sel.innerHTML = markup;
     }
 
     // ---- Accounts + Net Worth -------------------------------------------------
     async function loadAccounts() {
-      accounts = await (await fetch('/api/accounts')).json();
+      accounts = (await (await fetch('/api/accounts')).json()).filter((account) => !account.hidden);
       let totalAssets = 0, totalLiabilities = 0;
       const grid = document.getElementById('accountsGrid');
       grid.innerHTML = '';
@@ -758,24 +782,24 @@
         meta.innerHTML = (hasTargets ? `${fmtPos(totalSpent)} / ${fmtPos(data.totalBudgeted)}` : fmtPos(totalSpent))
           + (overCount ? ` · <span class="over">${overCount} over</span>` : '');
       }
-      let html = '';
-      if (!hasTargets) html += `<div class="note" style="margin-bottom:1rem">No monthly targets set in Actual — showing spend by category.</div>`;
+      let markup = '';
+      if (!hasTargets) markup += `<div class="note" style="margin-bottom:1rem">No monthly targets set in Actual — showing spend by category.</div>`;
       for (const g of data.groups) {
         const groupMax = Math.max(...g.categories.map(c => c.spent), 1);
-        html += `<div class="budget-group">
+        markup += `<div class="budget-group">
           <div class="budget-group-head"><span>${html(g.name)}</span><span class="muted">${hasTargets ? fmtPos(g.spent) + ' / ' + fmtPos(g.budgeted) : fmtPos(g.spent)}</span></div>`;
         for (const c of g.categories) {
           const pct = hasTargets && c.budgeted > 0 ? Math.min(100, (c.spent / c.budgeted) * 100) : (c.spent / groupMax * 100);
           const cls = hasTargets && c.over ? 'over' : (hasTargets && pct > 85 ? 'warn' : '');
           const right = hasTargets && c.budgeted > 0 ? `${fmtPos(c.spent)} / ${fmtPos(c.budgeted)}` : fmtPos(c.spent);
-          html += `<div class="budget-row">
+          markup += `<div class="budget-row">
             <div class="budget-row-top"><span class="b-name">${html(c.name)}</span><span class="b-amt">${right}${hasTargets && c.over ? ' · over' : ''}</span></div>
             <div class="bar-track"><div class="bar-fill ${cls}" style="width:${pct.toFixed(0)}%"></div></div>
           </div>`;
         }
-        html += `</div>`;
+        markup += `</div>`;
       }
-      card.innerHTML = html;
+      card.innerHTML = markup;
     }
 
     // ---- Reimbursement --------------------------------------------------------
@@ -802,8 +826,9 @@
       if (!events.length) { evList.innerHTML = '<div class="empty-state">No tagged events</div>'; return; }
 
       // Hide trips that settled more than a month ago; open trips always stay visible.
-      const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - 1);
-      const cutoffYMD = cutoff.toISOString().slice(0, 10);
+      const [fy, fm, fd] = financeToday().split('-').map(Number);
+      const cutoffDate = new Date(Date.UTC(fy, fm - 2, fd));
+      const cutoffYMD = `${cutoffDate.getUTCFullYear()}-${String(cutoffDate.getUTCMonth() + 1).padStart(2, '0')}-${String(cutoffDate.getUTCDate()).padStart(2, '0')}`;
       const isOld = (e) => e.status !== 'open' && e.settledDate && e.settledDate < cutoffYMD;
 
       const row = (e) => {
@@ -818,10 +843,10 @@
       };
 
       const oldCount = events.filter(isOld).length;
-      let html = events.map(row).join('');
-      if (oldCount) html += `<button class="reveal-btn" id="revealTrips" type="button">Show ${oldCount} older trip${oldCount === 1 ? '' : 's'}</button>`;
+      let markup = events.map(row).join('');
+      if (oldCount) markup += `<button class="reveal-btn" id="revealTrips" type="button">Show ${oldCount} older trip${oldCount === 1 ? '' : 's'}</button>`;
       evList.classList.remove('show-old');
-      evList.innerHTML = html;
+      evList.innerHTML = markup;
 
       const btn = document.getElementById('revealTrips');
       if (btn) btn.addEventListener('click', () => {
@@ -867,7 +892,7 @@
         const k = String(it.key || '');
         const hike = it.priceChange
           ? `<div class="hike ${it.priceChange.pct > 0 ? 'up' : 'down'}">${it.priceChange.pct > 0 ? '▲' : '▼'} ${Math.abs(it.priceChange.pct)}%</div>` : '';
-        const status = it.status === 'active' ? dueLabel(it.nextRenewal) : (it.status === 'cancelled' ? 'cancelled' : 'inactive');
+        const status = it.status === 'active' ? `estimated ${dueLabel(it.nextRenewal)}` : (it.status === 'cancelled' ? 'cancelled' : 'inactive');
         const toggle = it.status === 'cancelled'
           ? `<button class="sub-action" data-sub-key="${html(k)}" data-sub-status="active">reactivate</button>`
           : `<button class="sub-action" data-sub-key="${html(k)}" data-sub-status="cancelled">cancel</button>`;
@@ -880,10 +905,10 @@
       };
       const active = items.filter(i => i.status === 'active');
       const inactive = items.filter(i => i.status !== 'active');
-      let html = '';
-      if (active.length) html += `<div class="sub-group-label">Active · ${fmtPos(data.monthlyTotal)}/mo</div>` + active.map(rowHtml).join('');
-      if (inactive.length) html += `<div class="sub-group-label">Inactive &amp; Cancelled</div>` + inactive.map(rowHtml).join('');
-      card.innerHTML = html;
+      let markup = '';
+      if (active.length) markup += `<div class="sub-group-label">Active · ${fmtPos(data.monthlyTotal)}/mo</div>` + active.map(rowHtml).join('');
+      if (inactive.length) markup += `<div class="sub-group-label">Inactive &amp; Cancelled</div>` + inactive.map(rowHtml).join('');
+      card.innerHTML = markup;
       card.querySelectorAll('[data-sub-key]').forEach((button) => {
         button.addEventListener('click', () => {
           const body = button.dataset.subHidden === 'true'
@@ -912,7 +937,7 @@
       bills.forEach(b => { const d = daysUntil(b.dueDate); (d <= 7 ? buckets[0] : d <= 14 ? buckets[1] : buckets[2]).items.push(b); });
       card.innerHTML = buckets.filter(x => x.items.length).map(x =>
         `<div class="bill-bucket">${html(x.t)}</div>` + x.items.map(b => `
-          <div class="bill-row"><div class="bill-due">${html(dueLabel(b.dueDate))}</div>
+          <div class="bill-row"><div class="bill-due">${html(`est. ${dueLabel(b.dueDate)}`)}</div>
             <div class="bill-main"><div class="bill-payee">${html(cap(b.payee))}</div><div class="bill-cat">${html(b.category)} · ${html(cadenceLabel(b.cadence))}</div></div>
             <div class="bill-amt">${fmtPos(b.amount)}</div></div>`).join('')
       ).join('');
@@ -994,10 +1019,10 @@
     }
     function renderActiveFilters() {
       const el = document.getElementById('activeFilters');
-      let html = '';
-      if (state.accountFilter) html += `<span class="chip">${html(state.accountFilter.name)}<button onclick="clearFilter('account')">×</button></span>`;
-      if (state.categoryFilter) html += `<span class="chip">${html(state.categoryFilter)}<button onclick="clearFilter('category')">×</button></span>`;
-      el.innerHTML = html;
+      let markup = '';
+      if (state.accountFilter) markup += `<span class="chip">${html(state.accountFilter.name)}<button onclick="clearFilter('account')">×</button></span>`;
+      if (state.categoryFilter) markup += `<span class="chip">${html(state.categoryFilter)}<button onclick="clearFilter('category')">×</button></span>`;
+      el.innerHTML = markup;
     }
 
     function filterTxns() { state.txnPage = 50; renderTxns(); }
@@ -1083,6 +1108,26 @@
     }
     async function refreshData() { await fetch('/api/refresh', { method: 'POST' }); location.reload(); }
 
+    async function loadFinanceContext() {
+      const response = await fetch('/api/v1/ping');
+      if (!response.ok) return;
+      const payload = await response.json();
+      const data = payload && payload.data;
+      if (data && typeof data.financeTimeZone === 'string') financeTimeZone = data.financeTimeZone;
+    }
+
+    async function loadSection(load, targetIds) {
+      try {
+        await load();
+      } catch (error) {
+        console.error(error);
+        for (const id of targetIds) {
+          const target = document.getElementById(id);
+          if (target) target.innerHTML = '<div class="empty-state">Could not load this section. Refresh to retry.</div>';
+        }
+      }
+    }
+
     // CSV download for the selected month. A plain navigation (not the fetch
     // wrapper) so the browser handles the attachment; demo flag added manually.
     function exportCsv() {
@@ -1102,12 +1147,20 @@
     }
 
     async function init() {
+      await loadFinanceContext().catch(console.error);
       buildMonthPicker(); applyDemoIndicator(); applyMonthTags();
-      await loadCategories();
       await Promise.all([
-        loadAccounts(), loadSpending(), loadTrends(), loadBudgets(),
-        loadReimbursement(), loadInsights(), loadTransactions(),
-        loadRecurring(), loadBills(), loadGoals(),
+        loadSection(loadCategories, []),
+        loadSection(loadAccounts, ['accountsGrid']),
+        loadSection(loadSpending, ['categoryList']),
+        loadSection(loadTrends, []),
+        loadSection(loadBudgets, ['budgetCard']),
+        loadSection(loadReimbursement, ['oweList', 'eventList']),
+        loadSection(loadInsights, ['largestList', 'uncatList', 'anomalyList']),
+        loadSection(loadTransactions, ['txnBody']),
+        loadSection(loadRecurring, ['recurringCard']),
+        loadSection(loadBills, ['billsCard']),
+        loadSection(loadGoals, ['goalsCard']),
       ]);
     }
     init().catch(console.error);

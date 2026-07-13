@@ -21,6 +21,7 @@ function validDateOnly(value) {
 const dateOnly = z.string().refine(validDateOnly, 'date must be a real YYYY-MM-DD date');
 const monthOnly = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'month must be YYYY-MM');
 const nullableIdentifier = identifier.optional().nullable();
+const accountRole = z.enum(['operating_cash', 'protected_savings', 'credit_card', 'loan', 'investment', 'excluded', 'unknown']);
 
 const transactionRef = z.object({
   id: identifier,
@@ -123,7 +124,15 @@ const schemas = {
     id: identifier.optional(),
     name: z.string().max(300).optional().nullable(),
     hidden: z.boolean().optional(),
-  }).strict().refine((value) => value.name !== undefined || value.hidden !== undefined, 'an override field is required'),
+    role: accountRole.optional().nullable(),
+  }).strict().refine((value) => value.name !== undefined || value.hidden !== undefined || value.role !== undefined, 'an override field is required'),
+
+  reviewDisposition: z.object({
+    id: nonEmpty(500),
+    disposition: z.enum(['acknowledge', 'snooze', 'dismiss', 'resolved', 'clear']),
+    until: z.string().datetime().optional().nullable(),
+    note: z.string().max(1000).optional().nullable(),
+  }).strict().refine((value) => value.disposition !== 'snooze' || !!value.until, 'snooze requires an until timestamp'),
 
   manualAsset: z.object({
     id: identifier.optional(),
