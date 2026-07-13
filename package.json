@@ -17,6 +17,7 @@
     "check:toolchain": "node -e \"const v=process.versions.node.split('.').map(Number); if (v[0]<24) { console.error('Node 24+ required, got '+process.versions.node); process.exit(1); }\"",
     "check:alignment": "node scripts/check-version-alignment.js",
     "check:contract": "node scripts/check-contract-freshness.js",
+    "update:contract-stamp": "node scripts/update-contract-fingerprint.js",
     "check:fixtures": "node scripts/check-finance-fixtures.js",
     "check:dashboard": "npm --prefix finance-dashboard test && npm --prefix finance-dashboard run lint",
     "check:app": "npm --prefix finance-app test && npm --prefix finance-app run lint && node finance-app/scripts/verify-release-variant.js",

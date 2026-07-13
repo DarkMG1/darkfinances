@@ -42,12 +42,22 @@ to agree on `@actual-app/api` and the pinned Actual server image.
 ## Contract freshness
 
 ```bash
-node scripts/check-contract-freshness.js
+npm run check:contract
 ```
 
 Compares `finance-dashboard/server.js` routes to `finance-app/src/api/generated/endpoints.ts` and
-tracks a fingerprint stamp at `finance-app/src/api/generated/.contract-fingerprint`. Regenerate the
-generated client and update the stamp whenever API contracts change.
+tracks a fingerprint stamp at `finance-app/src/api/generated/.contract-fingerprint`. This is a
+verification-only command: a missing or stale stamp fails CI and is never created or repaired by
+the check.
+
+After intentionally regenerating the endpoint and type artifacts for a contract change, update the
+stamp explicitly:
+
+```bash
+npm run update:contract-stamp
+```
+
+This updates only the fingerprint stamp; it does not generate contract artifacts.
 
 ## Lockfile reproducibility
 
@@ -55,7 +65,8 @@ generated client and update the stamp whenever API contracts change.
 node scripts/check-lockfile-repro.js
 ```
 
-Runs `npm ci` twice and fails if `package-lock.json` mutates. CI executes this in a dedicated job.
+Runs `npm ci --ignore-scripts` and fails if `package-lock.json` mutates. It uses only Node built-ins
+before that install, so CI can execute it directly from a dependency-empty checkout.
 
 ## Coordinated backup provenance
 

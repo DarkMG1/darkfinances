@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
-const { contractFingerprint } = require('./release-manifest');
+const { contractFingerprint } = require('./contract-fingerprint');
 
 const root = path.resolve(__dirname, '..');
 const stampPath = path.join(root, 'finance-app', 'src', 'api', 'generated', '.contract-fingerprint');
@@ -13,14 +13,12 @@ function fail(message) {
 
 const current = contractFingerprint();
 if (!fs.existsSync(stampPath)) {
-  fs.writeFileSync(stampPath, `${current}\n`);
-  console.log(`contract-freshness: initialized stamp ${current}`);
-  process.exit(0);
+  fail(`generated contract stamp is missing. Regenerate endpoints/types and run npm run update:contract-stamp`);
 }
 
 const stamped = fs.readFileSync(stampPath, 'utf8').trim();
 if (stamped !== current) {
-  fail(`generated contract is stale (stamp=${stamped}, current=${current}). Regenerate endpoints/types and update ${path.relative(root, stampPath)}`);
+  fail(`generated contract is stale (stamp=${stamped}, current=${current}). Regenerate endpoints/types and run npm run update:contract-stamp`);
 }
 
 const server = fs.readFileSync(path.join(root, 'finance-dashboard', 'server.js'), 'utf8');
