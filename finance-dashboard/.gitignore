@@ -8,6 +8,11 @@ node_modules/
 *.env
 !*.env.example
 
+# Passkey credential store uses server.js's distinct atomic writer (no .last-good).
+# PR-15 follow-up: reconcile this store with STATE_REGISTRY's durability model.
+passkey-credentials.json
+passkey-credentials.json.*.*.tmp
+
 # Personal config (copy the *.example.json templates and fill in your own)
 personal-config.json
 owes-config.json
@@ -29,9 +34,18 @@ rules.json
 account-overrides.json
 manual-assets.json
 reconciliation.json
+budget-settings.json
+debt-planner.json
+investment-holdings.json
+operation-journal.json
+review-state.json
+transaction-sagas.json
 receipts/
 *.last-good
 *.corrupt-*
+
+# Atomic JSON-store temporary files: .<state>.json.<pid>.<random>.tmp
+.*.json.*.*.tmp
 
 # Personal reference scripts (not part of the app)
 .reference/
