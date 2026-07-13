@@ -37,8 +37,13 @@ mkdir -p "$output/Payload"
 cp -R "$app_path" "$output/Payload/Finances.app"
 test ! -e "$output/Payload/Finances.app/embedded.mobileprovision"
 test ! -e "$output/Payload/Finances.app/PlugIns/ExpoWidgetsTarget.appex"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 (
   cd "$output"
   ditto -c -k --sequesterRsrc --keepParent Payload "DarkFinances-${version}-${build_number}-unsigned.ipa"
   shasum -a 256 "DarkFinances-${version}-${build_number}-unsigned.ipa"
 )
+node "$ROOT/scripts/release-manifest.js" \
+  --variant=free-sideload \
+  --artifact="$output/DarkFinances-${version}-${build_number}-unsigned.ipa" \
+  "$output/DarkFinances-${version}-${build_number}-release-manifest.json"

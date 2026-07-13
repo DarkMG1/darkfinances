@@ -14,6 +14,7 @@
 # Usage:
 #   npm run ota:publish                       # branch "production"
 #   bash scripts/ota-publish.sh preview "fix budget rounding"
+#   bash scripts/ota-publish.sh free-sideload "fix sideload UI"
 #
 set -euo pipefail
 
@@ -22,7 +23,12 @@ cd "$ROOT"
 
 BRANCH="${1:-production}"
 MESSAGE="${2:-OTA update $(date +%Y-%m-%d-%H:%M)}"
-ENVIRONMENT="${3:-$BRANCH}"  # EAS env (development|preview|production); mirrors the branch
+if [ "$BRANCH" = "free-sideload" ]; then
+  export FREE_IOS_SIDELOAD=1
+  ENVIRONMENT="${3:-production}"
+else
+  ENVIRONMENT="${3:-$BRANCH}"  # EAS env (development|preview|production); usually mirrors the branch
+fi
 
 echo "==> Publishing OTA update to branch '$BRANCH' (env '$ENVIRONMENT')"
 npx eas-cli@latest update --branch "$BRANCH" --message "$MESSAGE" --environment "$ENVIRONMENT"

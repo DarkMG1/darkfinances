@@ -13,7 +13,3 @@ if [ -n "${COLLECTION_EVENT:-}" ] && [ -f "$HOME/actual-tools/collection-rules.j
   CONFIRM=1 bash "$HOME/actual-tools/run.sh" event-collect.js ||
     echo "event collection automation failed" >&2
 fi
-if [ -f "$HOME/actual-tools/build-rules.js" ]; then
-  CONFIRM=1 bash "$HOME/actual-tools/run.sh" build-rules.js ||
-    echo "rule-building automation failed" >&2
-fi

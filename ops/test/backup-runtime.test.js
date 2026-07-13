@@ -31,5 +31,7 @@ test('runtime backup includes sidecars and receipts without secrets', (t) => {
   const listing = spawnSync('tar', ['-tzf', archive], { encoding: 'utf8' });
   assert.match(listing.stdout, /goals\.json/);
   assert.match(listing.stdout, /receipts\/one\.jpg/);
+  assert.match(listing.stdout, /\.backup-manifest\.json/);
+  assert.equal(fs.existsSync(`${archive}.manifest.json`), true);
   assert.doesNotMatch(listing.stdout, /\.env/);
 });

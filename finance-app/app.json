@@ -23,7 +23,7 @@
     "ios": {
       "icon": "./assets/expo.icon",
       "supportsTablet": true,
-      "buildNumber": "4",
+      "buildNumber": "5",
       "bundleIdentifier": "dev.darkmg1.finances",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,

@@ -10,11 +10,11 @@ if [ -z "$archive" ] || [ ! -f "$archive" ]; then
 fi
 if [ "${CONFIRM:-0}" != "1" ]; then
   echo "Dry run only. Archive contents:" >&2
-  tar -tzf "$archive"
+  tar -tzf "$archive" >&2
   echo "Re-run with CONFIRM=1 after stopping finance-dashboard.service." >&2
   exit 2
 fi
-if systemctl --user is-active --quiet finance-dashboard.service; then
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet finance-dashboard.service; then
   echo "Refusing restore while finance-dashboard.service is active." >&2
   exit 1
 fi
@@ -25,7 +25,9 @@ while IFS= read -r entry; do
   esac
 done < <(tar -tzf "$archive")
 
-"$(dirname "$0")/backup-dashboard-runtime.sh" >/dev/null
+if compgen -G "$dashboard/*.json" >/dev/null || [ -d "$dashboard/receipts" ]; then
+  "$(dirname "$0")/backup-dashboard-runtime.sh" >/dev/null
+fi
 tar -xzf "$archive" -C "$dashboard"
 chmod 600 "$dashboard"/*.json 2>/dev/null || true
 if [ -d "$dashboard/receipts" ]; then
