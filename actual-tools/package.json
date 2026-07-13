@@ -1,0 +1,18 @@
+{
+  "name": "actual-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Deterministic Actual/Splitwise/Venmo CLI tools for DarkFinances",
+  "scripts": {
+    "check": "for file in *.js; do node --check \"$file\"; done && node --test test/*.test.js",
+    "test": "npm run check"
+  },
+  "dependencies": {
+    "@actual-app/api": "26.7.0"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "MIT"
+}

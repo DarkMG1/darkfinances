@@ -19,8 +19,14 @@ SAFE_DATA_DIR="$(python3 - "$FIX_DATA_DIR" <<'PY'
 import os, pathlib, sys
 p = pathlib.Path(sys.argv[1]).expanduser().resolve()
 allowed = [pathlib.Path('/tmp').resolve(), (pathlib.Path.home() / '.cache/actual-tools').resolve()]
-if str(p) in {'/', str(pathlib.Path.home().resolve())} or not any(p == root or root in p.parents for root in allowed):
+if str(p) in {'/', str(pathlib.Path.home().resolve())} or not any(root in p.parents for root in allowed):
     raise SystemExit(f'refusing unsafe FIX_DATA_DIR: {p}')
+try:
+    st = p.stat()
+except FileNotFoundError:
+    raise SystemExit(f'refusing missing FIX_DATA_DIR (create it with mode 0700 first): {p}')
+if not p.is_dir() or st.st_uid != os.getuid():
+    raise SystemExit(f'refusing unowned or non-directory FIX_DATA_DIR: {p}')
 print(p)
 PY
 )"

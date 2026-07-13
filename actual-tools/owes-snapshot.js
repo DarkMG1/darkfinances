@@ -43,13 +43,18 @@ function writeSnapshotAtomic(file, value) {
 // (events.json). A trip with a `group` set auto-pulls its Splitwise data here.
 function loadEventMap() {
   const map = { ...sw.eventToGroup };
+  const p = process.env.EVENTS_PATH || dashboardPath('events.json');
   try {
-    const p = process.env.EVENTS_PATH || dashboardPath('events.json');
     const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-    for (const e of (raw && raw.events) || []) {
+    if (!raw || !Array.isArray(raw.events)) throw new Error('expected an object with an events array');
+    for (const e of raw.events) {
       if (e && e.slug && e.group) map[e.slug] = e.group;
     }
-  } catch (_) { /* no events file yet */ }
+  } catch (error) {
+    if (!error || error.code !== 'ENOENT') {
+      throw new Error(`Invalid events file ${p}: ${error.message}`);
+    }
+  }
   return map;
 }
 

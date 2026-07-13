@@ -21,13 +21,32 @@ const slugify = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/
 function load() {
   try {
     const raw = JSON.parse(fs.readFileSync(EVENTS_PATH, 'utf8'));
-    return { events: raw && Array.isArray(raw.events) ? raw.events : [] };
-  } catch (_) {
-    return { events: [] };
+    if (!raw || !Array.isArray(raw.events)) throw new Error('expected an object with an events array');
+    return { events: raw.events };
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { events: [] };
+    throw new Error(`Refusing to replace invalid events file ${EVENTS_PATH}: ${error.message}`);
   }
 }
 function save(store) {
-  fs.writeFileSync(EVENTS_PATH, JSON.stringify(store, null, 2) + '\n');
+  if (!store || !Array.isArray(store.events)) throw new Error('events store is invalid');
+  const dir = path.dirname(EVENTS_PATH);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = path.join(dir, `.${path.basename(EVENTS_PATH)}.${process.pid}.${Date.now()}.tmp`);
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(store, null, 2) + '\n');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tmp, EVENTS_PATH);
+    fs.chmodSync(EVENTS_PATH, 0o600);
+  } catch (error) {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch (_) {}
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    throw error;
+  }
 }
 
 // --flag value / --flag=value parsing; positionals collected separately.

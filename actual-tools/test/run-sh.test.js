@@ -7,6 +7,7 @@ const { spawnSync } = require('child_process');
 
 function fixture(t, dataDir) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-runner-'));
+  if (dataDir !== '/') fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   t.after(() => {
     fs.rmSync(dir, { recursive: true, force: true });
     if (dataDir !== '/') fs.rmSync(dataDir, { recursive: true, force: true });
