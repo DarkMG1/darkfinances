@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { getConfig } = require('@expo/config');
+const { contractFingerprint } = require('./contract-fingerprint');
 
 const root = path.resolve(__dirname, '..');
 
@@ -43,19 +44,6 @@ function resolvedAppConfig(variant) {
     if (previous === undefined) delete process.env.FREE_IOS_SIDELOAD;
     else process.env.FREE_IOS_SIDELOAD = previous;
   }
-}
-
-function contractFingerprint() {
-  const validation = fs.readFileSync(path.join(root, 'finance-dashboard', 'lib', 'validation.js'), 'utf8');
-  const endpoints = fs.readFileSync(path.join(root, 'finance-app', 'src', 'api', 'generated', 'endpoints.ts'), 'utf8');
-  const types = fs.readFileSync(path.join(root, 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
-  const hash = crypto.createHash('sha256');
-  hash.update(validation);
-  hash.update('\0');
-  hash.update(endpoints);
-  hash.update('\0');
-  hash.update(types);
-  return hash.digest('hex').slice(0, 16);
 }
 
 function buildManifest(extra = {}) {
