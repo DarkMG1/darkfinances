@@ -31,6 +31,10 @@ const { buildCategoryInfo, transactionLeaves, summarizeCents } = require('./lib/
 const { fromCents } = require('./lib/domain/money');
 const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
 const { metricValue } = require('./lib/metric-provenance');
+const {
+  SAFE_TO_SPEND_INPUTS,
+  safeToSpendIncompleteReasons,
+} = require('./lib/safe-to-spend');
 const { statePath } = require('./lib/state-registry');
 const ACTUAL_API_PATH = process.env.ACTUAL_API_PATH || '@actual-app/api';
 const api = require(ACTUAL_API_PATH);
@@ -855,6 +859,8 @@ function monthProgress(m) {
   return { days, elapsed: Math.max(0, elapsed) };
 }
 
+const RESOLVED_ROLLOVER_MODES = new Set(['none', 'carryover', 'true_expense']);
+
 async function getBudgets({ month } = {}) {
   return withApi(async (api) => {
     const m = month || todayYMD().slice(0, 7);
@@ -864,8 +870,21 @@ async function getBudgets({ month } = {}) {
     try {
       bm = await api.getBudgetMonth(m);
     } catch (e) {
-      return { month: m, supported: false, groups: [], totalBudgeted: 0, totalSpent: 0 };
+      return {
+        month: m,
+        supported: false,
+        groups: [],
+        totalBudgeted: 0,
+        totalSpent: 0,
+        [SAFE_TO_SPEND_INPUTS]: null,
+      };
     }
+    const decisionInputs = {
+      eligibleCategoryCount: 0,
+      targetedCategoryCount: 0,
+      targetlessSpentCategoryCount: 0,
+      unresolvedRolloverCategoryCount: 0,
+    };
     const groups = [];
     for (const g of bm.categoryGroups || []) {
       if (g.is_income) continue;
@@ -873,7 +892,9 @@ async function getBudgets({ month } = {}) {
       const cats = (g.categories || [])
         .filter((c) => !REIMB_CAT.test(c.name || '')) // peer debts aren't spend
         .map((c) => {
-          const meta = { ...settings.defaults, ...(settings.categories[c.id] || {}), ...(settings.categories[c.name] || {}) };
+          const idSettings = settings.categories[c.id] || {};
+          const nameSettings = settings.categories[c.name] || {};
+          const meta = { ...settings.defaults, ...idSettings, ...nameSettings };
           const budgeted = (c.budgeted || 0) / 100;
           const spent = Math.max(0, -(c.spent || 0) / 100);
           const legacyTarget = Number(meta.monthlyTarget);
@@ -884,6 +905,16 @@ async function getBudgets({ month } = {}) {
           const expectedToDate = target > 0 ? round2((target / progress.days) * progress.elapsed) : null;
           const rolloverMode = meta.rolloverMode || 'none';
           const rolloverAmount = rolloverMode === 'none' ? 0 : round2((c.balance || 0) / 100);
+          const rolloverConfigured = [settings.defaults, idSettings, nameSettings]
+            .some((source) => Object.prototype.hasOwnProperty.call(source, 'rolloverMode'));
+          if (!BILL_CAT.test(`${g.name || ''} ${c.name || ''}`)) {
+            decisionInputs.eligibleCategoryCount++;
+            if (target > 0) decisionInputs.targetedCategoryCount++;
+            if (target <= 0 && spent > 0) decisionInputs.targetlessSpentCategoryCount++;
+            if (!rolloverConfigured || !RESOLVED_ROLLOVER_MODES.has(meta.rolloverMode)) {
+              decisionInputs.unresolvedRolloverCategoryCount++;
+            }
+          }
           const snoozed = meta.snoozedMonth === m;
           const status = snoozed
             ? 'snoozed'
@@ -946,6 +977,7 @@ async function getBudgets({ month } = {}) {
       daysElapsed: progress.elapsed,
       status: totalTarget > 0 && totalSpent > totalTarget ? 'over' : totalTarget > 0 && totalProjected > totalTarget * 1.05 ? 'watch' : 'on_track',
       groups,
+      [SAFE_TO_SPEND_INPUTS]: decisionInputs,
     };
   });
 }
@@ -2803,8 +2835,8 @@ async function getIncome({ window = 12 } = {}) {
 // ---------------------------------------------------------------------------
 // Upcoming bills — projected from active recurring items (paid-state aware)
 // ---------------------------------------------------------------------------
-async function getBills({ days = 45 } = {}) {
-  const { items } = await getRecurring({});
+async function getBills({ days = 45, recurring } = {}) {
+  const { items } = recurring || await getRecurring({});
   const today = todayYMD();
   const horizon = addDays(today, days);
   const paid = readJsonSafe(BILLS_PAID_PATH, {});
@@ -2973,18 +3005,19 @@ async function getToday() {
   const month = financeDate.slice(0, 7);
   const monthEndDate = monthRange(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1).end;
   const asOf = new Date().toISOString();
-  const [accounts, spending, budgets, bills, income, review, recent] = await Promise.all([
+  const [accounts, spending, budgets, recurring, goals, income, review, recent] = await Promise.all([
     getAccounts(),
     getSpending({ month }),
     getBudgets({ month }),
-    getBills({ days: 45 }),
+    getRecurring({}),
+    getGoals(),
     getIncome({}),
     getReview({ month }),
     getTransactions({ start: addDays(financeDate, -14), end: financeDate, collapse: true }),
   ]);
+  const bills = await getBills({ days: 45, recurring });
 
   const visibleAccounts = accounts.filter((account) => !account.hidden);
-  const unassigned = visibleAccounts.filter((account) => account.roleSource !== 'explicit' || account.role === 'unknown');
   const operatingAccounts = accountsForMetric(visibleAccounts, 'operating_cash');
   const cashCents = Math.round(operatingAccounts.reduce((sum, account) => sum + account.balance, 0) * 100);
   const billCents = Math.round((bills.bills || [])
@@ -2997,21 +3030,25 @@ async function getToday() {
     0
   ) * 100);
   const safeCents = cashCents - billCents - budgetCents;
+  const incompleteReasons = safeToSpendIncompleteReasons({
+    accounts,
+    visibleAccounts,
+    operatingAccounts,
+    budgets,
+    recurring,
+    goals,
+  });
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',
     value: fromCents(safeCents),
     valueCents: safeCents,
-    complete: unassigned.length === 0 && operatingAccounts.length > 0 && budgets.supported !== false,
+    complete: incompleteReasons.length === 0,
     asOf,
     financeDate,
     sources: operatingAccounts.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
     method: 'operating cash minus unpaid bills due this month minus remaining non-bill budget',
     excludes: ['protected savings', 'investments', 'credit availability', 'possible reimbursements', 'unfunded goals'],
-    incompleteReasons: [
-      ...(unassigned.length ? [`${unassigned.length} visible account role${unassigned.length === 1 ? '' : 's'} unassigned`] : []),
-      ...(!operatingAccounts.length ? ['no operating cash account assigned'] : []),
-      ...(budgets.supported === false ? ['budget data unavailable'] : []),
-    ],
+    incompleteReasons,
   });
   const revision = crypto.createHash('sha256')
     .update(`${apiHealth.lastSyncAt || apiHealth.initializedAt || ''}\0${financeDate}`)

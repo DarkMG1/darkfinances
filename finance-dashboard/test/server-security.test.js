@@ -84,8 +84,10 @@ test('server security boundaries fail closed', async (t) => {
   assert.equal(result.response.headers.get('etag'), null);
   result = await request(base, '/api/v1/today', { headers: { 'X-Demo-Mode': '1' } });
   assert.equal(result.response.status, 200);
-  assert.equal(result.body.data.complete, true);
-  assert.equal(result.body.data.liquidity.safeToSpend.complete, true);
+  assert.equal(result.body.data.complete, false);
+  assert.equal(result.body.data.liquidity.safeToSpend.complete, false);
+  assert.equal(result.body.data.liquidity.safeToSpend.value, null);
+  assert.equal(result.body.data.liquidity.safeToSpend.valueCents, null);
   assert.equal(result.body.data.revision.startsWith('demo-'), true);
 
   result = await request(base, '/api/v1/phantom/log', { headers: { 'X-Demo-Mode': '1' } });

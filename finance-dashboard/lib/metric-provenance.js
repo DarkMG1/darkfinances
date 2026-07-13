@@ -13,11 +13,14 @@ function metricValue({
   incompleteReasons = [],
 }) {
   const isComplete = complete === true;
+  const normalizedIncompleteReasons = [...new Set(
+    incompleteReasons.filter((reason) => typeof reason === 'string' && reason.length > 0)
+  )];
   return {
     value: isComplete ? value : null,
     valueCents: isComplete ? valueCents : null,
     complete: isComplete,
-    incompleteReasons: isComplete ? [] : incompleteReasons,
+    incompleteReasons: isComplete ? [] : normalizedIncompleteReasons,
     provenance: {
       metric,
       asOf,

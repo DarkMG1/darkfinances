@@ -65,9 +65,17 @@ test('incomplete metrics never expose a decision value', () => {
     valueCents: 10000,
     complete: false,
     financeDate: '2026-07-09',
-    incompleteReasons: ['account roles unassigned'],
+    incompleteReasons: [
+      'credit_card_coverage_unknown',
+      'goal_commitment_unknown',
+      'credit_card_coverage_unknown',
+    ],
   });
   assert.equal(metric.value, null);
   assert.equal(metric.valueCents, null);
-  assert.deepEqual(metric.incompleteReasons, ['account roles unassigned']);
+  assert.deepEqual(metric.incompleteReasons, [
+    'credit_card_coverage_unknown',
+    'goal_commitment_unknown',
+  ]);
+  assert.equal(metric.incompleteReasons.every((reason) => /^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(reason)), true);
 });

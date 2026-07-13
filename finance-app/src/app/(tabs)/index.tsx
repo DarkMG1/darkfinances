@@ -144,12 +144,10 @@ export default function Overview() {
               <SymbolView name="wallet.pass.fill" tintColor={colors.accentLight} size={28} resizeMode="scaleAspectFit" />
             </Card>
           ) : safeToSpend ? (
-            <Pressable onPress={() => router.push('/networth' as never)} style={({ pressed }) => pressed && { opacity: 0.7 }}>
-              <Card style={styles.incompleteCard}>
-                <Text style={styles.incompleteTitle}>Liquidity estimate hidden</Text>
-                <Text style={styles.incompleteText}>{safeToSpend.incompleteReasons.join(' · ')}. Assign each account&apos;s financial role to enable it.</Text>
-              </Card>
-            </Pressable>
+            <Card testID="today-safe-to-spend-unavailable" style={styles.incompleteCard}>
+              <Text style={styles.incompleteTitle}>Safe to Spend unavailable</Text>
+              <Text style={styles.incompleteText}>Required inputs are missing or unresolved. No estimate is shown until they are complete.</Text>
+            </Card>
           ) : null}
 
           {widgets.netWorth ? (

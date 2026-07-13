@@ -3,6 +3,9 @@
 // so the dashboard / app can be shown to other people safely. Dates are computed
 // relative to "today" on each call so the demo always looks current.
 
+const { metricValue } = require('./lib/metric-provenance');
+const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
+
 const pad2 = (n) => String(n).padStart(2, '0');
 const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 const monthKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
@@ -111,31 +114,36 @@ function today() {
   const upcoming = bills();
   const currentSpending = spending({});
   const inbox = review();
+  const incompleteReasons = safeToSpendIncompleteReasons({
+    accounts: allAccounts,
+    visibleAccounts: allAccounts,
+    operatingAccounts: cash,
+    budgets: { supported: false },
+    recurring: recurring(),
+    goals: goals(),
+  });
+  const safeToSpend = metricValue({
+    metric: 'safe_to_spend',
+    value: round2(cashValue - upcoming.total),
+    valueCents: Math.round((cashValue - upcoming.total) * 100),
+    complete: incompleteReasons.length === 0,
+    incompleteReasons,
+    asOf,
+    financeDate: ymd(new Date()),
+    sources: cash.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
+    method: 'demo operating cash minus upcoming bills',
+    excludes: ['possible reimbursements'],
+  });
   return {
     asOf,
     financeDate: ymd(new Date()),
     revision: `demo-${currentMonth()}`,
-    complete: true,
-    incompleteReasons: [],
+    complete: safeToSpend.complete,
+    incompleteReasons: safeToSpend.incompleteReasons,
     health: { ready: true, initializedAt: asOf, lastSyncAt: asOf, lastErrorAt: null, lastError: null },
     accounts: allAccounts,
     spending: currentSpending,
-    liquidity: {
-      safeToSpend: {
-        value: round2(cashValue - upcoming.total),
-        valueCents: Math.round((cashValue - upcoming.total) * 100),
-        complete: true,
-        incompleteReasons: [],
-        provenance: {
-          metric: 'safe_to_spend',
-          asOf,
-          financeDate: ymd(new Date()),
-          sources: cash.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
-          method: 'demo operating cash minus upcoming bills',
-          excludes: ['possible reimbursements'],
-        },
-      },
-    },
+    liquidity: { safeToSpend },
     obligations: { bills: upcoming.bills.slice(0, 5), nextIncome: income().streams[0] || null, source: 'inferred' },
     review: inbox,
     activity: { recent: transactions().slice(0, 8) },
