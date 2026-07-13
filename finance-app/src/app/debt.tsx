@@ -10,7 +10,7 @@ export default function DebtScreen() {
   const data = investments.data;
 
   return (
-    <PushScreen testID="debt-screen" refreshing={investments.isFetching} onRefresh={investments.refetch}>
+    <PushScreen testID="debt-screen" onRefresh={investments.refetch}>
       {investments.isLoading && !data ? (
         <Loading />
       ) : investments.isError && !data ? (

@@ -21,7 +21,7 @@ export default function CashFlow() {
   const spend = months.map((m) => m.spend);
 
   return (
-    <PushScreen testID="cashflow-screen" refreshing={trends.isFetching} onRefresh={trends.refetch}>
+    <PushScreen testID="cashflow-screen" onRefresh={trends.refetch}>
       {trends.isLoading ? (
         <Loading />
       ) : trends.isError && months.length === 0 ? (

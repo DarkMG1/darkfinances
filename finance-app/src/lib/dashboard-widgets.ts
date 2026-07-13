@@ -3,7 +3,6 @@ import { kv } from '@/lib/storage';
 
 export const DASHBOARD_WIDGETS = [
   { key: 'netWorth', label: 'Net Worth' },
-  { key: 'safeToSpend', label: 'Safe to Spend' },
   { key: 'review', label: "Today's Review" },
   { key: 'actions', label: 'Quick Actions' },
   { key: 'monthlyStats', label: 'Monthly Stats' },

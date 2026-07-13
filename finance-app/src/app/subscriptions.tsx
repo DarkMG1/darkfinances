@@ -59,7 +59,7 @@ export default function Subscriptions() {
   };
 
   return (
-    <PushScreen testID="subscriptions-screen" refreshing={recurring.isFetching} onRefresh={recurring.refetch}>
+    <PushScreen testID="subscriptions-screen" onRefresh={recurring.refetch}>
       {recurring.isLoading && !data ? (
         <SkeletonList hero rows={6} />
       ) : recurring.isError && !data ? (

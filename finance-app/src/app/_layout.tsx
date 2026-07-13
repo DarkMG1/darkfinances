@@ -19,6 +19,7 @@ import { useAutoUpdate } from '@/lib/auto-update';
 import { queryClient } from '@/lib/query-client';
 import { purgeLegacyReceiptCopies } from '@/lib/receipts';
 import { Loading } from '@/components/ui';
+import { NotificationRouter } from '@/components/notification-router';
 import { colors } from '@/theme/colors';
 
 const UNLOCK_FADE_ACTIVE_SETTLE_MS = 40;
@@ -103,7 +104,7 @@ function PrivacyGateOverlay({
 }
 
 function RootNav() {
-  const { ready, configured, faceId } = useServerConfig();
+  const { ready, configured, faceId, demo } = useServerConfig();
   const [unlocked, setUnlocked] = useState(false);
   const [lockFading, setLockFading] = useState(false);
   const [unlockFadeRunning, setUnlockFadeRunning] = useState(false);
@@ -117,6 +118,12 @@ function RootNav() {
   const lockedForBackground = useRef(false);
   const unlockTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unlockFadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const canPromptForUpdate = ready && appActive && (
+    !configured ||
+    !faceId ||
+    (unlocked && !privacyVisible && !lockFading && !unlockFadeRunning)
+  );
+  useAutoUpdate(canPromptForUpdate);
 
   const clearUnlockTimer = useCallback(() => {
     if (unlockTimer.current) {
@@ -284,7 +291,6 @@ function RootNav() {
           <Stack.Screen name="budgets" options={{ ...pushHeader, title: 'Budgets' }} />
           <Stack.Screen name="cashflow" options={{ ...pushHeader, title: 'Cash Flow' }} />
           <Stack.Screen name="forecast" options={{ ...pushHeader, title: 'Forecast' }} />
-          <Stack.Screen name="reports" options={{ ...pushHeader, title: 'Reports' }} />
           <Stack.Screen name="bills" options={{ ...pushHeader, title: 'Upcoming Bills' }} />
           <Stack.Screen name="income" options={{ ...pushHeader, title: 'Income' }} />
           <Stack.Screen name="subscriptions" options={{ ...pushHeader, title: 'Subscriptions' }} />
@@ -313,6 +319,12 @@ function RootNav() {
   return (
     <View style={styles.appShell}>
       {content}
+      {configured ? <NotificationRouter /> : null}
+      {configured && demo ? (
+        <View pointerEvents="none" style={styles.demoWatermark}>
+          <Text style={styles.demoWatermarkText}>DEMO · SYNTHETIC DATA</Text>
+        </View>
+      ) : null}
       {configured && faceId && (privacyVisible || !unlocked || lockFading) ? (
         <PrivacyGateOverlay
           fading={unlockFadeRunning}
@@ -327,7 +339,6 @@ function RootNav() {
 }
 
 export default function RootLayout() {
-  useAutoUpdate();
   useEffect(() => {
     void purgeLegacyReceiptCopies();
   }, []);
@@ -357,6 +368,8 @@ export default function RootLayout() {
 
 const styles = StyleSheet.create({
   appShell: { flex: 1, backgroundColor: colors.bg },
+  demoWatermark: { position: 'absolute', top: 52, alignSelf: 'center', zIndex: 9000, backgroundColor: colors.yellow + 'EE', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
+  demoWatermarkText: { color: colors.bg, fontSize: 10, fontWeight: '900', letterSpacing: 0.8 },
   lockOverlay: { ...StyleSheet.absoluteFill, zIndex: 9998, elevation: 9998, backgroundColor: colors.bg },
   splash: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
   lock: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 12 },

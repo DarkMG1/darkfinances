@@ -17,6 +17,7 @@ export const queryClient = new QueryClient({
 export async function clearFinanceQueries(): Promise<void> {
   await queryClient.cancelQueries();
   queryClient.clear();
+  queryClient.getMutationCache().clear();
 }
 
 export function financeServerScope(serverUrl: string | null, token: string | null, demo: boolean): string {

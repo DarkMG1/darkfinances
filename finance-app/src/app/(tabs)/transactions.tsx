@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Alert, FlatList, Modal, Pressable, RefreshControl, ScrollView, SectionList, Share, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, FlatList, Modal, Pressable, ScrollView, SectionList, Share, StyleSheet, Text, TextInput, View } from 'react-native';
 import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useRouter } from 'expo-router';
@@ -9,6 +9,7 @@ import { buildQuery } from '@/api/client/requests';
 import { useServerConfig } from '@/state/server';
 import { Transaction } from '@/api/generated/types';
 import { Avatar, ErrorState, PendingPill, SplitPill } from '@/components/ui';
+import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
 import { financeToday } from '@/lib/date-only';
@@ -70,11 +71,7 @@ export default function Transactions() {
   );
   const loading = searching ? searchRes.isLoading : txns.isLoading;
   const errored = searching ? searchRes.isError : txns.isError;
-  const fetching = searching ? searchRes.isFetching : txns.isFetching;
-  const onRefresh = () => {
-    haptics.light();
-    return searching ? searchRes.refetch() : txns.refetch();
-  };
+  const onRefresh = () => searching ? searchRes.refetch() : txns.refetch();
 
   const sections = useMemo(() => {
     const q = search.toLowerCase();
@@ -340,7 +337,7 @@ export default function Transactions() {
           stickySectionHeadersEnabled={false}
           contentContainerStyle={{ paddingBottom: 96 }}
           ListEmptyComponent={<Text style={styles.empty}>{searching ? 'No matches' : 'No transactions in range'}</Text>}
-          refreshControl={<RefreshControl tintColor={colors.accent} refreshing={fetching} onRefresh={onRefresh} />}
+          refreshControl={<GestureRefreshControl onRefresh={onRefresh} />}
         />
       )}
 

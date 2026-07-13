@@ -21,7 +21,7 @@ export default function ForecastScreen() {
   const events = data?.events.slice(0, 20) ?? [];
 
   return (
-    <PushScreen testID="forecast-screen" refreshing={forecast.isFetching} onRefresh={forecast.refetch}>
+    <PushScreen testID="forecast-screen" onRefresh={forecast.refetch}>
       {forecast.isLoading && !data ? (
         <Loading />
       ) : forecast.isError && !data ? (
@@ -52,19 +52,22 @@ export default function ForecastScreen() {
           ) : null}
 
           <Card style={{ marginTop: 12 }}>
-            <CardTitle>Projected Cash Balance</CardTitle>
+            <CardTitle>Illustrative Cash Plan</CardTitle>
             <LineChart width={width - 64} values={values} color={data.lowest.balance < 0 ? colors.red : colors.accentLight} />
-            <Text style={styles.hint}>Starts at {fmtPos(data.startBalance)} cash and includes known income, bills, budgets, and expected reimbursements.</Text>
+            <Text style={styles.hint}>Starts at {fmtPos(data.startBalance)} estimated cash and models inferred income, inferred bills, and planned budget spending. It is not a prediction.</Text>
+            {data.possibleReimbursement ? (
+              <Text style={styles.hint}>A possible {fmtPos(data.possibleReimbursement.amount)} reimbursement is excluded from every balance shown.</Text>
+            ) : null}
           </Card>
 
           <Card style={{ marginTop: 12 }}>
-            <CardTitle>Upcoming Forecast Events</CardTitle>
+            <CardTitle>Illustrative Plan Inputs</CardTitle>
             {events.length ? events.map((e, i) => (
               <View key={`${e.date}-${e.label}-${i}`} testID={`forecast-event-${i}`} style={styles.row}>
                 <View style={[styles.dot, { backgroundColor: kindColor(e.kind) }]} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.eventName} numberOfLines={1}>{e.label}</Text>
-                  <Text style={styles.eventMeta}>{fmtDate(e.date)} · {e.kind}</Text>
+                  <Text style={styles.eventMeta}>{fmtDate(e.date)} · {e.provenance} {e.kind}</Text>
                 </View>
                 <Text style={[styles.eventAmt, { color: e.amount >= 0 ? colors.green : colors.red }]}>{fmtSignedMoney(e.amount)}</Text>
               </View>

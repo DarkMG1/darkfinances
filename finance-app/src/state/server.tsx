@@ -1,9 +1,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import * as SecureStore from 'expo-secure-store';
 import { normalizeServerUrl } from '@/api/client/server-url';
-import { clearFinanceNotifications } from '@/lib/notifications';
-import { clearFinanceQueries, financeServerScope } from '@/lib/query-client';
-import { abortFinanceRequests } from '@/lib/request-lifecycle';
+import { purgeFinanceProfile } from '@/lib/profile-purge';
+import { financeServerScope } from '@/lib/query-client';
 import { kv } from '@/lib/storage';
 
 const TOKEN_KEY = 'finance_token';
@@ -39,7 +38,16 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     (async () => {
       kv.setString(LEGACY_QUERY_CACHE_KEY, null);
-      const storedUrl = kv.getString(URL_KEY);
+      const rawStoredUrl = kv.getString(URL_KEY);
+      let storedUrl: string | null = null;
+      if (rawStoredUrl) {
+        try {
+          storedUrl = normalizeServerUrl(rawStoredUrl);
+          kv.setString(URL_KEY, storedUrl);
+        } catch {
+          kv.setString(URL_KEY, null);
+        }
+      }
       const storedDemo = kv.getBool(DEMO_KEY, false);
       let storedToken: string | null = null;
       setServerUrl(storedUrl);
@@ -71,8 +79,12 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
       const nextFaceId = next.faceId === undefined ? faceId : next.faceId;
       const nextDemo = next.demo === undefined ? demo : next.demo;
       const identityChanged = nextUrl !== serverUrl || nextToken !== token || nextDemo !== demo;
+      const oldScope = financeServerScope(serverUrl, token, demo);
 
       try {
+        if (identityChanged) {
+          await purgeFinanceProfile(oldScope);
+        }
         if (next.token !== undefined) {
           if (nextToken) {
             await SecureStore.setItemAsync(TOKEN_KEY, nextToken, {
@@ -82,10 +94,6 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
             await SecureStore.deleteItemAsync(TOKEN_KEY);
           }
         }
-        if (identityChanged) {
-          abortFinanceRequests();
-          await clearFinanceQueries();
-        }
         kv.setString(URL_KEY, nextUrl);
         kv.setBool(FACEID_KEY, nextFaceId);
         kv.setBool(DEMO_KEY, nextDemo);
@@ -94,6 +102,14 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
         setFaceId(nextFaceId);
         setDemo(nextDemo);
       } catch (error) {
+        // Keep the persisted identity tuple coherent if any storage write fails.
+        // Query clearing is intentionally not rolled back; stale financial data
+        // is safer to discard than to restore under an uncertain identity.
+        try {
+          kv.setString(URL_KEY, serverUrl);
+          kv.setBool(FACEID_KEY, faceId);
+          kv.setBool(DEMO_KEY, demo);
+        } catch {}
         if (next.token !== undefined) {
           try {
             if (token) {
@@ -112,9 +128,8 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
   );
 
   const clear = useCallback(async () => {
-    abortFinanceRequests();
-    await clearFinanceQueries();
-    await clearFinanceNotifications(financeServerScope(serverUrl, token, demo)).catch(() => {});
+    const oldScope = financeServerScope(serverUrl, token, demo);
+    await purgeFinanceProfile(oldScope);
     await SecureStore.deleteItemAsync(TOKEN_KEY);
     kv.setString(URL_KEY, null);
     kv.setString(LEGACY_QUERY_CACHE_KEY, null);

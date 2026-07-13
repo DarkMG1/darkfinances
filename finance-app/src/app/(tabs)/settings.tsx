@@ -7,7 +7,7 @@ import { Screen } from '@/components/screen';
 import { Card, CardTitle } from '@/components/ui';
 import { useReconcilePending, useSetReconcileEnabled } from '@/api/hooks/finance.hooks';
 import { useServerConfig } from '@/state/server';
-import { testConnection } from '@/api/client/requests';
+import { verifyConnectionConfig } from '@/api/client/requests';
 import { authenticate, isBiometricAvailable } from '@/lib/biometric';
 import { DASHBOARD_WIDGETS, useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { buildRedactedDiagnostics } from '@/lib/diagnostics';
@@ -85,10 +85,7 @@ export default function Settings() {
       }
       setUpdateStatus('Downloading update…');
       await Updates.fetchUpdateAsync();
-      Alert.alert('Update ready', 'Restart now to apply the latest version?', [
-        { text: 'Later', style: 'cancel', onPress: () => setUpdateStatus('Update will apply on next launch') },
-        { text: 'Restart', onPress: () => Updates.reloadAsync() },
-      ]);
+      setUpdateStatus('Update downloaded; restart prompt ready');
     } catch (e: any) {
       setUpdateStatus(e?.message || 'Update check failed');
     }
@@ -114,8 +111,8 @@ export default function Settings() {
     try {
       const candidateUrl = editUrl.trim() || serverUrl || '';
       const candidateToken = newToken.trim() || token || '';
-      const ok = await testConnection(candidateUrl, candidateToken, demo);
-      setStatus(ok ? 'Connected ✓' : 'Failed');
+      await verifyConnectionConfig({ serverUrl: candidateUrl, token: candidateToken, demo });
+      setStatus('Connected ✓');
     } catch (e: any) {
       setStatus(e?.error || e?.message || 'Failed');
     }
@@ -125,9 +122,14 @@ export default function Settings() {
     if (editUrl.trim()) {
       setStatus('Verifying server…');
       try {
-        const ok = await testConnection(editUrl.trim(), newToken.trim() || token || '', demo);
-        if (!ok) throw new Error('Server did not confirm');
-        await setConfig({ serverUrl: editUrl.trim() });
+        const verified = await verifyConnectionConfig({
+          serverUrl: editUrl,
+          token: newToken.trim() || token || '',
+          demo,
+        });
+        await setConfig(verified);
+        setEditUrl(verified.serverUrl);
+        if (newToken.trim()) setNewToken('');
         setStatus('Server URL updated');
       } catch (e: any) {
         setStatus(e?.error || e?.message || 'Could not verify server');
@@ -138,11 +140,15 @@ export default function Settings() {
     if (newToken.trim()) {
       setStatus('Verifying token…');
       try {
-        const ok = await testConnection(editUrl.trim() || serverUrl || '', newToken.trim(), false);
-        if (!ok) throw new Error('Server did not confirm');
-        await setConfig({ token: newToken.trim() });
+        const verified = await verifyConnectionConfig({
+          serverUrl: editUrl.trim() || serverUrl || '',
+          token: newToken,
+          demo: false,
+        });
+        await setConfig(verified);
+        setEditUrl(verified.serverUrl);
         setNewToken('');
-        setStatus('Token updated');
+        setStatus(demo ? 'Token updated; demo mode turned off' : 'Token updated');
       } catch (e: any) {
         setStatus(e?.error || e?.message || 'Could not verify token');
       }
@@ -150,11 +156,14 @@ export default function Settings() {
   };
   const setDemoMode = async (value: boolean) => {
     try {
-      if (value) {
-        const ok = await testConnection(editUrl.trim() || serverUrl || '', token || '', true);
-        if (!ok) throw new Error('Demo endpoint did not confirm');
-      }
-      await setConfig({ demo: value });
+      const verified = await verifyConnectionConfig({
+        serverUrl: editUrl.trim() || serverUrl || '',
+        token: newToken.trim() || token || '',
+        demo: value,
+      });
+      await setConfig(verified);
+      setEditUrl(verified.serverUrl);
+      if (newToken.trim()) setNewToken('');
     } catch (e: any) {
       Alert.alert('Could not change demo mode', e?.error || e?.message || 'Please try again.');
     }

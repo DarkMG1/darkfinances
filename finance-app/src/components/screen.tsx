@@ -1,19 +1,9 @@
 import React from 'react';
-import { RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useServerConfig } from '@/state/server';
-import { haptics } from '@/lib/haptics';
+import { GestureRefreshControl, RefreshAction } from '@/components/gesture-refresh-control';
 import { colors } from '@/theme/colors';
-
-// Wraps a consumer onRefresh with a light haptic so every pull-to-refresh
-// confirms the gesture, without each screen wiring it up.
-function withRefreshHaptic(onRefresh?: () => void): (() => void) | undefined {
-  if (!onRefresh) return undefined;
-  return () => {
-    haptics.light();
-    onRefresh();
-  };
-}
 
 export function DemoRibbon() {
   const { demo } = useServerConfig();
@@ -25,12 +15,11 @@ export function DemoRibbon() {
   );
 }
 
-export function Screen({ title, accent, right, refreshing, onRefresh, children, testID }: {
+export function Screen({ title, accent, right, onRefresh, children, testID }: {
   title: string;
   accent?: string;
   right?: React.ReactNode;
-  refreshing?: boolean;
-  onRefresh?: () => void;
+  onRefresh?: RefreshAction;
   children: React.ReactNode;
   testID?: string;
 }) {
@@ -50,7 +39,7 @@ export function Screen({ title, accent, right, refreshing, onRefresh, children, 
         contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 60 }}
         refreshControl={
           onRefresh ? (
-            <RefreshControl tintColor={colors.accent} refreshing={!!refreshing} onRefresh={withRefreshHaptic(onRefresh)} />
+            <GestureRefreshControl onRefresh={onRefresh} />
           ) : undefined
         }
       >
@@ -61,9 +50,8 @@ export function Screen({ title, accent, right, refreshing, onRefresh, children, 
 }
 
 // For pushed (stack) routes that render under the native back-button header.
-export function PushScreen({ refreshing, onRefresh, children, testID }: {
-  refreshing?: boolean;
-  onRefresh?: () => void;
+export function PushScreen({ onRefresh, children, testID }: {
+  onRefresh?: RefreshAction;
   children: React.ReactNode;
   testID?: string;
 }) {
@@ -76,7 +64,7 @@ export function PushScreen({ refreshing, onRefresh, children, testID }: {
         contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}
         refreshControl={
           onRefresh ? (
-            <RefreshControl tintColor={colors.accent} refreshing={!!refreshing} onRefresh={withRefreshHaptic(onRefresh)} />
+            <GestureRefreshControl onRefresh={onRefresh} />
           ) : undefined
         }
       >

@@ -38,7 +38,7 @@ export default function MerchantDetail() {
   const rows = selMonth?.items ?? [];
 
   return (
-    <PushScreen testID="merchant-detail-screen" refreshing={hist.isFetching} onRefresh={hist.refetch}>
+    <PushScreen testID="merchant-detail-screen" onRefresh={hist.refetch}>
       <Stack.Screen options={{ title: name || 'Merchant' }} />
       {hist.isLoading && !hist.data ? (
         <SkeletonList hero rows={7} />

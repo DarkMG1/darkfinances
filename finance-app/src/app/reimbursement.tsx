@@ -134,7 +134,7 @@ export default function Reimbursement() {
   };
 
   return (
-    <PushScreen testID="reimbursement-screen" refreshing={reimb.isFetching || suggestions.isFetching} onRefresh={() => { reimb.refetch(); suggestions.refetch(); }}>
+    <PushScreen testID="reimbursement-screen" onRefresh={() => Promise.all([reimb.refetch(), suggestions.refetch()])}>
       {loading ? (
         <SkeletonList rows={5} />
       ) : reimb.isError && !reimb.data ? (
@@ -145,6 +145,17 @@ export default function Reimbursement() {
             <Text style={styles.total}>{fmtPos(grandTotal)}</Text>
             <Text style={styles.totalLabel}>owed to you · {debtorCount} {debtorCount === 1 ? 'person' : 'people'} · {cutoffLabel(reimb.data?.ledgerCutoff)}</Text>
             <Text style={[styles.sourceLabel, reimb.data?.owesWarning && { color: colors.yellow }]}>{snapshot}</Text>
+            {reimb.data?.lastKnownSplitwise ? (
+              <View style={styles.staleNotice}>
+                <Text style={styles.staleTitle}>Splitwise is not included in the current total</Text>
+                <Text style={styles.staleText}>
+                  Last known: {fmtPos(reimb.data.lastKnownSplitwise.total)}
+                  {reimb.data.lastKnownSplitwise.generatedAt
+                    ? ` · updated ${fmtDate(reimb.data.lastKnownSplitwise.generatedAt.slice(0, 10))}`
+                    : ''}
+                </Text>
+              </View>
+            ) : null}
 
             <View style={styles.rangeRow}>
               {RANGES.map((r) => {
@@ -339,6 +350,9 @@ const styles = StyleSheet.create({
   total: { color: colors.green, fontSize: 32, fontWeight: '800', letterSpacing: -1 },
   totalLabel: { color: colors.muted, fontSize: 13, marginTop: 2 },
   sourceLabel: { color: colors.muted, fontSize: 11, marginTop: 5, lineHeight: 15 },
+  staleNotice: { marginTop: 10, padding: 10, borderRadius: 10, backgroundColor: colors.yellow + '18', borderWidth: 1, borderColor: colors.yellow + '55' },
+  staleTitle: { color: colors.yellow, fontSize: 12, fontWeight: '800' },
+  staleText: { color: colors.muted, fontSize: 11, marginTop: 3 },
   rangeRow: { flexDirection: 'row', gap: 6, marginTop: 14, backgroundColor: colors.surface2, borderRadius: 10, padding: 3 },
   rangeChip: { flex: 1, paddingVertical: 7, borderRadius: 8, alignItems: 'center' },
   rangeChipOn: { backgroundColor: colors.accent },

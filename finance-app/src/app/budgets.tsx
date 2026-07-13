@@ -36,11 +36,7 @@ export default function Budgets() {
   const [editing, setEditing] = useState<Editing>(null);
   const [targetText, setTargetText] = useState('');
 
-  const refreshing = trends.isFetching || budgets.isFetching;
-  const onRefresh = () => {
-    trends.refetch();
-    budgets.refetch();
-  };
+  const onRefresh = () => Promise.all([trends.refetch(), budgets.refetch()]);
 
   const allMonths = useMemo(() => trends.data?.months ?? [], [trends.data?.months]);
   // Bars/navigation span exactly as far back as there's data.
@@ -79,7 +75,7 @@ export default function Budgets() {
   };
 
   return (
-    <PushScreen testID="budgets-screen" refreshing={refreshing} onRefresh={onRefresh}>
+    <PushScreen testID="budgets-screen" onRefresh={onRefresh}>
       <MonthNavigator months={availMonths} selected={month} onSelect={setMonth} currentKey={curKey} />
       {chart.length > 1 ? (
         <Card style={{ marginBottom: 20 }}>

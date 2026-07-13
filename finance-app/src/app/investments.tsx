@@ -11,7 +11,7 @@ export default function InvestmentsScreen() {
   const allocation = Object.entries(data?.allocation.byAssetClass ?? {}).sort((a, b) => b[1] - a[1]);
 
   return (
-    <PushScreen testID="investments-screen" refreshing={investments.isFetching} onRefresh={investments.refetch}>
+    <PushScreen testID="investments-screen" onRefresh={investments.refetch}>
       {investments.isLoading && !data ? (
         <Loading />
       ) : investments.isError && !data ? (

@@ -58,7 +58,7 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
   };
 
   return (
-    <PushScreen testID="reconcile-screen" refreshing={recon.isFetching} onRefresh={recon.refetch}>
+    <PushScreen testID="reconcile-screen" onRefresh={recon.refetch}>
       <View style={styles.nav}>
         <Pressable testID="reconcile-prev-month" onPress={() => { haptics.tap(); setMonth(stepMonth(month, -1)); }} hitSlop={12} style={({ pressed }) => [styles.navBtn, pressed && { opacity: 0.5 }]}>
           <Text style={styles.navArrow}>‹</Text>

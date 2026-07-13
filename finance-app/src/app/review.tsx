@@ -1,9 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Swipeable from 'react-native-gesture-handler/ReanimatedSwipeable';
 import { useRouter } from 'expo-router';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
-import { useReview } from '@/api/hooks/finance.hooks';
+import { useReview, useSetReviewDisposition } from '@/api/hooks/finance.hooks';
 import { ReviewTask, ReviewTransactionRef } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, Pill } from '@/components/ui';
@@ -70,8 +70,8 @@ function openTransaction(router: ReturnType<typeof useRouter>, t: ReviewTransact
 export default function ReviewScreen() {
   const router = useRouter();
   const review = useReview();
-  const [hidden, setHidden] = useState<Record<string, boolean>>({});
-  const tasks = useMemo(() => (review.data?.tasks ?? []).filter((t) => !hidden[t.id]), [review.data?.tasks, hidden]);
+  const setDisposition = useSetReviewDisposition();
+  const tasks = review.data?.tasks ?? [];
   const high = tasks.filter((t) => t.priority >= 80);
   const normal = tasks.filter((t) => t.priority < 80);
 
@@ -85,8 +85,9 @@ export default function ReviewScreen() {
   };
 
   const markReviewed = (id: string) => {
-    haptics.success();
-    setHidden((h) => ({ ...h, [id]: true }));
+    setDisposition.mutate({ id, disposition: 'acknowledge' }, {
+      onSuccess: () => haptics.success(),
+    });
   };
 
   const renderActions = (task: ReviewTask) => (
@@ -95,7 +96,7 @@ export default function ReviewScreen() {
         <Text style={styles.actionText}>{task.action === 'categorize' ? 'Categorize' : 'Open'}</Text>
       </Pressable>
       <Pressable testID={`review-task-reviewed-${task.id}`} style={styles.actionBtn} onPress={() => markReviewed(task.id)}>
-        <Text style={styles.actionText}>Reviewed</Text>
+        <Text style={styles.actionText}>Acknowledge</Text>
       </Pressable>
     </View>
   );
@@ -130,7 +131,7 @@ export default function ReviewScreen() {
   const loading = review.isLoading && !review.data;
 
   return (
-    <PushScreen testID="review-screen" refreshing={review.isFetching} onRefresh={review.refetch}>
+    <PushScreen testID="review-screen" onRefresh={review.refetch}>
       {loading ? (
         <SkeletonList rows={6} />
       ) : review.isError && !review.data ? (
@@ -159,7 +160,7 @@ export default function ReviewScreen() {
             </>
           ) : null}
 
-          <Text style={styles.hint}>Swipe a row to open it or mark it reviewed for this session. Editing the transaction clears it from the inbox after refresh.</Text>
+          <Text style={styles.hint}>Swipe a row to open it or acknowledge it across devices. Editing the underlying transaction resolves matching tasks after refresh.</Text>
         </>
       )}
     </PushScreen>

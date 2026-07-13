@@ -1,57 +1,29 @@
 import { useEffect } from 'react';
 import { Platform } from 'react-native';
 import { useAccounts, useBills, useManualAssets, useTrends } from '@/api/hooks/finance.hooks';
+import { getFinanceCapabilities } from '@/lib/capabilities';
+import { clearFinanceWidget, pushFinanceWidget } from '@/lib/widgets';
 import { useServerConfig } from '@/state/server';
 import { dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
-
-type WidgetPayload = {
-  netWorth: string;
-  change: string;
-  changeUp: boolean;
-  billPayee: string;
-  billAmount: string;
-  billDue: string;
-};
-
-// Lazy + guarded: the expo-widgets native module only exists in a build made
-// after adding the widget (rebuild + sideload). On any older build the require
-// throws at load (createWidget touches native), so we swallow it and no-op.
-function pushWidget(payload: WidgetPayload): void {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const mod = require('../widgets/FinanceWidget') as typeof import('../widgets/FinanceWidget');
-    mod.updateFinanceWidget(payload);
-  } catch {
-    /* widget native module unavailable on this build — ignore */
-  }
-}
-
-function clearWidget(): void {
-  pushWidget({
-    netWorth: '—',
-    change: '',
-    changeUp: true,
-    billPayee: 'Open DarkFinances',
-    billAmount: '',
-    billDue: 'Connect to refresh',
-  });
-}
 
 // Invisible: pushes a fresh snapshot to the home-screen widget whenever the app
 // is open with current data. Mounted once inside the authenticated tab navigator.
 export function WidgetSync() {
+  const capabilities = getFinanceCapabilities();
   const { demo } = useServerConfig();
-  const accounts = useAccounts();
-  const bills = useBills();
-  const trends = useTrends(12);
-  const manual = useManualAssets();
+  const accounts = useAccounts({ enabled: capabilities.widgets && !demo });
+  const bills = useBills(undefined, { enabled: capabilities.widgets && !demo });
+  const trends = useTrends(12, { enabled: capabilities.widgets && !demo });
+  const manual = useManualAssets({ enabled: capabilities.widgets && !demo });
 
-  useEffect(() => () => clearWidget(), []);
+  useEffect(() => () => {
+    if (capabilities.widgets) clearFinanceWidget();
+  }, [capabilities.widgets]);
 
   useEffect(() => {
-    if (Platform.OS !== 'ios') return;
+    if (!capabilities.widgets || Platform.OS !== 'ios') return;
     if (demo) {
-      clearWidget();
+      clearFinanceWidget();
       return;
     }
     const accts = accounts.data;
@@ -71,7 +43,7 @@ export function WidgetSync() {
     }
 
     const nextBill = (bills.data?.bills ?? []).find((b) => !b.paid);
-    pushWidget({
+    pushFinanceWidget({
       netWorth: fmtMoney(netWorth),
       change,
       changeUp,
@@ -79,7 +51,7 @@ export function WidgetSync() {
       billAmount: nextBill ? fmtPos(nextBill.amount) : '',
       billDue: nextBill ? dueLabel(nextBill.dueDate) : 'No bills due',
     });
-  }, [accounts.data, bills.data, demo, manual.data, trends.data]);
+  }, [accounts.data, bills.data, capabilities.widgets, demo, manual.data, trends.data]);
 
   return null;
 }

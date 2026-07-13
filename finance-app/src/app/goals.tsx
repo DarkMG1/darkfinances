@@ -46,7 +46,7 @@ export default function Goals() {
       return;
     }
     saveGoal.mutate(
-      { id: editing?.id, name: name.trim(), target: t, accountId, current: accountId ? undefined : saved, deadline: deadlineValue || null },
+      { id: editing?.id, name: name.trim(), target: t, accountId, current: saved, deadline: deadlineValue || null },
       { onSuccess: () => setEditing(null) }
     );
   };
@@ -59,7 +59,7 @@ export default function Goals() {
   };
 
   return (
-    <PushScreen testID="goals-screen" refreshing={goals.isFetching} onRefresh={goals.refetch}>
+    <PushScreen testID="goals-screen" onRefresh={goals.refetch}>
       {goals.isLoading ? (
         <SkeletonList rows={4} />
       ) : goals.isError && !goals.data ? (
@@ -77,7 +77,8 @@ export default function Goals() {
                     <Text style={styles.pct}>{g.pct != null ? `${g.pct}%` : ''}</Text>
                   </View>
                   <ProgressBar pct={g.pct ?? 0} />
-                  <Text style={styles.sub}>{fmtPos(g.current)} of {fmtPos(g.target)}</Text>
+                  <Text style={styles.sub}>{fmtPos(g.current)} allocated of {fmtPos(g.target)}</Text>
+                  {g.monthlyRequired != null ? <Text style={styles.sub}>{fmtPos(g.monthlyRequired)}/month needed through {g.deadline}</Text> : null}
                 </Card>
               </Pressable>
             ))
@@ -100,12 +101,9 @@ export default function Goals() {
             <Text style={styles.field}>Target amount</Text>
             <TextInput testID="goals-target-input" style={styles.input} value={target} onChangeText={setTarget} placeholder="5000" placeholderTextColor={colors.muted} keyboardType="decimal-pad" />
 
-            {accountId === null ? (
-              <>
-                <Text style={styles.field}>Saved so far</Text>
-                <TextInput testID="goals-current-input" style={styles.input} value={current} onChangeText={setCurrent} placeholder="0" placeholderTextColor={colors.muted} keyboardType="decimal-pad" />
-              </>
-            ) : null}
+            <Text style={styles.field}>Allocated to this goal</Text>
+            <TextInput testID="goals-current-input" style={styles.input} value={current} onChangeText={setCurrent} placeholder="0" placeholderTextColor={colors.muted} keyboardType="decimal-pad" />
+            {accountId ? <Text style={styles.help}>The linked account limits total allocations; its full balance is not counted separately for every goal.</Text> : null}
 
             <Text style={styles.field}>Deadline (optional)</Text>
             <TextInput testID="goals-deadline-input" style={styles.input} value={deadline} onChangeText={setDeadline} placeholder="YYYY-MM" placeholderTextColor={colors.muted} autoCapitalize="none" />
@@ -149,6 +147,7 @@ const styles = StyleSheet.create({
   sheetTitle: { color: colors.text, fontSize: 16, fontWeight: '700', marginBottom: 14 },
   field: { color: colors.muted, fontSize: 12, fontWeight: '600', marginTop: 12, marginBottom: 6 },
   input: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 10, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15 },
+  help: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 6 },
   chips: { gap: 8, paddingVertical: 2 },
   chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, maxWidth: 160 },
   chipActive: { backgroundColor: colors.accent, borderColor: colors.accent },

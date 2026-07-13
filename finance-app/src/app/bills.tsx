@@ -106,7 +106,7 @@ export default function Bills() {
   // Read-only: paid is auto-derived on the server from a matched real charge —
   // there's no manual "mark paid" (you can't fake a payment that didn't happen).
   const renderRow = (b: Bill) => {
-    const paidLabel = b.paid ? (b.matched ? `paid ${fmtDay(b.matched.date)}` : 'paid') : dueLabel(b.dueDate);
+    const paidLabel = b.paid ? (b.matched ? `paid ${fmtDay(b.matched.date)}` : 'paid') : `estimated ${dueLabel(b.dueDate)}`;
     const variance = b.variance ?? null;
     const varianceText = variance != null && Math.abs(variance) >= 0.01 ? ` · ${variance > 0 ? '+' : ''}${fmtMoney(variance)} vs expected` : '';
     return (
@@ -124,7 +124,7 @@ export default function Bills() {
   };
 
   return (
-    <PushScreen testID="bills-screen" refreshing={bills.isFetching} onRefresh={bills.refetch}>
+    <PushScreen testID="bills-screen" onRefresh={bills.refetch}>
       {bills.isLoading ? (
         <SkeletonList hero rows={5} />
       ) : bills.isError && !data ? (

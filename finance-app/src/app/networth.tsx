@@ -58,7 +58,7 @@ export default function NetWorthScreen() {
   const totalAbs = assets + Math.abs(liabilities);
   const assetPct = totalAbs > 0 ? (assets / totalAbs) * 100 : 100;
 
-  const onRefresh = () => { accounts.refetch(); trends.refetch(); manual.refetch(); };
+  const onRefresh = () => Promise.all([accounts.refetch(), trends.refetch(), manual.refetch()]);
 
   const openNew = (kind: 'asset' | 'liability') => { haptics.tap(); setEdit({ name: '', value: '', kind }); };
   const openEdit = (m: ManualAsset) => { haptics.tap(); setEdit({ id: m.id, name: m.name, value: String(m.value), kind: m.kind }); };
@@ -83,7 +83,7 @@ export default function NetWorthScreen() {
       testID={`networth-account-${a.id}`}
       key={a.id}
       style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}
-      onPress={() => router.push({ pathname: '/account/[id]', params: { id: a.id, name: a.name, balance: String(a.balance), hidden: a.hidden ? '1' : '0' } })}
+      onPress={() => router.push({ pathname: '/account/[id]', params: { id: a.id, name: a.name, balance: String(a.balance), hidden: a.hidden ? '1' : '0', role: a.role } })}
     >
       <Avatar label={a.name} size={36} />
       <View style={{ flex: 1, minWidth: 0 }}>
@@ -110,7 +110,7 @@ export default function NetWorthScreen() {
   );
 
   return (
-    <PushScreen testID="networth-screen" refreshing={accounts.isFetching || trends.isFetching || manual.isFetching} onRefresh={onRefresh}>
+    <PushScreen testID="networth-screen" onRefresh={onRefresh}>
       <Stack.Screen options={{ title: 'Net Worth' }} />
       {accounts.isLoading && !accounts.data ? (
         <SkeletonList hero rows={6} />

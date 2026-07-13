@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { SymbolView } from 'expo-symbols';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTransactions } from '@/api/hooks/finance.hooks';
 import { DemoRibbon } from '@/components/screen';
+import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { Avatar, EmptyState, ErrorState, PendingPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
@@ -150,8 +151,7 @@ export default function CategoryDetail() {
   const displayName = isAllSpending ? 'Spending' : isIncome ? 'Earnings' : name;
   const icon = categoryIcon(displayName);
   const loading = allTxns.isLoading && !allTxns.data;
-  const refreshing = allTxns.isFetching;
-  const refresh = () => { haptics.light(); allTxns.refetch(); };
+  const refresh = () => allTxns.refetch();
 
   return (
     <View style={styles.root} testID="category-detail-screen">
@@ -182,7 +182,7 @@ export default function CategoryDetail() {
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={{ paddingBottom: insets.bottom + 86 }}
-        refreshControl={<RefreshControl tintColor={colors.accent} refreshing={refreshing} onRefresh={refresh} />}
+        refreshControl={<GestureRefreshControl onRefresh={refresh} />}
       >
         {loading ? (
           <View style={{ padding: 18 }}><SkeletonList hero rows={7} /></View>

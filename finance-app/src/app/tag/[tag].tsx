@@ -33,7 +33,7 @@ export default function TagDetail() {
   }, [rows]);
 
   return (
-    <PushScreen testID="tag-detail-screen" refreshing={search.isFetching} onRefresh={search.refetch}>
+    <PushScreen testID="tag-detail-screen" onRefresh={search.refetch}>
       <Stack.Screen options={{ title: `#${display}` }} />
       {search.isLoading && !search.data ? (
         <SkeletonList hero rows={7} />

@@ -3,7 +3,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { useRouter } from 'expo-router';
 import Svg, { Circle } from 'react-native-svg';
-import { useBudgets, useInsights, useSpending, useTags, useTrends } from '@/api/hooks/finance.hooks';
+import { useBudgets, useInsights, useSpending, useTags, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { Screen } from '@/components/screen';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, PendingPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
@@ -71,12 +71,17 @@ export default function Spending() {
   const apiMonth = month === curKey ? undefined : month;
   const selectedWindow = useMemo(() => periodWindow(period, month, curKey), [period, month, curKey]);
   const spendingParams = period === 'month' ? apiMonth : { start: selectedWindow.start, end: selectedWindow.end };
+  const useCurrentToday = period === 'month' && apiMonth === undefined;
+  const today = useToday();
   const trends = useTrends(60);
-  const spending = useSpending(spendingParams);
+  const spending = useSpending(spendingParams, { enabled: !useCurrentToday });
   const budgets = useBudgets(apiMonth);
   const insights = useInsights(apiMonth);
   const tags = useTags();
-  const cur = spending.data?.current;
+  const cur = useCurrentToday ? today.data?.spending.current : spending.data?.current;
+  const spendingLoading = useCurrentToday ? today.isLoading : spending.isLoading;
+  const spendingError = useCurrentToday ? today.error : spending.error;
+  const spendingIsError = useCurrentToday ? today.isError : spending.isError;
 
   // Bars/navigation span exactly as far back as there's data: trim leading
   // buckets with no spend and no income from the (ascending) trends series.
@@ -137,8 +142,12 @@ export default function Spending() {
   // Real-spend merchants come from the backend (excludes transfers/investments/
   // CC payments/reimbursement), so savings moves and brokerage buys never show up.
   const topMerchants = insights.data?.topMerchants ?? [];
-  const refreshing = spending.isFetching || insights.isFetching || trends.isFetching || budgets.isFetching;
-  const refresh = () => { spending.refetch(); insights.refetch(); trends.refetch(); budgets.refetch(); };
+  const refresh = () => Promise.all([
+    useCurrentToday ? today.refetch() : spending.refetch(),
+    insights.refetch(),
+    trends.refetch(),
+    budgets.refetch(),
+  ]);
   const categoryParams = (name: string, bucket?: string) => ({
     name,
     start: selectedWindow.start,
@@ -156,16 +165,16 @@ export default function Spending() {
   );
 
   return (
-    <Screen title="Spending" right={headerRight} refreshing={refreshing} onRefresh={refresh} testID="spending-screen">
+    <Screen title="Spending" right={headerRight} onRefresh={refresh} testID="spending-screen">
       <View style={styles.controlsCard}>
         <PeriodChips value={period} onChange={setPeriod} />
         <DualMonthBars months={chartMonths} selected={month} onSelect={setMonth} />
       </View>
 
-      {spending.isLoading ? (
+      {spendingLoading ? (
         <SkeletonList rows={8} />
-      ) : spending.isError ? (
-        <ErrorState error={spending.error?.error} onRetry={refresh} />
+      ) : spendingIsError ? (
+        <ErrorState error={spendingError?.error} onRetry={refresh} />
       ) : !spendEntries.length && !refundEntries.length ? (
         <EmptyState icon="creditcard">{month === curKey ? 'No spending this month' : `No spending in ${monthLabel(month)}`}</EmptyState>
       ) : (
@@ -202,10 +211,9 @@ export default function Spending() {
                 <Text style={styles.mutedLabel}>Left for spending</Text>
                 <Text style={styles.budgetValue}>{budgetLeft < 0 ? '-' : ''}{fmtPos(Math.abs(budgetLeft))}</Text>
               </View>
-              <View style={styles.ringRow}>
-                <Ring label="$" pct={budgetPct} />
-                <Ring label="!" pct={Math.min(100, (refundTotal / Math.max(1, totalSpend)) * 100)} warn />
-                <Ring label="∞" pct={100 - budgetPct} />
+              <View style={styles.budgetFacts}>
+                <Text style={styles.budgetFact}>{budgetPct.toFixed(0)}% of target used</Text>
+                {refundTotal > 0.005 ? <Text style={styles.budgetFact}>{fmtPos(refundTotal)} refunds shown separately</Text> : null}
               </View>
             </View>
             <View style={styles.progressTrack}>
@@ -402,14 +410,6 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <CardTitle style={styles.section}>{children}</CardTitle>;
 }
 
-function Ring({ label, pct, warn }: { label: string; pct: number; warn?: boolean }) {
-  return (
-    <View style={[styles.ring, { borderColor: warn ? colors.yellow : colors.accent }]}>
-      <Text style={[styles.ringText, warn && { color: colors.yellow }]}>{label}</Text>
-    </View>
-  );
-}
-
 function BreakdownCircle({ entries, total }: { entries: [string, number][]; total: number }) {
   const size = 118;
   const stroke = 14;
@@ -584,9 +584,8 @@ const styles = StyleSheet.create({
   budgetMain: { flex: 1, minWidth: 0 },
   mutedLabel: { color: colors.muted, fontSize: 12, fontWeight: '600' },
   budgetValue: { color: colors.text, fontSize: 24, fontWeight: '800', marginTop: 4, letterSpacing: -0.5 },
-  ringRow: { flexDirection: 'row', gap: 8 },
-  ring: { width: 36, height: 36, borderRadius: 18, borderWidth: 2, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface2 },
-  ringText: { color: colors.accentLight, fontSize: 13, fontWeight: '800' },
+  budgetFacts: { alignItems: 'flex-end', gap: 3, maxWidth: '48%' },
+  budgetFact: { color: colors.muted, fontSize: 11, textAlign: 'right' },
   progressTrack: { height: 5, borderRadius: 3, backgroundColor: colors.surface2, margin: 16, marginTop: 14, overflow: 'hidden' },
   progressFill: { height: 5, borderRadius: 3, backgroundColor: colors.accent },
   breakdownCard: { padding: 0, overflow: 'hidden', marginBottom: 16 },

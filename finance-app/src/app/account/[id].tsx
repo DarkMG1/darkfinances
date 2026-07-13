@@ -4,9 +4,10 @@ import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAccounts, useSetAccountOverride, useTransactions } from '@/api/hooks/finance.hooks';
 import { DemoRibbon } from '@/components/screen';
+import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
-import { Transaction } from '@/api/generated/types';
+import { AccountRole, Transaction } from '@/api/generated/types';
 import { financeToday, previousMonth } from '@/lib/date-only';
 import { haptics } from '@/lib/haptics';
 import { colors, fmtDay, fmtMoney } from '@/theme/colors';
@@ -16,11 +17,19 @@ function windowStart(): string {
   const current = financeToday().slice(0, 7);
   return `${previousMonth(previousMonth(current))}-01`;
 }
+const ROLE_OPTIONS: { value: AccountRole; label: string }[] = [
+  { value: 'operating_cash', label: 'Everyday cash' },
+  { value: 'protected_savings', label: 'Protected savings' },
+  { value: 'credit_card', label: 'Credit card' },
+  { value: 'loan', label: 'Loan' },
+  { value: 'investment', label: 'Investment' },
+  { value: 'excluded', label: 'Exclude from metrics' },
+];
 
 export default function AccountDetail() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const p = useLocalSearchParams<{ id: string; name?: string; balance?: string; hidden?: string }>();
+  const p = useLocalSearchParams<{ id: string; name?: string; balance?: string; hidden?: string; role?: AccountRole }>();
 
   const accounts = useAccounts();
   const txns = useTransactions({ accountId: p.id, start: windowStart(), collapse: true });
@@ -33,10 +42,11 @@ export default function AccountDetail() {
   const [editing, setEditing] = useState(false);
   const [nameText, setNameText] = useState(p.name || '');
   const [hidden, setHidden] = useState(p.hidden === '1');
+  const [role, setRole] = useState<AccountRole>(p.role || 'unknown');
 
   const saveOverride = () => {
     override.mutate(
-      { id: p.id, name: nameText, hidden },
+      { id: p.id, name: nameText, hidden, role },
       {
         onSuccess: () => {
           setNameOverride(nameText.trim() || account?.name || p.name || 'Account');
@@ -93,7 +103,7 @@ export default function AccountDetail() {
         options={{
           title,
           headerRight: () => (
-            <Pressable testID="account-edit-button" onPress={() => { haptics.tap(); setNameText(title); setHidden(!!account?.hidden); setEditing(true); }} hitSlop={8}>
+            <Pressable testID="account-edit-button" onPress={() => { haptics.tap(); setNameText(title); setHidden(!!account?.hidden); setRole(account?.role || 'unknown'); setEditing(true); }} hitSlop={8}>
               <Text style={styles.editBtn}>Edit</Text>
             </Pressable>
           ),
@@ -114,8 +124,7 @@ export default function AccountDetail() {
           renderSectionHeader={({ section }) => <Text style={styles.sectionHeader}>{section.title}</Text>}
           stickySectionHeadersEnabled={false}
           contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}
-          refreshing={txns.isFetching}
-          onRefresh={() => { haptics.light(); txns.refetch(); }}
+          refreshControl={<GestureRefreshControl onRefresh={txns.refetch} />}
           ListHeaderComponent={
             balance != null ? (
               <View style={styles.hero}>
@@ -145,6 +154,22 @@ export default function AccountDetail() {
                 autoFocus
               />
               <Text style={styles.hintText}>Only changes how it shows here — your bank name is untouched. Clear it to reset.</Text>
+              <Text style={[styles.label, { marginTop: 18 }]}>Financial role</Text>
+              <View style={styles.roleWrap}>
+                {ROLE_OPTIONS.map((option) => (
+                  <Pressable
+                    key={option.value}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: role === option.value }}
+                    testID={`account-role-${option.value}`}
+                    onPress={() => setRole(option.value)}
+                    style={[styles.roleChip, role === option.value && styles.roleChipOn]}
+                  >
+                    <Text style={[styles.roleText, role === option.value && styles.roleTextOn]}>{option.label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <Text style={styles.hintText}>Used for liquidity and planning metrics. Renaming the account never changes this role.</Text>
               <View style={styles.hideRow}>
                 <View style={{ flex: 1, paddingRight: 12 }}>
                   <Text style={styles.hideLabel}>Hide account</Text>
@@ -183,6 +208,11 @@ const styles = StyleSheet.create({
   label: { color: colors.muted, fontSize: 12, fontWeight: '600', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
   input: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15 },
   hintText: { color: colors.muted, fontSize: 11, marginTop: 8, lineHeight: 16 },
+  roleWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  roleChip: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 9, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  roleChipOn: { backgroundColor: colors.accent, borderColor: colors.accent },
+  roleText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
+  roleTextOn: { color: '#fff' },
   hideRow: { flexDirection: 'row', alignItems: 'center', marginTop: 18, paddingTop: 14, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
   hideLabel: { color: colors.text, fontSize: 15, fontWeight: '600' },
   saveBtn: { backgroundColor: colors.accent, borderRadius: 10, paddingVertical: 13, alignItems: 'center', marginTop: 20 },

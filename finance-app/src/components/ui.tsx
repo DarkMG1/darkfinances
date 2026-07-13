@@ -109,7 +109,7 @@ export function ListRow({ avatar, title, subtitle, value, valueColor, valueSub, 
   );
   if (onPress) {
     return (
-      <Pressable testID={testID} onPress={onPress} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}>
+      <Pressable accessibilityRole="button" testID={testID} onPress={onPress} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}>
         {inner}
       </Pressable>
     );
@@ -126,7 +126,7 @@ export function PressableScale({ onPress, children, style, scale = 0.97, disable
   disabled?: boolean;
 }) {
   return (
-    <Pressable onPress={onPress} disabled={disabled} style={({ pressed }) => [style as ViewStyle, pressed && { opacity: 0.88, transform: [{ scale }] }]}>
+    <Pressable accessibilityRole={onPress ? 'button' : undefined} onPress={onPress} disabled={disabled} style={({ pressed }) => [style as ViewStyle, pressed && { opacity: 0.88, transform: [{ scale }] }]}>
       {children}
     </Pressable>
   );
@@ -198,7 +198,7 @@ export function TagChips({
               </Text>
             </Pressable>
             {onRemoveTag ? (
-              <Pressable hitSlop={8} onPress={() => onRemoveTag(t.raw)} style={({ pressed }) => (pressed ? { opacity: 0.5 } : null)}>
+              <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${t.label} tag`} hitSlop={16} onPress={() => onRemoveTag(t.raw)} style={({ pressed }) => (pressed ? { opacity: 0.5 } : null)}>
                 <SymbolView name="xmark.circle.fill" tintColor={tint} size={13} resizeMode="scaleAspectFit" style={styles.tagRemove} />
               </Pressable>
             ) : null}
@@ -235,7 +235,7 @@ export function ErrorState({ error, onRetry }: { error?: string; onRetry?: () =>
       <SymbolView name="exclamationmark.triangle" tintColor={colors.red} size={32} resizeMode="scaleAspectFit" style={{ opacity: 0.85 }} />
       <Text style={[styles.muted, { color: colors.red, textAlign: 'center' }]}>{error || 'Something went wrong'}</Text>
       {onRetry ? (
-        <Pressable onPress={onRetry} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+        <Pressable accessibilityRole="button" onPress={onRetry} style={({ pressed }) => [styles.retry, pressed && { opacity: 0.6 }]}>
           <Text style={[styles.muted, { color: colors.accentLight, marginTop: 4, fontWeight: '600' }]}>Tap to retry</Text>
         </Pressable>
       ) : null}
@@ -266,7 +266,7 @@ const styles = StyleSheet.create({
   splitPill: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: 'rgba(124,110,247,0.16)', borderRadius: 5, paddingHorizontal: 5, paddingVertical: 2, flexShrink: 0 },
   splitPillText: { color: colors.accentLight, fontSize: 9, fontWeight: '800', letterSpacing: 0.4 },
   avatar: { alignItems: 'center', justifyContent: 'center' },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, minHeight: 44 },
   rowMid: { flex: 1, minWidth: 0 },
   rowTitle: { color: colors.text, fontSize: 15, fontWeight: '600' },
   rowSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
@@ -285,4 +285,5 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', padding: 24 },
   emptyIcon: { width: 34, height: 34, marginBottom: 10, opacity: 0.6 },
   muted: { color: colors.muted, fontSize: 13 },
+  retry: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12 },
 });

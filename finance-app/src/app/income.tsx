@@ -35,7 +35,7 @@ export default function Income() {
   const inactive = (data?.streams ?? []).filter((s) => !s.active);
 
   return (
-    <PushScreen testID="income-screen" refreshing={income.isFetching} onRefresh={income.refetch}>
+    <PushScreen testID="income-screen" onRefresh={income.refetch}>
       {income.isLoading ? (
         <SkeletonList hero rows={4} />
       ) : income.isError && !data ? (
