@@ -1,11 +1,13 @@
 'use strict';
 
 function toCents(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) throw new TypeError('money value must be finite');
-  const cents = Math.round(number * 100);
-  if (Math.abs(number * 100 - cents) > 1e-7) throw new RangeError('money value has more than two decimal places');
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new TypeError('money value must be a finite number');
+  }
+  if (Object.is(value, -0)) throw new RangeError('money value must not be negative zero');
+  const cents = Math.round(value * 100);
   if (!Number.isSafeInteger(cents)) throw new RangeError('money value is outside the safe integer range');
+  if (!Object.is(cents / 100, value)) throw new RangeError('money value has more than two decimal places');
   return cents;
 }
 

@@ -98,13 +98,20 @@ test('server security boundaries fail closed', async (t) => {
     body: '{}',
   });
   assert.equal(result.response.status, 404);
+  result = await request(base, '/API/V1/Transactions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Demo-Mode': '1' },
+    body: JSON.stringify({ accountId: 'demo-checking', amount: 1.005 }),
+  });
+  assert.equal(result.response.status, 400);
+  assert.equal(result.body.code, 'INVALID_REQUEST');
   result = await request(base, '/demo', { redirect: 'manual' });
   assert.equal(result.response.status, 200);
   assert.match(String(result.body), /demoOnlyPage/);
-  result = await request(base, '/api/v1/transactions', {
+  result = await request(base, '/API/V1/Transactions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Demo-Mode': '1' },
-    body: JSON.stringify({ payee: '<img src=x onerror=alert(1)>' }),
+    body: JSON.stringify({ accountId: 'demo-checking', amount: -7.34, payee: '<img src=x onerror=alert(1)>' }),
   });
   assert.deepEqual(result.body.data, { ok: true, demo: true });
   result = await request(base, '/api/v1/transactions', { headers: { 'X-Demo-Mode': '1' } });
