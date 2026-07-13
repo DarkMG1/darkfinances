@@ -209,14 +209,17 @@ EAS Update can publish JavaScript and asset changes to an installed compatible n
 ```bash
 npm run ota:publish
 bash scripts/ota-publish.sh preview "describe the update"
+bash scripts/ota-publish.sh free-sideload "describe the sideload update"
 ```
 
-The default branch/environment is `production`. OTA updates cannot add or change native modules,
-plugins, entitlements, Info.plist values, widgets, or the native privacy shield. Those changes require a
-new IPA/native build.
+The default branch/environment is `production`. The `free-sideload` command resolves the free runtime
+configuration and publishes to its isolated branch/channel using the production EAS environment. OTA
+updates cannot add or change native modules, plugins, entitlements, Info.plist values, widgets, or the
+native privacy shield. Those changes require a new IPA/native build.
 
-`runtimeVersion` follows the app version. Changing `expo.version` creates a new native runtime; rebuild
-and reinstall before expecting updates for that version.
+The full build follows the app version. The free-sideload build uses
+`<app-version>-free-sideload` on the separate `free-sideload` channel. Changing either runtime requires
+a rebuild and reinstall before expecting updates for that binary.
 
 ## Quality checks
 

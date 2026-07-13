@@ -16,6 +16,8 @@ reverse-proxy settings, and alert delivery before installation.
 | `systemd/actual-sync.timer` | Twice-daily Pacific-time bank-sync schedule. |
 | `systemd/finance-sync-failure@.service` | `OnFailure` bridge to the alert script. |
 | `bin/backup-dashboard-runtime.sh` | Private archive of dashboard JSON sidecars and receipts. |
+| `bin/backup-coordinated.sh` | Quiesced backup with embedded manifest, checksum, and release provenance. |
+| `bin/verify-backup.sh` | Schema/checksum/receipt validation for a runtime archive. |
 | `bin/restore-dashboard-runtime.sh` | Dry-run-first, CONFIRM-gated sidecar restore. |
 | `bin/finance-sync-alert.sh` | Telegram alert delivery through an existing OpenClaw destination. |
 | `logrotate-darkfinances.conf` | Rotation policy for finance logs that may contain transaction metadata. |
@@ -200,9 +202,29 @@ invalidates any browser sessions preserved elsewhere.
 Verify an archive:
 
 ```bash
+ops/bin/verify-backup.sh /path/to/dashboard-runtime-<timestamp>.tgz
 sha256sum -c dashboard-runtime-<timestamp>.tgz.sha256
 tar -tzf dashboard-runtime-<timestamp>.tgz
 ```
+
+Each archive embeds `.backup-manifest.json` with per-file SHA-256 checksums, schema version, git
+commit, and recovery metadata. A matching `dashboard-runtime-<timestamp>.tgz.manifest.json` is
+written beside the archive.
+
+### Coordinated quiesced backup
+
+When systemd is available, `backup-coordinated.sh` stops `actual-sync.timer` and
+`finance-dashboard.service`, runs the runtime backup, verifies it, and records a release manifest.
+Set `BACKUP_INCLUDE_ACTUAL_DATA=1` to also archive `~/actual/data`.
+
+```bash
+install -m 700 ops/bin/backup-coordinated.sh \
+  "$HOME/.local/bin/backup-coordinated.sh"
+BACKUP_QUIESCE=0 "$HOME/.local/bin/backup-coordinated.sh"
+```
+
+Use `BACKUP_QUIESCE=0` on hosts without user systemd or when you have already stopped services
+manually.
 
 ## Restore dashboard runtime state
 
