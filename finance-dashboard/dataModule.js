@@ -35,6 +35,10 @@ const {
   SAFE_TO_SPEND_INPUTS,
   safeToSpendIncompleteReasons,
 } = require('./lib/safe-to-spend');
+const {
+  AccountNotFoundError,
+  TransactionNotFoundError,
+} = require('./lib/errors');
 const { statePath } = require('./lib/state-registry');
 const ACTUAL_API_PATH = process.env.ACTUAL_API_PATH || '@actual-app/api';
 const api = require(ACTUAL_API_PATH);
@@ -200,15 +204,16 @@ async function syncNow() {
 // Manual "Sync with bank": fetch fresh transactions from linked banks (SimpleFIN)
 // then pull deltas. Resilient — even if the bank fetch fails (provider down), we
 // still sync the ledger and report the warning instead of throwing.
-async function bankSync() {
+async function bankSync({ sync = true, throwOnBankError = false } = {}) {
   await initApi();
   let warning = null;
   try {
     await api.runBankSync();
   } catch (e) {
+    if (throwOnBankError) throw e;
     warning = (e && e.message) || 'bank fetch failed';
   }
-  await syncNow();
+  if (sync) await syncNow();
   return { ok: !warning, warning, at: new Date().toISOString() };
 }
 
@@ -673,7 +678,7 @@ async function getTransactions({ accountId, start, end, category, bucket, budget
 // in dollars (negative = expense, positive = income); resolves/creates the payee
 // by name. addTransactions (not importTransactions) so Actual's import dedup
 // can't silently drop a legitimate manual entry.
-async function createTransaction({ accountId, amount, payee, date, categoryId, notes } = {}) {
+async function createTransaction({ accountId, amount, payee, date, categoryId, notes } = {}, { sync = true } = {}) {
   if (!accountId) throw new Error('accountId required');
   const cents = toCents(amount);
   if (cents === 0) throw new Error('a non-zero amount is required');
@@ -681,11 +686,9 @@ async function createTransaction({ accountId, amount, payee, date, categoryId, n
   return withApi(async (api) => {
     let payeeId;
     if (name) {
-      try {
-        const payees = await api.getPayees();
-        const found = payees.find((p) => (p.name || '').toLowerCase() === name.toLowerCase());
-        payeeId = found ? found.id : await api.createPayee({ name });
-      } catch (_) { /* payee best-effort; keep the name in notes below if unresolved */ }
+      const payees = await api.getPayees();
+      const found = payees.find((p) => (p.name || '').toLowerCase() === name.toLowerCase());
+      payeeId = found ? found.id : await api.createPayee({ name });
     }
     const txn = {
       date: date || todayYMD(),
@@ -696,7 +699,7 @@ async function createTransaction({ accountId, amount, payee, date, categoryId, n
       cleared: false,
     };
     const res = await api.addTransactions(accountId, [txn], { learnCategories: false, runTransfers: false });
-    await syncNow(); // persist the write back to the Actual server
+    if (sync) await syncNow(); // persist the write back to the Actual server
     const id = Array.isArray(res) ? res[0] : res && Array.isArray(res.added) ? res.added[0] : null;
     return { ok: true, id: id || null };
   });
@@ -3302,7 +3305,10 @@ async function getTransactionById({ id, accountId, date } = {}) {
     const candidates = accountId
       ? accts.filter((account) => account.id === accountId)
       : accts.filter((account) => !account.closed);
-    if (!candidates.length) throw new Error('account not found');
+    if (!candidates.length) {
+      if (accountId) throw new AccountNotFoundError();
+      throw new Error('account not found');
+    }
     const transactionSets = await Promise.all(candidates.map(async (account) => ({
       account,
       transactions: await api.getTransactions(account.id, date, date),
@@ -3320,7 +3326,7 @@ async function getTransactionById({ id, accountId, date } = {}) {
         break;
       }
     }
-    if (!account) throw new Error('transaction not found');
+    if (!account) throw new TransactionNotFoundError();
     const catMap = Object.fromEntries(cats.map((c) => [c.id, c.name]));
     const pn = Object.fromEntries(payees.map((p) => [p.id, p.name]));
     const acctName = account.name || account.id;
@@ -3336,7 +3342,7 @@ async function getTransactionById({ id, accountId, date } = {}) {
       parent = txns.find((transaction) => transaction.id === requested.parent_id) || requested;
       requestedLeg = requested;
     }
-    if (!parent) throw new Error('transaction not found');
+    if (!parent) throw new TransactionNotFoundError();
     const subs = Array.isArray(parent.subtransactions) ? parent.subtransactions : [];
     const display = requestedLeg || parent;
     return {
@@ -3980,7 +3986,7 @@ async function applyRuleToTxns(api, rule, { months = 24 } = {}) {
   return applied;
 }
 
-async function saveRule({ match, categoryId, categoryName } = {}) {
+async function saveRule({ match, categoryId, categoryName } = {}, { sync = true } = {}) {
   const m = (match || '').trim();
   if (!m || !categoryId) throw new Error('match and categoryId required');
   const store = getRules();
@@ -3990,7 +3996,7 @@ async function saveRule({ match, categoryId, categoryName } = {}) {
   store.rules = store.rules.filter((r) => (r.match || '').toLowerCase() !== m.toLowerCase());
   store.rules.push(rule);
   const applied = await withApi((api) => applyRuleToTxns(api, rule));
-  if (applied) await syncNow();
+  if (applied && sync) await syncNow();
   writeJsonSafe(RULES_PATH, store);
   return { ok: true, id, applied };
 }
@@ -4008,7 +4014,7 @@ function deleteRule({ id } = {}) {
 // category over to Reimbursement, so a friend paying you back never counts as
 // real income. Only ever touches income-filed inflows whose payee/notes match a
 // settle-up service — manual categorizations elsewhere are left alone.
-async function refileSettleUps() {
+async function refileSettleUps({ sync = true } = {}) {
   return withApi(async (api) => {
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
@@ -4033,7 +4039,7 @@ async function refileSettleUps() {
         moved++;
       }
     }
-    if (moved) await syncNow();
+    if (moved && sync) await syncNow();
     return { ok: true, moved };
   });
 }
@@ -4117,7 +4123,7 @@ function validateSplitwiseMirrorSnapshot(truth, { now = Date.now(), maxAgeMs = 6
   }
   return truth.othersPaidItems;
 }
-async function syncSplitwiseShareExpenses() {
+async function syncSplitwiseShareExpenses({ sync = true } = {}) {
   return withApi(async (api) => {
     const truth = readJsonSafe(OWES_TRUTH_PATH, null);
     const items = validateSplitwiseMirrorSnapshot(truth);
@@ -4152,7 +4158,7 @@ async function syncSplitwiseShareExpenses() {
       }
     }
     for (const [id, t] of Object.entries(byTag)) if (!wanted.has(id)) { await api.deleteTransaction(t.id); pruned++; }
-    if (created || updated || pruned) await syncNow();
+    if (sync) await syncNow();
     return { ok: true, account: SW_ACCOUNT_NAME, items: items.length, created, updated, pruned };
   });
 }
@@ -4237,9 +4243,10 @@ function getCatalogDisplay() {
 
 // Re-apply every rule (used on refresh + manual "apply now"). Successful work is
 // synced, but any failed stage is surfaced so refresh never claims full success.
-async function applyRules() {
+async function applyRules({ sync = true } = {}) {
   const { rules } = getRules();
   let total = 0;
+  let settleUpsMoved = 0;
   const failures = [];
   await withApi(async (api) => {
     for (const r of rules) {
@@ -4251,11 +4258,14 @@ async function applyRules() {
     catch (error) { failures.push({ stage: 'catalog', error: error.message }); }
   });
   // Rescue misfiled peer settle-ups on every refresh so income never inflates.
-  try { await refileSettleUps(); }
+  try {
+    const settleUps = await refileSettleUps({ sync: false });
+    settleUpsMoved = settleUps.moved || 0;
+  }
   catch (error) { failures.push({ stage: 'settle-ups', error: error.message }); }
-  if (total) await syncNow();
+  if ((total || settleUpsMoved) && sync) await syncNow();
   if (failures.length) throw new Error(`categorization failed in ${failures.length} stage(s)`);
-  return { ok: true, applied: total };
+  return { ok: true, applied: total, settleUpsMoved };
 }
 
 // Force a payee to be treated as recurring even if detection didn't catch it

@@ -9,9 +9,11 @@ const browser = fs.readFileSync(path.resolve(__dirname, '..', 'public', 'index.h
 const appHome = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'index.tsx'), 'utf8');
 
 function serverRoutes() {
-  return [...server.matchAll(/\bv1\.(get|post|delete|put|patch)\('([^']+)'/g)]
-    .map((match) => `${match[1].toUpperCase()} /api/v1${match[2]}`)
-    .sort();
+  const direct = [...server.matchAll(/\bv1\.(get|post|delete|put|patch)\('([^']+)'/g)]
+    .map((match) => `${match[1].toUpperCase()} /api/v1${match[2]}`);
+  const journaled = [...server.matchAll(/\bregisterV1Mutation\('([A-Z]+)', '([^']+)'/g)]
+    .map((match) => `${match[1]} /api/v1${match[2]}`);
+  return [...new Set([...direct, ...journaled])].sort();
 }
 
 function generatedRoutes() {

@@ -3,36 +3,314 @@ const { readJsonFile, writeJsonFile } = require('./json-store');
 const { AppError } = require('./errors');
 const { statePath } = require('./state-registry');
 
-const MAX_ENTRIES = 1000;
+const OUTER_SCHEMA_VERSION = 1;
+const OPERATION_RECORD_VERSION = 2;
+const FINGERPRINT_VERSION = 2;
+const MAX_TERMINAL_ENTRIES = 1000;
 const KEY_RE = /^[A-Za-z0-9._:-]{8,128}$/;
+const HASH_RE = /^[a-f0-9]{64}$/;
+const PHASES = Object.freeze({
+  STARTED: 'started',
+  LOCAL_APPLIED: 'local_applied',
+  SYNC_UNKNOWN: 'sync_unknown',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+});
 
-function requestFingerprint(method, route, body) {
+function legacyRequestFingerprint(method, route, body) {
   return crypto
     .createHash('sha256')
     .update(`${method}\n${route}\n${JSON.stringify(body ?? null)}`)
     .digest('hex');
 }
 
+function jsonValue(value) {
+  const serialized = JSON.stringify(value === undefined ? null : value);
+  if (serialized === undefined) throw new TypeError('Value is not JSON serializable');
+  return JSON.parse(serialized);
+}
+
+function sortJson(value) {
+  if (Array.isArray(value)) return value.map(sortJson);
+  if (!value || typeof value !== 'object') return value;
+  const sorted = Object.create(null);
+  for (const key of Object.keys(value).sort()) sorted[key] = sortJson(value[key]);
+  return sorted;
+}
+
+function canonicalJson(value) {
+  return JSON.stringify(sortJson(jsonValue(value)));
+}
+
+function canonicalPath(value) {
+  const raw = String(value || '/');
+  const url = new URL(raw, 'http://operation-journal.invalid');
+  return url.pathname || '/';
+}
+
+function compareStrings(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function queryPairs(value) {
+  let params;
+  if (value instanceof URLSearchParams) {
+    params = new URLSearchParams(value);
+  } else if (typeof value === 'string') {
+    params = new URLSearchParams(value.replace(/^\?/, '').split('#', 1)[0]);
+  } else {
+    params = new URLSearchParams();
+    if (value && typeof value === 'object') {
+      for (const key of Object.keys(value)) {
+        const values = Array.isArray(value[key]) ? value[key] : [value[key]];
+        for (const item of values) params.append(key, item == null ? '' : String(item));
+      }
+    }
+  }
+  return [...params.entries()]
+    .map(([key, item], index) => ({ key, item, index }))
+    .sort((left, right) => compareStrings(left.key, right.key) || left.index - right.index)
+    .map(({ key, item }) => [key, item]);
+}
+
+function normalizedRequest(requestOrMethod, route, body, query) {
+  const request = requestOrMethod && typeof requestOrMethod === 'object'
+    ? requestOrMethod
+    : { method: requestOrMethod, route, body, query };
+  const rawUrl = request.url || request.route || request.path || '/';
+  const path = canonicalPath(request.path || request.route || rawUrl);
+  let queryValue;
+  if (Object.prototype.hasOwnProperty.call(request, 'query')) {
+    queryValue = request.query;
+  } else if (Object.prototype.hasOwnProperty.call(request, 'queryString')) {
+    queryValue = request.queryString;
+  } else {
+    queryValue = new URL(String(rawUrl), 'http://operation-journal.invalid').searchParams;
+  }
+  return {
+    method: String(request.method || '').toUpperCase(),
+    path,
+    query: queryPairs(queryValue),
+    body: request.body === undefined ? null : request.body,
+  };
+}
+
+function requestFingerprint(requestOrMethod, route, body, query) {
+  const request = normalizedRequest(requestOrMethod, route, body, query);
+  return crypto
+    .createHash('sha256')
+    .update(`${request.method}\n${request.path}\n${canonicalJson(request.query)}\n${canonicalJson(request.body)}`)
+    .digest('hex');
+}
+
+function legacyFingerprintForRequest(request) {
+  const route = canonicalPath(request.route || request.path || request.url || '/');
+  return legacyRequestFingerprint(String(request.method || ''), route, request.body);
+}
+
+function isObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validError(value) {
+  return isObject(value)
+    && /^[A-Z0-9_:-]{1,64}$/.test(value.code || '')
+    && typeof value.message === 'string'
+    && value.message.length >= 1
+    && value.message.length <= 240
+    && [...value.message].every((character) => {
+      const point = character.codePointAt(0);
+      return point > 0x1f && (point < 0x7f || point > 0x9f);
+    })
+    && Number.isInteger(value.status)
+    && value.status >= 400
+    && value.status <= 499;
+}
+
+function validLegacyOperation(key, operation) {
+  return operation.recordVersion === undefined
+    && operation.phase === undefined
+    && operation.fingerprintVersion === undefined
+    && (!operation.key || operation.key === key)
+    && HASH_RE.test(operation.fingerprint || '')
+    && typeof operation.method === 'string'
+    && typeof operation.route === 'string'
+    && ['started', 'completed', 'failed'].includes(operation.status);
+}
+
+function validVersionedOperation(key, operation) {
+  if (
+    operation.recordVersion !== OPERATION_RECORD_VERSION
+    || operation.fingerprintVersion !== FINGERPRINT_VERSION
+    || operation.key !== key
+    || !HASH_RE.test(operation.fingerprint || '')
+    || typeof operation.method !== 'string'
+    || typeof operation.route !== 'string'
+    || !Object.values(PHASES).includes(operation.phase)
+  ) return false;
+
+  const has = (field) => Object.prototype.hasOwnProperty.call(operation, field);
+  if (operation.phase === PHASES.STARTED) {
+    return operation.status === 'started'
+      && !has('provisionalResult')
+      && !has('localAppliedAt')
+      && !has('syncStartedAt')
+      && !has('result')
+      && !has('error');
+  }
+  if (operation.phase === PHASES.LOCAL_APPLIED) {
+    return operation.status === 'started'
+      && has('provisionalResult')
+      && has('localAppliedAt')
+      && !has('syncStartedAt')
+      && !has('result')
+      && !has('error');
+  }
+  if (operation.phase === PHASES.SYNC_UNKNOWN) {
+    return operation.status === 'started'
+      && has('provisionalResult')
+      && has('localAppliedAt')
+      && has('syncStartedAt')
+      && !has('result')
+      && !has('error');
+  }
+  if (operation.phase === PHASES.COMPLETED) {
+    return operation.status === 'completed'
+      && has('result')
+      && has('provisionalResult')
+      && has('localAppliedAt')
+      && !has('error')
+      && operation.knownBeforeApply !== true;
+  }
+  return operation.status === 'failed'
+    && operation.knownBeforeApply === true
+    && validError(operation.error)
+    && !has('provisionalResult')
+    && !has('localAppliedAt')
+    && !has('syncStartedAt')
+    && !has('result');
+}
+
 function validState(value) {
-  return !!value
-    && value.schemaVersion === 1
-    && value.operations
-    && typeof value.operations === 'object'
-    && !Array.isArray(value.operations);
+  if (
+    !value
+    || value.schemaVersion !== OUTER_SCHEMA_VERSION
+    || !isObject(value.operations)
+  ) return false;
+  return Object.entries(value.operations).every(([key, operation]) =>
+    KEY_RE.test(key)
+    && isObject(operation)
+    && (validVersionedOperation(key, operation) || validLegacyOperation(key, operation)));
+}
+
+function cloneDurable(value) {
+  return jsonValue(value);
+}
+
+function equivalent(left, right) {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
+function transitionError(message, code = 'OPERATION_TRANSITION_INVALID') {
+  return new AppError(message, {
+    code,
+    status: 409,
+    expose: true,
+  });
+}
+
+function sanitizeError(error) {
+  const rawCode = String(error?.code || 'OPERATION_FAILED').toUpperCase();
+  const code = rawCode.replace(/[^A-Z0-9_:-]/g, '_').slice(0, 64) || 'OPERATION_FAILED';
+  const withoutControls = [...String(error?.message || 'Operation failed before local application')]
+    .map((character) => {
+      const point = character.codePointAt(0);
+      return point <= 0x1f || (point >= 0x7f && point <= 0x9f) ? ' ' : character;
+    })
+    .join('');
+  const rawMessage = withoutControls
+    .replace(/\s+/g, ' ')
+    .trim();
+  const message = (rawMessage || 'Operation failed before local application').slice(0, 240);
+  const requestedStatus = Number(error?.status);
+  const status = Number.isInteger(requestedStatus) && requestedStatus >= 400 && requestedStatus <= 499
+    ? requestedStatus
+    : 400;
+  return { code, message, status };
+}
+
+function isVersioned(operation) {
+  return operation?.recordVersion === OPERATION_RECORD_VERSION;
+}
+
+function isKnownFailed(operation) {
+  return isVersioned(operation)
+    && operation.phase === PHASES.FAILED
+    && operation.status === 'failed'
+    && operation.knownBeforeApply === true;
+}
+
+function isCompleted(operation) {
+  return operation?.status === 'completed'
+    && (!isVersioned(operation) || operation.phase === PHASES.COMPLETED);
+}
+
+function isLegacyAmbiguous(operation) {
+  return !isVersioned(operation)
+    && (operation?.status === 'started' || operation?.status === 'failed');
+}
+
+function operationPhase(operation) {
+  if (isVersioned(operation)) return operation.phase;
+  if (isCompleted(operation)) return PHASES.COMPLETED;
+  return PHASES.STARTED;
+}
+
+function isTerminal(operation) {
+  return isCompleted(operation) || isKnownFailed(operation);
+}
+
+function terminalTime(operation) {
+  const parsed = Date.parse(operation.completedAt || operation.updatedAt || operation.startedAt || '');
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+}
+
+function ownOperation(operations, key) {
+  return Object.prototype.hasOwnProperty.call(operations, key) ? operations[key] : null;
+}
+
+function setOperation(operations, key, operation) {
+  Object.defineProperty(operations, key, {
+    value: operation,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
 }
 
 class OperationJournal {
-  constructor(file = statePath('operationJournal')) {
+  constructor(file = statePath('operationJournal'), {
+    readState = readJsonFile,
+    writeState = writeJsonFile,
+    now = () => new Date().toISOString(),
+  } = {}) {
     this.file = file;
+    this.readState = readState;
+    this.writeState = writeState;
+    this.now = now;
   }
 
   read() {
-    return readJsonFile(this.file, { schemaVersion: 1, operations: {} }, validState);
+    return this.readState(
+      this.file,
+      { schemaVersion: OUTER_SCHEMA_VERSION, operations: {} },
+      validState,
+    );
   }
 
   get(key) {
     if (!KEY_RE.test(key || '')) return null;
-    return this.read().operations[key] || null;
+    return ownOperation(this.read().operations, key);
   }
 
   start(key, request) {
@@ -44,9 +322,11 @@ class OperationJournal {
       });
     }
     const state = this.read();
-    const fingerprint = requestFingerprint(request.method, request.route, request.body);
-    const existing = state.operations[key];
+    const existing = ownOperation(state.operations, key);
     if (existing) {
+      const fingerprint = existing.fingerprintVersion === FINGERPRINT_VERSION
+        ? requestFingerprint(request)
+        : legacyFingerprintForRequest(request);
       if (existing.fingerprint !== fingerprint) {
         throw new AppError('Idempotency key was already used for a different request', {
           code: 'IDEMPOTENCY_KEY_REUSED',
@@ -56,60 +336,193 @@ class OperationJournal {
       }
       return { existing, fingerprint };
     }
-    state.operations[key] = {
+    const normalized = normalizedRequest(request);
+    const fingerprint = requestFingerprint(request);
+    const now = this.now();
+    setOperation(state.operations, key, {
       key,
+      recordVersion: OPERATION_RECORD_VERSION,
       fingerprint,
-      method: request.method,
-      route: request.route,
+      fingerprintVersion: FINGERPRINT_VERSION,
+      method: normalized.method,
+      route: normalized.path,
       status: 'started',
-      startedAt: new Date().toISOString(),
-    };
+      phase: PHASES.STARTED,
+      startedAt: now,
+      updatedAt: now,
+    });
     this.writePruned(state);
     return { existing: null, fingerprint };
   }
 
+  localApplied(key, provisionalResult) {
+    const state = this.read();
+    const operation = this.requireVersioned(state, key);
+    const durableResult = cloneDurable(provisionalResult === undefined ? null : provisionalResult);
+    if (operation.phase === PHASES.LOCAL_APPLIED) {
+      if (equivalent(operation.provisionalResult, durableResult)) return operation;
+      throw transitionError(
+        `Operation ${key} already has a different provisional result`,
+        'OPERATION_TRANSITION_CONFLICT',
+      );
+    }
+    if (operation.phase !== PHASES.STARTED) {
+      throw transitionError(`Operation ${key} cannot transition from ${operation.phase} to local_applied`);
+    }
+    state.operations[key] = {
+      ...operation,
+      status: 'started',
+      phase: PHASES.LOCAL_APPLIED,
+      provisionalResult: durableResult,
+      localAppliedAt: this.now(),
+      updatedAt: this.now(),
+    };
+    this.writePruned(state);
+    return state.operations[key];
+  }
+
+  syncUnknown(key) {
+    const state = this.read();
+    const operation = this.requireVersioned(state, key);
+    if (operation.phase === PHASES.SYNC_UNKNOWN) return operation;
+    if (operation.phase !== PHASES.LOCAL_APPLIED) {
+      throw transitionError(`Operation ${key} cannot transition from ${operation.phase} to sync_unknown`);
+    }
+    state.operations[key] = {
+      ...operation,
+      status: 'started',
+      phase: PHASES.SYNC_UNKNOWN,
+      syncStartedAt: this.now(),
+      updatedAt: this.now(),
+    };
+    this.writePruned(state);
+    return state.operations[key];
+  }
+
   complete(key, result) {
     const state = this.read();
-    const operation = state.operations[key];
-    if (!operation) throw new Error(`Operation ${key} was not started`);
+    const operation = this.requireVersioned(state, key);
+    const durableResult = cloneDurable(result === undefined ? null : result);
+    if (operation.phase === PHASES.COMPLETED) {
+      if (equivalent(operation.result, durableResult)) return operation;
+      throw transitionError(
+        `Operation ${key} already completed with a different result`,
+        'OPERATION_TRANSITION_CONFLICT',
+      );
+    }
+    if (![PHASES.LOCAL_APPLIED, PHASES.SYNC_UNKNOWN].includes(operation.phase)) {
+      throw transitionError(`Operation ${key} cannot transition from ${operation.phase} to completed`);
+    }
+    const now = this.now();
     state.operations[key] = {
       ...operation,
       status: 'completed',
-      completedAt: new Date().toISOString(),
-      result: result === undefined ? null : result,
+      phase: PHASES.COMPLETED,
+      completedAt: now,
+      updatedAt: now,
+      result: durableResult,
     };
     this.writePruned(state);
+    return state.operations[key];
   }
 
-  fail(key, error) {
+  failBeforeApply(key, error) {
     const state = this.read();
-    const operation = state.operations[key];
-    if (!operation) return;
+    const operation = this.requireVersioned(state, key);
+    const durableError = sanitizeError(error);
+    if (operation.phase === PHASES.FAILED) {
+      if (equivalent(operation.error, durableError)) return operation;
+      throw transitionError(
+        `Operation ${key} already failed with a different error`,
+        'OPERATION_TRANSITION_CONFLICT',
+      );
+    }
+    if (operation.phase !== PHASES.STARTED) {
+      throw transitionError(`Operation ${key} cannot transition from ${operation.phase} to failed`);
+    }
+    const now = this.now();
     state.operations[key] = {
       ...operation,
       status: 'failed',
-      completedAt: new Date().toISOString(),
-      error: {
-        code: error?.code || 'OPERATION_FAILED',
-        message: error?.message || 'Operation failed',
-      },
+      phase: PHASES.FAILED,
+      knownBeforeApply: true,
+      completedAt: now,
+      updatedAt: now,
+      error: durableError,
     };
     this.writePruned(state);
+    return state.operations[key];
+  }
+
+  fail(key, error) {
+    return this.failBeforeApply(key, error);
+  }
+
+  status(key) {
+    const operation = this.get(key);
+    if (!operation) return null;
+    const phase = operationPhase(operation);
+    const knownFailure = isKnownFailed(operation);
+    const completed = isCompleted(operation);
+    const value = {
+      key,
+      status: completed ? 'completed' : knownFailure ? 'failed' : 'started',
+      phase,
+      terminal: completed || knownFailure,
+      outcome: completed ? 'completed' : knownFailure ? 'failed' : 'unknown',
+      startedAt: operation.startedAt || null,
+      updatedAt: operation.updatedAt || operation.completedAt || operation.startedAt || null,
+      completedAt: operation.completedAt || null,
+    };
+    if (completed) value.result = cloneDurable(operation.result === undefined ? null : operation.result);
+    if (knownFailure) value.error = cloneDurable(operation.error);
+    if (
+      [PHASES.LOCAL_APPLIED, PHASES.SYNC_UNKNOWN].includes(phase)
+      && Object.prototype.hasOwnProperty.call(operation, 'provisionalResult')
+    ) value.provisionalResult = cloneDurable(operation.provisionalResult);
+    if (isLegacyAmbiguous(operation)) {
+      value.legacyAmbiguous = true;
+      value.legacyStatus = operation.status;
+    }
+    return value;
+  }
+
+  requireVersioned(state, key) {
+    const operation = ownOperation(state.operations, key);
+    if (!operation) throw transitionError(`Operation ${key} was not started`);
+    if (!isVersioned(operation)) {
+      throw transitionError(`Legacy operation ${key} is outcome-unknown and cannot transition`);
+    }
+    return operation;
   }
 
   writePruned(state) {
-    const entries = Object.entries(state.operations);
-    if (entries.length > MAX_ENTRIES) {
-      entries
-        .sort((a, b) => String(b[1].completedAt || b[1].startedAt).localeCompare(String(a[1].completedAt || a[1].startedAt)))
-        .slice(MAX_ENTRIES)
+    const terminal = Object.entries(state.operations).filter(([, operation]) => isTerminal(operation));
+    if (terminal.length > MAX_TERMINAL_ENTRIES) {
+      terminal
+        .sort(([aKey, a], [bKey, b]) => terminalTime(a) - terminalTime(b) || compareStrings(aKey, bKey))
+        .slice(0, terminal.length - MAX_TERMINAL_ENTRIES)
         .forEach(([key]) => delete state.operations[key]);
     }
-    writeJsonFile(this.file, state);
+    this.writeState(this.file, state);
   }
 }
 
 module.exports = {
+  FINGERPRINT_VERSION,
+  MAX_TERMINAL_ENTRIES,
+  OPERATION_RECORD_VERSION,
   OperationJournal,
+  PHASES,
+  canonicalJson,
+  canonicalPath,
+  isCompleted,
+  isKnownFailed,
+  isLegacyAmbiguous,
+  legacyRequestFingerprint,
+  operationPhase,
+  queryPairs,
   requestFingerprint,
+  sanitizeError,
+  validState,
 };

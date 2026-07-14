@@ -55,7 +55,7 @@ function reimbRef(id, amount) {
   };
 }
 
-test('money routes reject before data mutation and operation journaling', async (t) => {
+test('money routes reject before data mutation and durably journal known failures', async (t) => {
   const port = await unusedPort();
   const base = `http://127.0.0.1:${port}`;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-money-routes-'));
@@ -236,10 +236,17 @@ test('money routes reject before data mutation and operation journaling', async 
     assert.equal(result.body.code, 'INVALID_REQUEST');
   }
   assert.equal(fs.existsSync(marker), false, 'invalid requests must not invoke data mutations');
-  assert.equal(fs.existsSync(journal), false, 'invalid requests must not create operation-journal state');
+  assert.equal(fs.existsSync(journal), true, 'versioned validation failures must be durable');
+  const operations = JSON.parse(fs.readFileSync(journal, 'utf8')).operations;
+  assert.equal(operations['money-boundary-0'], undefined, 'legacy validation remains outside the v1 journal');
+  for (let index = 1; index < cases.length; index += 1) {
+    assert.equal(operations[`money-boundary-${index}`].status, 'failed');
+    assert.equal(operations[`money-boundary-${index}`].phase, 'failed');
+    assert.equal(operations[`money-boundary-${index}`].knownBeforeApply, true);
+  }
 
   for (const [index, entry] of cases.entries()) {
-    const result = await post(base, entry.pathname, `money-boundary-${index}`, entry.valid);
+    const result = await post(base, entry.pathname, `money-valid-${index}`, entry.valid);
     assert.equal(result.response.status, 200, `${entry.name}: ${JSON.stringify(result.body)}`);
   }
   const invoked = fs.readFileSync(marker, 'utf8').trim().split('\n');
