@@ -14,8 +14,10 @@
 #   CONFIGURATION=Debug npm run release:ios
 #
 set -euo pipefail
+unset FREE_IOS_SIDELOAD
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$ROOT/.." && pwd)"
 cd "$ROOT"
 
 CONFIGURATION="${CONFIGURATION:-Release}"
@@ -23,6 +25,9 @@ BUILD_DIR="$ROOT/build"
 ARCHIVE_PATH="$BUILD_DIR/Finances.xcarchive"
 IPA_DIR="$ROOT/dist"
 IPA_PATH="$IPA_DIR/Finances.ipa"
+MANIFEST_PATH="$IPA_DIR/Finances-release-manifest.json"
+rm -f "$MANIFEST_PATH"
+expected_source_digest="$(node "$REPO_ROOT/scripts/release-manifest.js" --source-digest)"
 
 echo "==> [1/5] Regenerating native iOS project (expo prebuild --clean)"
 npx expo prebuild -p ios --clean
@@ -60,7 +65,14 @@ cp -R "$APP_PATH" "$BUILD_DIR/Payload/"
 rm -f "$IPA_PATH"
 ( cd "$BUILD_DIR" && zip -qry "$IPA_PATH" Payload )
 rm -rf "$BUILD_DIR/Payload"
+node "$REPO_ROOT/scripts/release-manifest.js" \
+  --mode=ipa \
+  --variant=full \
+  --expected-source-digest="$expected_source_digest" \
+  --artifact="$IPA_PATH" \
+  "$MANIFEST_PATH"
 
 echo ""
 echo "Done. Unsigned IPA -> $IPA_PATH"
+echo "Release manifest -> $MANIFEST_PATH"
 echo "Sideload it with AltStore or Sideloadly; they re-sign with your Apple ID."

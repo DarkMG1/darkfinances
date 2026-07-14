@@ -40,6 +40,7 @@ investment-holdings.json
 operation-journal.json
 review-state.json
 transaction-sagas.json
+release-manifest.json
 receipts/
 *.last-good
 *.corrupt-*

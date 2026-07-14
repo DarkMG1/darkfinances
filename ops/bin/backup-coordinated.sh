@@ -5,7 +5,7 @@ umask 077
 dashboard="${FINANCE_DASHBOARD_DIR:-$HOME/finance-dashboard}"
 destination="${DARKFINANCES_BACKUP_DIR:-$HOME/darkfinances-backups}"
 actual_data="${ACTUAL_DATA_DIR:-$HOME/actual/data}"
-repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+repo_root="${DARKFINANCES_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 bin_dir="$(cd "$(dirname "$0")" && pwd)"
 quiesce="${BACKUP_QUIESCE:-1}"
 include_actual="${BACKUP_INCLUDE_ACTUAL_DATA:-0}"
@@ -44,10 +44,7 @@ runtime_archive="$("$bin_dir/backup-dashboard-runtime.sh")"
 "$bin_dir/verify-backup.sh" "$runtime_archive"
 
 manifest_path="$runtime_archive.manifest.json"
-release_manifest="$(node "$repo_root/scripts/release-manifest.js" --stdout)"
-printf '%s\n' "$release_manifest" > "$destination/coordinated-release-$(basename "$runtime_archive" .tgz).json"
-chmod 600 "$destination/coordinated-release-$(basename "$runtime_archive" .tgz).json"
-
+additional_backup_args=()
 if [ "$include_actual" = "1" ] && [ -d "$actual_data" ]; then
   actual_archive="$destination/actual-data-$(date -u +%Y%m%dT%H%M%SZ).tgz"
   tar -C "$(dirname "$actual_data")" -czf "$actual_archive" "$(basename "$actual_data")"
@@ -58,7 +55,17 @@ if [ "$include_actual" = "1" ] && [ -d "$actual_data" ]; then
     shasum -a 256 "$actual_archive" > "$actual_archive.sha256"
   fi
   chmod 600 "$actual_archive.sha256"
+  additional_backup_args+=("--backup-additional-archive=$actual_archive")
   echo "$actual_archive"
 fi
+
+release_manifest_path="$destination/coordinated-release-$(basename "$runtime_archive" .tgz).json"
+node "$repo_root/scripts/release-manifest.js" \
+  --mode=backup \
+  --backup-manifest="$manifest_path" \
+  --backup-archive="$runtime_archive" \
+  "${additional_backup_args[@]}" \
+  "$release_manifest_path" >/dev/null
+chmod 600 "$release_manifest_path"
 
 echo "$runtime_archive"

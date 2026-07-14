@@ -17,6 +17,7 @@ reverse-proxy settings, and alert delivery before installation.
 | `systemd/finance-sync-failure@.service` | `OnFailure` bridge to the alert script. |
 | `bin/backup-dashboard-runtime.sh` | Private archive of dashboard JSON sidecars and receipts. |
 | `bin/backup-coordinated.sh` | Quiesced backup with embedded manifest, checksum, and release provenance. |
+| `bin/write-dashboard-release-manifest.sh` | Content-address the reviewed files in a dashboard deployment. |
 | `bin/verify-backup.sh` | Schema/checksum/receipt validation for a runtime archive. |
 | `bin/restore-dashboard-runtime.sh` | Dry-run-first, CONFIRM-gated sidecar restore. |
 | `bin/finance-sync-alert.sh` | Telegram alert delivery through an existing OpenClaw destination. |
@@ -106,6 +107,26 @@ curl -fsS -H "X-Finance-Token: $FINANCE_API_TOKEN" \
 
 An HTTP `503` from ping means the process is reachable but Actual data is not ready. Investigate the
 journal before restarting repeatedly.
+
+After each code deployment and before relying on `/ping` release identity, hash the files actually
+present in the deployment:
+
+```bash
+FINANCE_DASHBOARD_DIR="$HOME/finance-dashboard" \
+  ops/bin/write-dashboard-release-manifest.sh
+node scripts/release-manifest.js \
+  --verify="$HOME/finance-dashboard/release-manifest.json"
+```
+
+The helper uses a fixed reviewed runtime-file allowlist and does not enumerate ignored sidecars,
+receipts, environment files, sessions, or dependencies. `DARKFINANCES_REPO_ROOT` must point to the
+repository containing the exact source copied into `FINANCE_DASHBOARD_DIR`; generation fails if any
+allowlisted source/deployment file differs. Set it explicitly when the helper is installed outside
+the repository, and set `RELEASE_MANIFEST_PATH` when the service uses a non-default manifest
+location. The standalone `--verify` command checks manifest structure and its canonical
+content digest. Dashboard `/ping` additionally rehashes every allowlisted file against the running
+dashboard directory; it reports `release: null` if deployed code or assets drift afterward. Schema-v1
+manifests remain readable for migration but do not claim this live deployed-file verification.
 
 ## 4. Install scheduled bank sync
 
@@ -215,12 +236,14 @@ written beside the archive.
 
 When systemd is available, `backup-coordinated.sh` stops `actual-sync.timer` and
 `finance-dashboard.service`, runs the runtime backup, verifies it, and records a release manifest.
-Set `BACKUP_INCLUDE_ACTUAL_DATA=1` to also archive `~/actual/data`.
+Set `BACKUP_INCLUDE_ACTUAL_DATA=1` to also archive `~/actual/data`; that additional archive is
+content-addressed in the same release manifest.
 
 ```bash
 install -m 700 ops/bin/backup-coordinated.sh \
   "$HOME/.local/bin/backup-coordinated.sh"
-BACKUP_QUIESCE=0 "$HOME/.local/bin/backup-coordinated.sh"
+DARKFINANCES_REPO_ROOT=/path/to/darkfinances \
+  BACKUP_QUIESCE=0 "$HOME/.local/bin/backup-coordinated.sh"
 ```
 
 Use `BACKUP_QUIESCE=0` on hosts without user systemd or when you have already stopped services

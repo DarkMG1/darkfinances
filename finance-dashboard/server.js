@@ -10,6 +10,7 @@ const { FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { SerialQueue } = require('./lib/serial-queue');
 const { OperationJournal } = require('./lib/operation-journal');
 const { parse, schemas } = require('./lib/validation');
+const { readReleaseIdentity } = require('./lib/release-identity');
 
 const {
   generateRegistrationOptions,
@@ -29,19 +30,7 @@ const runtimeHealth = {
 };
 
 function releaseIdentity() {
-  try {
-    const manifest = JSON.parse(fs.readFileSync(RELEASE_MANIFEST_PATH, 'utf8'));
-    return {
-      commit: manifest.repository?.commitShort || null,
-      dirty: manifest.repository?.dirty === true,
-      lockSha256: manifest.lockfile?.sha256 || null,
-      contract: manifest.contract?.fingerprint || null,
-      appVersion: manifest.app?.version || null,
-      builtAt: manifest.builtAt || null,
-    };
-  } catch {
-    return null;
-  }
+  return readReleaseIdentity(RELEASE_MANIFEST_PATH, __dirname);
 }
 
 // Defense-in-depth: the Actual API occasionally rejects a batch write out-of-band

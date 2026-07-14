@@ -193,6 +193,7 @@ entitlements, disables the widget target, compiles without code signing, and pac
 
 ```text
 build/sideload/DarkFinances-<version>-<build>-unsigned.ipa
+build/sideload/DarkFinances-<version>-<build>-release-manifest.json
 ```
 
 Sideloadly signs that IPA at installation time with the selected Apple ID. This path requires Xcode,
@@ -208,14 +209,24 @@ EAS Update can publish JavaScript and asset changes to an installed compatible n
 
 ```bash
 npm run ota:publish
-bash scripts/ota-publish.sh preview "describe the update"
+bash scripts/ota-publish.sh preview "describe the preview update"
 bash scripts/ota-publish.sh free-sideload "describe the sideload update"
 ```
 
-The default branch/environment is `production`. The `free-sideload` command resolves the free runtime
-configuration and publishes to its isolated branch/channel using the production EAS environment. OTA
-updates cannot add or change native modules, plugins, entitlements, Info.plist values, widgets, or the
-native privacy shield. Those changes require a new IPA/native build.
+The default target uses the full runtime with the `production` branch/channel/environment. `preview`
+uses the same full runtime with the checked-in `preview` branch/channel/environment.
+`free-sideload` uses its isolated runtime and branch/channel with the production EAS environment.
+Production and preview mappings must match `eas.json`; arbitrary channel or environment substitution
+is rejected. OTA updates cannot add or change native modules, plugins, entitlements, Info.plist
+values, widgets, or the native privacy shield. Those changes require a new IPA/native build.
+
+Immediately before publication, the script captures the source digest. It publishes directly to the
+requested stable branch, captures EAS machine-readable update evidence, and writes
+`dist/ota-release-manifest.json` only if the returned branch/runtime and configured channel still
+match and the source digest is unchanged. Publication precedes provenance generation; a provenance
+failure does not roll back EAS, but it produces no valid final manifest and preserves the private
+temporary EAS JSON for diagnosis. `OTA_CHANNEL`, when set, must equal the configured branch channel.
+Set `OTA_MANIFEST_PATH` to choose a different destination.
 
 The full build follows the app version. The free-sideload build uses
 `<app-version>-free-sideload` on the separate `free-sideload` channel. Changing either runtime requires
