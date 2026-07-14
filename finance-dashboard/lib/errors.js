@@ -10,11 +10,43 @@ class AppError extends Error {
   }
 }
 
-class RequestValidationError extends AppError {
+// Explicit marker for deterministic failures known to have happened before any
+// operation effect. The journal must never infer this property from HTTP status,
+// AppError membership, or an error message.
+class KnownPreApplyError extends AppError {
+  constructor(message, { code = 'KNOWN_PRE_APPLY_FAILURE', status = 400, cause } = {}) {
+    super(message, { code, status, expose: true, cause });
+    this.name = 'KnownPreApplyError';
+  }
+}
+
+class RequestValidationError extends KnownPreApplyError {
   constructor(message, issues = []) {
-    super(message, { code: 'INVALID_REQUEST', status: 400, expose: true });
+    super(message, { code: 'INVALID_REQUEST', status: 400 });
     this.name = 'RequestValidationError';
     this.issues = issues;
+  }
+}
+
+class AccountNotFoundError extends AppError {
+  constructor() {
+    super('account not found', {
+      code: 'NOT_FOUND',
+      status: 404,
+      expose: true,
+    });
+    this.name = 'AccountNotFoundError';
+  }
+}
+
+class TransactionNotFoundError extends AppError {
+  constructor() {
+    super('Transaction not found', {
+      code: 'NOT_FOUND',
+      status: 404,
+      expose: true,
+    });
+    this.name = 'TransactionNotFoundError';
   }
 }
 
@@ -54,7 +86,10 @@ function classifyError(error) {
 }
 
 module.exports = {
+  AccountNotFoundError,
   AppError,
+  KnownPreApplyError,
   RequestValidationError,
+  TransactionNotFoundError,
   classifyError,
 };

@@ -8,6 +8,8 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/errors.js',
   'lib/json-store.js',
   'lib/metric-provenance.js',
+  'lib/mutation-route-registry.js',
+  'lib/operation-executor.js',
   'lib/operation-journal.js',
   'lib/release-files.js',
   'lib/release-identity.js',

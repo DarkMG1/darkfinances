@@ -5,10 +5,22 @@ const session = require('express-session');
 const FileStore = require('session-file-store')(session);
 const fs = require('fs');
 const crypto = require('crypto');
-const { AppError, classifyError } = require('./lib/errors');
+const {
+  AccountNotFoundError,
+  AppError,
+  KnownPreApplyError,
+  TransactionNotFoundError,
+  classifyError,
+} = require('./lib/errors');
 const { FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { SerialQueue } = require('./lib/serial-queue');
 const { OperationJournal } = require('./lib/operation-journal');
+const { executeJournaledOperation } = require('./lib/operation-executor');
+const {
+  MUTATION_ROUTES,
+  getMutationRoute,
+  routeKey,
+} = require('./lib/mutation-route-registry');
 const { parse, schemas } = require('./lib/validation');
 const { readReleaseIdentity } = require('./lib/release-identity');
 
@@ -350,8 +362,10 @@ const MONEY_REQUEST_BOUNDARIES = [
 ];
 function validateMoneyRequestBoundary(req, res, next) {
   if (req.method !== 'POST') return next();
-  const idempotencyKey = req.get('Idempotency-Key') || '';
-  if (isVersionedApiRequest(req) && !isDemo(req) && !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey)) return next();
+  // Versioned real writes validate inside their admitted operation so a known
+  // pre-effect rejection is durable and replayable. Demo and legacy requests
+  // retain this outer boundary because they are not operation-journaled.
+  if (isVersionedApiRequest(req) && !isDemo(req)) return next();
   const requestPath = req.path.replace(/^\/api(?:\/v1)?(?=\/|$)/i, '') || '/';
   const boundary = MONEY_REQUEST_BOUNDARIES.find(({ pattern }) => pattern.test(requestPath));
   if (!boundary) return next();
@@ -617,45 +631,64 @@ const resolvers = {
   reports: (req) => cached(`reports-${monthOf(req) || 'current'}`, () => data.getReports({ month: monthOf(req) }), 300),
 };
 
-async function setRecurring(req) {
+const applyLocal = (operation, mutation) => operation
+  ? operation.applyLocal(mutation)
+  : mutation();
+const syncAfterLocal = (operation) => operation
+  ? operation.sync(() => data.syncNow())
+  : data.syncNow();
+
+async function setRecurring(req, operation) {
   const { key } = parse(schemas.keyParam, req.params, 'recurring key');
   const { status, hidden, forced, isBill, cancellation } = parse(schemas.recurringOverride, req.body, 'recurring override');
-  const result = data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation });
+  const result = await applyLocal(operation, () =>
+    data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation }));
   cache.flushAll();
   return result;
 }
-async function markRecurring(req) {
+async function markRecurring(req, operation) {
   const { payee, isBill } = parse(schemas.markRecurring, req.body, 'recurring merchant');
-  const result = data.markRecurring({ payee, isBill });
+  const result = await applyLocal(operation, () => data.markRecurring({ payee, isBill }));
   cache.flushAll();
   return result;
 }
-async function splitTxn(req) {
+async function splitTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date, legs } = parse(schemas.splitTransaction, req.body, 'transaction split');
-  const result = await data.splitTransaction({ id, accountId, date, legs });
-  await data.syncNow();
+  const result = await applyLocal(operation, () => data.splitTransaction({ id, accountId, date, legs }));
+  await syncAfterLocal(operation);
   cache.flushAll();
   return result;
 }
-async function unsplitTxn(req) {
+async function unsplitTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date, categoryId } = parse(schemas.unsplitTransaction, req.body, 'remove split');
-  const result = await data.removeSplit({ id, accountId, date, categoryId });
-  await data.syncNow();
+  const result = await applyLocal(operation, () => data.removeSplit({ id, accountId, date, categoryId }));
+  await syncAfterLocal(operation);
   cache.flushAll();
   return result;
 }
-async function setPayeeH(req) {
+async function setPayeeH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { payee, isLeg, parentId, accountId, date } = parse(schemas.setPayee, req.body, 'transaction payee');
-  const result = await data.setPayee({ id, payee, isLeg, parentId, accountId, date });
-  await data.syncNow();
+  const result = await applyLocal(operation, () =>
+    data.setPayee({ id, payee, isLeg, parentId, accountId, date }));
+  await syncAfterLocal(operation);
   cache.flushAll();
   return result;
 }
-async function bankSyncH() {
-  const result = await data.bankSync();
+async function bankSyncH(_req, operation) {
+  let result;
+  if (operation) {
+    // There is no pre-sync domain write for this action. Advance through a
+    // durable no-op local checkpoint so sync_unknown precedes runBankSync too.
+    operation.localApplied({ ok: true, bankSyncPending: true });
+    await operation.sync(async () => {
+      result = await data.bankSync({ throwOnBankError: true });
+    });
+  } else {
+    result = await data.bankSync();
+  }
   if (!result.ok) {
     cache.flushAll();
     return { ...result, phantom: { skipped: true, reason: 'bank sync did not complete' } };
@@ -671,31 +704,53 @@ async function bankSyncH() {
     },
   };
 }
-async function phantomCleanupH(req) {
+async function phantomCleanupH(req, operation) {
   const query = parse(schemas.phantomCleanupQuery, req.query, 'phantom cleanup query');
   const dryRun = query.dryRun === '1' || query.dryRun === 'true';
-  const r = await data.cleanupPhantoms({
+  const r = await applyLocal(operation, () => data.cleanupPhantoms({
     dryRun,
     window: query.window,
     agedDays: query.agedDays,
     observeDays: query.observeDays,
     holdAgedDays: query.holdAgedDays,
     holdObserveDays: query.holdObserveDays,
-  });
-  if (!dryRun) { await data.syncNow(); cache.flushAll(); }
+  }));
+  if (!dryRun) { await syncAfterLocal(operation); cache.flushAll(); }
   return r;
 }
 const phantomLogH = (req) => Promise.resolve(data.getPhantomLog({ limit: Number(req.query.limit) || 100 }));
 // Receipts
-async function addReceiptH(req) {
+async function addReceiptH(req, operation) {
   const receipt = parse(schemas.receipt, req.body, 'receipt');
-  await data.getTransactionById({ id: receipt.txnId, accountId: receipt.accountId, date: receipt.transactionDate });
-  return data.addReceipt(receipt);
+  try {
+    await data.getTransactionById({
+      id: receipt.txnId,
+      accountId: receipt.accountId,
+      date: receipt.transactionDate,
+    });
+  } catch (error) {
+    if (operation && error instanceof AccountNotFoundError) {
+      throw new KnownPreApplyError('Account not found', {
+        code: 'ACCOUNT_NOT_FOUND',
+        status: 404,
+        cause: error,
+      });
+    }
+    if (operation && error instanceof TransactionNotFoundError) {
+      throw new KnownPreApplyError('Transaction not found', {
+        code: 'TRANSACTION_NOT_FOUND',
+        status: 404,
+        cause: error,
+      });
+    }
+    throw error;
+  }
+  return applyLocal(operation, () => data.addReceipt(receipt));
 }
 const receiptsH = (req) => Promise.resolve(data.getReceipts({ txnId: req.query.txnId }));
-async function deleteReceiptH(req) {
+async function deleteReceiptH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'receipt id');
-  return data.deleteReceipt({ id });
+  return applyLocal(operation, () => data.deleteReceipt({ id }));
 }
 // Raw image stream (auth already enforced by the router). expo-image sends the
 // token via headers, so this just serves the file bytes with the right type.
@@ -712,119 +767,134 @@ function receiptImageH(req, res) {
     return res.sendFile(f.path);
   } catch (e) { return sendApiError(req, res, e); }
 }
-async function sweepReimbH(req) {
+async function sweepReimbH(req, operation) {
   const { tags, from, to } = parse(schemas.reimbursementSweep, req.body, 'reimbursement sweep');
-  const result = await data.sweepReimbursementTags({ tags, from, to });
-  await data.syncNow();
+  const result = await applyLocal(operation, () => data.sweepReimbursementTags({ tags, from, to }));
+  await syncAfterLocal(operation);
   cache.flushAll();
   return result;
 }
-async function deleteTxn(req) {
+async function deleteTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date } = parse(schemas.deleteTransactionQuery, req.query, 'transaction delete query');
-  const result = await data.deleteTransaction({ id, accountId, date });
-  await data.syncNow(); // persist the delete back to the Actual server
+  const result = await applyLocal(operation, () => data.deleteTransaction({ id, accountId, date }));
+  await syncAfterLocal(operation); // persist the delete back to the Actual server
   cache.flushAll(); // removing a transaction shifts balances/spending/insights
   return result;
 }
-async function saveRuleH(req) {
-  const result = await data.saveRule(parse(schemas.rule, req.body, 'categorization rule'));
+async function saveRuleH(req, operation) {
+  const rule = parse(schemas.rule, req.body, 'categorization rule');
+  const result = await applyLocal(operation, () => data.saveRule(rule, { sync: false }));
+  if (result.applied) await syncAfterLocal(operation);
   cache.flushAll();
   return result;
 }
-async function deleteRuleH(req) {
+async function deleteRuleH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'rule id');
-  const result = data.deleteRule({ id });
+  const result = await applyLocal(operation, () => data.deleteRule({ id }));
   cache.flushAll();
   return result;
 }
-async function applyRulesH() {
-  const result = await data.applyRules();
+async function applyRulesH(_req, operation) {
+  const result = await applyLocal(operation, () => data.applyRules({ sync: false }));
+  if (result.applied || result.settleUpsMoved) await syncAfterLocal(operation);
   cache.flushAll();
   return result;
 }
-async function syncSharesH() {
-  const result = await data.syncSplitwiseShareExpenses();
+async function syncSharesH(_req, operation) {
+  const result = await applyLocal(operation, () => data.syncSplitwiseShareExpenses({ sync: false }));
+  // Account/category creation is structural Actual work not represented by the
+  // transaction counters, so every successful local pass must be synchronized.
+  await syncAfterLocal(operation);
   cache.flushAll();
   return result;
 }
 async function eventsH() {
   return cached('events', () => data.getEvents(), 60);
 }
-async function saveEventH(req) {
-  const result = data.saveEvent(parse(schemas.event, req.body, 'event'));
+async function saveEventH(req, operation) {
+  const event = parse(schemas.event, req.body, 'event');
+  const result = await applyLocal(operation, () => data.saveEvent(event));
   cache.del('events');
   return result;
 }
-async function deleteEventH(req) {
+async function deleteEventH(req, operation) {
   const { slug } = parse(schemas.slugParam, req.params, 'event slug');
-  const result = data.deleteEvent({ slug });
+  const result = await applyLocal(operation, () => data.deleteEvent({ slug }));
   cache.del('events');
   return result;
 }
-async function setAccountOverrideH(req) {
+async function setAccountOverrideH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'account id');
   const { name, hidden, role } = parse(schemas.accountOverride, req.body, 'account override');
-  const result = data.setAccountOverride({ id, name, hidden, role });
+  const result = await applyLocal(operation, () => data.setAccountOverride({ id, name, hidden, role }));
   cache.del(['accounts', 'today']);
   return result;
 }
-async function setReviewDispositionH(req) {
-  const result = data.setReviewDisposition(parse(schemas.reviewDisposition, req.body, 'review disposition'));
+async function setReviewDispositionH(req, operation) {
+  const disposition = parse(schemas.reviewDisposition, req.body, 'review disposition');
+  const result = await applyLocal(operation, () => data.setReviewDisposition(disposition));
   cache.del(['today', 'review-current']);
   return result;
 }
-async function saveManualAssetH(req) {
-  const result = data.saveManualAsset(parse(schemas.manualAsset, req.body, 'manual asset'));
+async function saveManualAssetH(req, operation) {
+  const asset = parse(schemas.manualAsset, req.body, 'manual asset');
+  const result = await applyLocal(operation, () => data.saveManualAsset(asset));
   cache.del('manual-assets');
   return result;
 }
-async function deleteManualAssetH(req) {
+async function deleteManualAssetH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'manual asset id');
-  const result = data.deleteManualAsset({ id });
+  const result = await applyLocal(operation, () => data.deleteManualAsset({ id }));
   cache.del('manual-assets');
   return result;
 }
-async function setNotes(req) {
+async function setNotes(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { notes, isLeg, parentId, accountId, date } = parse(schemas.setNotes, req.body, 'transaction notes');
-  const result = await data.setTransactionNotes({ id, notes, isLeg, parentId, accountId, date });
-  await data.syncNow();
+  const result = await applyLocal(operation, () =>
+    data.setTransactionNotes({ id, notes, isLeg, parentId, accountId, date }));
+  await syncAfterLocal(operation);
   cache.flushAll();
   return result;
 }
-async function setDateH(req) {
+async function setDateH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { date, isLeg } = parse(schemas.setDate, req.body, 'transaction date');
-  const result = await data.setTransactionDate({ id, date, isLeg });
-  await data.syncNow();
+  const result = await applyLocal(operation, () => data.setTransactionDate({ id, date, isLeg }));
+  await syncAfterLocal(operation);
   cache.flushAll();
   return result;
 }
-async function saveGoal(req) {
-  const result = await data.saveGoal(parse(schemas.goal, req.body, 'goal'));
+async function saveGoal(req, operation) {
+  const goal = parse(schemas.goal, req.body, 'goal');
+  const result = await applyLocal(operation, () => data.saveGoal(goal));
   cache.del('goals');
   return result;
 }
-async function deleteGoal(req) {
+async function deleteGoal(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'goal id');
-  const result = data.deleteGoal(id);
+  const result = await applyLocal(operation, () => data.deleteGoal(id));
   cache.del('goals');
   return result;
 }
 
-async function setCategory(req) {
+async function setCategory(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { categoryId, isLeg, parentId, accountId, date } = parse(schemas.setCategory, req.body, 'transaction category');
-  const result = await data.setTransactionCategory({ id, categoryId, isLeg, parentId, accountId, date });
-  await data.syncNow(); // persist the write back to the Actual server
+  const result = await applyLocal(operation, () =>
+    data.setTransactionCategory({ id, categoryId, isLeg, parentId, accountId, date }));
+  await syncAfterLocal(operation); // persist the write back to the Actual server
   cache.flushAll();
   return result;
 }
 // Manual refresh: pull the latest deltas from the Actual server, clear stale
 // HTTP cache, then immediately re-warm the hot keys so the UI repopulates fast.
-async function doRefresh() {
-  await data.syncNow();
+async function doRefresh(operation) {
+  // Refresh has no domain mutation. A durable no-op local checkpoint still
+  // precedes sync so a crash or timeout cannot cause an automatic second sync.
+  if (operation) operation.localApplied({ ok: true, refreshPending: true });
+  await syncAfterLocal(operation);
   // Detect split deltas without changing the user's allocation.
   const splits = await data.reconcileSplits();
   const phantom = await data.cleanupPhantoms({ dryRun: true });
@@ -841,60 +911,65 @@ async function doRefresh() {
   };
 }
 
-async function markBill(req) {
+async function markBill(req, operation) {
   const { id, key, dueDate, paid } = parse(schemas.markBill, req.body, 'bill state');
-  const result = data.setBillPaid({ id, key, dueDate, paid });
+  const result = await applyLocal(operation, () => data.setBillPaid({ id, key, dueDate, paid }));
   cache.flushAll(); // bills are cached per horizon
   return result;
 }
 
-async function setOwes(req) {
-  const result = data.setOwesConfig(parse(schemas.owesConfig, req.body, 'reimbursement configuration'));
+async function setOwes(req, operation) {
+  const config = parse(schemas.owesConfig, req.body, 'reimbursement configuration');
+  const result = await applyLocal(operation, () => data.setOwesConfig(config));
   cache.flushAll(); // reimbursement aggregations depend on this config
   return result;
 }
 
-async function createTxn(req) {
-  const result = await data.createTransaction(parse(schemas.createTransaction, req.body, 'transaction'));
+async function createTxn(req, operation) {
+  const transaction = parse(schemas.createTransaction, req.body, 'transaction');
+  const result = await applyLocal(operation, () => data.createTransaction(transaction, { sync: false }));
+  await syncAfterLocal(operation);
   cache.flushAll(); // a new transaction shifts balances/spending/insights
   return result;
 }
 
-async function setBudget(req) {
+async function setBudget(req, operation) {
   const { month, categoryId, amount } = parse(schemas.budget, req.body, 'budget amount');
-  const result = await data.setBudgetAmount({ month, categoryId, amount });
-  await data.syncNow(); // persist the write back to the Actual server
+  const result = await applyLocal(operation, () => data.setBudgetAmount({ month, categoryId, amount }));
+  await syncAfterLocal(operation); // persist the write back to the Actual server
   cache.flushAll(); // budget targets feed budgets + insights
   return result;
 }
 
 const reimbLinks = (req) => Promise.resolve(data.getReimbLinks({ id: req.query.id }));
-async function addLink(req) {
-  const r = data.addReimbLink(parse(schemas.reimbLink, req.body, 'reimbursement link'));
+async function addLink(req, operation) {
+  const link = parse(schemas.reimbLink, req.body, 'reimbursement link');
+  const r = await applyLocal(operation, () => data.addReimbLink(link));
   cache.flushAll(); // suggestions net against links
   return r;
 }
-async function confirmRepaymentH(req) {
+async function confirmRepaymentH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'repayment id');
-  const r = await data.confirmRepayment({ id, from: req.query.from, to: req.query.to });
-  await data.syncNow(); // persist the inflow's new category to the Actual server
+  const r = await applyLocal(operation, () =>
+    data.confirmRepayment({ id, from: req.query.from, to: req.query.to }));
+  await syncAfterLocal(operation); // persist the inflow's new category to the Actual server
   cache.flushAll();
   return r;
 }
-async function dismissRepaymentH(req) {
+async function dismissRepaymentH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'repayment id');
   const inflowId = req.body?.inflowId == null
     ? undefined
     : parse(schemas.idParam, { id: req.body.inflowId }, 'repayment inflow id').id;
-  const r = data.dismissRepayment({ id, inflowId });
+  const r = await applyLocal(operation, () => data.dismissRepayment({ id, inflowId }));
   cache.flushAll();
   return r;
 }
-async function delLink(req) {
+async function delLink(req, operation) {
   const inflowId = (req.body && req.body.inflowId) || req.query.inflowId;
   const expenseId = (req.body && req.body.expenseId) || req.query.expenseId;
   const parsed = parse(schemas.deleteReimbLink, { inflowId, expenseId }, 'reimbursement unlink');
-  const r = data.deleteReimbLink(parsed);
+  const r = await applyLocal(operation, () => data.deleteReimbLink(parsed));
   cache.flushAll();
   return r;
 }
@@ -902,9 +977,18 @@ async function delLink(req) {
 // Reconciliation — read fresh (not cached) so checkboxes reflect instantly.
 const reconciliationH = (req) => data.getReconciliation({ month: monthOf(req) });
 const reconcilePendingH = () => data.getReconcilePending();
-const setReconItemH = (req) => Promise.resolve(data.setReconcileItem(parse(schemas.reconcileItem, req.body, 'reconciliation item')));
-const setReconMonthH = (req) => Promise.resolve(data.setReconcileMonth(parse(schemas.reconcileMonth, req.body, 'reconciliation month')));
-const setReconEnabledH = (req) => Promise.resolve(data.setReconcileEnabled(parse(schemas.reconcileEnabled, req.body, 'reconciliation setting')));
+const setReconItemH = (req, operation) => {
+  const item = parse(schemas.reconcileItem, req.body, 'reconciliation item');
+  return applyLocal(operation, () => data.setReconcileItem(item));
+};
+const setReconMonthH = (req, operation) => {
+  const month = parse(schemas.reconcileMonth, req.body, 'reconciliation month');
+  return applyLocal(operation, () => data.setReconcileMonth(month));
+};
+const setReconEnabledH = (req, operation) => {
+  const setting = parse(schemas.reconcileEnabled, req.body, 'reconciliation setting');
+  return applyLocal(operation, () => data.setReconcileEnabled(setting));
+};
 
 // Monthly CSV export (raw text/csv, used by web download + app share sheet).
 function csvEscape(v) {
@@ -947,58 +1031,48 @@ function sendApiError(req, res, error) {
   if (error && Array.isArray(error.issues)) body.issues = error.issues;
   return res.status(classified.status).json(body);
 }
-const runHandler = (req, fn) =>
+const runHandler = (req, fn, operation) =>
   ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)
-    ? mutationQueue.run(() => fn(req))
-    : fn(req);
+    ? mutationQueue.run(() => fn(req, operation))
+    : fn(req, operation);
 const raw = (fn) => async (req, res) => {
   try { res.json(await runHandler(req, fn)); } catch (e) { sendApiError(req, res, e); }
 };
-const env = (fn) => async (req, res) => {
+function operationJournalError(error, phase) {
+  runtimeHealth.fatalErrorAt = new Date().toISOString();
+  console.error(`[operation-journal:${phase}]`, error);
+}
+const env = (fn, mutationRoute = null) => async (req, res) => {
   const mutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
   const versioned = isVersionedApiRequest(req);
-  const idempotencyKey = mutation && versioned && !isDemo(req) ? req.get('Idempotency-Key') : null;
-  let started = false;
   try {
-    if (idempotencyKey !== null) {
-      const { existing } = operationJournal.start(idempotencyKey, {
-        method: req.method,
-        route: req.originalUrl.split('?')[0],
-        body: req.body,
-      });
-      if (existing?.status === 'completed') return res.json({ data: existing.result, operation: { key: idempotencyKey, replayed: true } });
-      if (existing?.status === 'started') {
-        throw new AppError('The previous request outcome is unknown; check operation status before retrying', {
-          code: 'OUTCOME_UNKNOWN',
-          status: 409,
+    if (mutation && versioned && !isDemo(req)) {
+      if (!mutationRoute) {
+        throw new AppError('Versioned mutation route is missing lifecycle classification', {
+          code: 'MUTATION_LIFECYCLE_UNCLASSIFIED',
+          status: 500,
           expose: true,
         });
       }
-      if (existing?.status === 'failed') {
-        throw new AppError(existing.error?.message || 'The previous operation failed', {
-          code: existing.error?.code || 'OPERATION_FAILED',
-          status: 409,
-          expose: true,
-        });
-      }
-      started = true;
-    } else if (mutation && versioned && !isDemo(req)) {
-      throw new AppError('A valid Idempotency-Key header is required', {
-        code: 'IDEMPOTENCY_KEY_REQUIRED',
-        status: 400,
-        expose: true,
+      const idempotencyKey = req.get('Idempotency-Key');
+      const execution = await executeJournaledOperation({
+        journal: operationJournal,
+        key: idempotencyKey,
+        request: {
+          method: req.method,
+          path: `${req.baseUrl || ''}${req.path || ''}` || req.path,
+          url: req.originalUrl,
+          body: req.body,
+        },
+        handler: (operation) => runHandler(req, fn, operation),
+        requiresCheckpoint: mutationRoute.requiresCheckpoint,
+        onJournalError: operationJournalError,
       });
+      return res.json({ data: execution.result, operation: execution.operation });
     }
     const result = await runHandler(req, fn);
-    if (started) operationJournal.complete(idempotencyKey, result);
-    return res.json({ data: result, ...(started ? { operation: { key: idempotencyKey } } : {}) });
+    return res.json({ data: result });
   } catch (e) {
-    if (started) {
-      try { operationJournal.fail(idempotencyKey, e); } catch (journalError) {
-        runtimeHealth.fatalErrorAt = new Date().toISOString();
-        console.error('[operation-journal]', journalError);
-      }
-    }
     return sendApiError(req, res, e);
   }
 };
@@ -1100,8 +1174,17 @@ v1.use((req, res, next) => req.method === 'POST' && /^\/receipts\/?$/i.test(req.
   : next());
 v1.use(validateMoneyRequestBoundary);
 v1.use(demoMiddleware(true)); // demo mode for native clients (after token/session auth)
+const registeredV1MutationRoutes = new Set();
+function registerV1Mutation(method, route, handler) {
+  const definition = getMutationRoute(method, route);
+  if (!definition) throw new Error(`Unclassified versioned mutation route: ${method} ${route}`);
+  const key = routeKey(method, route);
+  if (registeredV1MutationRoutes.has(key)) throw new Error(`Duplicate versioned mutation route: ${key}`);
+  registeredV1MutationRoutes.add(key);
+  v1[method.toLowerCase()](route, env(handler, definition));
+}
 v1.get('/operations/:key', env(async (req) => {
-  const operation = operationJournal.get(req.params.key);
+  const operation = operationJournal.status(req.params.key);
   if (!operation) {
     throw new AppError('Operation not found', {
       code: 'OPERATION_NOT_FOUND',
@@ -1133,14 +1216,14 @@ v1.get('/ping', env(async () => {
 v1.get('/accounts', env(resolvers.accounts));
 v1.get('/today', env(resolvers.today));
 v1.get('/transactions', env(resolvers.transactions));
-v1.post('/transactions', env(createTxn));
+registerV1Mutation('POST', '/transactions', createTxn);
 v1.get('/spending', env(resolvers.spending));
 v1.get('/trends', env(resolvers.trends));
 v1.get('/budgets', env(resolvers.budgets));
-v1.post('/budgets', env(setBudget));
+registerV1Mutation('POST', '/budgets', setBudget);
 v1.get('/reimbursement', env(resolvers.reimbursement));
 v1.get('/review', env(resolvers.review));
-v1.post('/review/dispositions', env(setReviewDispositionH));
+registerV1Mutation('POST', '/review/dispositions', setReviewDispositionH);
 v1.get('/reimbursement-ledger', env(resolvers.reimbursementLedger));
 v1.get('/insights', env(resolvers.insights));
 v1.get('/merchant-history', env(resolvers.merchantHistory));
@@ -1154,54 +1237,59 @@ v1.get('/tags', env(resolvers.tags));
 v1.get('/report.csv', reportCsv);
 v1.get('/goals', env(resolvers.goals));
 v1.get('/transactions/:id', env(resolvers.txnById));
-v1.post('/transactions/:id/category', env(setCategory));
-v1.post('/transactions/:id/notes', env(setNotes));
-v1.post('/transactions/:id/date', env(setDateH));
-v1.post('/transactions/:id/payee', env(setPayeeH));
-v1.post('/transactions/:id/split', env(splitTxn));
-v1.post('/transactions/:id/unsplit', env(unsplitTxn));
-v1.delete('/transactions/:id', env(deleteTxn));
-v1.post('/bank-sync', env(bankSyncH));
-v1.post('/reimbursements/sweep', env(sweepReimbH));
-v1.post('/phantom/cleanup', env(phantomCleanupH));
+registerV1Mutation('POST', '/transactions/:id/category', setCategory);
+registerV1Mutation('POST', '/transactions/:id/notes', setNotes);
+registerV1Mutation('POST', '/transactions/:id/date', setDateH);
+registerV1Mutation('POST', '/transactions/:id/payee', setPayeeH);
+registerV1Mutation('POST', '/transactions/:id/split', splitTxn);
+registerV1Mutation('POST', '/transactions/:id/unsplit', unsplitTxn);
+registerV1Mutation('DELETE', '/transactions/:id', deleteTxn);
+registerV1Mutation('POST', '/bank-sync', bankSyncH);
+registerV1Mutation('POST', '/reimbursements/sweep', sweepReimbH);
+registerV1Mutation('POST', '/phantom/cleanup', phantomCleanupH);
 v1.get('/phantom/log', env(phantomLogH));
-v1.post('/receipts', env(addReceiptH));
+registerV1Mutation('POST', '/receipts', addReceiptH);
 v1.get('/receipts', env(receiptsH));
 v1.get('/receipts/:id/image', receiptImageH); // raw bytes (auth via router)
-v1.delete('/receipts/:id', env(deleteReceiptH));
+registerV1Mutation('DELETE', '/receipts/:id', deleteReceiptH);
 v1.get('/rules', env(resolvers.rules));
-v1.post('/rules', env(saveRuleH));
-v1.post('/rules/apply', env(applyRulesH));
-v1.delete('/rules/:id', env(deleteRuleH));
-v1.post('/splitwise/sync-shares', env(syncSharesH));
+registerV1Mutation('POST', '/rules', saveRuleH);
+registerV1Mutation('POST', '/rules/apply', applyRulesH);
+registerV1Mutation('DELETE', '/rules/:id', deleteRuleH);
+registerV1Mutation('POST', '/splitwise/sync-shares', syncSharesH);
 v1.get('/events', env(eventsH));
-v1.post('/events', env(saveEventH));
-v1.delete('/events/:slug', env(deleteEventH));
-v1.post('/accounts/:id/override', env(setAccountOverrideH));
+registerV1Mutation('POST', '/events', saveEventH);
+registerV1Mutation('DELETE', '/events/:slug', deleteEventH);
+registerV1Mutation('POST', '/accounts/:id/override', setAccountOverrideH);
 v1.get('/manual-assets', env(resolvers.manualAssets));
 v1.get('/investments', env(resolvers.investments));
 v1.get('/reports', env(resolvers.reports));
-v1.post('/manual-assets', env(saveManualAssetH));
-v1.delete('/manual-assets/:id', env(deleteManualAssetH));
-v1.post('/recurring/:key/override', env(setRecurring));
-v1.post('/recurring/mark', env(markRecurring));
-v1.post('/bills/paid', env(markBill));
+registerV1Mutation('POST', '/manual-assets', saveManualAssetH);
+registerV1Mutation('DELETE', '/manual-assets/:id', deleteManualAssetH);
+registerV1Mutation('POST', '/recurring/:key/override', setRecurring);
+registerV1Mutation('POST', '/recurring/mark', markRecurring);
+registerV1Mutation('POST', '/bills/paid', markBill);
 v1.get('/owes-config', env(async () => data.getOwesConfig()));
-v1.post('/owes-config', env(setOwes));
+registerV1Mutation('POST', '/owes-config', setOwes);
 v1.get('/reimb-links', env(reimbLinks));
-v1.post('/reimb-links', env(addLink));
-v1.delete('/reimb-links', env(delLink));
+registerV1Mutation('POST', '/reimb-links', addLink);
+registerV1Mutation('DELETE', '/reimb-links', delLink);
 v1.get('/repayments/suggestions', env(resolvers.repaymentSuggestions));
-v1.post('/repayments/:id/confirm', env(confirmRepaymentH));
-v1.post('/repayments/:id/dismiss', env(dismissRepaymentH));
+registerV1Mutation('POST', '/repayments/:id/confirm', confirmRepaymentH);
+registerV1Mutation('POST', '/repayments/:id/dismiss', dismissRepaymentH);
 v1.get('/reconciliation', env(reconciliationH));
 v1.get('/reconciliation/pending', env(reconcilePendingH));
-v1.post('/reconciliation/item', env(setReconItemH));
-v1.post('/reconciliation/month', env(setReconMonthH));
-v1.post('/reconciliation/enabled', env(setReconEnabledH));
-v1.post('/goals', env(saveGoal));
-v1.delete('/goals/:id', env(deleteGoal));
-v1.post('/refresh', env(async () => doRefresh()));
+registerV1Mutation('POST', '/reconciliation/item', setReconItemH);
+registerV1Mutation('POST', '/reconciliation/month', setReconMonthH);
+registerV1Mutation('POST', '/reconciliation/enabled', setReconEnabledH);
+registerV1Mutation('POST', '/goals', saveGoal);
+registerV1Mutation('DELETE', '/goals/:id', deleteGoal);
+registerV1Mutation('POST', '/refresh', (_req, operation) => doRefresh(operation));
+const missingV1MutationRoutes = MUTATION_ROUTES
+  .filter(({ method, path: route }) => !registeredV1MutationRoutes.has(routeKey(method, route)));
+if (missingV1MutationRoutes.length) {
+  throw new Error(`Unregistered versioned mutation routes: ${missingV1MutationRoutes.map(({ method, path: route }) => `${method} ${route}`).join(', ')}`);
+}
 app.use('/api/v1', v1);
 
 // ---- Freshness: keep the local Actual cache in sync with the server ---------
