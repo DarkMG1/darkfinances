@@ -6,20 +6,83 @@ DarkFinances ships through three coordinated paths:
 2. **Free sideload IPA** — `FREE_IOS_SIDELOAD=1` removes widget/push entitlements; local notifications remain.
 3. **OTA updates** — JavaScript/assets only when the installed `runtimeVersion` matches.
 
-## Immutable release manifest
+## Content-addressed release manifest
 
-`scripts/release-manifest.js` writes a checksum-stable JSON manifest without modifying
-`finance-dashboard/server.js`:
+Schema-v2 manifests separate display metadata such as `builtAt`, the short commit, and the local
+branch from the identity-bearing `content` object. `contentDigest.value` is the SHA-256 of canonical
+JSON for `content`; regenerating equivalent evidence at a different time therefore preserves the
+digest. Verify a stored manifest before using it:
 
 ```bash
-npm run release:manifest
-node scripts/release-manifest.js --stdout
-RELEASE_VARIANT=free-sideload node scripts/release-manifest.js build/sideload/manifest.json
+node scripts/release-manifest.js --verify=/path/to/release-manifest.json
 ```
 
-Fields include git commit, lockfile SHA-256, Actual server/API alignment, contract fingerprint,
-and Expo runtime/channel metadata. `npm run sideload:ios` writes a variant-stamped manifest next to
-the unsigned IPA.
+This is content integrity, not authenticity. There is no signing key or cryptographic signature:
+anyone able to replace both the content and its digest can create a different internally consistent
+manifest. Protect or attest the manifest through the release system if publisher authenticity is
+required.
+
+Every manifest binds the Git commit, a SHA-256 aggregate of tracked working-tree content and
+non-ignored untracked source (including executable semantics), clean/tracked-dirty/untracked state,
+the root lockfile, contract fingerprint, Actual version alignment, and app
+variant/version/runtime/channel/build identity.
+Untracked filenames and source contents are not recorded. Git-ignored environment files, runtime
+sidecars, receipts, dependencies, and build output are neither enumerated nor hashed automatically.
+
+Release evidence is mode-specific:
+
+| Mode | Required bound evidence |
+| --- | --- |
+| `source` | Source and contract identity only; the default used by side-effect-free CI checks. |
+| `dashboard` | The explicit deployed dashboard root and the reviewed runtime-file allowlist. |
+| `ipa` | The supplied IPA/artifact basename, byte length, and SHA-256. |
+| `ota` | EAS update/group IDs, runtime, release profile, environment, channel, and branch. |
+| `backup` | The backup sidecar manifest and every supplied archive basename, byte length, and SHA-256. |
+
+Examples:
+
+```bash
+# No writes, builds, deploys, publications, or backups:
+npm run check:release
+node scripts/release-manifest.js --stdout
+node scripts/release-manifest.js --source-digest
+
+# Hash reviewed files in the deployed dashboard and write the manifest read by /ping:
+FINANCE_DASHBOARD_DIR="$HOME/finance-dashboard" \
+  ops/bin/write-dashboard-release-manifest.sh
+
+# Explicit evidence can be added without creating it:
+node scripts/release-manifest.js \
+  --source-archive=/path/to/source.tar.gz \
+  --dirty-patch=/path/to/working-tree.patch \
+  build/source-release-manifest.json
+```
+
+Release callers store the exact one-line `--source-digest` output before a long build or publication
+and pass it back with `--expected-source-digest=<sha256>` when creating the final manifest.
+
+The dashboard helper requires `DARKFINANCES_REPO_ROOT` to identify the repository containing the
+exact deployed source. It hashes each reviewed runtime path in both `finance-dashboard/` and the
+deployment and refuses to create a manifest unless bytes, SHA-256, size, and executable semantics
+match. It never walks or trusts arbitrary deployment contents. For schema v2, every `/ping` request
+rehashes those files in the current dashboard runtime directory and returns `release: null` if a file
+is missing, replaced, symlinked, reordered, or differs in bytes, SHA-256, or executable state.
+
+The IPA and OTA scripts capture `--source-digest` immediately before the long operation and require
+the same digest when generating the final manifest. This prevents a built artifact or published
+update from being attributed to source that changed during the operation. IPA, backup, source
+archive, and dirty-patch evidence is hashed incrementally in bounded chunks.
+
+OTA publication retains the checked-in profile mappings: `production` uses its production
+branch/channel/environment, `preview` uses its preview branch/channel/environment, and
+`free-sideload` uses its isolated branch/channel with the production EAS environment. Production and
+preview are validated against `finance-app/eas.json`. The publisher captures EAS `--json` output
+after publication and then writes and verifies
+`finance-app/dist/ota-release-manifest.json`; it does not create temporary branches or remap channels.
+`npm run sideload:ios` continues to write a free-sideload manifest beside its unsigned IPA.
+
+Supplied artifact, backup, source-archive, and dirty-patch paths must be existing regular files.
+Only basenames and hashes enter the manifest; absolute local paths and file contents do not.
 
 ## Variant verification
 
@@ -36,8 +99,9 @@ differences and use separate OTA channels and runtime identities.
 node scripts/check-version-alignment.js
 ```
 
-Requires `ops/actual-compose.yml`, `finance-dashboard/package.json`, and `actual-tools/package.json`
-to agree on `@actual-app/api` and the pinned Actual server image.
+Requires exact `x.y.z` versions in `ops/actual-compose.yml`, `finance-dashboard/package.json`, and
+`actual-tools/package.json`, with both API dependencies exactly equal to the pinned server image.
+Manifest construction and verification reuse this same alignment rule.
 
 ## Contract freshness
 
@@ -72,7 +136,8 @@ before that install, so CI can execute it directly from a dependency-empty check
 
 `ops/bin/backup-coordinated.sh` quiesces timers/services when available, archives dashboard sidecars
 with embedded `.backup-manifest.json`, writes an external manifest + SHA-256 checksum, and records a
-release manifest beside the archive. Verify before restore:
+release manifest beside the archive. When Actual data is included, its archive is also bound as
+additional backup evidence. Verify before restore:
 
 ```bash
 ops/bin/verify-backup.sh /path/to/dashboard-runtime-<timestamp>.tgz

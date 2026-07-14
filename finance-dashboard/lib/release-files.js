@@ -1,0 +1,27 @@
+const DASHBOARD_RUNTIME_FILES = Object.freeze([
+  'dataModule.js',
+  'demoData.js',
+  'lib/account-overrides.js',
+  'lib/date-only.js',
+  'lib/domain/classification.js',
+  'lib/domain/money.js',
+  'lib/errors.js',
+  'lib/json-store.js',
+  'lib/metric-provenance.js',
+  'lib/operation-journal.js',
+  'lib/release-files.js',
+  'lib/release-identity.js',
+  'lib/release-schema.js',
+  'lib/safe-to-spend.js',
+  'lib/serial-queue.js',
+  'lib/state-registry.js',
+  'lib/transaction-references.js',
+  'lib/validation.js',
+  'package-lock.json',
+  'package.json',
+  'public/index.html',
+  'public/login.html',
+  'server.js',
+]);
+
+module.exports = { DASHBOARD_RUNTIME_FILES };
