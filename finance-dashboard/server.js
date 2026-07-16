@@ -655,6 +655,10 @@ async function markRecurring(req, operation) {
 async function splitTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date, legs } = parse(schemas.splitTransaction, req.body, 'transaction split');
+  data.assertTransactionReplacementAvailable({
+    accountId,
+    ids: [id, ...legs.map((leg) => leg.id).filter(Boolean)],
+  });
   const result = await applyLocal(operation, () => data.splitTransaction({ id, accountId, date, legs }));
   await syncAfterLocal(operation);
   cache.flushAll();
@@ -663,6 +667,7 @@ async function splitTxn(req, operation) {
 async function unsplitTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date, categoryId } = parse(schemas.unsplitTransaction, req.body, 'remove split');
+  data.assertTransactionReplacementAvailable({ accountId, ids: [id] });
   const result = await applyLocal(operation, () => data.removeSplit({ id, accountId, date, categoryId }));
   await syncAfterLocal(operation);
   cache.flushAll();
@@ -671,6 +676,9 @@ async function unsplitTxn(req, operation) {
 async function setPayeeH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { payee, isLeg, parentId, accountId, date } = parse(schemas.setPayee, req.body, 'transaction payee');
+  if (isLeg) {
+    data.assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
+  }
   const result = await applyLocal(operation, () =>
     data.setPayee({ id, payee, isLeg, parentId, accountId, date }));
   await syncAfterLocal(operation);
@@ -852,6 +860,9 @@ async function deleteManualAssetH(req, operation) {
 async function setNotes(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { notes, isLeg, parentId, accountId, date } = parse(schemas.setNotes, req.body, 'transaction notes');
+  if (isLeg) {
+    data.assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
+  }
   const result = await applyLocal(operation, () =>
     data.setTransactionNotes({ id, notes, isLeg, parentId, accountId, date }));
   await syncAfterLocal(operation);
@@ -882,6 +893,9 @@ async function deleteGoal(req, operation) {
 async function setCategory(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { categoryId, isLeg, parentId, accountId, date } = parse(schemas.setCategory, req.body, 'transaction category');
+  if (isLeg) {
+    data.assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
+  }
   const result = await applyLocal(operation, () =>
     data.setTransactionCategory({ id, categoryId, isLeg, parentId, accountId, date }));
   await syncAfterLocal(operation); // persist the write back to the Actual server

@@ -27,6 +27,16 @@ const {
 } = require('./lib/date-only');
 const { readJsonFile, writeJsonFile } = require('./lib/json-store');
 const { rewriteTransactionReferences } = require('./lib/transaction-references');
+const {
+  rewriteTransactionReplacementReferences,
+} = require('./lib/transaction-replacement-references');
+const {
+  SagaInterruption,
+  addableTransaction,
+  assertReconstructableTransaction,
+  createTransactionReplacementSaga,
+  transactionReplacementMap,
+} = require('./lib/transaction-replacement-saga');
 const { buildCategoryInfo, transactionLeaves, summarizeCents } = require('./lib/domain/classification');
 const { fromCents, toCents } = require('./lib/domain/money');
 const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
@@ -192,6 +202,7 @@ async function syncNow() {
   try {
     await initApi();
     await api.sync();
+    await getTransactionSagaManager().markSynced(api);
     apiHealth.lastSyncAt = new Date().toISOString();
     apiHealth.lastError = null;
   } catch (error) {
@@ -2321,6 +2332,9 @@ async function getMerchantHistory({ payee, months = 12 } = {}) {
 // Write: safe split-aware category change
 // ---------------------------------------------------------------------------
 async function setTransactionCategory({ id, categoryId, isLeg, parentId, accountId, date }) {
+  if (isLeg && parentId && accountId) {
+    assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
+  }
   return withApi(async (api) => {
     if (!isLeg) {
       // Simple, safe path for non-split transactions.
@@ -2339,9 +2353,13 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
       payee: s.payee || undefined,
     }));
     const replacement = addableTransaction(parent, { category: undefined, subtransactions: subs });
-    const added = await replaceActualTransaction(api, { accountId, original: parent, replacement });
-    const idMap = transactionReplacementMap(parent, added);
-    const references = updateTransactionReferences(idMap);
+    const added = await replaceActualTransaction(api, {
+      accountId,
+      original: parent,
+      replacement,
+      requestedLegs: retainedReplacementLegs(parent),
+    });
+    const { idMap, references } = replacementSagaResult(added);
     return {
       ok: true,
       mode: 'rebuild-split',
@@ -3100,195 +3118,51 @@ async function resolvePayeeId(api, name) {
   return found ? found.id : await api.createPayee({ name: n });
 }
 
-function addableSubtransaction(transaction) {
-  return {
-    amount: transaction.amount,
-    category: transaction.category || null,
-    notes: transaction.notes || undefined,
-    payee: transaction.payee || undefined,
-  };
-}
+let transactionSagaManager = null;
+const replacementSagaResults = new WeakMap();
 
-function addableTransaction(transaction, overrides = {}) {
-  const value = {
-    date: transaction.date,
-    amount: transaction.amount,
-    payee: transaction.payee || undefined,
-    notes: transaction.notes || undefined,
-    cleared: transaction.cleared,
-    imported_id: transaction.imported_id || undefined,
-    imported_payee: transaction.imported_payee || undefined,
-    category: transaction.category || undefined,
-  };
-  const sourceSubs = overrides.subtransactions !== undefined
-    ? overrides.subtransactions
-    : transaction.subtransactions;
-  if (Array.isArray(sourceSubs) && sourceSubs.length) {
-    delete value.category;
-    value.subtransactions = sourceSubs.map(addableSubtransaction);
-  }
-  return { ...value, ...overrides, subtransactions: value.subtransactions };
-}
-
-function transactionReplacementMap(original, replacement, requestedLegs) {
-  const idMap = { [String(original.id)]: String(replacement.id) };
-  const oldSubs = Array.isArray(original.subtransactions) ? original.subtransactions : [];
-  const newSubs = Array.isArray(replacement.subtransactions) ? replacement.subtransactions : [];
-  if (requestedLegs) {
-    const retained = new Set();
-    requestedLegs.forEach((leg, index) => {
-      if (!leg.id) return;
-      retained.add(String(leg.id));
-      idMap[String(leg.id)] = newSubs[index]?.id ? String(newSubs[index].id) : null;
+function getTransactionSagaManager() {
+  if (!transactionSagaManager) {
+    transactionSagaManager = createTransactionReplacementSaga({
+      sagaPath: TRANSACTION_SAGAS_PATH,
+      preflightReferences: readTransactionReferenceStores,
+      planReferences: planTransactionReferenceMigration,
+      applyReferenceStep: applyTransactionReferenceStep,
+      referencesConverged: transactionReferencesConverged,
+      referenceSteps: TRANSACTION_REFERENCE_STEPS,
     });
-    for (const old of oldSubs) if (!retained.has(String(old.id))) idMap[String(old.id)] = null;
-  } else if (newSubs.length) {
-    oldSubs.forEach((old, index) => {
-      idMap[String(old.id)] = newSubs[index]?.id ? String(newSubs[index].id) : null;
-    });
-  } else {
-    for (const old of oldSubs) idMap[String(old.id)] = String(replacement.id);
   }
-  return idMap;
+  return transactionSagaManager;
 }
 
-async function locateReplacement(api, accountId, date, beforeIds, expected) {
-  const after = await api.getTransactions(accountId, date, date);
-  const candidates = after.filter((transaction) => !beforeIds.has(String(transaction.id)));
-  return candidates.find((transaction) =>
-    transaction.date === expected.date &&
-    transaction.amount === expected.amount &&
-    Boolean(transaction.is_parent) === Boolean(expected.subtransactions?.length) &&
-    (!expected.imported_id || transaction.imported_id === expected.imported_id) &&
-    (!expected.subtransactions || (transaction.subtransactions || []).length === expected.subtransactions.length)
-  ) || null;
+async function recoverTransactionSagas(actualApi, options) {
+  return getTransactionSagaManager().recover(actualApi, options);
 }
 
-function readTransactionSagas() {
-  const state = readJsonSafe(TRANSACTION_SAGAS_PATH, { schemaVersion: 1, sagas: {} });
-  if (!state || state.schemaVersion !== 1 || !state.sagas || typeof state.sagas !== 'object') {
-    throw new Error('invalid transaction saga state');
+function assertTransactionReplacementAvailable({ accountId, ids } = {}) {
+  getTransactionSagaManager().assertAvailable({ accountId, ids });
+}
+
+async function assertTransactionImportedIdentityAvailable(api, { accountId, original }) {
+  await getTransactionSagaManager().assertImportedIdentityAvailable(api, { accountId, original });
+}
+
+function retainedReplacementLegs(transaction) {
+  return (transaction?.subtransactions || []).map((leg) => ({ id: String(leg.id) }));
+}
+
+async function replaceActualTransaction(api, args) {
+  const result = await getTransactionSagaManager().replace(api, args);
+  if (result.transaction && typeof result.transaction === 'object') {
+    replacementSagaResults.set(result.transaction, result);
   }
-  return state;
+  return result.transaction;
 }
 
-function writeTransactionSaga(saga) {
-  const state = readTransactionSagas();
-  state.sagas[saga.id] = saga;
-  const ordered = Object.values(state.sagas)
-    .sort((a, b) => String(b.updatedAt || b.startedAt).localeCompare(String(a.updatedAt || a.startedAt)));
-  state.sagas = Object.fromEntries(ordered.slice(0, 100).map((entry) => [entry.id, entry]));
-  writeJsonSafe(TRANSACTION_SAGAS_PATH, state);
-}
-
-function updateTransactionSaga(saga, patch) {
-  Object.assign(saga, patch, { updatedAt: new Date().toISOString() });
-  writeTransactionSaga(saga);
-}
-
-async function recoverTransactionSagas(actualApi) {
-  const state = readTransactionSagas();
-  const active = Object.values(state.sagas).filter((saga) => !['completed', 'recovered', 'aborted'].includes(saga.status));
-  let changed = false;
-  for (const saga of active) {
-    const transactions = await actualApi.getTransactions(saga.accountId, saga.original.date, saga.original.date);
-    const originalPresent = transactions.some((transaction) => String(transaction.id) === String(saga.original.id));
-    if (originalPresent) {
-      updateTransactionSaga(saga, { status: 'aborted', recovery: 'original-still-present' });
-      continue;
-    }
-    const beforeIds = new Set(saga.beforeIds || []);
-    let replacementTransaction = transactions.find((transaction) =>
-      !beforeIds.has(String(transaction.id))
-      && transaction.date === saga.replacement.date
-      && transaction.amount === saga.replacement.amount
-      && (!saga.replacement.imported_id || transaction.imported_id === saga.replacement.imported_id)
-    );
-    if (replacementTransaction) {
-      const idMap = transactionReplacementMap(saga.original, replacementTransaction, saga.requestedLegs || undefined);
-      updateTransactionReferences(idMap);
-      updateTransactionSaga(saga, {
-        status: 'completed',
-        replacementId: String(replacementTransaction.id),
-        recovery: 'finished-reference-migration',
-      });
-      changed = true;
-      continue;
-    }
-    const idsBeforeRestore = new Set(transactions.map((transaction) => String(transaction.id)));
-    await actualApi.addTransactions(saga.accountId, [addableTransaction(saga.original)], { learnCategories: false, runTransfers: false });
-    replacementTransaction = await locateReplacement(
-      actualApi,
-      saga.accountId,
-      saga.original.date,
-      idsBeforeRestore,
-      addableTransaction(saga.original),
-    );
-    if (!replacementTransaction) throw new Error(`could not recover transaction saga ${saga.id}`);
-    updateTransactionReferences(transactionReplacementMap(saga.original, replacementTransaction));
-    updateTransactionSaga(saga, {
-      status: 'recovered',
-      recoveryTransactionId: String(replacementTransaction.id),
-      recovery: 'restored-original',
-    });
-    changed = true;
-  }
-  if (changed) await actualApi.sync();
-}
-
-async function replaceActualTransaction(api, { accountId, original, replacement, requestedLegs }) {
-  if (original.transfer_id) throw new Error('transfer transactions cannot be rebuilt as splits');
-  readTransactionReferenceStores(); // fail before deleting if any sidecar is unreadable
-  const dayTransactions = await api.getTransactions(accountId, original.date, original.date);
-  const beforeIds = new Set(dayTransactions.map((transaction) => String(transaction.id)));
-  const saga = {
-    id: `replace_${Date.now().toString(36)}_${crypto.randomBytes(6).toString('hex')}`,
-    status: 'prepared',
-    accountId: String(accountId),
-    original,
-    replacement,
-    requestedLegs: requestedLegs || null,
-    beforeIds: [...beforeIds],
-    startedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-  writeTransactionSaga(saga);
-  await api.deleteTransaction(original.id);
-  updateTransactionSaga(saga, { status: 'original-deleted' });
-  let added = null;
-  try {
-    await api.addTransactions(accountId, [replacement], { learnCategories: false, runTransfers: false });
-    added = await locateReplacement(api, accountId, original.date, beforeIds, replacement);
-    if (!added) throw new Error('replacement transaction could not be identified');
-    updateTransactionSaga(saga, { status: 'replacement-added', replacementId: String(added.id) });
-    const idMap = transactionReplacementMap(original, added, requestedLegs);
-    const references = updateTransactionReferences(idMap);
-    updateTransactionSaga(saga, { status: 'completed', idMap, references });
-    return added;
-  } catch (error) {
-    try {
-      if (added) await api.deleteTransaction(added.id);
-      await api.addTransactions(accountId, [addableTransaction(original)], { learnCategories: false, runTransfers: false });
-      const restored = await locateReplacement(api, accountId, original.date, beforeIds, addableTransaction(original));
-      if (restored) updateTransactionReferences(transactionReplacementMap(original, restored));
-      error.recoveryTransactionId = restored?.id || null;
-      updateTransactionSaga(saga, {
-        status: 'recovered',
-        recoveryTransactionId: restored?.id ? String(restored.id) : null,
-        error: error.message,
-      });
-    } catch (recoveryError) {
-      error.recoveryError = recoveryError;
-      try {
-        updateTransactionSaga(saga, {
-          status: 'recovery-failed',
-          error: error.message,
-          recoveryError: recoveryError.message,
-        });
-      } catch (_) {}
-    }
-    throw error;
-  }
+function replacementSagaResult(transaction) {
+  const result = replacementSagaResults.get(transaction);
+  if (!result) throw new Error('replacement saga result is unavailable');
+  return result;
 }
 
 // Fetch one transaction (parent or simple) with its legs. Account id is preferred,
@@ -3384,11 +3258,14 @@ async function splitTransaction({ id, accountId, date, legs } = {}) {
     if (cents === 0) throw new Error('each leg needs a non-zero amount');
     return { id: l.id || null, cents, categoryId: l.categoryId || null, name: (l.name || '').trim(), notes: (l.notes || '').trim() };
   });
+  assertTransactionReplacementAvailable({ accountId, ids: [id, ...norm.map((leg) => leg.id)] });
   return withApi(async (api) => {
     const txns = await api.getTransactions(accountId, date, date);
     const target = txns.find((t) => t.id === id);
     if (!target) throw new Error('transaction not found');
     if (target.parent_id) throw new Error('edit the whole split, not a single leg');
+    assertReconstructableTransaction(target);
+    await assertTransactionImportedIdentityAvailable(api, { accountId, original: target });
     const total = target.amount; // integer cents (sign preserved)
 
     const sum = norm.reduce((s, x) => s + x.cents, 0);
@@ -3404,8 +3281,7 @@ async function splitTransaction({ id, accountId, date, legs } = {}) {
       })),
     });
     const added = await replaceActualTransaction(api, { accountId, original: target, replacement, requestedLegs: target.is_parent ? norm : undefined });
-    const idMap = transactionReplacementMap(target, added, target.is_parent ? norm : undefined);
-    const references = updateTransactionReferences(idMap);
+    const { references } = replacementSagaResult(added);
     return {
       ok: true,
       mode: target.is_parent ? 'edit' : 'create',
@@ -3459,8 +3335,12 @@ async function reconcileSplitDeltas(api, { months = 3, apply = false } = {}) {
       }));
       try {
         const replacement = addableTransaction(t, { category: undefined, subtransactions: subs });
-        const added = await replaceActualTransaction(api, { accountId: a.id, original: t, replacement });
-        updateTransactionReferences(transactionReplacementMap(t, added));
+        await replaceActualTransaction(api, {
+          accountId: a.id,
+          original: t,
+          replacement,
+          requestedLegs: retainedReplacementLegs(t),
+        });
         fixed++;
       } catch (e) {
         console.error(`[split-delta] ${t.id} update failed: ${e.message}`);
@@ -3528,8 +3408,12 @@ async function sweepReimbursementTags({ tags, from, to } = {}) {
           });
           if (changed) {
             const replacement = addableTransaction(t, { category: undefined, subtransactions: subs });
-            const added = await replaceActualTransaction(api, { accountId: a.id, original: t, replacement });
-            updateTransactionReferences(transactionReplacementMap(t, added));
+            await replaceActualTransaction(api, {
+              accountId: a.id,
+              original: t,
+              replacement,
+              requestedLegs: retainedReplacementLegs(t),
+            });
           }
         } else if (!t.is_parent) {
           if (t.amount < 0 && isSpendKind(t.category) && hasTargetTag(t.notes)) {
@@ -3822,6 +3706,46 @@ function readTransactionReferenceStores() {
   };
 }
 
+const TRANSACTION_REFERENCE_STEPS = Object.freeze([
+  'receipts',
+  'links',
+  'suggestions',
+  'reconciliation',
+  'phantomSeen',
+]);
+
+function planTransactionReferenceMigration(idMap) {
+  const result = rewriteTransactionReplacementReferences(readTransactionReferenceStores(), idMap);
+  return {
+    stats: result.stats,
+  };
+}
+
+function applyTransactionReferenceStep(step, idMap, _plan) {
+  const current = readTransactionReferenceStores();
+  const next = rewriteTransactionReplacementReferences(current, idMap).stores[step];
+  const destinations = {
+    receipts: RECEIPTS_PATH,
+    links: REIMB_LINKS_PATH,
+    suggestions: REIMB_SUGGEST_PATH,
+    reconciliation: RECON_PATH,
+    phantomSeen: PHANTOM_SEEN_PATH,
+  };
+  if (!destinations[step]) throw new Error(`unknown transaction reference step: ${step}`);
+  if (JSON.stringify(current[step]) !== JSON.stringify(next)) {
+    writeJsonSafe(destinations[step], next);
+  }
+}
+
+function transactionReferencesConverged(idMap, _plan) {
+  const current = readTransactionReferenceStores();
+  const rewritten = rewriteTransactionReplacementReferences(current, idMap);
+  for (const step of TRANSACTION_REFERENCE_STEPS) {
+    if (JSON.stringify(current[step]) !== JSON.stringify(rewritten.stores[step])) return false;
+  }
+  return true;
+}
+
 function updateTransactionReferences(idMap) {
   const before = readTransactionReferenceStores();
   const result = rewriteTransactionReferences(before, idMap);
@@ -3864,6 +3788,7 @@ function updateTransactionReferences(idMap) {
 // Collapse a split back into a single plain transaction (RM's "remove split").
 // delete + re-add as a simple row so we never hit the unsafe in-place unsplit path.
 async function removeSplit({ id, accountId, date, categoryId } = {}) {
+  if (accountId && id) assertTransactionReplacementAvailable({ accountId, ids: [id] });
   return withApi(async (api) => {
     if (!accountId || !date) throw new Error('accountId and date required');
     const txns = await api.getTransactions(accountId, date, date);
@@ -3877,7 +3802,7 @@ async function removeSplit({ id, accountId, date, categoryId } = {}) {
     });
     delete replacement.subtransactions;
     const added = await replaceActualTransaction(api, { accountId, original: parent, replacement });
-    const references = updateTransactionReferences(transactionReplacementMap(parent, added));
+    const { references } = replacementSagaResult(added);
     return {
       ok: true,
       mode: 'unsplit',
@@ -3921,9 +3846,12 @@ async function deleteTransaction({ id, accountId, date, allowImported = false } 
 // (find-or-create); Actual keeps imported_payee + imported_id untouched so the
 // original bank description and future matching are preserved. Blank name clears it.
 async function setPayee({ id, payee, isLeg, parentId, accountId, date } = {}) {
+  if (isLeg && parentId && accountId) {
+    assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
+  }
   return withApi(async (api) => {
-    const payeeId = await resolvePayeeId(api, payee);
     if (!isLeg) {
+      const payeeId = await resolvePayeeId(api, payee);
       await api.updateTransaction(id, { payee: payeeId || null });
       return { ok: true, mode: 'update' };
     }
@@ -3931,6 +3859,9 @@ async function setPayee({ id, payee, isLeg, parentId, accountId, date } = {}) {
     const txns = await api.getTransactions(accountId, date, date);
     const parent = txns.find((t) => t.id === parentId);
     if (!parent || !Array.isArray(parent.subtransactions)) throw new Error('parent split not found');
+    assertReconstructableTransaction(parent);
+    await assertTransactionImportedIdentityAvailable(api, { accountId, original: parent });
+    const payeeId = await resolvePayeeId(api, payee);
     const subs = parent.subtransactions.map((s) => ({
       amount: s.amount,
       category: s.category || null,
@@ -3938,9 +3869,13 @@ async function setPayee({ id, payee, isLeg, parentId, accountId, date } = {}) {
       payee: s.id === id ? payeeId || null : s.payee || undefined,
     }));
     const replacement = addableTransaction(parent, { category: undefined, subtransactions: subs });
-    const added = await replaceActualTransaction(api, { accountId, original: parent, replacement });
-    const idMap = transactionReplacementMap(parent, added);
-    const references = updateTransactionReferences(idMap);
+    const added = await replaceActualTransaction(api, {
+      accountId,
+      original: parent,
+      replacement,
+      requestedLegs: retainedReplacementLegs(parent),
+    });
+    const { idMap, references } = replacementSagaResult(added);
     return {
       ok: true,
       mode: 'rebuild-split',
@@ -4280,6 +4215,9 @@ function markRecurring({ payee, isBill } = {}) {
 // Write: safe split-aware notes change (mirrors setTransactionCategory)
 // ---------------------------------------------------------------------------
 async function setTransactionNotes({ id, notes, isLeg, parentId, accountId, date }) {
+  if (isLeg && parentId && accountId) {
+    assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
+  }
   return withApi(async (api) => {
     if (!isLeg) {
       await api.updateTransaction(id, { notes: notes || null });
@@ -4296,9 +4234,13 @@ async function setTransactionNotes({ id, notes, isLeg, parentId, accountId, date
       payee: s.payee || undefined,
     }));
     const replacement = addableTransaction(parent, { category: undefined, subtransactions: subs });
-    const added = await replaceActualTransaction(api, { accountId, original: parent, replacement });
-    const idMap = transactionReplacementMap(parent, added);
-    const references = updateTransactionReferences(idMap);
+    const added = await replaceActualTransaction(api, {
+      accountId,
+      original: parent,
+      replacement,
+      requestedLegs: retainedReplacementLegs(parent),
+    });
+    const { idMap, references } = replacementSagaResult(added);
     return {
       ok: true,
       mode: 'rebuild-split',
@@ -4575,7 +4517,10 @@ module.exports = {
   setReconcileEnabled,
   getReconcilePending,
   getTransactionById,
+  SagaInterruption,
   addableTransaction,
+  assertReconstructableTransaction,
+  assertTransactionReplacementAvailable,
   transactionReplacementMap,
   replaceActualTransaction,
   recoverTransactionSagas,
