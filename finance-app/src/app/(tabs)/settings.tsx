@@ -172,7 +172,20 @@ export default function Settings() {
   const disconnect = () => {
     Alert.alert('Disconnect', 'Remove the saved server and token from this device?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Disconnect', style: 'destructive', onPress: () => clear() },
+      {
+        text: 'Disconnect',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await clear();
+          } catch (e: any) {
+            Alert.alert(
+              'Could not disconnect',
+              e?.error || e?.message || 'A pending finance operation must be reconciled first.',
+            );
+          }
+        },
+      },
     ]);
   };
 

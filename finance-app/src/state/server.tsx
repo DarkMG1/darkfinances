@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import * as SecureStore from 'expo-secure-store';
 import { normalizeServerUrl } from '@/api/client/server-url';
+import { financeOperationProfileScope } from '@/lib/finance-operations';
 import { purgeFinanceProfile } from '@/lib/profile-purge';
 import { financeServerScope } from '@/lib/query-client';
 import { kv } from '@/lib/storage';
@@ -80,10 +81,11 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
       const nextDemo = next.demo === undefined ? demo : next.demo;
       const identityChanged = nextUrl !== serverUrl || nextToken !== token || nextDemo !== demo;
       const oldScope = financeServerScope(serverUrl, token, demo);
+      const oldOperationScope = financeOperationProfileScope(serverUrl, token, demo);
 
       try {
         if (identityChanged) {
-          await purgeFinanceProfile(oldScope);
+          await purgeFinanceProfile(oldScope, oldOperationScope);
         }
         if (next.token !== undefined) {
           if (nextToken) {
@@ -129,7 +131,8 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
 
   const clear = useCallback(async () => {
     const oldScope = financeServerScope(serverUrl, token, demo);
-    await purgeFinanceProfile(oldScope);
+    const oldOperationScope = financeOperationProfileScope(serverUrl, token, demo);
+    await purgeFinanceProfile(oldScope, oldOperationScope);
     await SecureStore.deleteItemAsync(TOKEN_KEY);
     kv.setString(URL_KEY, null);
     kv.setString(LEGACY_QUERY_CACHE_KEY, null);
