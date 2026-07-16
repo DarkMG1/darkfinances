@@ -2,6 +2,7 @@ import { AppState, Platform } from 'react-native';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import { getServerBaseUrl } from '@/api/client/server-url';
+import { getFinanceOperationReconciliationDiagnostic } from '@/lib/finance-operations';
 import { queryClient } from '@/lib/query-client';
 
 export function buildRedactedDiagnostics(input: {
@@ -40,5 +41,6 @@ export function buildRedactedDiagnostics(input: {
       faceId: input.faceId,
     },
     queries,
+    operationReconciliation: getFinanceOperationReconciliationDiagnostic(),
   };
 }

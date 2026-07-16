@@ -2,8 +2,17 @@ import { useMutation, UseMutationOptions, useQuery, UseQueryOptions } from '@tan
 import { getServerAuthHeaders } from '@/api/client/server-auth';
 import { getServerBaseUrl, normalizeServerUrl } from '@/api/client/server-url';
 import { HttpMethod } from '@/api/generated/endpoints';
+import { financeOperationMachine, financeOperationProfileScope } from '@/lib/finance-operations';
+import { FINANCE_QUERY_SCOPE_META_KEY } from '@/lib/foreground-operation-reconciliation';
 import { haptics } from '@/lib/haptics';
 import { registerFinanceRequest } from '@/lib/request-lifecycle';
+import {
+  classifyDirectMutationError,
+  DirectMutationOutcome,
+  executeMutationWithIdempotency,
+  REACT_QUERY_MUTATION_RETRY,
+  ServerOperationStatus,
+} from '@/lib/request-operation-state';
 import { useServerConfig } from '@/state/server';
 
 export type FinanceError = Error & { error: string; status?: number; code?: string; requestId?: string };
@@ -30,38 +39,19 @@ interface QueryArgs<D> {
   idempotencyKey?: string;
 }
 
-let mutationSequence = 0;
-function createIdempotencyKey(): string {
-  mutationSequence = (mutationSequence + 1) % 1_000_000;
-  return `ios-${Date.now().toString(36)}-${mutationSequence.toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-}
-
-async function recoverOperation<T>(
+async function queryOperationStatus<T>(
   serverUrl: string | null | undefined,
   token: string | null | undefined,
-  demo: boolean | undefined,
   key: string,
-): Promise<T> {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 750));
-    const response = await fetch(`${getServerBaseUrl(serverUrl)}/api/v1/operations/${encodeURIComponent(key)}`, {
-      headers: {
-        ...getServerAuthHeaders(token),
-        ...(demo ? { 'X-Demo-Mode': '1' } : {}),
-      },
-    });
-    const envelope = await response.json() as {
-      data?: { status: string; result?: T; error?: { code?: string; message?: string } };
-      error?: string;
-      code?: string;
-    };
-    if (!response.ok) throw createError(envelope.error || 'Could not check operation outcome', response.status, envelope.code);
-    if (envelope.data?.status === 'completed') return envelope.data.result as T;
-    if (envelope.data?.status === 'failed') {
-      throw createError(envelope.data.error?.message || 'Operation failed', 409, envelope.data.error?.code);
-    }
-  }
-  throw createError('Request outcome is still unknown. Check the operation before retrying.', 409, 'OUTCOME_UNKNOWN');
+): Promise<ServerOperationStatus<T>> {
+  const status = await buildQuery<ServerOperationStatus<T>>({
+    serverUrl,
+    token,
+    endpoint: `/api/v1/operations/${encodeURIComponent(key)}`,
+    method: 'GET',
+  });
+  if (!status) throw createError('Could not read operation status', 502, 'MALFORMED_RESPONSE');
+  return status;
 }
 
 // Core fetch wrapper. Unwraps the { data } / { error } envelope returned by /api/v1.
@@ -123,6 +113,9 @@ export async function buildQuery<T, D = unknown>({
         parsed = JSON.parse(text) as { data?: T; error?: string; code?: string; requestId?: string };
       } catch {
         if (!response.ok) throw createError(`Request failed with status ${response.status}`, response.status);
+        if (method !== 'GET') {
+          throw createError('Server returned a malformed mutation response', response.status, 'MALFORMED_RESPONSE');
+        }
         return text as unknown as T;
       }
     }
@@ -135,11 +128,11 @@ export async function buildQuery<T, D = unknown>({
         parsed?.requestId,
       );
     }
+    if (method !== 'GET' && (!parsed || !Object.prototype.hasOwnProperty.call(parsed, 'data'))) {
+      throw createError('Server returned a malformed mutation response', response.status, 'MALFORMED_RESPONSE');
+    }
     return parsed?.data;
   } catch (error) {
-    if (timedOut && idempotencyKey) {
-      return recoverOperation<T>(serverUrl, token, demo, idempotencyKey);
-    }
     if (timedOut) throw createError('Request timed out. Check your connection and try again.', 408, 'TIMEOUT');
     throw error;
   } finally {
@@ -175,6 +168,10 @@ export function useFinanceQuery<R, V = Record<string, unknown>>({
     }),
     ...options,
     queryKey,
+    meta: {
+      ...options.meta,
+      [FINANCE_QUERY_SCOPE_META_KEY]: scope,
+    },
     enabled: configured && (options.enabled ?? true),
   });
 }
@@ -193,17 +190,50 @@ export function useFinanceMutation<R = void, V = void>({
 }: FinanceMutationProps<R, V>) {
   const { serverUrl, token, demo } = useServerConfig();
   return useMutation<R | undefined, FinanceError, V>({
-    mutationFn: (variables: V) =>
-      buildQuery<R, V>({
-        serverUrl,
-        token,
-        demo,
-        endpoint: typeof endpoint === 'function' ? endpoint(variables) : endpoint,
-        method,
-        data: variables,
-        idempotencyKey: demo ? undefined : createIdempotencyKey(),
-      }),
     ...options,
+    mutationFn: (variables: V) => {
+      const resolvedEndpoint = typeof endpoint === 'function' ? endpoint(variables) : endpoint;
+      const scopeDigest = financeOperationProfileScope(serverUrl, token, demo);
+      if (!demo && !scopeDigest) {
+        throw createError('Finance server profile is not configured', 400, 'PROFILE_NOT_CONFIGURED');
+      }
+      return executeMutationWithIdempotency<R | undefined>({
+        demo,
+        machine: financeOperationMachine,
+        demoDispatch: () => buildQuery<R, V>({
+          serverUrl,
+          token,
+          demo: true,
+          endpoint: resolvedEndpoint,
+          method,
+          data: variables,
+        }),
+        operation: {
+          scopeDigest: scopeDigest ?? '',
+          endpoint: resolvedEndpoint,
+          method,
+          body: variables,
+          dispatch: async (idempotencyKey): Promise<DirectMutationOutcome<R | undefined>> => {
+            try {
+              const result = await buildQuery<R, V>({
+                serverUrl,
+                token,
+                endpoint: resolvedEndpoint,
+                method,
+                data: variables,
+                idempotencyKey,
+              });
+              return { kind: 'completed', result };
+            } catch (error) {
+              return classifyDirectMutationError(error);
+            }
+          },
+          queryStatus: (idempotencyKey) =>
+            queryOperationStatus<R | undefined>(serverUrl, token, idempotencyKey),
+        },
+      });
+    },
+    retry: REACT_QUERY_MUTATION_RETRY,
     // Centralized haptic feedback so every write (link, note, category, goal, add
     // expense, …) confirms itself without each call site wiring it up. Args are
     // forwarded verbatim so we stay agnostic to react-query's callback arity.
@@ -216,6 +246,19 @@ export function useFinanceMutation<R = void, V = void>({
       return onError?.(...args);
     },
   });
+}
+
+export async function reconcilePendingFinanceOperations(config: {
+  serverUrl: string | null | undefined;
+  token: string | null | undefined;
+  demo: boolean;
+}): Promise<{ checked: number; completed: number; failed: number; unresolved: number }> {
+  const scopeDigest = financeOperationProfileScope(config.serverUrl, config.token, config.demo);
+  if (!scopeDigest) return { checked: 0, completed: 0, failed: 0, unresolved: 0 };
+  return financeOperationMachine.reconcileProfile(
+    scopeDigest,
+    (idempotencyKey) => queryOperationStatus<unknown>(config.serverUrl, config.token, idempotencyKey),
+  );
 }
 
 // Imperative connection test used by onboarding/settings.

@@ -90,6 +90,53 @@ normalized URL, token, and demo state. When it changes, the app:
 
 This prevents data from one server or demo session appearing in another.
 
+## Mutation idempotency and recovery
+
+One logical mobile mutation is the combination of the live server/profile identity, uppercase HTTP
+method, canonical endpoint pathname, canonically key-sorted query pairs, and canonical JSON variables.
+Object keys are sorted recursively; array order and duplicate-query-value order are preserved. A
+SHA-256 digest of that identity is the local lookup key. The URL, token, endpoint, query, and variables
+exist only while computing the digest and are never written to idempotency storage.
+
+Before a live mutation can use the network, the app writes a `prepared` MMKV record and then writes
+`dispatching`. The record contains only schema version, 64-character request and profile digests, the
+idempotency key, lifecycle state, and timestamps. The same MMKV snapshot carries a non-sensitive
+monotonic generation number that makes later terminal invocations distinct. Keys are domain-separated
+SHA-256 values derived
+from the request/profile digests, timestamp, and durable generation number; the profile digest includes
+the server's documented long-random API token. Hashing uses the audited JavaScript-only
+`@noble/hashes` package and adds no native module.
+
+The same key is reused while the record is:
+
+- `prepared`: no dispatch was recorded, so a user invocation may send it once with the existing key.
+- `dispatching` or `outcome_unknown`: the app performs authenticated
+  `GET /api/v1/operations/:key` status reads and never automatically replays the mutation.
+
+`completed` returns the server's durable result and removes the local record. `failed` reconstructs the
+server's stored status/code/message, throws it, and removes the record. Only after one of those terminal
+outcomes—or after discarding a `prepared` record that was provably never dispatched—may a later
+intentional mutation receive a new key. Timeout, abort, transport failure, malformed response,
+`started`, `local_applied`, `sync_unknown`, and explicit `OUTCOME_UNKNOWN` all retain the key.
+`OPERATION_NOT_FOUND` after dispatch is also outcome-unknown: the request may predate server journal
+retention or admission may have failed, so a missing record is never permission to resend.
+
+Pending metadata is rehydrated from MMKV after restart. Startup and foreground recovery issue status
+GETs only; they do not replay POST, PUT, PATCH, or DELETE requests, start background mutation workers,
+or persist React Query's mutation cache. If foreground recovery finds a completed operation, all active
+finance queries for that same profile are marked stale and refetched without haptics. Other profiles
+remain untouched. A refetch failure leaves those queries stale and records only a stable error code,
+numeric status, and timestamp; it does not restore the completed operation or send a mutation. A later
+successful foreground reconciliation or profile purge clears that diagnostic; a failed reconciliation
+or blocked purge retains it. Demo mutations bypass idempotency persistence entirely.
+
+Changing or deleting a live profile is blocked while that profile has a `dispatching` or
+`outcome_unknown` record. This intentionally keeps the old URL/token available for authenticated
+reconciliation instead of silently deleting a safety record and allowing a duplicate under a new
+profile. A profile change may discard `prepared` records because they were durably recorded before any
+network dispatch. This safety-over-convenience tradeoff can temporarily prevent disconnecting when the
+server cannot be reached; replacement/abandonment recovery is deliberately outside this mechanism.
+
 ## Demo mode
 
 Tap **Use demo data** during onboarding. Demo mode uses the dashboard's isolated synthetic fixtures,
@@ -109,6 +156,8 @@ The default development demo URL is `http://127.0.0.1:5007`. A build can overrid
 - Face ID can lock the UI after a configurable grace period.
 - The iOS privacy shield covers app content immediately when the app leaves the foreground.
 - Financial query caches are scoped to the configured server and cleared on disconnect.
+- Pending mutation storage contains digests and lifecycle metadata only, never request bodies, financial
+  values, receipt images, credentials, or server URLs.
 - Receipt images are resized and converted on device, then uploaded immediately; they are not retained
   as an app-managed local receipt archive.
 - Widget data is minimized and cleared on disconnect or demo mode.

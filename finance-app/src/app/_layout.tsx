@@ -13,9 +13,18 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { ErrorBoundaryProps, Stack } from 'expo-router';
 import { focusManager, QueryClientProvider } from '@tanstack/react-query';
+import { reconcilePendingFinanceOperations } from '@/api/client/requests';
 import { ServerProvider, useServerConfig } from '@/state/server';
 import { authenticate } from '@/lib/biometric';
 import { useAutoUpdate } from '@/lib/auto-update';
+import {
+  clearFinanceOperationReconciliationDiagnostic,
+  recordFinanceOperationReconciliationError,
+} from '@/lib/finance-operations';
+import {
+  reconcileFinanceOperationsOnForeground,
+  refreshActiveFinanceQueriesForScope,
+} from '@/lib/foreground-operation-reconciliation';
 import { queryClient } from '@/lib/query-client';
 import { purgeLegacyReceiptCopies } from '@/lib/receipts';
 import { Loading } from '@/components/ui';
@@ -104,7 +113,7 @@ function PrivacyGateOverlay({
 }
 
 function RootNav() {
-  const { ready, configured, faceId, demo } = useServerConfig();
+  const { ready, configured, faceId, demo, serverUrl, token, scope } = useServerConfig();
   const [unlocked, setUnlocked] = useState(false);
   const [lockFading, setLockFading] = useState(false);
   const [unlockFadeRunning, setUnlockFadeRunning] = useState(false);
@@ -124,6 +133,24 @@ function RootNav() {
     (unlocked && !privacyVisible && !lockFading && !unlockFadeRunning)
   );
   useAutoUpdate(canPromptForUpdate);
+
+  const reconcileOperations = useCallback(() => {
+    if (!ready || !configured || demo) return;
+    void reconcileFinanceOperationsOnForeground({
+      reconcile: () => reconcilePendingFinanceOperations({ serverUrl, token, demo }),
+      refreshCompletedQueries: () => refreshActiveFinanceQueriesForScope(queryClient, scope),
+      clearDiagnostic: clearFinanceOperationReconciliationDiagnostic,
+      recordDiagnostic: recordFinanceOperationReconciliationError,
+    });
+  }, [configured, demo, ready, scope, serverUrl, token]);
+
+  useEffect(() => {
+    if (AppState.currentState === 'active') reconcileOperations();
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') reconcileOperations();
+    });
+    return () => sub.remove();
+  }, [reconcileOperations]);
 
   const clearUnlockTimer = useCallback(() => {
     if (unlockTimer.current) {
@@ -346,7 +373,6 @@ export default function RootLayout() {
     const updateFocus = (state: AppStateStatus) => {
       const focused = state === 'active';
       focusManager.setFocused(focused);
-      if (focused) void queryClient.resumePausedMutations();
     };
     updateFocus(AppState.currentState);
     const sub = AppState.addEventListener('change', updateFocus);

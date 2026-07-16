@@ -1,4 +1,8 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import {
+  clearFinanceOperationReconciliationDiagnostic,
+  prepareFinanceOperationProfilePurge,
+} from '@/lib/finance-operations';
 import { abortFinanceRequests } from '@/lib/request-lifecycle';
 import { clearFinanceNotifications } from '@/lib/notifications';
 import { clearFinanceQueries, queryClient } from '@/lib/query-client';
@@ -14,7 +18,11 @@ export async function purgeReceiptCache(): Promise<void> {
   }
 }
 
-export async function purgeFinanceProfile(scope?: string): Promise<void> {
+export async function purgeFinanceProfile(
+  scope: string | undefined,
+  operationScope: string | null,
+): Promise<void> {
+  prepareFinanceOperationProfilePurge(operationScope);
   abortFinanceRequests();
   await clearFinanceQueries();
   queryClient.getMutationCache().clear();
@@ -25,4 +33,5 @@ export async function purgeFinanceProfile(scope?: string): Promise<void> {
   }
   clearFinanceWidget();
   await purgeReceiptCache();
+  clearFinanceOperationReconciliationDiagnostic();
 }
