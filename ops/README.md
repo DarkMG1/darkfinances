@@ -343,6 +343,10 @@ The helper:
   with journaled rollback phases (`rollback_in_progress`, `rollback_failed`, `rolled_back`) driven by the
   snapshot manifest rather than post-mutation live-tree enumeration.
 - Re-verifies archive SHA-256 and manifest artifact ID before treating a `complete` journal as idempotent.
+- Re-verifies the full installed destination closed-world tree (bytes, modes, sidecar schemas, receipt
+  references) against the bound manifest before returning `complete`; destination drift fails closed.
+- Serializes live restores with an atomic `restore.lock` in the control root (`O_EXCL`); concurrent
+  invocations fail with `restore already in progress`.
 - Requires a PR-18 quiescence admission token with TTL and bindings to archive SHA-256 and destination path;
   generation evidence is re-read immediately before the first mutation.
 - Fsyncs journals (write-temp-then-rename), staged files, and parent directories at mutation boundaries where

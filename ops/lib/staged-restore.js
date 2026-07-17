@@ -44,9 +44,11 @@ const {
   snapshotDigest,
 } = require('./restore-snapshot');
 const { writeFileAtomic, fsyncPath } = require('./restore-durable-io');
+const { acquireRestoreLock } = require('./restore-instance-lock');
 
 const JOURNAL_KIND = 'darkfinances-staged-restore-journal';
 const JOURNAL_SCHEMA_VERSION = 2;
+const JOURNAL_MAX_BYTES = 512 * 1024;
 
 const PHASE = Object.freeze({
   INIT: 'init',
@@ -126,6 +128,10 @@ function readJournal(journalPath) {
   if (!journalPath || !fs.existsSync(journalPath)) return null;
   const stat = fs.lstatSync(journalPath);
   if (stat.isSymbolicLink()) throw new Error('restore journal must not be a symbolic link');
+  if (!stat.isFile()) throw new Error('restore journal must be a regular file');
+  if (stat.size > JOURNAL_MAX_BYTES) {
+    throw new Error('restore journal exceeds size limit');
+  }
   const journal = parseJson('restore journal', fs.readFileSync(journalPath, 'utf8'));
   if (journal.kind !== JOURNAL_KIND) throw new Error('restore journal kind mismatch');
   if (journal.schemaVersion !== JOURNAL_SCHEMA_VERSION) {
@@ -197,7 +203,7 @@ function assertJournalMatchesRequest(journal, { archiveSha256, canonicalDestinat
   }
 }
 
-function verifyCompleteReplay(journal, { archivePath, sidecarManifest, canonicalDestination }) {
+function verifyCompleteArchiveBindings(journal, { archivePath, sidecarManifest, canonicalDestination }) {
   if (journal.destinationRoot !== canonicalDestination) {
     throw new Error('restore journal destination binding mismatch');
   }
@@ -208,6 +214,36 @@ function verifyCompleteReplay(journal, { archivePath, sidecarManifest, canonical
   if (journal.manifestArtifactId !== sidecarManifest.artifact.id) {
     throw new Error('completed restore journal manifest artifact mismatch');
   }
+}
+
+function verifyCompleteDestination({
+  destinationRoot,
+  manifest,
+  inventory,
+  toolingRoot,
+  destinationEvidence,
+}) {
+  try {
+    verifyInstalledRuntime({
+      destinationRoot,
+      manifest,
+      inventory,
+      toolingRoot,
+    });
+    validateGenerationBindingForRestore({
+      manifest,
+      runtimeRoot: destinationRoot,
+      inventory,
+      destinationEvidence,
+    });
+  } catch (error) {
+    throw new Error(`completed restore destination drift detected: ${error.message}`);
+  }
+}
+
+function verifyCompleteReplay(journal, context) {
+  verifyCompleteArchiveBindings(journal, context);
+  verifyCompleteDestination(context);
 }
 
 function sameFilesystem(left, right) {
@@ -330,11 +366,6 @@ function removePathIfExists(target) {
   else fs.rmSync(target, { force: true });
 }
 
-function pathExistedBeforeSwap(journal, relative) {
-  if (!journal.snapshotDigest) return null;
-  return null;
-}
-
 function swapRuntimeTree({
   destinationRoot,
   stagingRoot,
@@ -414,6 +445,7 @@ function verifyInstalledRuntime({
   manifest,
   inventory,
   toolingRoot,
+  driftMessage = 'installed runtime tree does not match manifest closed world',
 }) {
   verifyManifestRuntimeChecksums(destinationRoot, manifest);
   const runtimePaths = runtimeRelativePathsFromManifest(manifest);
@@ -426,7 +458,7 @@ function verifyInstalledRuntime({
   }).sort();
   const expected = runtimePaths.slice().sort();
   if (actual.join('\n') !== expected.join('\n')) {
-    throw new Error('installed runtime tree does not match manifest closed world');
+    throw new Error(driftMessage);
   }
   const validateBackupSidecar = loadValidateBackupSidecar(toolingRoot);
   const { validateSidecar, validateReceiptReferences } = require('./backup-verify');
@@ -465,6 +497,18 @@ function parseFaultSchedule(raw) {
         const error = new Error(`permission denied at ${point}`);
         error.code = 'EACCES';
         throw error;
+      }
+      if (next.holdUntilFile) {
+        if (next.createReadyFile) {
+          fs.writeFileSync(next.createReadyFile, `${process.pid}\n`, { mode: 0o600 });
+        }
+        const deadline = Date.now() + (next.holdTimeoutMs ?? 30000);
+        while (!fs.existsSync(next.holdUntilFile)) {
+          if (Date.now() > deadline) {
+            throw new Error(`timed out waiting for ${next.holdUntilFile}`);
+          }
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+        }
       }
     }
   };
@@ -568,6 +612,7 @@ function runStagedRestore(options = {}) {
 
   let journal = null;
   let resumeFromJournal = false;
+  let restoreLock = null;
   const sidecarManifest = readManifestFromArchive(archivePath);
 
   if (persist) {
@@ -575,17 +620,7 @@ function runStagedRestore(options = {}) {
     assertControlPathsSafe(layout);
     journal = readJournal(layout.journalPath);
     if (journal?.phase === PHASE.COMPLETE) {
-      verifyCompleteReplay(journal, { archivePath, sidecarManifest, canonicalDestination });
-      if (!dryRun) {
-        return {
-          dryRun,
-          resumed: true,
-          phase: PHASE.COMPLETE,
-          manifestArtifactId: journal.manifestArtifactId,
-          generationBindingDigest: journal.generationBindingDigest,
-          report: journal.report,
-        };
-      }
+      verifyCompleteArchiveBindings(journal, { archivePath, sidecarManifest, canonicalDestination });
     } else if (journal) {
       assertJournalMatchesRequest(journal, { archiveSha256, canonicalDestination });
       resumeFromJournal = journal.phase !== PHASE.INIT;
@@ -593,11 +628,13 @@ function runStagedRestore(options = {}) {
   } else if (destinationExists(canonicalDestination) && fs.existsSync(layout.journalPath)) {
     journal = readJournal(layout.journalPath);
     if (journal?.phase === PHASE.COMPLETE) {
-      verifyCompleteReplay(journal, { archivePath, sidecarManifest, canonicalDestination });
+      verifyCompleteArchiveBindings(journal, { archivePath, sidecarManifest, canonicalDestination });
     } else if (journal) {
       assertJournalMatchesRequest(journal, { archiveSha256, canonicalDestination });
     }
   }
+
+  restoreLock = acquireRestoreLock({ layout, canonicalDestination, dryRun, env });
 
   if (!journal && persist) {
     journal = createJournal({
@@ -654,6 +691,35 @@ function runStagedRestore(options = {}) {
       publishDir: extractRoot,
       readOnly: true,
     });
+    injectFault?.('after:archive-verify');
+
+    if (journal?.phase === PHASE.COMPLETE) {
+      if (manifest.artifact.id !== journal.manifestArtifactId) {
+        throw new Error('completed restore journal manifest artifact mismatch');
+      }
+      const replayEvidence = readDestinationGenerationEvidence({
+        releaseManifestPath: options.releaseManifestPath,
+        actualDataGenerationPath: options.actualDataGenerationPath,
+        releaseManifestDigest: options.releaseManifestDigest,
+        actualDataGeneration: options.actualDataGeneration,
+      });
+      verifyCompleteDestination({
+        destinationRoot: canonicalDestination,
+        manifest,
+        inventory: inventoryFromBundle(extractRoot),
+        toolingRoot: path.join(extractRoot, 'tooling'),
+        destinationEvidence: replayEvidence,
+      });
+      return {
+        dryRun,
+        resumed: true,
+        phase: PHASE.COMPLETE,
+        manifestArtifactId: journal.manifestArtifactId,
+        generationBindingDigest: journal.generationBindingDigest,
+        report: journal.report,
+      };
+    }
+
     if (persist) {
       updateJournal(journal, {
         phase: PHASE.ARCHIVE_VERIFIED,
@@ -661,7 +727,6 @@ function runStagedRestore(options = {}) {
       });
       writeJournal(layout.journalPath, journal, true);
     }
-    injectFault?.('after:archive-verify');
 
     const inventory = inventoryFromBundle(extractRoot);
     const manifestPaths = runtimeRelativePathsFromManifest(manifest);
@@ -841,7 +906,7 @@ function runStagedRestore(options = {}) {
       report,
     };
   } catch (error) {
-    if (persist && journal) {
+    if (persist && journal && journal.phase !== PHASE.COMPLETE) {
       updateJournal(journal, { phase: PHASE.FAILED, error: redactPath(error.message) });
       writeJournal(layout.journalPath, journal, true);
       if (journal.snapshotDigest && fs.existsSync(layout.snapshotRoot)) {
@@ -862,6 +927,7 @@ function runStagedRestore(options = {}) {
     }
     throw safeError(error);
   } finally {
+    restoreLock?.release();
     if (dryRun && fs.existsSync(workRoot)) fs.rmSync(workRoot, { recursive: true, force: true });
   }
 }
@@ -885,4 +951,7 @@ module.exports = {
   cleanupControlArtifacts,
   performRollback,
   verifyCompleteReplay,
+  verifyCompleteArchiveBindings,
+  verifyCompleteDestination,
+  JOURNAL_MAX_BYTES,
 };

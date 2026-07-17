@@ -17,6 +17,7 @@ const OPS_TOOLING_FILES = Object.freeze([
   'ops/lib/list-backup-runtime-members.js',
   'ops/lib/verify-backup-bundle-standalone.js',
   'ops/lib/generation-binding-artifact.js',
+  'ops/lib/restore-instance-lock.js',
   'ops/lib/restore-control-layout.js',
   'ops/lib/restore-durable-io.js',
   'ops/lib/restore-snapshot.js',

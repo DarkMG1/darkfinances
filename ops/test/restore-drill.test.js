@@ -5,7 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { once } = require('node:events');
+const { spawnSync, spawn } = require('child_process');
 const { buildBackupBundle } = require('../lib/build-backup-bundle');
 const {
   BINDING_FIELD,
@@ -20,7 +21,13 @@ const {
   runStagedRestore,
   PHASE,
   readJournal,
+  JOURNAL_MAX_BYTES,
 } = require('../lib/staged-restore');
+const {
+  LOCK_KIND,
+  LOCK_SCHEMA_VERSION,
+  lockPathForLayout,
+} = require('../lib/restore-instance-lock');
 const { writeProductionDashboard, PRODUCTION_SHAPED } = require('./fixtures/backup-bundle-dashboard-fixtures');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -154,7 +161,7 @@ test('staged restore removes destination-only stale files and refuses unknown ex
       dryRun: true,
       env: admissionEnv(root, destination, archive),
     }),
-    /unknown runtime files/,
+    /completed restore destination drift detected/,
   );
 });
 
@@ -865,4 +872,245 @@ test('shell wrapper resumes interrupted restore without explicit workRoot', (t) 
   const second = spawnSync(restoreShell, [archive], { encoding: 'utf8', env: resumeEnv });
   assert.equal(second.status, 0, second.stderr);
   assert.equal(controlJournal(destination)?.phase, PHASE.COMPLETE);
+});
+
+function completeRestore(root, destination, archive) {
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
+  runStagedRestore({
+    archivePath: archive,
+    destinationRoot: destination,
+    dryRun: false,
+    confirm: true,
+    env: admissionEnv(root, destination, archive),
+  });
+}
+
+test('COMPLETE live replay detects deleted runtime content', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-drift-delete-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeTerminalSagaDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  completeRestore(root, destination, archive);
+  fs.rmSync(path.join(destination, 'rules.json'), { force: true });
+  assert.throws(
+    () => runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      dryRun: false,
+      confirm: true,
+      env: admissionEnv(root, destination, archive),
+    }),
+    /completed restore destination drift detected/,
+  );
+});
+
+test('COMPLETE live replay detects mode tamper and unknown runtime files', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-drift-mode-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeTerminalSagaDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  completeRestore(root, destination, archive);
+  fs.chmodSync(path.join(destination, 'rules.json'), 0o644);
+  assert.throws(
+    () => runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      dryRun: false,
+      confirm: true,
+      env: admissionEnv(root, destination, archive),
+    }),
+    /completed restore destination drift detected/,
+  );
+  fs.chmodSync(path.join(destination, 'rules.json'), 0o600);
+  fs.writeFileSync(path.join(destination, 'drift-extra.txt'), 'x\n', { mode: 0o600 });
+  assert.throws(
+    () => runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      dryRun: true,
+      env: admissionEnv(root, destination, archive),
+    }),
+    /completed restore destination drift detected/,
+  );
+});
+
+test('COMPLETE replay detects generation evidence drift', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-drift-evidence-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeTerminalSagaDashboard(dashboard);
+  const releaseDigest = 'a'.repeat(64);
+  const archive = buildBundle(root, dashboard, { releaseManifestDigest: releaseDigest });
+  completeRestore(root, destination, archive);
+  const releasePath = path.join(root, 'release-manifest.json');
+  fs.writeFileSync(releasePath, `${JSON.stringify({ schemaVersion: 1, digest: 'b'.repeat(64) }, null, 2)}\n`, { mode: 0o600 });
+  assert.throws(
+    () => runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      dryRun: false,
+      confirm: true,
+      releaseManifestPath: releasePath,
+      env: admissionEnv(root, destination, archive),
+    }),
+    /completed restore destination drift detected/,
+  );
+});
+
+test('dry-run against COMPLETE journal reports destination drift without false confidence', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-dry-drift-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeTerminalSagaDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  completeRestore(root, destination, archive);
+  fs.writeFileSync(path.join(destination, 'rules.json'), '{"rules":[{"id":"tampered"}]}\n', { mode: 0o600 });
+  assert.throws(
+    () => runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      dryRun: true,
+      env: admissionEnv(root, destination, archive),
+    }),
+    /completed restore destination drift detected/,
+  );
+});
+
+test('oversized restore journal is rejected with controlled error', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-journal-size-');
+  const destination = path.join(root, 'destination');
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  const layout = controlLayoutForDestination(destination);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(layout.journalPath, `${'x'.repeat(JOURNAL_MAX_BYTES + 1)}`, { mode: 0o600 });
+  assert.throws(
+    () => readJournal(layout.journalPath),
+    /restore journal exceeds size limit/,
+  );
+});
+
+test('concurrent live restore rejects second invocation while first holds lock', async (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-concurrent-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeTerminalSagaDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
+  const ready = path.join(root, 'child-ready');
+  const release = path.join(root, 'release-child');
+  const tokenPath = path.join(root, 'admission.json');
+  fs.writeFileSync(tokenPath, `${JSON.stringify(buildAdmissionTokenForRestore({
+    archiveSha256: sha256File(archive),
+    destinationRoot: path.resolve(destination),
+  }), null, 2)}\n`, { mode: 0o600 });
+  const childEnv = {
+    ...process.env,
+    FINANCE_DASHBOARD_DIR: destination,
+    RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
+    RESTORE_FAULT_SCHEDULE: JSON.stringify([{
+      point: 'after:preflight',
+      createReadyFile: ready,
+      holdUntilFile: release,
+      holdTimeoutMs: 120000,
+    }]),
+  };
+  const child = spawn(process.execPath, [
+    path.join(repoRoot, 'ops/lib/staged-restore-cli.js'),
+    '--confirm',
+    archive,
+  ], { env: childEnv, stdio: 'ignore' });
+  t.after(() => {
+    try { process.kill(child.pid, 'SIGTERM'); } catch { /* ignore */ }
+  });
+  const layout = controlLayoutForDestination(destination);
+  const readyDeadline = Date.now() + 120000;
+  while (!fs.existsSync(ready) && Date.now() < readyDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(fs.existsSync(ready), 'first restore should reach preflight hold');
+  assert.ok(fs.existsSync(lockPathForLayout(layout)), 'first restore should hold live lock');
+  const blocked = spawnSync(process.execPath, [
+    path.join(repoRoot, 'ops/lib/staged-restore-cli.js'),
+    '--confirm',
+    archive,
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      FINANCE_DASHBOARD_DIR: destination,
+      RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
+    },
+  });
+  assert.match(blocked.stderr, /restore already in progress/);
+  fs.writeFileSync(release, 'go\n', { mode: 0o600 });
+  const [exitCode] = await once(child, 'exit');
+  assert.equal(exitCode, 0, blocked.stderr);
+});
+
+test('stale dead restore lock is removed and restore proceeds', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-dead-lock-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeTerminalSagaDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
+  const layout = controlLayoutForDestination(destination);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(layout.controlRoot + '/restore.lock', `${JSON.stringify({
+    kind: LOCK_KIND,
+    schemaVersion: LOCK_SCHEMA_VERSION,
+    pid: 99999999,
+    destinationRoot: layout.canonicalDestination,
+    createdAt: new Date().toISOString(),
+  }, null, 2)}\n`, { mode: 0o600 });
+  const result = runStagedRestore({
+    archivePath: archive,
+    destinationRoot: destination,
+    dryRun: false,
+    confirm: true,
+    env: admissionEnv(root, destination, archive),
+  });
+  assert.equal(result.phase, PHASE.COMPLETE);
+  assert.equal(fs.existsSync(lockPathForLayout(layout)), false);
+});
+
+test('malformed and symlink restore locks fail safe', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-bad-lock-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeTerminalSagaDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
+  const layout = controlLayoutForDestination(destination);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(layout.controlRoot + '/restore.lock', 'not-json', { mode: 0o600 });
+  assert.throws(
+    () => runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      dryRun: false,
+      confirm: true,
+      env: admissionEnv(root, destination, archive),
+    }),
+    /restore lock unavailable/,
+  );
+  fs.rmSync(layout.controlRoot + '/restore.lock', { force: true });
+  fs.writeFileSync(path.join(root, 'outside-lock'), '{}\n', { mode: 0o600 });
+  fs.symlinkSync(path.join(root, 'outside-lock'), layout.controlRoot + '/restore.lock');
+  assert.throws(
+    () => runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      dryRun: false,
+      confirm: true,
+      env: admissionEnv(root, destination, archive),
+    }),
+    /symbolic link/,
+  );
 });
