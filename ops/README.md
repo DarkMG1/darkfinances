@@ -312,12 +312,12 @@ Environment:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BACKUP_QUIESCE` | `1` | Stop/verify/restart writers around backup |
 | `BACKUP_INCLUDE_ACTUAL_DATA` | `0` | Also archive `ACTUAL_DATA_DIR` and bind Actual generation |
+| `BACKUP_PRE_QUIESCED` | unset | Verify-only mode when writers were stopped out-of-band (never skips verification or mints restore authority) |
 | `BACKUP_DRY_RUN` | `0` | Discovery/plan only |
 | `FINANCE_EVENT_SYNC_CONFIGURED` | unset | Include optional event-sync writers when `1` |
 
-Use `BACKUP_QUIESCE=0` only on hosts without user systemd or when writers are already quiesced manually.
+`BACKUP_QUIESCE=0` is forbidden. Restore admission tokens are Ed25519-signed, short-lived, and issued only by the coordinated restore session while it holds the exclusive coordination lock — never during backup.
 
 ## Restore dashboard runtime state
 

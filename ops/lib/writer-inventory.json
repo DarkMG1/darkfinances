@@ -102,7 +102,7 @@
       "stopPhase": "restore-lock",
       "restartPhase": "jobs-timers",
       "optional": false,
-      "quiescentStates": ["absent"]
+      "quiescentStates": ["absent", "stale"]
     }
   ]
 }

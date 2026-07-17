@@ -19,6 +19,13 @@ async function checkDashboardHealth(context) {
     pollMs = DEFAULT_HEALTH_POLL_MS,
     expectedGeneration = null,
   } = context;
+  if (!expectedGeneration) {
+    return {
+      ok: false,
+      component: 'finance-dashboard',
+      error: 'expected release digest is required for post-restart health',
+    };
+  }
   const port = env.FINANCE_DASHBOARD_PORT || '5007';
   const token = env.FINANCE_API_TOKEN;
   const url = `http://127.0.0.1:${port}/api/v1/ping`;
@@ -30,13 +37,20 @@ async function checkDashboardHealth(context) {
       const response = await runners.httpGet(url, headers, Math.min(5000, timeoutMs));
       const body = await response.json();
       if (response.status === 200 && body?.ok === true) {
-        if (expectedGeneration && body.release?.contentDigest?.value
-          && body.release.contentDigest.value !== expectedGeneration) {
+        const releaseDigest = body.release?.contentDigest?.value;
+        if (!releaseDigest) {
+          return {
+            ok: false,
+            component: 'finance-dashboard',
+            error: 'dashboard release digest missing from ping',
+          };
+        }
+        if (releaseDigest !== expectedGeneration) {
           return {
             ok: false,
             component: 'finance-dashboard',
             error: 'dashboard release generation mismatch',
-            diagnostics: redactDiagnostics({ status: response.status, release: body.release?.contentDigest?.value }),
+            diagnostics: redactDiagnostics({ status: response.status, release: releaseDigest }),
           };
         }
         return {

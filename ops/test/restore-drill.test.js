@@ -13,7 +13,9 @@ const {
   buildGenerationBinding,
   bindingsEquivalent,
 } = require('../lib/restore-generation-binding');
-const { buildAdmissionTokenForRestore } = require('../lib/restore-quiescence-admission');
+const { buildTestAdmissionToken, registerTestAdmission } = require('./fixtures/admission-token-fixtures');
+const { installTestCoordinatorKeys, installFakeSystemctl } = require('./fixtures/coordinated-test-helpers');
+const { coordinatedLayoutForRoot } = require('../lib/coordinated-operation-layout');
 const { sha256File } = require('../lib/backup-verify');
 const { controlLayoutForDestination } = require('../lib/restore-control-layout');
 const { buildSnapshotManifest } = require('../lib/restore-snapshot');
@@ -40,14 +42,46 @@ function mkRoot(t, prefix) {
 }
 
 function admissionEnv(root, destination, archivePath, extra = {}) {
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  const archiveSha256 = sha256File(archivePath);
+  const { readManifestFromArchive } = require('../lib/backup-bundle-verify');
+  const { loadWriterInventory, writerInventoryDigest } = require('../lib/writer-inventory');
+  const manifest = readManifestFromArchive(archivePath);
+  const gen = manifest.generationBinding || {};
+  const manifestArtifactId = extra.manifestArtifactId || manifest.artifact.id;
+  const releaseManifestDigest = extra.releaseManifestDigest
+    ?? gen.releaseManifestDigest
+    ?? gen.dashboardStateId;
+  const { token } = buildTestAdmissionToken({
+    keyPair: keys.pair,
+    bindings: {
+      archiveSha256,
+      destinationRoot: path.resolve(destination),
+      manifestArtifactId,
+      releaseManifestDigest,
+      coordinatedManifestDigest: extra.coordinatedManifestDigest ?? gen.dashboardStateId,
+      writerInventoryDigest: extra.writerInventoryDigest ?? writerInventoryDigest(loadWriterInventory()),
+      actualDataGeneration: extra.actualDataGeneration ?? gen.actualDataGeneration ?? null,
+    },
+  });
+  registerTestAdmission(layout, token);
   const tokenPath = path.join(root, 'quiescence-admission.json');
-  fs.writeFileSync(tokenPath, `${JSON.stringify(buildAdmissionTokenForRestore({
-    archiveSha256: sha256File(archivePath),
-    destinationRoot: path.resolve(destination),
-  }), null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(tokenPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
+  const fakeBin = installFakeSystemctl(root, {
+    'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+    'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+    'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+  });
   return {
     ...process.env,
+    PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
     RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
+    COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+    COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+    DARKFINANCES_BACKUP_DIR: coordinatorRoot,
     ...extra,
   };
 }
@@ -200,7 +234,7 @@ test('refuses restore without quiescence admission token', (t) => {
       dryRun: true,
       env: { ...process.env, RESTORE_QUIESCENCE_ADMISSION_PATH: '' },
     }),
-    /missing quiescence admission token/,
+    /missing signed quiescence admission token/,
   );
 });
 
@@ -725,19 +759,29 @@ test('expired admission token is rejected', (t) => {
   const destination = path.join(root, 'destination');
   writeTerminalSagaDashboard(dashboard);
   const archive = buildBundle(root, dashboard);
-  const tokenPath = path.join(root, 'expired.json');
-  const expired = buildAdmissionTokenForRestore({
-    archiveSha256: sha256File(archive),
-    destinationRoot: path.resolve(destination),
+  const keys = installTestCoordinatorKeys(root);
+  const { token } = buildTestAdmissionToken({
+    keyPair: keys.pair,
     ttlMs: -1000,
+    bindings: {
+      archiveSha256: sha256File(archive),
+      destinationRoot: path.resolve(destination),
+    },
   });
-  fs.writeFileSync(tokenPath, `${JSON.stringify(expired, null, 2)}\n`, { mode: 0o600 });
+  const tokenPath = path.join(root, 'expired.json');
+  fs.writeFileSync(tokenPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
+  const fakeBin = installFakeSystemctl(root);
   assert.throws(
     () => runStagedRestore({
       archivePath: archive,
       destinationRoot: destination,
       dryRun: true,
-      env: { ...process.env, RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath },
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
+        COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+      },
     }),
     /expired/,
   );
@@ -749,19 +793,30 @@ test('wrong admission archive binding is rejected before mutation', (t) => {
   const destination = path.join(root, 'destination');
   writeTerminalSagaDashboard(dashboard);
   const archive = buildBundle(root, dashboard);
+  const keys = installTestCoordinatorKeys(root);
+  const { token } = buildTestAdmissionToken({
+    keyPair: keys.pair,
+    bindings: {
+      archiveSha256: 'f'.repeat(64),
+      destinationRoot: path.resolve(destination),
+    },
+  });
   const tokenPath = path.join(root, 'wrong-archive.json');
-  fs.writeFileSync(tokenPath, `${JSON.stringify(buildAdmissionTokenForRestore({
-    archiveSha256: 'f'.repeat(64),
-    destinationRoot: path.resolve(destination),
-  }), null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(tokenPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  const fakeBin = installFakeSystemctl(root);
   assert.throws(
     () => runStagedRestore({
       archivePath: archive,
       destinationRoot: destination,
       dryRun: false,
       confirm: true,
-      env: { ...process.env, RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath },
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
+        COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+      },
     }),
     /archive binding mismatch/,
   );
@@ -889,23 +944,16 @@ test('shell wrapper resumes interrupted restore without explicit workRoot', (t) 
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  const tokenPath = path.join(root, 'admission.json');
-  fs.writeFileSync(tokenPath, `${JSON.stringify(buildAdmissionTokenForRestore({
-    archiveSha256: sha256File(archive),
-    destinationRoot: path.resolve(destination),
-  }), null, 2)}\n`, { mode: 0o600 });
   const faultEnv = {
-    ...process.env,
+    ...admissionEnv(root, destination, archive),
     FINANCE_DASHBOARD_DIR: destination,
-    RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
     RESTORE_FAULT_SCHEDULE: JSON.stringify([{ point: 'after:snapshot-capture', throwError: 'shell interrupt' }]),
   };
   const first = spawnSync(restoreShell, [archive], { encoding: 'utf8', env: faultEnv });
   assert.notEqual(first.status, 0, first.stderr);
   const resumeEnv = {
-    ...process.env,
+    ...admissionEnv(root, destination, archive),
     FINANCE_DASHBOARD_DIR: destination,
-    RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
     CONFIRM: '1',
   };
   const second = spawnSync(restoreShell, [archive], { encoding: 'utf8', env: resumeEnv });
@@ -1041,15 +1089,10 @@ test('concurrent live restore rejects second invocation while first holds lock',
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
   const ready = path.join(root, 'child-ready');
   const release = path.join(root, 'release-child');
-  const tokenPath = path.join(root, 'admission.json');
-  fs.writeFileSync(tokenPath, `${JSON.stringify(buildAdmissionTokenForRestore({
-    archiveSha256: sha256File(archive),
-    destinationRoot: path.resolve(destination),
-  }), null, 2)}\n`, { mode: 0o600 });
+  const baseEnv = admissionEnv(root, destination, archive);
   const childEnv = {
-    ...process.env,
+    ...baseEnv,
     FINANCE_DASHBOARD_DIR: destination,
-    RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
     RESTORE_FAULT_SCHEDULE: JSON.stringify([{
       point: 'after:preflight',
       createReadyFile: ready,
@@ -1079,9 +1122,8 @@ test('concurrent live restore rejects second invocation while first holds lock',
   ], {
     encoding: 'utf8',
     env: {
-      ...process.env,
+      ...baseEnv,
       FINANCE_DASHBOARD_DIR: destination,
-      RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
     },
   });
   assert.match(blocked.stderr, /restore already in progress/);

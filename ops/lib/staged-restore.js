@@ -25,8 +25,16 @@ const {
 const {
   requireQuiescenceAdmission,
   assertAdmissionBindings,
-  buildAdmissionTokenForRestore,
+  issueSignedAdmissionToken,
+  consumeAdmissionToken,
 } = require('./restore-quiescence-admission');
+const { coordinatedLayoutForRoot } = require('./coordinated-operation-layout');
+const {
+  assertAllWritersQuiescentForAdmission,
+  captureWriterState,
+} = require('./writer-quiescence');
+const { enumerateWriters, loadWriterInventory } = require('./writer-inventory');
+const { createDefaultRunners } = require('./ops-command-runners');
 const {
   controlLayoutForDestination,
   ensureControlRoot,
@@ -602,6 +610,10 @@ function runStagedRestore(options = {}) {
         archiveSha256,
         destinationRoot: canonicalDestination,
       },
+      layout: options.layout || (options.coordinatorRoot
+        ? coordinatedLayoutForRoot(options.coordinatorRoot)
+        : null),
+      verifyLiveWriters: false,
     });
   }
 
@@ -801,20 +813,105 @@ function runStagedRestore(options = {}) {
       return { dryRun: true, resumed: false, phase: PHASE.PREFLIGHT_PASSED, report };
     }
 
-    const admission = requireQuiescenceAdmission({
-      ...options,
-      env,
-      requireBindings: true,
-      bindingContext: {
-        archiveSha256,
-        destinationRoot: canonicalDestination,
-        manifestArtifactId: manifest.artifact.id,
-      },
-    });
+    let admission;
+    const coordinatorLayout = options.layout
+      || (options.coordinatorRoot ? coordinatedLayoutForRoot(options.coordinatorRoot) : null);
+    const writerInventory = loadWriterInventory();
+    const writers = enumerateWriters(writerInventory, env);
+    const runnersForLive = options.runners || createDefaultRunners(env);
+    const liveSnapshots = new Map();
+    for (const writer of writers) {
+      liveSnapshots.set(writer.id, captureWriterState(writer, {
+        inventory: writerInventory,
+        env,
+        runners: runnersForLive,
+        dashboardDir: canonicalDestination,
+        allowOwnRestoreLock: true,
+      }));
+    }
+    if (options.coordinatedSession) {
+      const session = options.coordinatedSession;
+      for (const [id, prior] of (session.snapshotsById || new Map()).entries()) {
+        const current = liveSnapshots.get(id);
+        if (current && prior) {
+          current.originallyActive = prior.originallyActive;
+          current.originallyEnabled = prior.originallyEnabled;
+          current.originallyRunning = prior.originallyRunning;
+          current.restartPolicy = prior.restartPolicy ?? current.restartPolicy ?? null;
+        }
+      }
+      assertAllWritersQuiescentForAdmission({
+        ...session.context,
+        inventory: writerInventory,
+        writers,
+        snapshotsById: liveSnapshots,
+        dashboardDir: canonicalDestination,
+        allowOwnRestoreLock: true,
+      });
+      admission = issueSignedAdmissionToken({
+        layout: session.layout,
+        runId: session.runId,
+        journalId: session.journalId,
+        snapshotsById: liveSnapshots,
+        context: { ...session.context, inventory: writerInventory, writers, dashboardDir: canonicalDestination },
+        env,
+        privateKey: session.privateKey,
+        bindings: {
+          archiveSha256,
+          destinationRoot: canonicalDestination,
+          manifestArtifactId: manifest.artifact.id,
+          releaseManifestDigest: bindingResult.expectedBinding.releaseManifestDigest,
+          coordinatedManifestDigest: options.coordinatedManifestDigest || bindingResult.expectedBinding.releaseManifestDigest,
+          writerInventoryDigest: session.writerInventoryDigest,
+          actualDataGeneration: bindingResult.expectedBinding.actualDataGeneration,
+        },
+      });
+      const tokenPath = path.join(session.layout.workRoot, `restore-admission-${session.runId}.json`);
+      writeFileAtomic(tokenPath, `${JSON.stringify(admission, null, 2)}\n`, 0o600);
+      env.RESTORE_QUIESCENCE_ADMISSION_PATH = tokenPath;
+    } else {
+      admission = requireQuiescenceAdmission({
+        ...options,
+        env,
+        requireBindings: true,
+        layout: coordinatorLayout,
+        bindingContext: {
+          archiveSha256,
+          destinationRoot: canonicalDestination,
+          manifestArtifactId: manifest.artifact.id,
+          releaseManifestDigest: bindingResult.expectedBinding.releaseManifestDigest,
+          actualDataGeneration: bindingResult.expectedBinding.actualDataGeneration,
+          coordinatedManifestDigest: options.coordinatedManifestDigest,
+          writerInventoryDigest: options.writerInventoryDigest,
+        },
+        writerContext: {
+          inventory: writerInventory,
+          env,
+          runners: runnersForLive,
+          dashboardDir: canonicalDestination,
+          writers,
+          snapshotsById: liveSnapshots,
+          allowOwnRestoreLock: true,
+        },
+      });
+      assertAllWritersQuiescentForAdmission({
+        inventory: writerInventory,
+        env,
+        runners: runnersForLive,
+        dashboardDir: canonicalDestination,
+        writers,
+        snapshotsById: liveSnapshots,
+        allowOwnRestoreLock: true,
+      }, admission.writers);
+    }
     assertAdmissionBindings(admission, {
       archiveSha256,
       destinationRoot: canonicalDestination,
       manifestArtifactId: manifest.artifact.id,
+      releaseManifestDigest: bindingResult.expectedBinding.releaseManifestDigest,
+      actualDataGeneration: bindingResult.expectedBinding.actualDataGeneration,
+      coordinatedManifestDigest: options.coordinatedManifestDigest,
+      writerInventoryDigest: options.writerInventoryDigest,
     });
 
     const freshEvidence = readDestinationGenerationEvidence({
@@ -893,6 +990,9 @@ function runStagedRestore(options = {}) {
     writeJournal(layout.journalPath, journal, true);
     cleanupControlArtifacts(layout, { keepJournal: true });
     fsyncPath(layout.controlRoot, true);
+    if (admission && coordinatorLayout && options.skipAdmissionConsumption !== true) {
+      consumeAdmissionToken(coordinatorLayout, admission);
+    }
 
     return {
       dryRun: false,
@@ -942,7 +1042,6 @@ module.exports = {
   swapRuntimeTree,
   parseFaultSchedule,
   restoreIdForDestination,
-  buildAdmissionTokenForRestore,
   cleanupControlArtifacts,
   performRollback,
   JOURNAL_MAX_BYTES,

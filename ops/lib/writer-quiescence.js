@@ -78,6 +78,11 @@ function captureWriterState(writer, context) {
       snapshot.running = snapshot.active;
       snapshot.originallyActive = snapshot.active;
       snapshot.originallyRunning = snapshot.running;
+      if (typeof runners.dockerInspectRestartPolicy === 'function') {
+        snapshot.restartPolicy = runners.dockerInspectRestartPolicy(writer.containerName);
+      } else {
+        snapshot.restartPolicy = null;
+      }
       return snapshot;
     }
 
@@ -96,9 +101,14 @@ function captureWriterState(writer, context) {
         }
         const payload = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
         if (isProcessAlive(payload.pid)) {
-          snapshot.state = 'held';
-          snapshot.active = true;
-          snapshot.running = true;
+          if (payload.pid === process.pid && context.allowOwnRestoreLock === true) {
+            snapshot.state = 'absent';
+            snapshot.active = false;
+          } else {
+            snapshot.state = 'held';
+            snapshot.active = true;
+            snapshot.running = true;
+          }
         } else {
           snapshot.state = 'stale';
           snapshot.active = false;
@@ -145,6 +155,7 @@ function preserveOriginalFlags(snapshot, fresh) {
     originallyActive: snapshot.originallyActive,
     originallyEnabled: snapshot.originallyEnabled,
     originallyRunning: snapshot.originallyRunning,
+    restartPolicy: snapshot.restartPolicy,
   };
   Object.assign(snapshot, fresh, preserved);
 }
@@ -194,6 +205,9 @@ async function stopWriter(writer, snapshot, context) {
   if (writer.type === 'docker-container') {
     const composeFile = env[writer.composeFileEnv || 'ACTUAL_COMPOSE_FILE']
       || path.join(env.HOME || '', 'actual', 'compose.yml');
+    if (snapshot.restartPolicy && typeof runners.dockerUpdateRestartPolicy === 'function') {
+      runners.dockerUpdateRestartPolicy(writer.containerName, 'no');
+    }
     const result = runners.dockerComposeStop(composeFile, writer.containerName);
     snapshot.stopIssued = true;
     if (result.status !== 0) {
@@ -284,6 +298,9 @@ async function restartWriter(writer, snapshot, context) {
         snapshot.restartOk = false;
         return { ok: false, error: `docker compose start ${writer.containerName} failed` };
       }
+      if (snapshot.restartPolicy && typeof runners.dockerUpdateRestartPolicy === 'function') {
+        runners.dockerUpdateRestartPolicy(writer.containerName, snapshot.restartPolicy);
+      }
       snapshot.restartOk = true;
       return { ok: true };
     }
@@ -312,18 +329,119 @@ async function restartWritersByPhase(context, snapshotsById, phase) {
   return results;
 }
 
+function admissionStateFromSnapshot(snapshot) {
+  if (!snapshot) return null;
+  if (['inactive', 'dead', 'failed', 'stopped', 'absent', 'not-present'].includes(snapshot.state)) {
+    return snapshot.state === 'not-present' ? 'not-present' : 'stopped';
+  }
+  if (!snapshot.originallyActive && !snapshot.originallyRunning) {
+    return 'inactive';
+  }
+  return null;
+}
+
 function writerStatesForAdmission(snapshotsById) {
   const states = {};
   for (const [id, snapshot] of snapshotsById.entries()) {
-    if (['inactive', 'dead', 'failed', 'stopped', 'absent', 'not-present'].includes(snapshot.state)) {
-      states[id] = snapshot.state === 'not-present' ? 'not-present' : 'stopped';
-    } else if (!snapshot.originallyActive && !snapshot.originallyRunning) {
-      states[id] = 'inactive';
-    } else {
-      states[id] = 'stopped';
+    const state = admissionStateFromSnapshot(snapshot);
+    if (!state) {
+      throw new Error(`writer ${id} is not quiescent (state=${snapshot.state}); cannot mint restore authority`);
     }
+    states[id] = state;
   }
   return states;
+}
+
+function assertAllWritersQuiescentForAdmission(context, tokenWriters = null) {
+  const inventory = context.inventory || loadWriterInventory();
+  const writers = context.writers || enumerateWriters(inventory, context.env || process.env);
+  const snapshotsById = context.snapshotsById || new Map();
+  for (const writer of writers) {
+    const snapshot = snapshotsById.get(writer.id);
+    const fresh = captureWriterState(writer, context);
+    if (snapshot) preserveOriginalFlags(snapshot, fresh);
+    const subject = snapshot || fresh;
+    if (!isWriterQuiescent(writer, subject)) {
+      throw new Error(`writer ${writer.id} is not live-quiescent (state=${subject.state})`);
+    }
+    if (snapshot) Object.assign(snapshot, fresh, {
+      originallyActive: snapshot.originallyActive,
+      originallyEnabled: snapshot.originallyEnabled,
+      originallyRunning: snapshot.originallyRunning,
+    });
+  }
+  if (tokenWriters) {
+    for (const [id, expected] of Object.entries(tokenWriters)) {
+      const snapshot = snapshotsById.get(id);
+      const state = admissionStateFromSnapshot(snapshot || { state: 'missing' });
+      if (!state || state !== expected) {
+        throw new Error(`admission writer claim ${id}=${expected} does not match live quiescence`);
+      }
+    }
+  }
+}
+
+async function verifySnapshotBoundary(context, snapshotsById, label = 'snapshot boundary') {
+  const verify = await verifyAllQuiescent(context, snapshotsById);
+  if (!verify.ok) {
+    const detail = verify.failures.map((entry) => `${entry.id}:${entry.reason}`).join(', ');
+    throw new Error(`${label} quiescence verification failed: ${detail}`);
+  }
+  return verify;
+}
+
+async function ensureQuiescentForSnapshot(context, snapshotsById, {
+  stopIfNeeded = true,
+  label = 'snapshot boundary',
+} = {}) {
+  if (stopIfNeeded) {
+    const inventory = context.inventory || loadWriterInventory();
+    for (const phase of inventory.stopPhases) {
+      const stopResult = await stopWritersByPhase(context, snapshotsById, phase);
+      if (!stopResult.ok) throw new Error(stopResult.error || `stop failed at ${phase} (${label})`);
+    }
+  }
+  return verifySnapshotBoundary(context, snapshotsById, label);
+}
+
+function auditDeploymentDiscovery(context) {
+  const inventory = context.inventory || loadWriterInventory();
+  const { runners, env } = context;
+  const issues = [];
+  const inventoriedUnits = new Set(
+    inventory.writers
+      .filter((entry) => entry.type === 'systemd-timer' || entry.type === 'systemd-service')
+      .map((entry) => entry.unit),
+  );
+  if (runners.commandExists('systemctl') && typeof runners.listActiveSystemdUnits === 'function') {
+    for (const unit of runners.listActiveSystemdUnits()) {
+      if (!inventoriedUnits.has(unit) && /finance|actual|darkfinances/.test(unit)) {
+        issues.push(`active systemd unit not inventoried: ${unit}`);
+      }
+    }
+  }
+  for (const writer of inventory.writers) {
+    if (writer.configEnv && env[writer.configEnv] !== '1') {
+      if (!writer.optional && !writer.requireWhenEnv) continue;
+      if (writer.optional && typeof runners.systemctlIsActive === 'function' && writer.unit) {
+        const active = runners.systemctlIsActive(writer.scope, writer.unit);
+        if (['active', 'activating'].includes(normalizeState(active.state))) {
+          issues.push(`optional writer ${writer.id} is active despite ${writer.configEnv} unset`);
+        }
+      }
+    }
+  }
+  if (issues.length > 0) {
+    throw new Error(`writer inventory deployment audit failed: ${issues.join('; ')}`);
+  }
+}
+
+function assertActualGenerationStable(actualDataDir, expectedGeneration, label = 'actual generation') {
+  const current = computeActualDataGeneration(actualDataDir);
+  if (current !== expectedGeneration) {
+    throw new Error(`${label} drift detected (${expectedGeneration} -> ${current})`);
+  }
+  return current;
 }
 
 function computeActualDataGeneration(actualDataDir) {
@@ -372,5 +490,11 @@ module.exports = {
   restartWriter,
   restartWritersByPhase,
   writerStatesForAdmission,
+  admissionStateFromSnapshot,
+  assertAllWritersQuiescentForAdmission,
+  verifySnapshotBoundary,
+  ensureQuiescentForSnapshot,
+  auditDeploymentDiscovery,
+  assertActualGenerationStable,
   computeActualDataGeneration,
 };

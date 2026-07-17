@@ -3,13 +3,11 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
 const { buildBackupBundle } = require('./build-backup-bundle');
 const { verifyBackupBundleArchive } = require('./backup-bundle-verify');
 const { sha256File } = require('./backup-verify');
 const { loadBackupStateInventory } = require('./backup-bundle-inventory');
 const { scanActiveRestoreSubjects } = require('./restore-generation-binding');
-const { buildAdmissionTokenForRestore } = require('./restore-quiescence-admission');
 const {
   coordinatedLayoutForRoot,
   ensureCoordinatedControlRoot,
@@ -23,21 +21,23 @@ const {
   appendJournalError,
   isTerminalPhase,
 } = require('./coordinated-run-journal');
+const { assertJournalBinding } = require('./coordinated-journal-binding');
 const { createDefaultRunners } = require('./ops-command-runners');
 const {
   discoverWriters,
-  stopWritersByPhase,
-  verifyAllQuiescent,
+  ensureQuiescentForSnapshot,
+  verifySnapshotBoundary,
   restartWritersByPhase,
-  writerStatesForAdmission,
   computeActualDataGeneration,
+  assertActualGenerationStable,
+  auditDeploymentDiscovery,
 } = require('./writer-quiescence');
 const { runPostRestartHealthChecks } = require('./coordinated-backup-health');
-const { loadWriterInventory } = require('./writer-inventory');
+const { loadWriterInventory, writerInventoryDigest } = require('./writer-inventory');
 const { writeFileAtomic } = require('./restore-durable-io');
 
 const COORDINATED_MANIFEST_KIND = 'darkfinances-coordinated-backup-manifest';
-const COORDINATED_MANIFEST_SCHEMA_VERSION = 1;
+const COORDINATED_MANIFEST_SCHEMA_VERSION = 2;
 
 function createRunId() {
   return crypto.randomUUID();
@@ -65,19 +65,21 @@ function buildCoordinatedManifest({
   const releaseDigest = releaseManifestPath && fs.existsSync(releaseManifestPath)
     ? sha256File(releaseManifestPath)
     : null;
+  if (!releaseDigest) throw new Error('coordinated manifest requires release manifest digest');
   return {
     kind: COORDINATED_MANIFEST_KIND,
     schemaVersion: COORDINATED_MANIFEST_SCHEMA_VERSION,
     createdAt: new Date().toISOString(),
     runId: journal.runId,
     journalId: journal.journalId,
+    provenanceOnly: true,
     generation: {
       bundleArtifactId: bundleManifest.artifact.id,
       bundleManifestDigest: sha256File(bundleManifestPath),
       runtimeInventoryDigest: bundleManifest.runtimeState.inventoryDigest,
       releaseManifestDigest: releaseDigest,
       actualDataGeneration,
-      sourceCommit: bundleManifest.provenance.sourceCommit ?? null,
+      writerInventoryDigest: journal.inventory.writerInventoryDigest,
     },
     artifacts: {
       bundleArchive: path.basename(journal.artifacts.bundleArchive),
@@ -86,11 +88,8 @@ function buildCoordinatedManifest({
         ? path.basename(journal.artifacts.releaseManifest)
         : null,
       actualArchive: actualArchivePath ? path.basename(actualArchivePath) : null,
-      admissionToken: journal.artifacts.admissionToken
-        ? path.basename(journal.artifacts.admissionToken)
-        : null,
     },
-    bindingsAcceptedBy: ['darkfinances-staged-restore', 'darkfinances-restore-quiescence-admission'],
+    bindingsAcceptedBy: ['darkfinances-staged-restore-generation-binding'],
   };
 }
 
@@ -125,14 +124,15 @@ function buildContext(options, inventory, env, runners, dashboardDir, shouldInte
     dashboardDir,
     stopDeadlineMs: options.stopDeadlineMs || 60_000,
     pollMs: options.pollMs || 500,
-    shouldInterrupt,
+    shouldInterrupt: options.shouldInterrupt || shouldInterrupt,
   };
 }
 
-function needsQuiescence(journal, quiesce) {
-  if (!quiesce) return false;
-  if (!journal) return true;
-  return journal.phase === PHASE.INIT || journal.phase === PHASE.WRITERS_CAPTURED;
+function preQuiescedMode(env = process.env) {
+  if (env.BACKUP_QUIESCE === '0') {
+    throw new Error('BACKUP_QUIESCE=0 is forbidden; use BACKUP_PRE_QUIESCED=1 only when writers were stopped out-of-band');
+  }
+  return env.BACKUP_PRE_QUIESCED === '1';
 }
 
 function needsBackupPublish(journal) {
@@ -143,7 +143,9 @@ function needsBackupPublish(journal) {
 }
 
 function loadGenerationBindingsFromJournal(journal) {
-  if (!journal?.artifacts?.coordinatedManifest) return { actualDataGeneration: null, boundReleaseGeneration: null };
+  if (!journal?.artifacts?.coordinatedManifest) {
+    throw new Error('coordinated manifest missing during journal resume');
+  }
   const manifestPath = journal.artifacts.coordinatedManifest;
   if (!fs.existsSync(manifestPath)) {
     throw new Error('coordinated manifest missing during journal resume');
@@ -163,7 +165,6 @@ function resultFromJournalArtifacts(journal) {
     actualArchive: journal.artifacts.actualArchive || null,
     releaseManifest: journal.artifacts.releaseManifest || null,
     coordinatedManifest: journal.artifacts.coordinatedManifest || null,
-    admissionTokenPath: journal.artifacts.admissionToken || null,
     journal,
     actualDataGeneration: null,
     bundleArtifactId: null,
@@ -178,29 +179,86 @@ async function restartAll(context, snapshotsById) {
   return results;
 }
 
+async function prepareWriterContext({
+  journal,
+  inventory,
+  env,
+  runners,
+  dashboardDir,
+  layout,
+  includeActual,
+  preQuiesced,
+  runId,
+  dryRun,
+  coordinatorOptions = {},
+}) {
+  const snapshotsById = new Map();
+  let discoverySnapshots;
+  if (journal) {
+    assertJournalBinding(journal, {
+      layout,
+      inventory,
+      options: { dashboardDir, includeActualData: includeActual, preQuiesced },
+    });
+    runId = journal.runId || runId;
+    const discovery = discoverWriters({ inventory, env, runners, dashboardDir });
+    auditDeploymentDiscovery({ inventory, env, runners, dashboardDir });
+    for (const snapshot of discovery.snapshots) snapshotsById.set(snapshot.id, snapshot);
+    if (journal.preRunWriters?.length) {
+      for (const prior of journal.preRunWriters) {
+        const current = snapshotsById.get(prior.id);
+        if (current) {
+          current.originallyActive = prior.originallyActive;
+          current.originallyEnabled = prior.originallyEnabled;
+          current.originallyRunning = prior.originallyRunning;
+          current.restartPolicy = prior.restartPolicy ?? current.restartPolicy ?? null;
+        }
+      }
+    }
+    journal.preRunWriters = [...snapshotsById.values()];
+    discoverySnapshots = journal.preRunWriters;
+  } else {
+    const discovery = discoverWriters({ inventory, env, runners, dashboardDir });
+    auditDeploymentDiscovery({ inventory, env, runners, dashboardDir });
+    for (const snapshot of discovery.snapshots) snapshotsById.set(snapshot.id, snapshot);
+    discoverySnapshots = discovery.snapshots;
+  }
+  const context = buildContext(
+    coordinatorOptions,
+    inventory,
+    env,
+    runners,
+    dashboardDir,
+    coordinatorOptions.shouldInterrupt,
+  );
+  context.writers = inventory.writers.filter((writer) => snapshotsById.has(writer.id));
+  return { context, snapshotsById, discoverySnapshots, runId };
+}
+
 async function runCoordinatedBackup(options = {}) {
   const env = options.env || process.env;
   const dryRun = options.dryRun === true;
-  const quiesce = options.quiesce !== false;
+  const preQuiesced = options.preQuiesced === true || preQuiescedMode(env);
   const includeActual = options.includeActual === true || env.BACKUP_INCLUDE_ACTUAL_DATA === '1';
   const dashboardDir = path.resolve(options.dashboardDir || env.FINANCE_DASHBOARD_DIR || path.join(env.HOME || '', 'finance-dashboard'));
   const destination = path.resolve(options.destination || env.DARKFINANCES_BACKUP_DIR || path.join(env.HOME || '', 'darkfinances-backups'));
   const actualDataDir = path.resolve(options.actualDataDir || env.ACTUAL_DATA_DIR || path.join(env.HOME || '', 'actual', 'data'));
   const repoRoot = path.resolve(options.repoRoot || env.DARKFINANCES_REPO_ROOT || path.join(__dirname, '..', '..'));
-  const runners = options.runners || createDefaultRunners(env);
+  const runners = options.runners || createDefaultRunners(env, options);
   const inventory = options.inventory || loadWriterInventory();
   const layout = coordinatedLayoutForRoot(destination);
   let runId = options.runId || createRunId();
   const runOwnedArtifacts = [];
   let lock = null;
   let journal = options.resumeJournal || null;
-  const snapshotsById = new Map();
+  let snapshotsById = new Map();
   let primaryError = null;
   let interrupted = false;
   let result = null;
   let context = null;
   let actualDataGeneration = null;
   let boundReleaseGeneration = null;
+  let discoverySnapshots = [];
 
   const onSignal = (signal) => {
     interrupted = true;
@@ -233,40 +291,38 @@ async function runCoordinatedBackup(options = {}) {
     }
 
     lock = acquireCoordinatedLock({ layout, operation: 'backup', dryRun, env });
-    context = buildContext(
-      options,
+    ({
+      context,
+      snapshotsById,
+      discoverySnapshots,
+      runId,
+    } = await prepareWriterContext({
+      journal,
       inventory,
       env,
       runners,
       dashboardDir,
-      options.shouldInterrupt || (() => interrupted),
-    );
+      layout,
+      includeActual,
+      preQuiesced,
+      runId,
+      dryRun,
+      coordinatorOptions: options,
+    }));
 
-    let discoverySnapshots;
-    if (journal?.preRunWriters?.length) {
-      runId = journal.runId || runId;
-      for (const snapshot of journal.preRunWriters) {
-        snapshotsById.set(snapshot.id, { ...snapshot });
-      }
-      context.writers = inventory.writers.filter((writer) => snapshotsById.has(writer.id));
-      discoverySnapshots = journal.preRunWriters;
-    } else {
-      const discovery = discoverWriters(context);
-      context.writers = discovery.writers;
-      for (const snapshot of discovery.snapshots) snapshotsById.set(snapshot.id, snapshot);
-      discoverySnapshots = discovery.snapshots;
-      if (!journal) {
-        journal = createRunJournal({
-          runId,
-          operation: 'backup',
-          layout,
-          writerInventory: inventory,
-          preRunWriters: discovery.snapshots,
-          options: { includeActualData: includeActual, quiesce, dashboardDir },
-        });
-        journal.phase = PHASE.WRITERS_CAPTURED;
-        if (!dryRun) writeRunJournal(layout.journalPath, journal);
-      }
+    if (!journal) {
+      journal = createRunJournal({
+        runId,
+        operation: 'backup',
+        layout,
+        writerInventory: inventory,
+        preRunWriters: [...snapshotsById.values()],
+        options: { includeActualData: includeActual, preQuiesced, dashboardDir },
+      });
+      journal.phase = PHASE.WRITERS_CAPTURED;
+      if (!dryRun) writeRunJournal(layout.journalPath, journal);
+    } else if (!dryRun) {
+      writeRunJournal(layout.journalPath, journal);
     }
 
     if (dryRun) {
@@ -274,38 +330,37 @@ async function runCoordinatedBackup(options = {}) {
         ok: true,
         dryRun: true,
         plan: {
-          stopPhases: inventory.stopPhases,
+          stopPhases: preQuiesced ? [] : inventory.stopPhases,
           restartPhases: inventory.restartPhases,
           writers: discoverySnapshots,
           includeActual,
-          quiesce,
+          preQuiesced,
         },
         journal,
       };
     }
 
-    if (needsQuiescence(journal, quiesce)) {
-      for (const phase of inventory.stopPhases) {
-        if (interrupted) throw new Error('interrupted during quiescence');
-        const stopResult = await stopWritersByPhase(context, snapshotsById, phase);
-        if (!stopResult.ok) throw new Error(stopResult.error || `stop failed at ${phase}`);
-      }
-      const verify = await verifyAllQuiescent(context, snapshotsById);
-      if (!verify.ok) {
-        const detail = verify.failures.map((entry) => `${entry.id}:${entry.reason}`).join(', ');
-        throw new Error(`quiescence verification failed: ${detail}`);
-      }
+    const publishNeeded = needsBackupPublish(journal);
+    if (publishNeeded) {
+      await ensureQuiescentForSnapshot(context, snapshotsById, {
+        stopIfNeeded: !preQuiesced,
+        label: 'initial snapshot boundary',
+      });
       journal.phase = PHASE.QUIESCENCE_VERIFIED;
       writeRunJournal(layout.journalPath, journal);
+    } else {
+      await verifySnapshotBoundary(context, snapshotsById, 'backup-complete-resume');
     }
 
-    if (!needsBackupPublish(journal)) {
+    if (!publishNeeded) {
       const bindings = loadGenerationBindingsFromJournal(journal);
       actualDataGeneration = bindings.actualDataGeneration;
       boundReleaseGeneration = bindings.boundReleaseGeneration;
       result = resultFromJournalArtifacts(journal);
       result.actualDataGeneration = actualDataGeneration;
     } else {
+      await verifySnapshotBoundary(context, snapshotsById, 'pre-dashboard-bundle');
+
       actualDataGeneration = includeActual ? computeActualDataGeneration(actualDataDir) : null;
       assertNoActiveSagaGenerationMismatch(dashboardDir, actualDataGeneration, includeActual);
 
@@ -320,6 +375,7 @@ async function runCoordinatedBackup(options = {}) {
         provenance: { actualDataGeneration },
       });
       verifyBackupBundleArchive({ archivePath: bundleArchiveStaging });
+      await verifySnapshotBoundary(context, snapshotsById, 'pre-publish-dashboard-bundle');
 
       const bundleArchiveFinal = path.join(destination, path.basename(bundleArchiveStaging));
       const bundleManifestFinal = `${bundleArchiveFinal}.manifest.json`;
@@ -333,21 +389,27 @@ async function runCoordinatedBackup(options = {}) {
       let actualArchiveFinal = null;
       const additionalBackupArgs = [];
       if (includeActual) {
+        await verifySnapshotBoundary(context, snapshotsById, 'pre-actual-hash');
+        const beforeActualGeneration = computeActualDataGeneration(actualDataDir);
         const actualStaging = path.join(stagingDir, `actual-data-${timestamp}.tgz`);
-        const tar = spawnSync('tar', [
+        const tar = runners.tar([
           '-C', path.dirname(actualDataDir),
           '-czf', actualStaging,
           path.basename(actualDataDir),
-        ], { encoding: 'utf8' });
+        ]);
         if (tar.status !== 0) throw new Error(tar.stderr || 'actual data tar failed');
+        assertActualGenerationStable(actualDataDir, beforeActualGeneration, 'actual data tree during tar');
         fs.chmodSync(actualStaging, 0o600);
         actualArchiveFinal = path.join(destination, path.basename(actualStaging));
+        await verifySnapshotBoundary(context, snapshotsById, 'pre-publish-actual-archive');
         publishAtomic(actualArchiveFinal, actualStaging);
         writeChecksumSidecar(actualArchiveFinal);
         additionalBackupArgs.push(`--backup-additional-archive=${actualArchiveFinal}`);
         journal.artifacts.actualArchive = actualArchiveFinal;
+        actualDataGeneration = beforeActualGeneration;
       }
 
+      await verifySnapshotBoundary(context, snapshotsById, 'pre-release-manifest');
       const releaseManifestFinal = path.join(destination, `coordinated-release-${path.basename(bundleArchiveFinal, '.tgz')}.json`);
       if (typeof options.writeReleaseManifest === 'function') {
         options.writeReleaseManifest({
@@ -357,18 +419,22 @@ async function runCoordinatedBackup(options = {}) {
           additionalBackupArgs,
         });
       } else {
-        const release = spawnSync(process.execPath, [
+        const release = runners.nodeScript(
           path.join(repoRoot, 'scripts/release-manifest.js'),
-          '--mode=backup',
-          `--backup-manifest=${bundleManifestFinal}`,
-          `--backup-archive=${bundleArchiveFinal}`,
-          ...additionalBackupArgs,
-          releaseManifestFinal,
-        ], { encoding: 'utf8', cwd: repoRoot });
+          [
+            '--mode=backup',
+            `--backup-manifest=${bundleManifestFinal}`,
+            `--backup-archive=${bundleArchiveFinal}`,
+            ...additionalBackupArgs,
+            releaseManifestFinal,
+          ],
+          { cwd: repoRoot },
+        );
         if (release.status !== 0) throw new Error(release.stderr || release.stdout || 'release manifest failed');
       }
       fs.chmodSync(releaseManifestFinal, 0o600);
       journal.artifacts.releaseManifest = releaseManifestFinal;
+      boundReleaseGeneration = sha256File(releaseManifestFinal);
 
       const coordinatedManifest = buildCoordinatedManifest({
         journal,
@@ -378,23 +444,9 @@ async function runCoordinatedBackup(options = {}) {
         actualArchivePath: actualArchiveFinal,
         actualDataGeneration,
       });
-      boundReleaseGeneration = coordinatedManifest.generation.releaseManifestDigest;
       const coordinatedManifestFinal = path.join(destination, `coordinated-backup-${runId}.json`);
       writeFileAtomic(coordinatedManifestFinal, `${JSON.stringify(coordinatedManifest, null, 2)}\n`, 0o600);
       journal.artifacts.coordinatedManifest = coordinatedManifestFinal;
-
-      const admissionToken = buildAdmissionTokenForRestore({
-        archiveSha256: sha256File(bundleArchiveFinal),
-        destinationRoot: dashboardDir,
-        manifestArtifactId: bundleManifest.artifact.id,
-        releaseManifestDigest: coordinatedManifest.generation.releaseManifestDigest,
-        actualDataGeneration,
-        writers: writerStatesForAdmission(snapshotsById),
-        ttlMs: options.admissionTtlMs,
-      });
-      const admissionPath = path.join(destination, `quiescence-admission-${runId}.json`);
-      writeFileAtomic(admissionPath, `${JSON.stringify(admissionToken, null, 2)}\n`, 0o600);
-      journal.artifacts.admissionToken = admissionPath;
       journal.phase = PHASE.BACKUP_COMPLETE;
       writeRunJournal(layout.journalPath, journal);
 
@@ -404,7 +456,6 @@ async function runCoordinatedBackup(options = {}) {
         actualArchive: actualArchiveFinal,
         releaseManifest: releaseManifestFinal,
         coordinatedManifest: coordinatedManifestFinal,
-        admissionTokenPath: admissionPath,
         journal,
         actualDataGeneration,
         bundleArtifactId: bundleManifest.artifact.id,
@@ -425,7 +476,13 @@ async function runCoordinatedBackup(options = {}) {
       }
     }
   } finally {
-    if (!dryRun && quiesce && context && snapshotsById.size > 0) {
+    const shouldRestart = !dryRun && context && snapshotsById.size > 0
+      && (journal?.phase === PHASE.BACKUP_COMPLETE
+        || journal?.phase === PHASE.RESTART_COMPLETE
+        || journal?.phase === PHASE.COMPLETE
+        || journal?.phase === PHASE.RECOVERY_REQUIRED
+        || primaryError);
+    if (shouldRestart) {
       const restartResults = await restartAll(context, snapshotsById);
       if (journal) {
         journal.restartResults = restartResults;
@@ -451,8 +508,11 @@ async function runCoordinatedBackup(options = {}) {
       });
       if (journal) {
         journal.healthResults = health.results;
-        if (!primaryError && health.ok) journal.phase = PHASE.COMPLETE;
-        else if (!health.ok) {
+        if (!primaryError && health.ok) {
+          journal.phase = PHASE.HEALTH_VERIFIED;
+          writeRunJournal(layout.journalPath, journal);
+          journal.phase = PHASE.COMPLETE;
+        } else if (!health.ok) {
           appendJournalError(journal, 'post-restart health verification failed');
           if (journal.phase !== PHASE.FAILED) journal.phase = PHASE.RECOVERY_REQUIRED;
         }
@@ -465,11 +525,9 @@ async function runCoordinatedBackup(options = {}) {
       const restartFailures = restartResults.filter((entry) => entry.ok === false);
       if (restartFailures.length > 0) {
         const failed = restartFailures.map((entry) => entry.id).join(', ');
-        if (primaryError) {
-          primaryError = new Error(`${primaryError.message}; restart failures: ${failed}`);
-        } else {
-          primaryError = new Error(`restart failures: ${failed}`);
-        }
+        primaryError = primaryError
+          ? new Error(`${primaryError.message}; restart failures: ${failed}`)
+          : new Error(`restart failures: ${failed}`);
       } else if (!primaryError && !health.ok) {
         primaryError = new Error('post-restart health verification failed');
       }
@@ -489,7 +547,7 @@ module.exports = {
   assertNoActiveSagaGenerationMismatch,
   cleanupRunOwnedArtifacts,
   createRunId,
-  needsQuiescence,
+  preQuiescedMode,
   needsBackupPublish,
   loadGenerationBindingsFromJournal,
   resultFromJournalArtifacts,

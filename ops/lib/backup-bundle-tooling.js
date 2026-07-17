@@ -10,6 +10,7 @@ const OPS_TOOLING_FILES = Object.freeze([
   'ops/lib/backup-bundle-inventory.js',
   'ops/lib/backup-bundle-tar-listing.js',
   'ops/lib/backup-bundle-verify.js',
+  'ops/lib/build-backup-bundle.js',
   'ops/lib/backup-bundle-manifest.js',
   'ops/lib/backup-state-inventory.json',
   'ops/lib/backup-verify.js',
@@ -35,6 +36,11 @@ const OPS_TOOLING_FILES = Object.freeze([
   'ops/lib/coordinated-backup-health.js',
   'ops/lib/coordinated-backup.js',
   'ops/lib/coordinated-backup-cli.js',
+  'ops/lib/coordinated-admission-crypto.js',
+  'ops/lib/coordinated-admission-registry.js',
+  'ops/lib/coordinated-journal-binding.js',
+  'ops/lib/coordinated-restore.js',
+  'ops/lib/coordinated-restore-cli.js',
 ]);
 
 const DASHBOARD_TOOLING_SEED = 'finance-dashboard/lib/runtime-state-store.js';
@@ -72,7 +78,13 @@ function dashboardToolingFiles() {
 }
 
 function bundleToolingSourcePaths() {
-  return [...OPS_TOOLING_FILES, ...dashboardToolingFiles()].sort();
+  const opsAbs = OPS_TOOLING_FILES.map((rel) => path.join(REPO_ROOT, rel));
+  const opsClosure = collectLibClosure(opsAbs).filter((rel) => (
+    rel.startsWith('ops/lib/')
+    || rel.startsWith('ops/bin/')
+    || OPS_TOOLING_FILES.includes(rel)
+  ));
+  return [...new Set([...OPS_TOOLING_FILES, ...opsClosure, ...dashboardToolingFiles()])].sort();
 }
 
 function bundleDestinationRelative(sourceRelative) {
@@ -81,6 +93,9 @@ function bundleDestinationRelative(sourceRelative) {
   }
   if (sourceRelative === 'ops/lib/staged-restore-cli.js') {
     return 'tooling/ops/bin/restore-dashboard-runtime.js';
+  }
+  if (sourceRelative === 'ops/lib/coordinated-restore-cli.js') {
+    return 'tooling/ops/bin/restore-coordinated.js';
   }
   if (sourceRelative === 'ops/lib/coordinated-backup-cli.js') {
     return 'tooling/ops/bin/backup-coordinated.js';

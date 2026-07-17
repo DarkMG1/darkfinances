@@ -15,17 +15,22 @@ const {
   restartWritersByPhase,
   captureWriterState,
   preserveOriginalFlags,
+  restartWriter,
 } = require('../lib/writer-quiescence');
 const { acquireCoordinatedLock } = require('../lib/coordinated-operation-lock');
 const { coordinatedLayoutForRoot } = require('../lib/coordinated-operation-layout');
 const { readRunJournal, PHASE, createRunJournal, writeRunJournal } = require('../lib/coordinated-run-journal');
 const { loadWriterInventory } = require('../lib/writer-inventory');
-const { parseAdmissionToken, assertAdmissionFresh, assertAdmissionBindings, buildTestAdmissionToken } = require('../lib/restore-quiescence-admission');
-const { runPostRestartHealthChecks } = require('../lib/coordinated-backup-health');
+const { parseAdmissionToken, assertAdmissionFresh, assertAdmissionBindings } = require('../lib/restore-quiescence-admission');
+const { buildTestAdmissionToken } = require('./fixtures/admission-token-fixtures');
+const { installTestCoordinatorKeys } = require('./fixtures/coordinated-test-helpers');
 const {
   createMockRunners,
   defaultActiveUnits,
+  RELEASE_MANIFEST_BODY,
+  RELEASE_MANIFEST_DIGEST,
 } = require('./fixtures/coordinated-backup-fixtures');
+const { runPostRestartHealthChecks } = require('../lib/coordinated-backup-health');
 const { bundleToolingSourcePaths } = require('../lib/backup-bundle-tooling');
 const { writeProductionDashboard } = require('./fixtures/backup-bundle-dashboard-fixtures');
 
@@ -40,9 +45,7 @@ function mkRoot(t, prefix) {
 
 function stubReleaseManifest() {
   return ({ releaseManifestPath }) => {
-    fs.writeFileSync(releaseManifestPath, `${JSON.stringify({
-      contentDigest: { value: 'c'.repeat(64) },
-    }, null, 2)}\n`, { mode: 0o600 });
+    fs.writeFileSync(releaseManifestPath, RELEASE_MANIFEST_BODY, { mode: 0o600 });
   };
 }
 
@@ -67,7 +70,6 @@ function envFor(root, dashboard, extra = {}) {
     DARKFINANCES_BACKUP_DIR: path.join(root, 'backups'),
     DARKFINANCES_REPO_ROOT: repoRoot,
     COORDINATED_TEST_SKIP_LOCK: '0',
-    BACKUP_QUIESCE: '1',
     BACKUP_INCLUDE_ACTUAL_DATA: '0',
     FINANCE_API_TOKEN: 'test-token',
     ...extra,
@@ -155,9 +157,13 @@ test('happy path quiesces, backs up bundle, publishes manifest, and restarts in 
   assert.equal(fs.existsSync(result.bundleArchive), true);
   assert.equal(fs.existsSync(`${result.bundleArchive}.sha256`), true);
   assert.equal(fs.existsSync(result.coordinatedManifest), true);
-  assert.equal(fs.existsSync(result.admissionTokenPath), true);
-  const token = parseAdmissionToken(fs.readFileSync(result.admissionTokenPath, 'utf8'));
-  assertAdmissionFresh(token);
+  assert.equal(
+    fs.readdirSync(env.DARKFINANCES_BACKUP_DIR).some((name) => name.startsWith('quiescence-admission-')),
+    false,
+  );
+  const manifest = JSON.parse(fs.readFileSync(result.coordinatedManifest, 'utf8'));
+  assert.equal(manifest.provenanceOnly, true);
+  assert.equal(manifest.schemaVersion, 2);
   const stopIndex = runners.commands.findIndex((entry) => entry.includes('actual-sync.timer') && entry.includes('stop'));
   const dashboardStop = runners.commands.findIndex((entry) => entry.includes('finance-dashboard.service') && entry.includes('stop'));
   const dashboardStart = runners.commands.findIndex((entry) => entry.includes('finance-dashboard.service') && entry.includes('start'));
@@ -420,9 +426,10 @@ test('multiple restart failures are reported without masking primary backup erro
   );
 });
 
-test('admission token expires and rejects stale restore binding', () => {
-  const { buildTestAdmissionToken } = require('../lib/restore-quiescence-admission');
-  const token = buildTestAdmissionToken({}, {}, 1);
+test('admission token expires and rejects stale restore binding', (t) => {
+  const root = mkRoot(t, 'df-admission-expired-');
+  const keys = installTestCoordinatorKeys(root);
+  const { token } = buildTestAdmissionToken({ keyPair: keys.pair, ttlMs: 1 });
   assert.throws(() => assertAdmissionFresh(token, Date.now() + 60_000), /expired/);
 });
 
@@ -453,13 +460,14 @@ test('coordinated manifest binds generation fields accepted by PR-17', (t) => {
   const journal = {
     runId: 'run-1',
     journalId: 'j-1',
+    inventory: { writerInventoryDigest: 'd'.repeat(64) },
     artifacts: {
       bundleArchive: path.join(root, 'bundle.tgz'),
       bundleManifest: manifestPath,
       releaseManifest: releasePath,
-      admissionToken: path.join(root, 'admission.json'),
     },
   };
+  fs.writeFileSync(path.join(root, 'bundle.tgz'), 'bundle\n');
   const bundleManifest = {
     artifact: { id: 'a'.repeat(64), bundleName: 'dashboard-runtime-backup-bundle.tgz' },
     runtimeState: { inventoryDigest: 'b'.repeat(64) },
@@ -473,7 +481,8 @@ test('coordinated manifest binds generation fields accepted by PR-17', (t) => {
   });
   assert.equal(manifest.kind, 'darkfinances-coordinated-backup-manifest');
   assert.match(manifest.generation.bundleArtifactId, /^[a-f0-9]{64}$/);
-  assert.deepEqual(manifest.bindingsAcceptedBy, ['darkfinances-staged-restore', 'darkfinances-restore-quiescence-admission']);
+  assert.equal(manifest.provenanceOnly, true);
+  assert.deepEqual(manifest.bindingsAcceptedBy, ['darkfinances-staged-restore-generation-binding']);
 });
 
 test('all-active and all-inactive writer combinations discover consistently', (t) => {
@@ -696,7 +705,7 @@ test('incomplete run journal resumes with preserved pre-run writer snapshots', a
     layout,
     writerInventory: inventory,
     preRunWriters: snapshots,
-    options: { includeActualData: false, quiesce: true, dashboardDir: dashboard },
+    options: { includeActualData: false, preQuiesced: false, dashboardDir: dashboard },
   });
   journal.phase = PHASE.WRITERS_CAPTURED;
   writeRunJournal(layout.journalPath, journal);
@@ -733,7 +742,7 @@ test('interrupt during quiescence records recovery_required in journal', async (
   const env = envFor(root, dashboard);
   await assert.rejects(
     () => runCoordinatedBackup({
-      ...backupOptions(env, runners, { stopDeadlineMs: 5000, pollMs: 50 }),
+      ...backupOptions(env, runners, { stopDeadlineMs: 150, pollMs: 5 }),
       shouldInterrupt: () => triggerInterrupt,
       dashboardDir: dashboard,
       destination: env.DARKFINANCES_BACKUP_DIR,
@@ -769,10 +778,15 @@ test('post-restart health fails on actual data generation mismatch', async () =>
   assert.ok(health.results.some((entry) => /generation mismatch/.test(entry.error || '')));
 });
 
-test('admission token rejects archive and destination binding drift', () => {
-  const token = buildTestAdmissionToken({}, {
-    archiveSha256: 'a'.repeat(64),
-    destinationRoot: '/tmp/dashboard-a',
+test('admission token rejects archive and destination binding drift', (t) => {
+  const root = mkRoot(t, 'df-admission-drift-');
+  const keys = installTestCoordinatorKeys(root);
+  const { token } = buildTestAdmissionToken({
+    keyPair: keys.pair,
+    bindings: {
+      archiveSha256: 'a'.repeat(64),
+      destinationRoot: '/tmp/dashboard-a',
+    },
   });
   assert.throws(
     () => assertAdmissionBindings(token, {
@@ -790,15 +804,12 @@ test('admission token rejects archive and destination binding drift', () => {
   );
 });
 
-test('post-restart health fails on dashboard release generation mismatch', async () => {
+test('post-restart health fails when release digest is missing from ping', async () => {
   const runners = createMockRunners({
     units: defaultActiveUnits(),
     pingResponse: {
       status: 200,
-      body: {
-        ok: true,
-        release: { contentDigest: { value: 'deadbeef'.repeat(8) } },
-      },
+      body: { ok: true, release: {} },
     },
   });
   const health = await runPostRestartHealthChecks({
@@ -806,12 +817,12 @@ test('post-restart health fails on dashboard release generation mismatch', async
     snapshotsById: new Map(),
     env: { ...process.env, FINANCE_API_TOKEN: 'test-token' },
     runners,
-    expectedReleaseGeneration: 'cafebabe'.repeat(8),
+    expectedReleaseGeneration: RELEASE_MANIFEST_DIGEST,
     timeoutMs: 50,
     pollMs: 1,
   });
   assert.equal(health.ok, false);
-  assert.ok(health.results.some((entry) => /generation mismatch/.test(entry.error || '')));
+  assert.ok(health.results.some((entry) => /release digest missing/.test(entry.error || '')));
 });
 
 test('timer trigger race during stop fails closed', async (t) => {
@@ -865,6 +876,95 @@ test('systemd stop failure refuses backup before snapshot', async (t) => {
   );
 });
 
+test('BACKUP_QUIESCE=0 is forbidden', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-no-quiesce-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard, { BACKUP_QUIESCE: '0' });
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, createMockRunners({ units: defaultActiveUnits() })),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /BACKUP_QUIESCE=0 is forbidden/,
+  );
+});
+
+test('BACKUP_PRE_QUIESCED=1 rejects active writers and mints no restore token', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-pre-quiesced-active-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard, { BACKUP_PRE_QUIESCED: '1' });
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, createMockRunners({ units: defaultActiveUnits() }), { stopDeadlineMs: 200 }),
+      preQuiesced: true,
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /quiescence verification failed|did not quiesce/,
+  );
+});
+
+test('quiescence_verified resume with active writer fails before snapshot', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-resume-active-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard);
+  const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  const inventory = loadWriterInventory();
+  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const { snapshots } = discoverWriters({ inventory, env, runners, dashboardDir: dashboard });
+  const journal = createRunJournal({
+    runId: 'resume-active',
+    operation: 'backup',
+    layout,
+    writerInventory: inventory,
+    preRunWriters: snapshots,
+    options: { includeActualData: false, preQuiesced: false, dashboardDir: dashboard },
+  });
+  journal.phase = PHASE.QUIESCENCE_VERIFIED;
+  writeRunJournal(layout.journalPath, journal);
+  const activeRunners = createMockRunners({
+    units: defaultActiveUnits(),
+    reappearingWriters: ['finance-dashboard.service'],
+  });
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, activeRunners, { stopDeadlineMs: 200 }),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /quiescence verification failed|did not quiesce/,
+  );
+});
+
 test('journal resume uses preserved snapshots when live discovery would fail', async (t) => {
   const root = mkRoot(t, 'df-coordinated-resume-unknown-');
   const dashboard = path.join(root, 'dashboard');
@@ -894,7 +994,7 @@ test('journal resume uses preserved snapshots when live discovery would fail', a
     layout,
     writerInventory: inventory,
     preRunWriters: snapshots,
-    options: { includeActualData: false, quiesce: true, dashboardDir: dashboard },
+    options: { includeActualData: false, preQuiesced: false, dashboardDir: dashboard },
   });
   journal.phase = PHASE.WRITERS_CAPTURED;
   writeRunJournal(layout.journalPath, journal);
@@ -904,13 +1004,14 @@ test('journal resume uses preserved snapshots when live discovery would fail', a
       'finance-dashboard.service': { active: 'unknown', enabled: 'enabled' },
     },
   });
-  const result = await runCoordinatedBackup({
-    ...backupOptions(env, badRunners),
-    dashboardDir: dashboard,
-    destination: env.DARKFINANCES_BACKUP_DIR,
-  });
-  assert.equal(result.ok, true);
-  assert.equal(result.journal.phase, PHASE.COMPLETE);
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, badRunners),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /unknown state/,
+  );
 });
 
 test('journal resume at backup_complete skips republish and finishes restart', async (t) => {
@@ -929,11 +1030,11 @@ test('journal resume at backup_complete skips republish and finishes restart', a
   const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
   fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
   const inventory = loadWriterInventory();
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const setupRunners = createMockRunners({ units: defaultActiveUnits() });
   const { snapshots } = discoverWriters({
     inventory,
     env,
-    runners,
+    runners: setupRunners,
     dashboardDir: dashboard,
   });
   const bundleArchive = path.join(env.DARKFINANCES_BACKUP_DIR, 'existing-bundle.tgz');
@@ -942,7 +1043,7 @@ test('journal resume at backup_complete skips republish and finishes restart', a
   const coordinatedManifest = path.join(env.DARKFINANCES_BACKUP_DIR, 'coordinated-backup-resume.json');
   fs.writeFileSync(coordinatedManifest, `${JSON.stringify({
     generation: {
-      releaseManifestDigest: 'c'.repeat(64),
+      releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
       actualDataGeneration: null,
     },
   }, null, 2)}\n`, { mode: 0o600 });
@@ -952,7 +1053,7 @@ test('journal resume at backup_complete skips republish and finishes restart', a
     layout,
     writerInventory: inventory,
     preRunWriters: snapshots,
-    options: { includeActualData: false, quiesce: true, dashboardDir: dashboard },
+    options: { includeActualData: false, preQuiesced: false, dashboardDir: dashboard },
   });
   journal.phase = PHASE.BACKUP_COMPLETE;
   journal.artifacts = {
@@ -960,9 +1061,15 @@ test('journal resume at backup_complete skips republish and finishes restart', a
     bundleManifest: `${bundleArchive}.manifest.json`,
     releaseManifest: path.join(env.DARKFINANCES_BACKUP_DIR, 'release.json'),
     coordinatedManifest,
-    admissionToken: path.join(env.DARKFINANCES_BACKUP_DIR, 'admission.json'),
   };
   writeRunJournal(layout.journalPath, journal);
+  const runners = createMockRunners({
+    units: {
+      'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+      'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+      'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+    },
+  });
   const buildCalls = { count: 0 };
   const originalBuild = require('../lib/build-backup-bundle').buildBackupBundle;
   require('../lib/build-backup-bundle').buildBackupBundle = () => {
@@ -981,7 +1088,109 @@ test('journal resume at backup_complete skips republish and finishes restart', a
   assert.equal(result.resumed, true);
   assert.equal(result.bundleArchive, bundleArchive);
   assert.equal(result.journal.phase, PHASE.COMPLETE);
-  assert.equal(runners.commands.some((entry) => entry.includes('stop')), false);
+  assert.equal(buildCalls.count, 0);
+});
+
+test('writerStatesForAdmission throws when required writer is active', () => {
+  const map = snapshotsMap([
+    { id: 'finance-dashboard', state: 'active', originallyActive: true, originallyRunning: true },
+  ]);
+  assert.throws(
+    () => require('../lib/writer-quiescence').writerStatesForAdmission(map),
+    /not quiescent/,
+  );
+});
+
+test('docker restart policy is disabled during quiescence and restored on restart', async (t) => {
+  const root = mkRoot(t, 'df-docker-policy-');
+  const compose = path.join(root, 'compose.yml');
+  fs.writeFileSync(compose, 'services:\n  actual:\n    image: test\n', { mode: 0o600 });
+  const inventory = loadWriterInventory();
+  const writer = inventory.writers.find((entry) => entry.id === 'actual-container');
+  const runners = createMockRunners({
+    units: defaultActiveUnits(),
+    containers: { actual: 'running' },
+    restartPolicies: { actual: 'unless-stopped' },
+  });
+  const context = {
+    inventory,
+    env: { ACTUAL_COMPOSE_FILE: compose, BACKUP_INCLUDE_ACTUAL_DATA: '1', HOME: root },
+    runners,
+    dashboardDir: path.join(root, 'dashboard'),
+    pollMs: 1,
+    stopDeadlineMs: 50,
+  };
+  const snapshot = captureWriterState(writer, context);
+  snapshot.originallyRunning = true;
+  snapshot.originallyActive = true;
+  snapshot.restartPolicy = 'unless-stopped';
+  context.writers = [writer];
+  await stopWriter(writer, snapshot, context);
+  assert.ok(runners.commands.some((entry) => entry.includes('update') && entry.includes('--restart=no')));
+  await restartWriter(writer, snapshot, context);
+  assert.ok(runners.commands.some((entry) => entry.includes('update') && entry.includes('--restart=unless-stopped')));
+});
+
+test('journal resume rejects writer inventory digest drift', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-digest-drift-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard);
+  const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  const inventory = loadWriterInventory();
+  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const journal = createRunJournal({
+    runId: 'digest-drift',
+    operation: 'backup',
+    layout,
+    writerInventory: inventory,
+    preRunWriters: [],
+    options: { includeActualData: false, preQuiesced: false, dashboardDir: dashboard },
+  });
+  journal.inventory.writerInventoryDigest = '0'.repeat(64);
+  journal.phase = PHASE.WRITERS_CAPTURED;
+  writeRunJournal(layout.journalPath, journal);
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, runners),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /writer inventory digest mismatch/,
+  );
+});
+
+test('signed admission token rejects forgery and wrong verification key', (t) => {
+  const root = mkRoot(t, 'df-admission-forgery-');
+  const keys = installTestCoordinatorKeys(root);
+  const other = installTestCoordinatorKeys(path.join(root, 'other'));
+  const { token } = buildTestAdmissionToken({ keyPair: keys.pair });
+  token.signature = 'AAAA';
+  assert.throws(
+    () => parseAdmissionToken(JSON.stringify(token), 'token', { publicKey: keys.pair.publicKey }),
+    /signature verification failed/,
+  );
+  const { token: good } = buildTestAdmissionToken({ keyPair: keys.pair });
+  assert.throws(
+    () => parseAdmissionToken(JSON.stringify(good), 'token', { publicKey: other.pair.publicKey }),
+    /signature verification failed/,
+  );
+});
+
+test('tooling closure includes coordinated restore and build-backup dependencies', () => {
+  const sources = bundleToolingSourcePaths();
+  assert.ok(sources.includes('ops/lib/build-backup-bundle.js'));
+  assert.ok(sources.includes('ops/lib/coordinated-admission-crypto.js'));
+  assert.ok(sources.includes('ops/lib/coordinated-restore.js'));
 });
 
 test('shell wrapper dry-run exits 2 without mutating destination', (t) => {

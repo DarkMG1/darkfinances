@@ -20,6 +20,9 @@ function toolingSourceRelativeFromBundlePath(bundlePath) {
   if (bundlePath === 'tooling/ops/bin/backup-coordinated.js') {
     return 'ops/lib/coordinated-backup-cli.js';
   }
+  if (bundlePath === 'tooling/ops/bin/restore-coordinated.js') {
+    return 'ops/lib/coordinated-restore-cli.js';
+  }
   if (!bundlePath.startsWith('tooling/')) {
     throw new Error(`expected tooling bundle path: ${bundlePath}`);
   }

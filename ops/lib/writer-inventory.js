@@ -98,11 +98,23 @@ function writersForPhase(writers, phaseKey, phaseValue) {
   return writers.filter((writer) => writer[phaseKey] === phaseValue);
 }
 
+function writerInventoryDigest(inventory) {
+  const crypto = require('crypto');
+  return crypto.createHash('sha256').update(`${JSON.stringify({
+    schemaVersion: inventory.schemaVersion,
+    kind: inventory.kind,
+    stopPhases: inventory.stopPhases,
+    restartPhases: inventory.restartPhases,
+    writers: inventory.writers,
+  })}\n`).digest('hex');
+}
+
 module.exports = {
   INVENTORY_KIND,
   INVENTORY_PATH,
   SAFE_UNIT_PATTERN,
   loadWriterInventory,
+  writerInventoryDigest,
   writerConfigured,
   enumerateWriters,
   writersForPhase,

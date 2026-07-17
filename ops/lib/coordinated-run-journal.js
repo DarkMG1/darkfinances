@@ -4,7 +4,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { writeFileAtomic } = require('./restore-durable-io');
 const { inventoryDigest, loadBackupStateInventory } = require('./backup-bundle-inventory');
-const { loadWriterInventory } = require('./writer-inventory');
+const { loadWriterInventory, writerInventoryDigest } = require('./writer-inventory');
 
 const JOURNAL_KIND = 'darkfinances-coordinated-run-journal';
 const JOURNAL_SCHEMA_VERSION = 1;
@@ -47,17 +47,13 @@ function createRunJournal({
     phase: PHASE.INIT,
     canonicalRoot: layout.canonicalRoot,
     inventory: {
-      writerInventoryDigest: journalDigest({
-        schemaVersion: writers.schemaVersion,
-        kind: writers.kind,
-        writers: writers.writers.map((entry) => entry.id),
-      }),
+      writerInventoryDigest: writerInventoryDigest(writers),
       runtimeInventoryDigest: inventoryDigest(runtimeInventory),
     },
     preRunWriters,
     options: {
       includeActualData: options.includeActualData === true,
-      quiesce: options.quiesce !== false,
+      preQuiesced: options.preQuiesced === true,
       dashboardDir: options.dashboardDir || null,
     },
     artifacts: {},

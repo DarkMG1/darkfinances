@@ -1,18 +1,26 @@
 #!/usr/bin/env node
 'use strict';
 
-const { runCoordinatedBackup } = require('./coordinated-backup');
+const path = require('path');
+
+function loadCoordinatedBackup() {
+  const libDir = path.basename(path.dirname(__filename)) === 'bin'
+    ? path.join(__dirname, '..', 'lib')
+    : __dirname;
+  return require(path.join(libDir, 'coordinated-backup'));
+}
 
 async function main() {
   const dryRun = process.env.BACKUP_DRY_RUN === '1' || process.argv.includes('--dry-run');
-  const quiesce = process.env.BACKUP_QUIESCE !== '0';
   const includeActual = process.env.BACKUP_INCLUDE_ACTUAL_DATA === '1';
+  const preQuiesced = process.env.BACKUP_PRE_QUIESCED === '1';
 
   try {
+    const { runCoordinatedBackup } = loadCoordinatedBackup();
     const result = await runCoordinatedBackup({
       dryRun,
-      quiesce,
       includeActual,
+      preQuiesced,
       env: process.env,
     });
     if (result.dryRun) {
