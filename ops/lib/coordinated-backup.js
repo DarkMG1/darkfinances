@@ -129,6 +129,47 @@ function buildContext(options, inventory, env, runners, dashboardDir, shouldInte
   };
 }
 
+function needsQuiescence(journal, quiesce) {
+  if (!quiesce) return false;
+  if (!journal) return true;
+  return journal.phase === PHASE.INIT || journal.phase === PHASE.WRITERS_CAPTURED;
+}
+
+function needsBackupPublish(journal) {
+  if (!journal) return true;
+  return journal.phase === PHASE.INIT
+    || journal.phase === PHASE.WRITERS_CAPTURED
+    || journal.phase === PHASE.QUIESCENCE_VERIFIED;
+}
+
+function loadGenerationBindingsFromJournal(journal) {
+  if (!journal?.artifacts?.coordinatedManifest) return { actualDataGeneration: null, boundReleaseGeneration: null };
+  const manifestPath = journal.artifacts.coordinatedManifest;
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error('coordinated manifest missing during journal resume');
+  }
+  const coordinated = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  return {
+    actualDataGeneration: coordinated.generation?.actualDataGeneration ?? null,
+    boundReleaseGeneration: coordinated.generation?.releaseManifestDigest ?? null,
+  };
+}
+
+function resultFromJournalArtifacts(journal) {
+  return {
+    ok: true,
+    resumed: true,
+    bundleArchive: journal.artifacts.bundleArchive || null,
+    actualArchive: journal.artifacts.actualArchive || null,
+    releaseManifest: journal.artifacts.releaseManifest || null,
+    coordinatedManifest: journal.artifacts.coordinatedManifest || null,
+    admissionTokenPath: journal.artifacts.admissionToken || null,
+    journal,
+    actualDataGeneration: null,
+    bundleArtifactId: null,
+  };
+}
+
 async function restartAll(context, snapshotsById) {
   const results = [];
   for (const phase of context.inventory.restartPhases) {
@@ -149,7 +190,7 @@ async function runCoordinatedBackup(options = {}) {
   const runners = options.runners || createDefaultRunners(env);
   const inventory = options.inventory || loadWriterInventory();
   const layout = coordinatedLayoutForRoot(destination);
-  const runId = options.runId || createRunId();
+  let runId = options.runId || createRunId();
   const runOwnedArtifacts = [];
   let lock = null;
   let journal = options.resumeJournal || null;
@@ -201,26 +242,31 @@ async function runCoordinatedBackup(options = {}) {
       options.shouldInterrupt || (() => interrupted),
     );
 
-    const discovery = discoverWriters(context);
-    context.writers = discovery.writers;
-    for (const snapshot of discovery.snapshots) snapshotsById.set(snapshot.id, snapshot);
-
-    if (!journal) {
-      journal = createRunJournal({
-        runId,
-        operation: 'backup',
-        layout,
-        writerInventory: inventory,
-        preRunWriters: discovery.snapshots,
-        options: { includeActualData: includeActual, quiesce, dashboardDir },
-      });
-      journal.phase = PHASE.WRITERS_CAPTURED;
-      if (!dryRun) writeRunJournal(layout.journalPath, journal);
-    } else {
-      for (const snapshot of journal.preRunWriters || []) {
+    let discoverySnapshots;
+    if (journal?.preRunWriters?.length) {
+      runId = journal.runId || runId;
+      for (const snapshot of journal.preRunWriters) {
         snapshotsById.set(snapshot.id, { ...snapshot });
       }
       context.writers = inventory.writers.filter((writer) => snapshotsById.has(writer.id));
+      discoverySnapshots = journal.preRunWriters;
+    } else {
+      const discovery = discoverWriters(context);
+      context.writers = discovery.writers;
+      for (const snapshot of discovery.snapshots) snapshotsById.set(snapshot.id, snapshot);
+      discoverySnapshots = discovery.snapshots;
+      if (!journal) {
+        journal = createRunJournal({
+          runId,
+          operation: 'backup',
+          layout,
+          writerInventory: inventory,
+          preRunWriters: discovery.snapshots,
+          options: { includeActualData: includeActual, quiesce, dashboardDir },
+        });
+        journal.phase = PHASE.WRITERS_CAPTURED;
+        if (!dryRun) writeRunJournal(layout.journalPath, journal);
+      }
     }
 
     if (dryRun) {
@@ -230,7 +276,7 @@ async function runCoordinatedBackup(options = {}) {
         plan: {
           stopPhases: inventory.stopPhases,
           restartPhases: inventory.restartPhases,
-          writers: discovery.snapshots,
+          writers: discoverySnapshots,
           includeActual,
           quiesce,
         },
@@ -238,7 +284,7 @@ async function runCoordinatedBackup(options = {}) {
       };
     }
 
-    if (quiesce) {
+    if (needsQuiescence(journal, quiesce)) {
       for (const phase of inventory.stopPhases) {
         if (interrupted) throw new Error('interrupted during quiescence');
         const stopResult = await stopWritersByPhase(context, snapshotsById, phase);
@@ -253,109 +299,117 @@ async function runCoordinatedBackup(options = {}) {
       writeRunJournal(layout.journalPath, journal);
     }
 
-    actualDataGeneration = includeActual ? computeActualDataGeneration(actualDataDir) : null;
-    assertNoActiveSagaGenerationMismatch(dashboardDir, actualDataGeneration, includeActual);
-
-    const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, 'Z');
-    const stagingDir = fs.mkdtempSync(path.join(layout.workRoot, 'backup-'));
-    runOwnedArtifacts.push(stagingDir);
-
-    const bundleArchiveStaging = path.join(stagingDir, `dashboard-runtime-backup-bundle-${timestamp}.tgz`);
-    const bundleManifest = (options.buildBackupBundle || buildBackupBundle)({
-      dashboardDir,
-      archivePath: bundleArchiveStaging,
-      provenance: { actualDataGeneration },
-    });
-    verifyBackupBundleArchive({ archivePath: bundleArchiveStaging });
-
-    const bundleArchiveFinal = path.join(destination, path.basename(bundleArchiveStaging));
-    const bundleManifestFinal = `${bundleArchiveFinal}.manifest.json`;
-    publishAtomic(bundleArchiveFinal, bundleArchiveStaging);
-    fs.copyFileSync(`${bundleArchiveStaging}.manifest.json`, bundleManifestFinal);
-    fs.chmodSync(bundleManifestFinal, 0o600);
-    writeChecksumSidecar(bundleArchiveFinal);
-    journal.artifacts.bundleArchive = bundleArchiveFinal;
-    journal.artifacts.bundleManifest = bundleManifestFinal;
-
-    let actualArchiveFinal = null;
-    const additionalBackupArgs = [];
-    if (includeActual) {
-      const actualStaging = path.join(stagingDir, `actual-data-${timestamp}.tgz`);
-      const tar = spawnSync('tar', [
-        '-C', path.dirname(actualDataDir),
-        '-czf', actualStaging,
-        path.basename(actualDataDir),
-      ], { encoding: 'utf8' });
-      if (tar.status !== 0) throw new Error(tar.stderr || 'actual data tar failed');
-      fs.chmodSync(actualStaging, 0o600);
-      actualArchiveFinal = path.join(destination, path.basename(actualStaging));
-      publishAtomic(actualArchiveFinal, actualStaging);
-      writeChecksumSidecar(actualArchiveFinal);
-      additionalBackupArgs.push(`--backup-additional-archive=${actualArchiveFinal}`);
-      journal.artifacts.actualArchive = actualArchiveFinal;
-    }
-
-    const releaseManifestFinal = path.join(destination, `coordinated-release-${path.basename(bundleArchiveFinal, '.tgz')}.json`);
-    if (typeof options.writeReleaseManifest === 'function') {
-      options.writeReleaseManifest({
-        releaseManifestPath: releaseManifestFinal,
-        bundleManifestFinal,
-        bundleArchiveFinal,
-        additionalBackupArgs,
-      });
+    if (!needsBackupPublish(journal)) {
+      const bindings = loadGenerationBindingsFromJournal(journal);
+      actualDataGeneration = bindings.actualDataGeneration;
+      boundReleaseGeneration = bindings.boundReleaseGeneration;
+      result = resultFromJournalArtifacts(journal);
+      result.actualDataGeneration = actualDataGeneration;
     } else {
-      const release = spawnSync(process.execPath, [
-        path.join(repoRoot, 'scripts/release-manifest.js'),
-        '--mode=backup',
-        `--backup-manifest=${bundleManifestFinal}`,
-        `--backup-archive=${bundleArchiveFinal}`,
-        ...additionalBackupArgs,
-        releaseManifestFinal,
-      ], { encoding: 'utf8', cwd: repoRoot });
-      if (release.status !== 0) throw new Error(release.stderr || release.stdout || 'release manifest failed');
+      actualDataGeneration = includeActual ? computeActualDataGeneration(actualDataDir) : null;
+      assertNoActiveSagaGenerationMismatch(dashboardDir, actualDataGeneration, includeActual);
+
+      const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, 'Z');
+      const stagingDir = fs.mkdtempSync(path.join(layout.workRoot, 'backup-'));
+      runOwnedArtifacts.push(stagingDir);
+
+      const bundleArchiveStaging = path.join(stagingDir, `dashboard-runtime-backup-bundle-${timestamp}.tgz`);
+      const bundleManifest = (options.buildBackupBundle || buildBackupBundle)({
+        dashboardDir,
+        archivePath: bundleArchiveStaging,
+        provenance: { actualDataGeneration },
+      });
+      verifyBackupBundleArchive({ archivePath: bundleArchiveStaging });
+
+      const bundleArchiveFinal = path.join(destination, path.basename(bundleArchiveStaging));
+      const bundleManifestFinal = `${bundleArchiveFinal}.manifest.json`;
+      publishAtomic(bundleArchiveFinal, bundleArchiveStaging);
+      fs.copyFileSync(`${bundleArchiveStaging}.manifest.json`, bundleManifestFinal);
+      fs.chmodSync(bundleManifestFinal, 0o600);
+      writeChecksumSidecar(bundleArchiveFinal);
+      journal.artifacts.bundleArchive = bundleArchiveFinal;
+      journal.artifacts.bundleManifest = bundleManifestFinal;
+
+      let actualArchiveFinal = null;
+      const additionalBackupArgs = [];
+      if (includeActual) {
+        const actualStaging = path.join(stagingDir, `actual-data-${timestamp}.tgz`);
+        const tar = spawnSync('tar', [
+          '-C', path.dirname(actualDataDir),
+          '-czf', actualStaging,
+          path.basename(actualDataDir),
+        ], { encoding: 'utf8' });
+        if (tar.status !== 0) throw new Error(tar.stderr || 'actual data tar failed');
+        fs.chmodSync(actualStaging, 0o600);
+        actualArchiveFinal = path.join(destination, path.basename(actualStaging));
+        publishAtomic(actualArchiveFinal, actualStaging);
+        writeChecksumSidecar(actualArchiveFinal);
+        additionalBackupArgs.push(`--backup-additional-archive=${actualArchiveFinal}`);
+        journal.artifacts.actualArchive = actualArchiveFinal;
+      }
+
+      const releaseManifestFinal = path.join(destination, `coordinated-release-${path.basename(bundleArchiveFinal, '.tgz')}.json`);
+      if (typeof options.writeReleaseManifest === 'function') {
+        options.writeReleaseManifest({
+          releaseManifestPath: releaseManifestFinal,
+          bundleManifestFinal,
+          bundleArchiveFinal,
+          additionalBackupArgs,
+        });
+      } else {
+        const release = spawnSync(process.execPath, [
+          path.join(repoRoot, 'scripts/release-manifest.js'),
+          '--mode=backup',
+          `--backup-manifest=${bundleManifestFinal}`,
+          `--backup-archive=${bundleArchiveFinal}`,
+          ...additionalBackupArgs,
+          releaseManifestFinal,
+        ], { encoding: 'utf8', cwd: repoRoot });
+        if (release.status !== 0) throw new Error(release.stderr || release.stdout || 'release manifest failed');
+      }
+      fs.chmodSync(releaseManifestFinal, 0o600);
+      journal.artifacts.releaseManifest = releaseManifestFinal;
+
+      const coordinatedManifest = buildCoordinatedManifest({
+        journal,
+        bundleManifest,
+        bundleManifestPath: bundleManifestFinal,
+        releaseManifestPath: releaseManifestFinal,
+        actualArchivePath: actualArchiveFinal,
+        actualDataGeneration,
+      });
+      boundReleaseGeneration = coordinatedManifest.generation.releaseManifestDigest;
+      const coordinatedManifestFinal = path.join(destination, `coordinated-backup-${runId}.json`);
+      writeFileAtomic(coordinatedManifestFinal, `${JSON.stringify(coordinatedManifest, null, 2)}\n`, 0o600);
+      journal.artifacts.coordinatedManifest = coordinatedManifestFinal;
+
+      const admissionToken = buildAdmissionTokenForRestore({
+        archiveSha256: sha256File(bundleArchiveFinal),
+        destinationRoot: dashboardDir,
+        manifestArtifactId: bundleManifest.artifact.id,
+        releaseManifestDigest: coordinatedManifest.generation.releaseManifestDigest,
+        actualDataGeneration,
+        writers: writerStatesForAdmission(snapshotsById),
+        ttlMs: options.admissionTtlMs,
+      });
+      const admissionPath = path.join(destination, `quiescence-admission-${runId}.json`);
+      writeFileAtomic(admissionPath, `${JSON.stringify(admissionToken, null, 2)}\n`, 0o600);
+      journal.artifacts.admissionToken = admissionPath;
+      journal.phase = PHASE.BACKUP_COMPLETE;
+      writeRunJournal(layout.journalPath, journal);
+
+      result = {
+        ok: true,
+        bundleArchive: bundleArchiveFinal,
+        actualArchive: actualArchiveFinal,
+        releaseManifest: releaseManifestFinal,
+        coordinatedManifest: coordinatedManifestFinal,
+        admissionTokenPath: admissionPath,
+        journal,
+        actualDataGeneration,
+        bundleArtifactId: bundleManifest.artifact.id,
+      };
     }
-    fs.chmodSync(releaseManifestFinal, 0o600);
-    journal.artifacts.releaseManifest = releaseManifestFinal;
-
-    const coordinatedManifest = buildCoordinatedManifest({
-      journal,
-      bundleManifest,
-      bundleManifestPath: bundleManifestFinal,
-      releaseManifestPath: releaseManifestFinal,
-      actualArchivePath: actualArchiveFinal,
-      actualDataGeneration,
-    });
-    boundReleaseGeneration = coordinatedManifest.generation.releaseManifestDigest;
-    const coordinatedManifestFinal = path.join(destination, `coordinated-backup-${runId}.json`);
-    writeFileAtomic(coordinatedManifestFinal, `${JSON.stringify(coordinatedManifest, null, 2)}\n`, 0o600);
-    journal.artifacts.coordinatedManifest = coordinatedManifestFinal;
-
-    const admissionToken = buildAdmissionTokenForRestore({
-      archiveSha256: sha256File(bundleArchiveFinal),
-      destinationRoot: dashboardDir,
-      manifestArtifactId: bundleManifest.artifact.id,
-      releaseManifestDigest: coordinatedManifest.generation.releaseManifestDigest,
-      actualDataGeneration,
-      writers: writerStatesForAdmission(snapshotsById),
-      ttlMs: options.admissionTtlMs,
-    });
-    const admissionPath = path.join(destination, `quiescence-admission-${runId}.json`);
-    writeFileAtomic(admissionPath, `${JSON.stringify(admissionToken, null, 2)}\n`, 0o600);
-    journal.artifacts.admissionToken = admissionPath;
-    journal.phase = PHASE.BACKUP_COMPLETE;
-    writeRunJournal(layout.journalPath, journal);
-
-    result = {
-      ok: true,
-      bundleArchive: bundleArchiveFinal,
-      actualArchive: actualArchiveFinal,
-      releaseManifest: releaseManifestFinal,
-      coordinatedManifest: coordinatedManifestFinal,
-      admissionTokenPath: admissionPath,
-      journal,
-      actualDataGeneration,
-      bundleArtifactId: bundleManifest.artifact.id,
-    };
   } catch (error) {
     primaryError = error;
     cleanupRunOwnedArtifacts(runOwnedArtifacts);
@@ -408,9 +462,16 @@ async function runCoordinatedBackup(options = {}) {
           // best-effort
         }
       }
-      if (primaryError && restartResults.some((entry) => entry.ok === false)) {
-        const failed = restartResults.filter((entry) => entry.ok === false).map((entry) => entry.id).join(', ');
-        primaryError = new Error(`${primaryError.message}; restart failures: ${failed}`);
+      const restartFailures = restartResults.filter((entry) => entry.ok === false);
+      if (restartFailures.length > 0) {
+        const failed = restartFailures.map((entry) => entry.id).join(', ');
+        if (primaryError) {
+          primaryError = new Error(`${primaryError.message}; restart failures: ${failed}`);
+        } else {
+          primaryError = new Error(`restart failures: ${failed}`);
+        }
+      } else if (!primaryError && !health.ok) {
+        primaryError = new Error('post-restart health verification failed');
       }
     }
     if (lock) lock.release();
@@ -428,4 +489,8 @@ module.exports = {
   assertNoActiveSagaGenerationMismatch,
   cleanupRunOwnedArtifacts,
   createRunId,
+  needsQuiescence,
+  needsBackupPublish,
+  loadGenerationBindingsFromJournal,
+  resultFromJournalArtifacts,
 };

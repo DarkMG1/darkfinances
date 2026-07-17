@@ -552,11 +552,14 @@ test('health check fails on stale dashboard readiness', async (t) => {
     pingResponse: { status: 503, body: { ok: false } },
   });
   const env = envFor(root, dashboard);
-  await runCoordinatedBackup({
-    ...backupOptions(env, runners, { stopDeadlineMs: 500 }),
-    dashboardDir: dashboard,
-    destination: env.DARKFINANCES_BACKUP_DIR,
-  });
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, runners, { stopDeadlineMs: 500 }),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /post-restart health verification failed/,
+  );
   const journal = readRunJournal(path.join(env.DARKFINANCES_BACKUP_DIR, '.darkfinances-coordinated/run-journal.json'));
   assert.equal(journal.phase, PHASE.RECOVERY_REQUIRED);
 });
@@ -833,4 +836,193 @@ test('timer trigger race during stop fails closed', async (t) => {
     }),
     /quiescence verification failed|did not quiesce/,
   );
+});
+
+test('systemd stop failure refuses backup before snapshot', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-systemctl-stop-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const runners = createMockRunners({
+    units: defaultActiveUnits(),
+    stopFailures: new Set(['finance-dashboard.service']),
+  });
+  const env = envFor(root, dashboard);
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, runners, { stopDeadlineMs: 500 }),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /systemctl stop finance-dashboard.service failed/,
+  );
+});
+
+test('journal resume uses preserved snapshots when live discovery would fail', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-resume-unknown-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard);
+  const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  const inventory = loadWriterInventory();
+  const goodRunners = createMockRunners({ units: defaultActiveUnits() });
+  const { snapshots } = discoverWriters({
+    inventory,
+    env,
+    runners: goodRunners,
+    dashboardDir: dashboard,
+  });
+  const journal = createRunJournal({
+    runId: 'resume-unknown',
+    operation: 'backup',
+    layout,
+    writerInventory: inventory,
+    preRunWriters: snapshots,
+    options: { includeActualData: false, quiesce: true, dashboardDir: dashboard },
+  });
+  journal.phase = PHASE.WRITERS_CAPTURED;
+  writeRunJournal(layout.journalPath, journal);
+  const badRunners = createMockRunners({
+    units: {
+      ...defaultActiveUnits(),
+      'finance-dashboard.service': { active: 'unknown', enabled: 'enabled' },
+    },
+  });
+  const result = await runCoordinatedBackup({
+    ...backupOptions(env, badRunners),
+    dashboardDir: dashboard,
+    destination: env.DARKFINANCES_BACKUP_DIR,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.journal.phase, PHASE.COMPLETE);
+});
+
+test('journal resume at backup_complete skips republish and finishes restart', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-resume-backup-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard);
+  const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  const inventory = loadWriterInventory();
+  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const { snapshots } = discoverWriters({
+    inventory,
+    env,
+    runners,
+    dashboardDir: dashboard,
+  });
+  const bundleArchive = path.join(env.DARKFINANCES_BACKUP_DIR, 'existing-bundle.tgz');
+  fs.mkdirSync(env.DARKFINANCES_BACKUP_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(bundleArchive, 'bundle\n', { mode: 0o600 });
+  const coordinatedManifest = path.join(env.DARKFINANCES_BACKUP_DIR, 'coordinated-backup-resume.json');
+  fs.writeFileSync(coordinatedManifest, `${JSON.stringify({
+    generation: {
+      releaseManifestDigest: 'c'.repeat(64),
+      actualDataGeneration: null,
+    },
+  }, null, 2)}\n`, { mode: 0o600 });
+  const journal = createRunJournal({
+    runId: 'resume-backup',
+    operation: 'backup',
+    layout,
+    writerInventory: inventory,
+    preRunWriters: snapshots,
+    options: { includeActualData: false, quiesce: true, dashboardDir: dashboard },
+  });
+  journal.phase = PHASE.BACKUP_COMPLETE;
+  journal.artifacts = {
+    bundleArchive,
+    bundleManifest: `${bundleArchive}.manifest.json`,
+    releaseManifest: path.join(env.DARKFINANCES_BACKUP_DIR, 'release.json'),
+    coordinatedManifest,
+    admissionToken: path.join(env.DARKFINANCES_BACKUP_DIR, 'admission.json'),
+  };
+  writeRunJournal(layout.journalPath, journal);
+  const buildCalls = { count: 0 };
+  const originalBuild = require('../lib/build-backup-bundle').buildBackupBundle;
+  require('../lib/build-backup-bundle').buildBackupBundle = () => {
+    buildCalls.count += 1;
+    return originalBuild.apply(this, arguments);
+  };
+  t.after(() => { require('../lib/build-backup-bundle').buildBackupBundle = originalBuild; });
+  const result = await runCoordinatedBackup({
+    ...backupOptions(env, runners, {
+      writeReleaseManifest: stubReleaseManifest(),
+    }),
+    dashboardDir: dashboard,
+    destination: env.DARKFINANCES_BACKUP_DIR,
+  });
+  assert.equal(buildCalls.count, 0);
+  assert.equal(result.resumed, true);
+  assert.equal(result.bundleArchive, bundleArchive);
+  assert.equal(result.journal.phase, PHASE.COMPLETE);
+  assert.equal(runners.commands.some((entry) => entry.includes('stop')), false);
+});
+
+test('shell wrapper dry-run exits 2 without mutating destination', (t) => {
+  const root = mkRoot(t, 'df-coordinated-shell-dry-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const fakeBin = path.join(root, 'bin');
+  fs.mkdirSync(fakeBin, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(fakeBin, 'systemctl'), `#!/usr/bin/env bash
+set -euo pipefail
+unit="\${@: -1}"
+case " \$* " in
+  *" is-active "*) case "$unit" in
+    finance-dashboard.service|actual-sync.timer) echo active; exit 0 ;;
+    *) echo inactive; exit 3 ;;
+  esac ;;
+  *" is-enabled "*) echo enabled; exit 0 ;;
+  *) exit 0 ;;
+esac
+`, { mode: 0o755 });
+  const env = {
+    ...process.env,
+    HOME: root,
+    PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+    FINANCE_DASHBOARD_DIR: dashboard,
+    DARKFINANCES_BACKUP_DIR: path.join(root, 'backups'),
+    DARKFINANCES_REPO_ROOT: repoRoot,
+    BACKUP_DRY_RUN: '1',
+  };
+  const result = spawnSync('bash', [coordinatedShell], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(result.status, 2, result.stderr || result.stdout);
+  assert.equal(fs.existsSync(path.join(env.DARKFINANCES_BACKUP_DIR, '.darkfinances-coordinated')), false);
 });
