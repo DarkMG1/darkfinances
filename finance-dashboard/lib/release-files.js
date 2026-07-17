@@ -28,6 +28,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/repayment-confirmation-sidecars.js',
   'lib/repayment-transaction-locator.js',
   'lib/receipt-limits.js',
+  'lib/recurrence.js',
   'lib/release-files.js',
   'lib/release-identity.js',
   'lib/release-schema.js',

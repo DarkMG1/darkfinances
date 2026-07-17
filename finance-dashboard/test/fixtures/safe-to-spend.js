@@ -5,6 +5,7 @@ const REASON = Object.freeze({
   budgetTargetsMissing: 'budget_targets_missing',
   budgetTargetCoveragePartial: 'budget_target_coverage_partial',
   targetlessCategorySpending: 'targetless_category_spending',
+  billRecurrenceUnresolved: 'bill_recurrence_unresolved',
   nonBillRecurrenceUnresolved: 'non_bill_recurrence_unresolved',
   goalCommitmentUnknown: 'goal_commitment_unknown',
   rolloverTreatmentUnknown: 'rollover_treatment_unknown',
@@ -107,6 +108,52 @@ function buildFixture({
   };
 }
 
+function buildUncertainRentFixture() {
+  const today = financeToday();
+  const monthShift = (key, delta) => {
+    const [y, m] = key.split('-').map(Number);
+    const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+  };
+  const monthKey = today.slice(0, 7);
+  const day = Number(today.slice(8, 10));
+  const last = day >= 8 ? `${monthKey}-08` : `${monthShift(monthKey, -1)}-08`;
+  const mid = `${monthShift(last.slice(0, 7), -1)}-03`;
+  const first = `${monthShift(mid.slice(0, 7), -1)}-05`;
+  const rentDates = [first, mid, last];
+  const fixture = buildFixture();
+  fixture.categoryGroups = fixture.categoryGroups.map((group) => {
+    if (group.name !== 'Everyday Spending') return group;
+    return {
+      ...group,
+      categories: [...group.categories, { id: 'rent', name: 'Rent' }],
+    };
+  });
+  fixture.budgetMonth.categoryGroups = fixture.budgetMonth.categoryGroups.map((group) => {
+    if (group.name !== 'Everyday Spending') return group;
+    return {
+      ...group,
+      categories: [
+        ...group.categories,
+        category('rent', 'Rent', 2100, 0),
+      ],
+    };
+  });
+  fixture.payees.push({ id: 'rent-payee', name: 'Skyline Apartments' });
+  for (const [index, date] of rentDates.entries()) {
+    fixture.transactions.push({
+      id: `rent-${index}`,
+      account: 'acc-check',
+      date,
+      amount: -210000,
+      category: 'rent',
+      payee: 'rent-payee',
+      cleared: true,
+    });
+  }
+  return fixture;
+}
+
 const scenarios = [
   {
     name: 'negative credit-card liability without explicit coverage policy',
@@ -202,6 +249,8 @@ async function getTransactions(accountId, start, end) {
 
 module.exports = {
   REASON,
+  buildFixture,
+  buildUncertainRentFixture,
   complete,
   configure,
   downloadBudget,

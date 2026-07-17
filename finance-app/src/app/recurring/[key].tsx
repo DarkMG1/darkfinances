@@ -75,8 +75,8 @@ export default function RecurringDetail() {
 
       <Card style={styles.statsCard}>
         <Stat label="Status" value={cancelled ? 'Cancelled' : item.status === 'active' ? 'Active' : 'Inactive'} />
-        <Stat label="Next renewal" value={item.status === 'active' ? fmtDay(item.nextRenewal) : '—'} />
-        <Stat label="Renewal window" value={`${fmtDay(item.renewalWindow?.start ?? item.nextRenewal)} - ${fmtDay(item.renewalWindow?.end ?? item.nextRenewal)}`} />
+        <Stat label="Next renewal" value={item.status === 'active' ? (item.nextRenewal ? fmtDay(item.nextRenewal) : 'Date uncertain') : '—'} />
+        <Stat label="Renewal window" value={item.renewalWindow ? `${fmtDay(item.renewalWindow.start)} - ${fmtDay(item.renewalWindow.end)}` : (item.status === 'active' ? 'Date uncertain' : '—')} />
         <Stat label="Last charged" value={fmtDay(item.lastCharged)} />
         <Stat label="Last amount" value={item.previousAmount ? `${fmtPos(item.previousAmount)} -> ${fmtPos(item.lastAmount)}` : fmtPos(item.lastAmount ?? item.amount)} />
         <Stat label="Confidence" value={`${item.confidence ?? 0}%`} />

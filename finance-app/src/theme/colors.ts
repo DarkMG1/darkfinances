@@ -53,18 +53,20 @@ export const monthLabel = (key: string): string => {
   const [y, m] = key.split('-').map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
 };
-export const fmtDay = (d: string): string => {
-  if (!d) return '';
+export const fmtDay = (d: string | null | undefined): string => {
+  if (!d) return 'Date uncertain';
   const [y, m, day] = d.split('-').map(Number);
   if (!y) return d;
   return new Date(y, m - 1, day).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 };
-export const daysUntil = (d: string, anchor?: string): number => {
-  if (!d) return 0;
+export const daysUntil = (d: string | null | undefined, anchor?: string): number | null => {
+  if (!d) return null;
   return daysUntilDateOnly(d, anchor);
 };
-export const dueLabel = (d: string, anchor?: string): string => {
+export const dueLabel = (d: string | null | undefined, anchor?: string): string => {
+  if (!d) return 'date uncertain';
   const n = daysUntil(d, anchor);
+  if (n == null) return 'date uncertain';
   if (n < 0) return `${-n}d overdue`;
   if (n === 0) return 'today';
   if (n === 1) return 'tomorrow';

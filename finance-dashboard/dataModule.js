@@ -25,6 +25,19 @@ const {
   monthRange: calendarMonthRange,
   todayYMD,
 } = require('./lib/date-only');
+const {
+  CADENCE_DAYS,
+  classifyCadence,
+  inactiveGapDays,
+  inferRecurrenceSchedule,
+  monthlyEquivalentAmount,
+  nextOccurrenceAfter,
+  paidMatchWindow,
+  projectOccurrences,
+  projectionConfidencePenalty,
+  renewalWindow,
+  rollToOnOrAfter,
+} = require('./lib/recurrence');
 const { readJsonFile, writeJsonFile, JsonStoreError } = require('./lib/json-store');
 const { readRuntimeStateByPath, writeRuntimeStateByPath, RuntimeStateError } = require('./lib/runtime-state-store');
 const {
@@ -403,23 +416,7 @@ function stddev(arr) {
   return Math.sqrt(arr.reduce((s, x) => s + (x - m) ** 2, 0) / arr.length);
 }
 
-// Recurring cadence buckets keyed by typical day-period; the classifier maps a
-// median inter-charge gap into one of these named cadences (null = irregular).
-const CADENCE_DAYS = { weekly: 7, biweekly: 14, semimonthly: 15.22, monthly: 30.44, bimonthly: 60.88, quarterly: 91.3, semiannual: 182.6, annual: 365.25 };
-function classifyCadence(gap) {
-  if (gap >= 5 && gap <= 9) return 'weekly';
-  if (gap >= 12 && gap <= 14) return 'biweekly';
-  // Twice-a-month payroll (e.g. 15th + month-end) alternates ~13–17 day gaps,
-  // landing in the dead zone between biweekly and monthly. Treat 15–18 as
-  // semimonthly so a paycheck isn't dropped as "irregular".
-  if (gap >= 15 && gap <= 18) return 'semimonthly';
-  if (gap >= 25 && gap <= 35) return 'monthly';
-  if (gap >= 55 && gap <= 70) return 'bimonthly';
-  if (gap >= 80 && gap <= 100) return 'quarterly';
-  if (gap >= 170 && gap <= 200) return 'semiannual';
-  if (gap >= 330 && gap <= 400) return 'annual';
-  return null;
-}
+// Recurring cadence classification and calendar-safe projection live in lib/recurrence.js.
 // Normalize a payee into a stable subscription key (drops store numbers / punctuation).
 function recurringKey(payee) {
   return (payee || '')
@@ -2806,9 +2803,19 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
       const effPeriod = period || (forced ? CADENCE_DAYS.monthly : period);
       const amount = median(amounts);
       const lastCharged = dates[dates.length - 1];
-      const nextRenewal = addDays(lastCharged, Math.round(effPeriod));
-      const monthlyEquivalent = amount * (30.44 / effPeriod);
-      const confidence = Math.max(35, Math.min(99, Math.round(100 - cv * 45 + Math.min(10, dates.length) * 2 + (forced ? -15 : 0))));
+      const schedule = inferRecurrenceSchedule({ dates, cadence: effCadence, forced });
+      const projectionUncertain = !!schedule.uncertain;
+      const nextRenewal = projectionUncertain ? null : nextOccurrenceAfter(lastCharged, schedule);
+      const monthlyEquivalent = monthlyEquivalentAmount(amount, effCadence);
+      const confidence = Math.max(
+        35,
+        Math.min(
+          99,
+          Math.round(
+            100 - cv * 45 + Math.min(10, dates.length) * 2 + (forced ? -15 : 0) - projectionConfidencePenalty(schedule),
+          ),
+        ),
+      );
 
       const lastAmt = amounts[amounts.length - 1];
       const prevAmt = amounts[amounts.length - 2];
@@ -2816,7 +2823,7 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
       if (prevAmt && Math.abs(lastAmt - prevAmt) / prevAmt > 0.05)
         priceChange = { from: round2(prevAmt), to: round2(lastAmt), pct: Math.round(((lastAmt - prevAmt) / prevAmt) * 100) };
 
-      let status = daysBetween(lastCharged, today) <= effPeriod * 1.8 ? 'active' : 'inactive';
+      let status = daysBetween(lastCharged, today) <= inactiveGapDays(effCadence) ? 'active' : 'inactive';
       if (ov && ov.status) status = ov.status; // user override (e.g. cancelled)
       const finalIsBill = ov && typeof ov.isBill === 'boolean' ? ov.isBill : isBill;
 
@@ -2832,7 +2839,8 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
         firstCharged: dates[0],
         lastCharged,
         nextRenewal,
-        renewalWindow: { start: addDays(nextRenewal, -3), end: addDays(nextRenewal, 3) },
+        renewalWindow: renewalWindow(nextRenewal),
+        projectionUncertain: projectionUncertain || undefined,
         priceChange,
         confidence,
         firstSeen: dates[0],
@@ -2967,20 +2975,20 @@ async function getIncome({ window = 12 } = {}) {
       for (let i = 1; i < dates.length; i++) gaps.push(daysBetween(dates[i - 1], dates[i]));
       const cadence = classifyCadence(median(gaps));
       if (!cadence) continue; // irregular deposits aren't a paycheck
-      const period = CADENCE_DAYS[cadence];
       const amount = median(amounts);
       const lastPaid = dates[dates.length - 1];
-      let nextPay = addDays(lastPaid, Math.round(period));
-      let guard = 0;
-      while (nextPay < today && guard < 64) { nextPay = addDays(nextPay, Math.round(period)); guard++; }
+      const schedule = inferRecurrenceSchedule({ dates, cadence });
+      if (schedule.uncertain) continue;
+      const nextPay = rollToOnOrAfter(today, schedule) || nextOccurrenceAfter(lastPaid, schedule);
+      if (!nextPay) continue;
       const displayPayee = rec.key === 'interest' ? 'Interest' : bestPayeeLabel(rec.names);
       streams.push({
         key: rec.key, payee: displayPayee, category: rec.category, cadence,
         amount: round2(amount),
-        monthlyEquivalent: round2(amount * (30.44 / period)),
+        monthlyEquivalent: round2(monthlyEquivalentAmount(amount, cadence)),
         occurrences: dates.length,
         lastPaid, nextPay,
-        active: daysBetween(lastPaid, today) <= period * 2,
+        active: daysBetween(lastPaid, today) <= inactiveGapDays(cadence),
         history: dates.slice(-6).map((d) => ({ date: d, amount: round2(perDay[d]) })),
       });
     }
@@ -3023,20 +3031,19 @@ async function getBills({ days = 45, recurring } = {}) {
   for (const it of items) {
     if (it.status !== 'active') continue;
     if (!it.isBill) continue; // bills view = true bills only; subscriptions live in their own screen
-    const period = Math.round(CADENCE_DAYS[it.cadence] || 30.44);
+    if (it.projectionUncertain) continue;
     const hist = it.history || [];
+    const schedule = inferRecurrenceSchedule({
+      dates: hist.map((h) => h.date),
+      cadence: it.cadence,
+      forced: !!it.forced,
+    });
+    if (schedule.uncertain) continue;
     const amtTol = Math.max(2, Math.abs(it.amount) * 0.35); // utilities swing; allow ±35% (min $2)
-    let due = it.nextRenewal;
-    let guard = 0;
-    while (due < today && guard < 64) { due = addDays(due, period); guard++; } // roll overdue forward
-    while (due <= horizon && guard < 96) {
+    const dueDates = projectOccurrences({ schedule, windowStart: today, windowEnd: horizon });
+    for (const due of dueDates) {
       const id = `${it.key}|${due}`;
-      // Auto-derive "paid" by matching a real recorded charge to this cycle: a
-      // charge in the window leading up to (and just past) the due date with a
-      // comparable amount. The lower bound excludes the prior cycle's charge so
-      // we don't mis-flag the upcoming occurrence as already paid.
-      const lo = addDays(due, -Math.round(period * 0.45));
-      const hi = addDays(due, 7);
+      const { lo, hi } = paidMatchWindow(due, schedule);
       const match = hist.find((h) => h.date >= lo && h.date <= hi && Math.abs(Math.abs(h.amount) - Math.abs(it.amount)) <= amtTol);
       const manual = paid[id];
       bills.push({
@@ -3048,8 +3055,6 @@ async function getBills({ days = 45, recurring } = {}) {
         matched: match ? { date: match.date, amount: match.amount } : null,
         variance: match ? round2(Math.abs(match.amount) - Math.abs(it.amount)) : null,
       });
-      due = addDays(due, period);
-      guard++;
     }
   }
   bills.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
@@ -3085,27 +3090,20 @@ async function getForecast({ days = 90 } = {}) {
     events.push({ date, label, amount: round2(Number(amount)), kind, provenance, sourceId });
   };
 
-  const nextCadenceDate = (date, cadence) => {
-    if (cadence === 'semimonthly') {
-      const day = Number(date.slice(8, 10));
-      if (day < 15) return `${date.slice(0, 7)}-15`;
-      if (day === 15) return monthRange(Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1).end;
-      return `${addMonths(date, 1).slice(0, 7)}-15`;
-    }
-    const monthSteps = { monthly: 1, bimonthly: 2, quarterly: 3, semiannual: 6, annual: 12 };
-    if (monthSteps[cadence]) return addMonths(date, monthSteps[cadence]);
-    return addDays(date, Math.round(CADENCE_DAYS[cadence] || 14));
-  };
-
   for (const s of income.streams || []) {
     if (!s.active) continue;
-    let due = s.nextPay;
-    let guard = 0;
-    while (due < today && guard < 64) { due = nextCadenceDate(due, s.cadence); guard++; }
-    while (due <= horizon && guard < 128) {
+    const schedule = inferRecurrenceSchedule({
+      dates: [...new Set([...(s.history || []).map((h) => h.date), s.lastPaid].filter(Boolean))].sort(),
+      cadence: s.cadence,
+    });
+    if (schedule.uncertain) continue;
+    const payDates = projectOccurrences({
+      schedule,
+      windowStart: today,
+      windowEnd: horizon,
+    });
+    for (const due of payDates) {
       pushEvent(due, s.payee || 'Income', Math.abs(s.amount), 'income', 'inferred', s.key);
-      due = nextCadenceDate(due, s.cadence);
-      guard++;
     }
   }
   for (const b of bills.bills || []) {
