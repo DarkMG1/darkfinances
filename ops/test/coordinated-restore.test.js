@@ -13,7 +13,7 @@ const { coordinatedLayoutForRoot } = require('../lib/coordinated-operation-layou
 const { consumeAdmission } = require('../lib/coordinated-admission-registry');
 const { parseAdmissionToken } = require('../lib/restore-quiescence-admission');
 const { buildTestAdmissionToken, registerTestAdmission } = require('./fixtures/admission-token-fixtures');
-const { installTestCoordinatorKeys } = require('./fixtures/coordinated-test-helpers');
+const { installTestCoordinatorKeys, installFakeSystemctl } = require('./fixtures/coordinated-test-helpers');
 const { createMockRunners, defaultActiveUnits } = require('./fixtures/coordinated-backup-fixtures');
 const { writeProductionDashboard } = require('./fixtures/backup-bundle-dashboard-fixtures');
 const { loadWriterInventory } = require('../lib/writer-inventory');
@@ -134,7 +134,7 @@ test('consumed admission token cannot be reused for restore', (t) => {
   );
 });
 
-test('extracted bundle tooling runs coordinated backup dry-run without repository', async (t) => {
+test('extracted bundle tooling runs coordinated backup and restore dry-run without repository', async (t) => {
   const root = mkRoot(t, 'df-relocated-coordinated-');
   const dashboard = path.join(root, 'dashboard');
   writeProductionDashboard(dashboard, {
@@ -155,17 +155,13 @@ test('extracted bundle tooling runs coordinated backup dry-run without repositor
   assert.equal(fs.existsSync(toolingCli), true);
   const restoreCli = path.join(extractRoot, 'tooling/ops/bin/restore-coordinated.js');
   assert.equal(fs.existsSync(restoreCli), true);
-  const fakeBin = path.join(root, 'bin');
-  fs.mkdirSync(fakeBin, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(fakeBin, 'systemctl'), `#!/usr/bin/env bash
-case " \$* " in
-  *" is-active "*) echo inactive; exit 3 ;;
-  *" is-enabled "*) echo disabled; exit 1 ;;
-  *) exit 0 ;;
-esac
-`, { mode: 0o755 });
+  const fakeBin = installFakeSystemctl(root, quiescedUnits());
+  installTestCoordinatorKeys(root);
+  const destination = path.join(root, 'restore-dest');
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
   const { spawnSync } = require('child_process');
-  const result = spawnSync(process.execPath, [toolingCli], {
+  const backupResult = spawnSync(process.execPath, [toolingCli], {
     encoding: 'utf8',
     env: {
       ...process.env,
@@ -177,5 +173,19 @@ esac
       BACKUP_DRY_RUN: '1',
     },
   });
-  assert.equal(result.status, 2, result.stderr || result.stdout);
+  assert.equal(backupResult.status, 2, backupResult.stderr || backupResult.stdout);
+  const restoreResult = spawnSync(process.execPath, [restoreCli, '--dry-run', archive], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+      HOME: root,
+      FINANCE_DASHBOARD_DIR: destination,
+      DARKFINANCES_BACKUP_DIR: path.join(root, 'backups-restore'),
+      DARKFINANCES_REPO_ROOT: path.join(root, 'missing-repo'),
+      COORDINATED_VERIFY_KEY_PATH: path.join(root, '.config', 'darkfinances', 'coordinated-verify.pem'),
+      COORDINATED_SIGNING_KEY_PATH: path.join(root, '.config', 'darkfinances', 'coordinated-sign.pem'),
+    },
+  });
+  assert.equal(restoreResult.status, 2, restoreResult.stderr || restoreResult.stdout);
 });
