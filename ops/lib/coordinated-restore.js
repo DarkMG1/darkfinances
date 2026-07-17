@@ -100,7 +100,7 @@ async function runCoordinatedRestore(options = {}) {
     }
 
     lock = acquireCoordinatedLock({ layout, operation: 'restore', dryRun, env });
-    const discovery = discoverWriters({ inventory, env, runners, dashboardDir });
+    const discovery = discoverWriters({ inventory, env, runners, dashboardDir, preview: dryRun });
     auditDeploymentDiscovery({ inventory, env, runners, dashboardDir });
     for (const snapshot of discovery.snapshots) snapshotsById.set(snapshot.id, snapshot);
     context = {

@@ -137,12 +137,44 @@ function discoverWriters(context) {
   const inventory = context.inventory || loadWriterInventory();
   const writers = enumerateWriters(inventory, context.env);
   const snapshots = writers.map((writer) => captureWriterState(writer, context));
-  for (const snapshot of snapshots) {
-    if (snapshot.state === UNKNOWN_STATE) {
-      throw new Error(`writer ${snapshot.id} has unknown state${snapshot.error ? `: ${snapshot.error}` : ''}`);
+  if (context.preview !== true) {
+    for (const snapshot of snapshots) {
+      if (snapshot.state === UNKNOWN_STATE) {
+        throw new Error(`writer ${snapshot.id} has unknown state${snapshot.error ? `: ${snapshot.error}` : ''}`);
+      }
     }
   }
   return { inventory, writers, snapshots };
+}
+
+function previewWritersForRestore(context, {
+  label = 'restore dry-run',
+  failOnActive = false,
+} = {}) {
+  const discovery = discoverWriters({ ...context, preview: true });
+  const warnings = [];
+  let quiescent = true;
+  for (const writer of discovery.writers) {
+    const snapshot = discovery.snapshots.find((entry) => entry.id === writer.id);
+    if (!snapshot) continue;
+    if (snapshot.state === UNKNOWN_STATE) {
+      warnings.push(`${label}: writer ${writer.id} state unknown${snapshot.error ? `: ${snapshot.error}` : ''}`);
+      quiescent = false;
+      continue;
+    }
+    if (!isWriterQuiescent(writer, snapshot)) {
+      warnings.push(`${label}: writer ${writer.id} not quiescent (state=${snapshot.state})`);
+      quiescent = false;
+    }
+  }
+  if (failOnActive && !quiescent) {
+    throw new Error(`${label} writer preview failed: ${warnings.join('; ')}`);
+  }
+  return {
+    quiescent,
+    warnings,
+    writers: discovery.snapshots,
+  };
 }
 
 function isWriterQuiescent(writer, snapshot) {
@@ -501,6 +533,7 @@ module.exports = {
   captureWriterState,
   preserveOriginalFlags,
   discoverWriters,
+  previewWritersForRestore,
   isWriterQuiescent,
   waitForWriterQuiescence,
   stopWriter,

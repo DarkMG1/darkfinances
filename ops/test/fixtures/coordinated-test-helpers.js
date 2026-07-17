@@ -6,21 +6,56 @@ const assert = require('node:assert/strict');
 const { exportPublicKeyPem, exportPrivateKeyPem } = require('../../lib/coordinated-admission-crypto');
 const { buildTestAdmissionToken, registerTestAdmission } = require('./admission-token-fixtures');
 const { coordinatedLayoutForRoot } = require('../../lib/coordinated-operation-layout');
+const { createMockRunners } = require('./coordinated-backup-fixtures');
+
+function quiescedUnits() {
+  return {
+    'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+    'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+    'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+  };
+}
+
+function shellEscape(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
 
 function installFakeSystemctl(root, units = {}) {
   const fakeBin = path.join(root, 'bin');
   fs.mkdirSync(fakeBin, { recursive: true, mode: 0o700 });
-  const unitJson = JSON.stringify(units);
-  fs.writeFileSync(path.join(fakeBin, 'systemctl'), `#!/usr/bin/env bash
-set -euo pipefail
-units='${unitJson}'
-unit="\${@: -1}"
-case " \$* " in
-  *" is-active "*) node -e "const u=process.argv[1];const m=JSON.parse(process.argv[2]);const e=m[u]||{active:'inactive'};const s=e.active||'inactive';process.stdout.write(s);process.exit(['active','activating'].includes(s)?0:3)" "$unit" "$units" ;;
-  *" is-enabled "*) node -e "const u=process.argv[1];const m=JSON.parse(process.argv[2]);const e=m[u]||{enabled:'disabled'};process.stdout.write(e.enabled||'disabled');process.exit(0)" "$unit" "$units" ;;
-  *" list-units "*) exit 0 ;;
-  *" stop "*|*" start "*) exit 0 ;;
-  *) exit 0 ;;
+  const activeCases = Object.entries(units).map(([unit, entry]) => (
+    `      ${shellEscape(unit)}) state=${shellEscape(entry.active || 'inactive')} ;;`
+  )).join('\n');
+  const enabledCases = Object.entries(units).map(([unit, entry]) => (
+    `      ${shellEscape(unit)}) state=${shellEscape(entry.enabled || 'disabled')} ;;`
+  )).join('\n');
+  fs.writeFileSync(path.join(fakeBin, 'systemctl'), `#!/bin/sh
+unit="\${@##* }"
+case " $* " in
+  *" is-active "*)
+    state=inactive
+    case "$unit" in
+${activeCases}
+      *) state=inactive ;;
+    esac
+    printf '%s' "$state"
+    case "$state" in active|activating) exit 0;; *) exit 3;; esac
+    ;;
+  *" is-enabled "*)
+    state=disabled
+    case "$unit" in
+${enabledCases}
+      *) state=disabled ;;
+    esac
+    printf '%s' "$state"
+    exit 0
+    ;;
+  *" list-units "*|*" stop "*|*" start "*)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
 esac
 `, { mode: 0o755 });
   return fakeBin;
@@ -85,11 +120,7 @@ function signedAdmissionEnv(root, {
   });
   registerTestAdmission(layout, token);
   const tokenPath = writeTrustedAdmissionToken(layout, token);
-  const fakeBin = installFakeSystemctl(root, {
-    'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
-    'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
-    'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
-  });
+  const fakeBin = installFakeSystemctl(root, quiescedUnits());
   return {
     env: {
       ...process.env,
@@ -105,6 +136,67 @@ function signedAdmissionEnv(root, {
   };
 }
 
+function restoreDrillContext(root, destination, archivePath, extra = {}) {
+  const {
+    PATH: _ignoredPath,
+    runners: injectedRunners,
+    units: unitOverrides,
+    keyPair,
+    coordinatorRoot: coordinatorOverride,
+    ...safeExtra
+  } = extra;
+  const keys = installTestCoordinatorKeys(root, keyPair);
+  const coordinatorRoot = coordinatorOverride || path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(layout.workRoot, { recursive: true, mode: 0o700 });
+  const { sha256File } = require('../../lib/backup-verify');
+  const { readManifestFromArchive } = require('../../lib/backup-bundle-verify');
+  const { loadWriterInventory, writerInventoryDigest } = require('../../lib/writer-inventory');
+  const archiveSha256 = sha256File(archivePath);
+  const manifest = readManifestFromArchive(archivePath);
+  const gen = manifest.generationBinding || {};
+  const manifestArtifactId = safeExtra.manifestArtifactId || manifest.artifact.id;
+  const releaseManifestDigest = safeExtra.releaseManifestDigest
+    ?? gen.releaseManifestDigest
+    ?? gen.dashboardStateId;
+  const { token } = buildTestAdmissionToken({
+    keyPair: keys.pair,
+    bindings: {
+      archiveSha256,
+      destinationRoot: path.resolve(destination),
+      manifestArtifactId,
+      releaseManifestDigest,
+      coordinatedManifestDigest: safeExtra.coordinatedManifestDigest ?? gen.dashboardStateId,
+      writerInventoryDigest: safeExtra.writerInventoryDigest ?? writerInventoryDigest(loadWriterInventory()),
+      actualDataGeneration: safeExtra.actualDataGeneration ?? gen.actualDataGeneration ?? null,
+    },
+  });
+  registerTestAdmission(layout, token);
+  const tokenPath = path.join(layout.workRoot, 'quiescence-admission.json');
+  fs.writeFileSync(tokenPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
+  const units = unitOverrides || quiescedUnits();
+  const fakeBin = installFakeSystemctl(root, units);
+  const runners = injectedRunners || createMockRunners({ units });
+  return {
+    env: {
+      ...process.env,
+      ...safeExtra,
+      PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+      RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
+      COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+      COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+      DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+    },
+    runners,
+    coordinatorRoot,
+    layout,
+    keys,
+    token,
+    tokenPath,
+  };
+}
+
 module.exports = {
   installFakeSystemctl,
   installTestCoordinatorKeys,
@@ -112,4 +204,6 @@ module.exports = {
   writeTrustedAdmissionToken,
   isMutatingCommand,
   assertPreviewOnlyCommands,
+  quiescedUnits,
+  restoreDrillContext,
 };

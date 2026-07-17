@@ -201,7 +201,7 @@ async function prepareWriterContext({
       options: { dashboardDir, includeActualData: includeActual, preQuiesced },
     });
     runId = journal.runId || runId;
-    const discovery = discoverWriters({ inventory, env, runners, dashboardDir });
+    const discovery = discoverWriters({ inventory, env, runners, dashboardDir, preview: dryRun });
     auditDeploymentDiscovery({ inventory, env, runners, dashboardDir });
     for (const snapshot of discovery.snapshots) snapshotsById.set(snapshot.id, snapshot);
     if (journal.preRunWriters?.length) {
@@ -218,7 +218,7 @@ async function prepareWriterContext({
     journal.preRunWriters = [...snapshotsById.values()];
     discoverySnapshots = journal.preRunWriters;
   } else {
-    const discovery = discoverWriters({ inventory, env, runners, dashboardDir });
+    const discovery = discoverWriters({ inventory, env, runners, dashboardDir, preview: dryRun });
     auditDeploymentDiscovery({ inventory, env, runners, dashboardDir });
     for (const snapshot of discovery.snapshots) snapshotsById.set(snapshot.id, snapshot);
     discoverySnapshots = discovery.snapshots;

@@ -33,6 +33,7 @@ const { coordinatedLayoutForRoot } = require('./coordinated-operation-layout');
 const {
   assertAllWritersQuiescentForAdmission,
   captureWriterState,
+  previewWritersForRestore,
 } = require('./writer-quiescence');
 const { enumerateWriters, loadWriterInventory } = require('./writer-inventory');
 const { createDefaultRunners } = require('./ops-command-runners');
@@ -801,6 +802,18 @@ function runStagedRestore(options = {}) {
     injectFault?.('after:preflight');
 
     if (dryRun) {
+      const writerInventory = loadWriterInventory();
+      const runnersForPreview = options.runners || createDefaultRunners(env);
+      const writerPreview = previewWritersForRestore({
+        inventory: writerInventory,
+        env,
+        runners: runnersForPreview,
+        dashboardDir: canonicalDestination,
+        allowOwnRestoreLock: true,
+      }, {
+        label: 'restore dry-run',
+        failOnActive: env.RESTORE_DRY_RUN_STRICT === '1',
+      });
       const report = {
         manifestArtifactId: manifest.artifact.id,
         generationBindingDigest: bindingResult.expectedBinding.dashboardStateId,
@@ -813,6 +826,11 @@ function runStagedRestore(options = {}) {
         dryRun: true,
         stagedTreeDigest: stagedDigest,
         archiveSha256,
+        writerPreview: {
+          quiescent: writerPreview.quiescent,
+          writers: writerPreview.writers,
+        },
+        warnings: writerPreview.warnings,
       };
       return { dryRun: true, resumed: false, phase: PHASE.PREFLIGHT_PASSED, report };
     }
