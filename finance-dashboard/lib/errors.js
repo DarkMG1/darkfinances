@@ -61,6 +61,14 @@ function classifyError(error) {
       { code: error.code, status: 500, expose: true, cause: error }
     );
   }
+  if (error?.name === 'RuntimeStateError' || String(error?.code || '').startsWith('RUNTIME_STATE_')) {
+    return new AppError(error.message, {
+      code: error.code || 'RUNTIME_STATE_ERROR',
+      status: 500,
+      expose: true,
+      cause: error,
+    });
+  }
 
   const message = String(error?.message || error || 'Unexpected error');
   if (/not found/i.test(message)) {
