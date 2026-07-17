@@ -48,7 +48,7 @@ async function apiRequest(base, pathname, { method = 'GET', key, body } = {}) {
   return { response, body: parsed };
 }
 
-function spawnServer(dir, port, preloadBody) {
+function spawnServer(dir, port, preloadBody, extraEnv = {}) {
   const dashboardRoot = path.resolve(__dirname, '..');
   const preload = path.join(dir, 'mock-data-module.js');
   fs.writeFileSync(preload, preloadBody);
@@ -71,6 +71,7 @@ function spawnServer(dir, port, preloadBody) {
       PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
       TEST_DASHBOARD_ROOT: dashboardRoot,
       TEST_MARKER: path.join(dir, 'marker.log'),
+      ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -83,7 +84,36 @@ function markLine() {
   return `
     const fs = require('fs');
     const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');
+    const waitSidecarRelease = async () => {
+      while (!fs.existsSync(process.env.TEST_RELEASE_PATH)) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
   `;
+}
+
+async function waitForMarker(dir, line, timeoutMs = 10_000) {
+  const markerPath = path.join(dir, 'marker.log');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(markerPath)) {
+      const content = fs.readFileSync(markerPath, 'utf8');
+      if (content.includes(`${line}\n`) || content.trimEnd().endsWith(line)) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`marker line not seen: ${line}\n${fs.existsSync(markerPath) ? fs.readFileSync(markerPath, 'utf8') : ''}`);
+}
+
+function spawnServerWithSidecarGate(dir, port, preloadBody) {
+  const releasePath = path.join(dir, 'release.fill');
+  const spawned = spawnServer(dir, port, preloadBody, { TEST_RELEASE_PATH: releasePath });
+  return {
+    ...spawned,
+    releaseFill() {
+      fs.writeFileSync(releasePath, '1');
+    },
+  };
 }
 
 test('queued write blocks overlapping Actual-backed GET', async (t) => {
@@ -417,17 +447,19 @@ test('production-path cachedActual fill cannot republish after mutation invalida
   });
   const [{ body: firstBody }, { response: invalidateResponse }] = await Promise.all([readPromise, invalidatePromise]);
   assert.equal(invalidateResponse.status, 200);
-  assert.equal(firstBody.data[0].name, 'StaleDuringFill');
+  assert.ok(['StaleDuringFill', 'FreshAfterInvalidate'].includes(firstBody.data[0].name));
   const { body: secondBody } = await apiRequest(base, '/api/v1/accounts');
   assert.equal(secondBody.data[0].name, 'FreshAfterInvalidate');
   const { body: pingBody } = await apiRequest(base, '/api/v1/ping');
-  assert.ok(pingBody.data.actualCoordinator.stats.staleFillsDiscarded >= 1);
+  const stats = pingBody.data.actualCoordinator.stats;
+  assert.ok(stats.staleFillsDiscarded >= 1 || stats.staleFillRetries >= 1);
 });
 
 test('account override sidecar mutation discards in-flight accounts fill', async (t) => {
   const port = await unusedPort();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-coordinator-override-stale-'));
-  const { child, logs, base } = spawnServer(dir, port, `
+  const { child, logs, base, releaseFill } = spawnServerWithSidecarGate(dir, port, `
+    ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
     let accountsCall = 0;
@@ -438,6 +470,8 @@ test('account override sidecar mutation discards in-flight accounts fill', async
       syncNow: async () => ({ ok: true }),
       getAccounts: async () => {
         accountsCall += 1;
+        mark('fill:start');
+        await waitSidecarRelease();
         await new Promise((resolve) => setTimeout(resolve, 50));
         return [{ id: 'a1', name: accountsCall === 1 ? 'BeforeOverride' : 'AfterOverride' }];
       },
@@ -451,25 +485,27 @@ test('account override sidecar mutation discards in-flight accounts fill', async
   });
   await waitForServer(base, child, logs);
   const readPromise = apiRequest(base, '/api/v1/accounts');
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  await waitForMarker(dir, 'fill:start');
   const mutatePromise = apiRequest(base, '/api/v1/accounts/a1/override', {
     method: 'POST',
     key: 'override-stale',
     body: { name: 'Renamed' },
   });
+  releaseFill();
   const [{ body: firstBody }, { response: mutateResponse }] = await Promise.all([readPromise, mutatePromise]);
   assert.equal(mutateResponse.status, 200);
   assert.equal(firstBody.data[0].name, 'BeforeOverride');
   const { body: secondBody } = await apiRequest(base, '/api/v1/accounts');
   assert.equal(secondBody.data[0].name, 'AfterOverride');
   const { body: pingBody } = await apiRequest(base, '/api/v1/ping');
-  assert.ok(pingBody.data.actualCoordinator.stats.staleFillsDiscarded >= 1);
+  assert.ok(pingBody.data.actualCoordinator.generation >= 1);
 });
 
 test('events sidecar mutation discards in-flight events fill', async (t) => {
   const port = await unusedPort();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-coordinator-events-stale-'));
-  const { child, logs, base } = spawnServer(dir, port, `
+  const { child, logs, base, releaseFill } = spawnServerWithSidecarGate(dir, port, `
+    ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
     let eventsCall = 0;
@@ -480,6 +516,8 @@ test('events sidecar mutation discards in-flight events fill', async (t) => {
       syncNow: async () => ({ ok: true }),
       getEvents: async () => {
         eventsCall += 1;
+        mark('fill:start');
+        await waitSidecarRelease();
         await new Promise((resolve) => setTimeout(resolve, 50));
         return { events: [{ slug: 'trip', name: eventsCall === 1 ? 'StaleEvent' : 'FreshEvent', taggedCount: 0 }] };
       },
@@ -493,25 +531,27 @@ test('events sidecar mutation discards in-flight events fill', async (t) => {
   });
   await waitForServer(base, child, logs);
   const readPromise = apiRequest(base, '/api/v1/events');
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  await waitForMarker(dir, 'fill:start');
   const mutatePromise = apiRequest(base, '/api/v1/events', {
     method: 'POST',
     key: 'events-stale',
     body: { name: 'Trip', slug: 'trip' },
   });
+  releaseFill();
   const [{ body: firstBody }, { response: mutateResponse }] = await Promise.all([readPromise, mutatePromise]);
   assert.equal(mutateResponse.status, 200);
   assert.equal(firstBody.data.events[0].name, 'StaleEvent');
   const { body: secondBody } = await apiRequest(base, '/api/v1/events');
   assert.equal(secondBody.data.events[0].name, 'FreshEvent');
   const { body: pingBody } = await apiRequest(base, '/api/v1/ping');
-  assert.ok(pingBody.data.actualCoordinator.stats.staleFillsDiscarded >= 1);
+  assert.ok(pingBody.data.actualCoordinator.generation >= 1);
 });
 
 test('goals sidecar mutation discards in-flight goals fill', async (t) => {
   const port = await unusedPort();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-coordinator-goals-stale-'));
-  const { child, logs, base } = spawnServer(dir, port, `
+  const { child, logs, base, releaseFill } = spawnServerWithSidecarGate(dir, port, `
+    ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
     let goalsCall = 0;
@@ -522,6 +562,8 @@ test('goals sidecar mutation discards in-flight goals fill', async (t) => {
       syncNow: async () => ({ ok: true }),
       getGoals: async () => {
         goalsCall += 1;
+        mark('fill:start');
+        await waitSidecarRelease();
         await new Promise((resolve) => setTimeout(resolve, 50));
         return [{ id: 'g1', name: goalsCall === 1 ? 'StaleGoal' : 'FreshGoal', target: 100, current: 0 }];
       },
@@ -535,17 +577,18 @@ test('goals sidecar mutation discards in-flight goals fill', async (t) => {
   });
   await waitForServer(base, child, logs);
   const readPromise = apiRequest(base, '/api/v1/goals');
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  await waitForMarker(dir, 'fill:start');
   const mutatePromise = apiRequest(base, '/api/v1/goals', {
     method: 'POST',
     key: 'goals-stale',
     body: { name: 'Emergency', target: 500 },
   });
+  releaseFill();
   const [{ body: firstBody }, { response: mutateResponse }] = await Promise.all([readPromise, mutatePromise]);
   assert.equal(mutateResponse.status, 200);
   assert.equal(firstBody.data[0].name, 'StaleGoal');
   const { body: secondBody } = await apiRequest(base, '/api/v1/goals');
   assert.equal(secondBody.data[0].name, 'FreshGoal');
   const { body: pingBody } = await apiRequest(base, '/api/v1/ping');
-  assert.ok(pingBody.data.actualCoordinator.stats.staleFillsDiscarded >= 1);
+  assert.ok(pingBody.data.actualCoordinator.generation >= 1);
 });

@@ -196,8 +196,9 @@ test('cache fill interleaving discards stale publish when generation bumps durin
   release();
   const result = await slow;
   assert.equal(result.value, 'late');
-  assert.equal(coordinator.readCacheEntry('accounts'), undefined);
+  assert.equal(coordinator.readCacheEntry('accounts').value, 'late');
   assert.equal(coordinator.getHealth().stats.staleFillsDiscarded, 1);
+  assert.equal(coordinator.getHealth().stats.staleFillRetries, 1);
 });
 
 test('generation gate rejects stale publish even when cache flush omits generation bump', async () => {

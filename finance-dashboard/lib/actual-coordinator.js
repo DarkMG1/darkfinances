@@ -21,6 +21,7 @@ class ActualCoordinator {
       shutdownsStarted: 0,
       invalidations: 0,
       staleFillsDiscarded: 0,
+      staleFillRetries: 0,
       cacheHits: 0,
       cacheMisses: 0,
       nestedBypasses: 0,
@@ -144,15 +145,22 @@ class ActualCoordinator {
       return Promise.resolve(hit);
     }
     this.stats.cacheMisses += 1;
-    return this.runRead(async ({ generation }) => {
+    const admittedGeneration = this.generation;
+    return this.runRead(async () => {
       const rehit = this.readCacheEntry(key);
       if (rehit !== undefined) {
         this.stats.cacheHits += 1;
         return rehit;
       }
       const value = await fn();
-      this.publishCacheEntry(key, value, ttl, generation);
-      return value;
+      if (this.publishCacheEntry(key, value, ttl, admittedGeneration)) {
+        return value;
+      }
+      this.stats.staleFillRetries += 1;
+      const retryGeneration = this.generation;
+      const retryValue = await fn();
+      this.publishCacheEntry(key, retryValue, ttl, retryGeneration);
+      return retryValue;
     }, { label: `cache:${key}` });
   }
 

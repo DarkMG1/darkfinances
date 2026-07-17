@@ -516,6 +516,21 @@ function invalidateActualProjection(...keys) {
   actualCoordinator.invalidateGeneration(list.length > 0 ? { keys: list } : {});
 }
 
+// Sidecar writes that change Actual-derived HTTP projections must hold the
+// coordinator write lane through persistence and invalidation so overlapping
+// cachedActual fills cannot publish under a post-mutation generation while the
+// sidecar is still pre-mutation.
+function runActualProjectionMutation(task, ...keys) {
+  const list = keys.flat().filter(Boolean);
+  const label = list.length > 0 ? list.join(',') : 'all';
+  return actualCoordinator.runWrite(async () => {
+    const result = await task();
+    if (list.length > 0) invalidateActualProjection(...list);
+    else invalidateActualProjection();
+    return result;
+  }, { invalidateBefore: false, label: `projection:${label}` });
+}
+
 function invalidateLocalCache(...keys) {
   const list = keys.flat().filter(Boolean);
   if (list.length === 0) cache.flushAll();
@@ -809,17 +824,19 @@ async function addReceiptH(req, operation) {
     }
     throw error;
   }
-  const result = await applyLocal(operation, () => data.addReceipt(receipt));
-  invalidateActualProjection('today', 'review-current');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.addReceipt(receipt)),
+    'today', 'review-current',
+  );
 }
 const receiptsH = (req) => Promise.resolve(data.getReceipts({ txnId: req.query.txnId }));
 async function deleteReceiptH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'receipt id');
   data.assertReceiptMutationAvailable({ id });
-  const result = await applyLocal(operation, () => data.deleteReceipt({ id }));
-  invalidateActualProjection('today', 'review-current');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteReceipt({ id })),
+    'today', 'review-current',
+  );
 }
 // Raw image stream (auth already enforced by the router). expo-image sends the
 // token via headers, so this just serves the file bytes with the right type.
@@ -886,28 +903,32 @@ async function eventsH() {
 }
 async function saveEventH(req, operation) {
   const event = parse(schemas.event, req.body, 'event');
-  const result = await applyLocal(operation, () => data.saveEvent(event));
-  invalidateActualProjection('events');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.saveEvent(event)),
+    'events',
+  );
 }
 async function deleteEventH(req, operation) {
   const { slug } = parse(schemas.slugParam, req.params, 'event slug');
-  const result = await applyLocal(operation, () => data.deleteEvent({ slug }));
-  invalidateActualProjection('events');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteEvent({ slug })),
+    'events',
+  );
 }
 async function setAccountOverrideH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'account id');
   const { name, hidden, role } = parse(schemas.accountOverride, req.body, 'account override');
-  const result = await applyLocal(operation, () => data.setAccountOverride({ id, name, hidden, role }));
-  invalidateActualProjection('accounts', 'today');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setAccountOverride({ id, name, hidden, role })),
+    'accounts', 'today',
+  );
 }
 async function setReviewDispositionH(req, operation) {
   const disposition = parse(schemas.reviewDisposition, req.body, 'review disposition');
-  const result = await applyLocal(operation, () => data.setReviewDisposition(disposition));
-  invalidateActualProjection('today', 'review-current');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setReviewDisposition(disposition)),
+    'today', 'review-current',
+  );
 }
 async function saveManualAssetH(req, operation) {
   const asset = parse(schemas.manualAsset, req.body, 'manual asset');
@@ -944,15 +965,17 @@ async function setDateH(req, operation) {
 }
 async function saveGoal(req, operation) {
   const goal = parse(schemas.goal, req.body, 'goal');
-  const result = await applyLocal(operation, () => data.saveGoal(goal));
-  invalidateActualProjection('goals', 'today');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.saveGoal(goal)),
+    'goals', 'today',
+  );
 }
 async function deleteGoal(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'goal id');
-  const result = await applyLocal(operation, () => data.deleteGoal(id));
-  invalidateActualProjection('goals', 'today');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteGoal(id)),
+    'goals', 'today',
+  );
 }
 
 async function setCategory(req, operation) {
@@ -1073,24 +1096,24 @@ const reconcilePendingH = () => data.getReconcilePending();
 const setReconItemH = (req, operation) => {
   const item = parse(schemas.reconcileItem, req.body, 'reconciliation item');
   data.assertTransactionMutationAvailable({ ids: [item.id] });
-  return applyLocal(operation, () => data.setReconcileItem(item)).then((result) => {
-    invalidateActualProjection('today', 'review-current');
-    return result;
-  });
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setReconcileItem(item)),
+    'today', 'review-current',
+  );
 };
 const setReconMonthH = (req, operation) => {
   const month = parse(schemas.reconcileMonth, req.body, 'reconciliation month');
-  return applyLocal(operation, () => data.setReconcileMonth(month)).then((result) => {
-    invalidateActualProjection('today', 'review-current');
-    return result;
-  });
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setReconcileMonth(month)),
+    'today', 'review-current',
+  );
 };
 const setReconEnabledH = (req, operation) => {
   const setting = parse(schemas.reconcileEnabled, req.body, 'reconciliation setting');
-  return applyLocal(operation, () => data.setReconcileEnabled(setting)).then((result) => {
-    invalidateActualProjection('today', 'review-current');
-    return result;
-  });
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setReconcileEnabled(setting)),
+    'today', 'review-current',
+  );
 };
 
 // Monthly CSV export (raw text/csv, used by web download + app share sheet).

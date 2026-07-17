@@ -13,7 +13,7 @@ instance. The coordinator is the single contract for that shared resource.
 | HTTP mutations touching Actual | `mutationQueue` → dataModule → `runWrite` | `invalidateHttpCache()` |
 | Splitwise mirror preflight | `runRead` (`skipRecover: true`) | n/a |
 | Saga recovery / `initApi` / `syncNow` / `shutdownApi` | `runRecover` | `syncNow` invalidates before lane release |
-| Sidecar mutations affecting Actual-derived projections | none on Actual lane | `invalidateActualProjection(...keys)` |
+| Sidecar mutations affecting Actual-derived projections | `runActualProjectionMutation` (write lane through persist + invalidate) | `invalidateActualProjection(...keys)` |
 | Sidecar mutations affecting local-only projections | none | `invalidateLocalCache(...keys)` |
 | Graceful shutdown | drain mutations → `shutdownApi` → `shutdownHandoff` | n/a |
 
@@ -61,7 +61,10 @@ discarded at publish time.
    inside `runRecover` after saga sync succeeds, before releasing the lane.
 5. **Sidecar projection invalidation** — mutations that change Actual-derived HTTP
    projections (events, account overrides, review disposition, goals, reconciliation,
-   receipts, recurring overrides, …) must use `invalidateActualProjection`, not `cache.del`.
+   receipts, recurring overrides, …) run through `runActualProjectionMutation`, which
+   holds the coordinator write lane through sidecar persistence and then calls
+   `invalidateActualProjection`. `cachedRead` admits generation at cache miss and
+   retries once when publication is discarded mid-fill.
 6. **HTTP mutation queue unchanged** — versioned mutations serialize on
    `SerialQueue('finance-mutations')`; coordinator serializes Actual access.
 7. **Bounded diagnostics** — `/api/v1/ping` exposes `actualCoordinator` health.

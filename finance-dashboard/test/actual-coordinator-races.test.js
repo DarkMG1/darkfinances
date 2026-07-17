@@ -130,3 +130,26 @@ test('reproduction: serial warmCache through coordinator preserves lane exclusiv
   }
   assert.equal(maxLane, 1);
 });
+
+test('cachedRead admits generation at cache miss and retries after invalidation during fill', async () => {
+  const coordinator = new ActualCoordinator('admit-retry');
+  const cache = new NodeCache();
+  coordinator.bindCache(cache);
+  let calls = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const fill = coordinator.cachedRead('events', async () => {
+    calls += 1;
+    await gate;
+    return { events: [{ name: calls === 1 ? 'StaleEvent' : 'FreshEvent' }] };
+  }, 30);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  coordinator.invalidateGeneration({ keys: ['events'] });
+  release();
+  const result = await fill;
+  assert.equal(result.events[0].name, 'FreshEvent');
+  assert.equal(coordinator.readCacheEntry('events').events[0].name, 'FreshEvent');
+  assert.equal(calls, 2);
+  assert.equal(coordinator.getHealth().stats.staleFillsDiscarded, 1);
+  assert.equal(coordinator.getHealth().stats.staleFillRetries, 1);
+});
