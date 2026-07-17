@@ -21,6 +21,10 @@ test('runtime backup includes sidecars and receipts without secrets', (t) => {
     '{"schemaVersion":1,"sagas":{}}\n',
   );
   fs.writeFileSync(
+    path.join(dashboard, 'splitwise-mirror-resolutions.json'),
+    '{"schemaVersion":1,"resolutions":[]}\n',
+  );
+  fs.writeFileSync(
     path.join(dashboard, 'repayment-confirmation-sagas.json'),
     '{"schemaVersion":1,"sagas":{}}\n',
   );
@@ -53,6 +57,7 @@ test('runtime backup includes sidecars and receipts without secrets', (t) => {
   assert.match(listing.stdout, /goals\.json/);
   assert.match(listing.stdout, /transaction-deletion-sagas\.json/);
   assert.match(listing.stdout, /bulk-operation-sagas\.json/);
+  assert.match(listing.stdout, /splitwise-mirror-resolutions\.json/);
   assert.match(listing.stdout, /repayment-confirmation-sagas\.json/);
   assert.match(listing.stdout, /receipts\/one\.jpg/);
   assert.match(listing.stdout, /\.backup-manifest\.json/);
@@ -60,6 +65,7 @@ test('runtime backup includes sidecars and receipts without secrets', (t) => {
   const manifest = JSON.parse(fs.readFileSync(`${archive}.manifest.json`, 'utf8'));
   assert.ok(manifest.sidecars.includes('transaction-deletion-sagas.json'));
   assert.ok(manifest.sidecars.includes('bulk-operation-sagas.json'));
+  assert.ok(manifest.sidecars.includes('splitwise-mirror-resolutions.json'));
   assert.ok(manifest.sidecars.includes('repayment-confirmation-sagas.json'));
   assert.ok(manifest.sidecars.includes('transaction-sagas.json'));
   assert.ok(manifest.sidecars.includes('operation-journal.json'));

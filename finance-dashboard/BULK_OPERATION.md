@@ -1,7 +1,7 @@
 # Bulk operation safety contract
 
 `bulk-operation-sagas.json` stores versioned checkpoint records for multi-item rule
-application, rule-save auto-apply, and live phantom cleanup. Each record binds to an
+application, rule-save auto-apply, live phantom cleanup, and Splitwise mirror sync. Each record binds to an
 operation idempotency key (when present), exact transaction ids, canonical identity
 fingerprints (category intent stored separately), stable item order, intended effects,
 and sidecar convergence plans.
@@ -69,7 +69,7 @@ Actual mutation occurred.
 ## Deployment and downgrade safety
 
 Do not serve mutation traffic from a pre-PR-11 server while any nonterminal
-`bulk-operation-sagas.json` record exists. That constraint is an explicit operator
+`bulk-operation-sagas.json` record exists (including `splitwise_mirror` after PR-12). That constraint is an explicit operator
 contract; a new binary cannot enforce behavior of an older server after downgrade.
 Restore generation-bound backups with matching Actual, deletion sagas, phantom
 sidecars, and rules state.

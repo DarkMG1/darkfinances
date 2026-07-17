@@ -57,6 +57,27 @@ test('validateSidecar narrowly validates bulk operation saga state', () => {
   ));
 });
 
+test('validateSidecar narrowly validates splitwise mirror resolution state', () => {
+  assert.throws(
+    () => validateSidecar(
+      'splitwise-mirror-resolutions.json',
+      JSON.stringify({ schemaVersion: 2, resolutions: [] }),
+    ),
+    /schemaVersion 1/,
+  );
+  assert.throws(
+    () => validateSidecar(
+      'splitwise-mirror-resolutions.json',
+      JSON.stringify({ schemaVersion: 1 }),
+    ),
+    /resolutions array/,
+  );
+  assert.doesNotThrow(() => validateSidecar(
+    'splitwise-mirror-resolutions.json',
+    JSON.stringify({ schemaVersion: 1, resolutions: [] }),
+  ));
+});
+
 test('validateSidecar narrowly validates repayment confirmation saga state', () => {
   assert.throws(
     () => validateSidecar(

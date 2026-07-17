@@ -466,7 +466,14 @@ test('active deletion blocks a second delete and every replacement caller for it
       (error) => error.code === 'TRANSACTION_DELETION_IN_PROGRESS',
     );
   }
-  assert.deepEqual(fakeActual.inspect().counts, { delete: 0, add: 0, update: 0, sync: 0 });
+  assert.deepEqual(fakeActual.inspect().counts, {
+    delete: 0,
+    add: 0,
+    update: 0,
+    sync: 0,
+    createAccount: 0,
+    createCategory: 0,
+  });
 });
 
 test('unrelated and terminal deletion sagas do not block admission', () => {

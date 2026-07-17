@@ -124,7 +124,7 @@ function validError(value) {
     })
     && Number.isInteger(value.status)
     && value.status >= 400
-    && value.status <= 499;
+    && value.status <= 599;
 }
 
 function validLegacyOperation(key, operation) {
@@ -233,7 +233,7 @@ function sanitizeError(error) {
     .trim();
   const message = (rawMessage || 'Operation failed before local application').slice(0, 240);
   const requestedStatus = Number(error?.status);
-  const status = Number.isInteger(requestedStatus) && requestedStatus >= 400 && requestedStatus <= 499
+  const status = Number.isInteger(requestedStatus) && requestedStatus >= 400 && requestedStatus <= 599
     ? requestedStatus
     : 400;
   return { code, message, status };

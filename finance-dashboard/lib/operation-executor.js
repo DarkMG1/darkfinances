@@ -18,7 +18,7 @@ function outcomeUnknown(cause) {
 
 function terminalFailure(operation) {
   const storedStatus = operation.error?.status;
-  const status = Number.isInteger(storedStatus) && storedStatus >= 400 && storedStatus <= 499
+  const status = Number.isInteger(storedStatus) && storedStatus >= 400 && storedStatus <= 599
     ? storedStatus
     : 400;
   return new AppError(operation.error?.message || 'The operation failed before local application', {

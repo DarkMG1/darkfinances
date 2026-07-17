@@ -683,3 +683,177 @@ test('concurrent same-key bulk mutations execute one handler and preserve journa
     assert.ok(['started', 'completed'].includes(statusBody.data.status));
   }
 });
+
+test('splitwise sync-shares binds operation journal to splitwise_mirror saga identity', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-splitwise-mirror-journal-'));
+  const dashboardRoot = path.resolve(__dirname, '..');
+  const journalPath = path.join(dir, 'operation-journal.json');
+  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
+  const marker = path.join(dir, 'effects.log');
+  const preload = path.join(dir, 'mock-data-module.js');
+  fs.writeFileSync(preload, `
+    const fs = require('fs');
+    const path = require('path');
+    const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
+    const mark = (value) => fs.appendFileSync(process.env.TEST_EFFECT_MARKER, value + '\\n');
+    let bulkPhase = 'sync_pending';
+    const mock = new Proxy({
+      initApi: async () => ({ ok: true }),
+      shutdownApi: async () => ({ ok: true }),
+      getHealth: () => ({ ready: true }),
+      syncSplitwiseShareExpenses: async ({ operationKey, journalBinding } = {}) => {
+        mark('mirror:' + operationKey);
+        mark('kind:' + (journalBinding?.kind || ''));
+        bulkPhase = 'sync_pending';
+        const binding = journalBinding || {};
+        fs.writeFileSync(process.env.BULK_OPERATION_SAGAS_PATH, JSON.stringify({
+          schemaVersion: 1,
+          sagas: {
+            mirror1: {
+              id: 'mirror1',
+              recordVersion: 1,
+              kind: 'splitwise_mirror',
+              operationKey,
+              operationJournalFingerprint: binding.fingerprint || null,
+              operationJournalFingerprintVersion: binding.fingerprintVersion ?? null,
+              operationJournalMethod: binding.method || 'POST',
+              operationJournalRoute: binding.route || '/api/v1/splitwise/sync-shares',
+              phase: bulkPhase,
+              plan: { params: { accountName: 'Splitwise' }, items: [] },
+              itemOutcomes: { '0': { status: 'completed' } },
+              auditOutcome: { status: 'in_progress', applied: 1, failed: 0, skipped: 0, failedItems: [] },
+            },
+          },
+        }, null, 2) + '\\n');
+        return {
+          ok: false,
+          needsSync: true,
+          created: 1,
+          updated: 0,
+          pruned: 0,
+          items: 0,
+          account: 'Splitwise',
+          status: 'in_progress',
+        };
+      },
+      getBulkOperationResult: (operationKey) => {
+        mark('result:' + operationKey);
+        return {
+          ok: true,
+          needsSync: false,
+          created: 1,
+          updated: 0,
+          pruned: 0,
+          items: 0,
+          account: 'Splitwise',
+          status: 'completed',
+          auditOutcome: { status: 'completed', applied: 1, failed: 0, skipped: 0, failedItems: [] },
+        };
+      },
+      syncNow: async () => {
+        mark('sync');
+        bulkPhase = 'completed';
+        const store = JSON.parse(fs.readFileSync(process.env.BULK_OPERATION_SAGAS_PATH, 'utf8'));
+        const saga = Object.values(store.sagas)[0];
+        saga.phase = 'completed';
+        saga.auditOutcome = { status: 'completed', applied: 1, failed: 0, skipped: 0, failedItems: [] };
+        fs.writeFileSync(process.env.BULK_OPERATION_SAGAS_PATH, JSON.stringify(store, null, 2) + '\\n');
+      },
+      assertBulkOperationJournalAdmission: () => {},
+      proveBulkOperationJournalCompletion: () => ({
+        ok: true,
+        needsSync: false,
+        created: 1,
+        updated: 0,
+        pruned: 0,
+        status: 'completed',
+      }),
+    }, {
+      get(target, property) {
+        if (property in target) return target[property];
+        return async () => [];
+      },
+    });
+    require.cache[dataPath] = {
+      id: dataPath,
+      filename: dataPath,
+      loaded: true,
+      exports: mock,
+      children: [],
+      paths: [],
+    };
+  `);
+
+  const logs = { value: '' };
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: dashboardRoot,
+    env: {
+      ...process.env,
+      NODE_ENV: 'test',
+      DEMO_ONLY: '1',
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
+      PORT: String(port),
+      PUBLIC_ORIGIN: `http://localhost:${port}`,
+      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
+      WEBAUTHN_RP_ID: 'localhost',
+      FINANCE_API_TOKEN: 'test-api-token',
+      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
+      SESSION_DIR: path.join(dir, 'sessions'),
+      OPERATION_JOURNAL_PATH: journalPath,
+      BULK_OPERATION_SAGAS_PATH: bulkPath,
+      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
+      TEST_DASHBOARD_ROOT: dashboardRoot,
+      TEST_EFFECT_MARKER: marker,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (chunk) => { logs.value += chunk; });
+  child.stderr.on('data', (chunk) => { logs.value += chunk; });
+  t.after(() => {
+    child.kill('SIGTERM');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  await waitForServer(base, child, logs);
+  const key = 'bulk-splitwise-mirror-journal';
+  const response = await fetch(`${base}/api/v1/splitwise/sync-shares`, {
+    method: 'POST',
+    headers: {
+      'X-Finance-Token': 'test-api-token',
+      'Idempotency-Key': key,
+    },
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.data.ok, true);
+  assert.equal(body.data.status, 'completed');
+  assert.equal(body.data.created, 1);
+  assert.equal(typeof body.data.updated, 'number');
+  assert.equal(typeof body.data.pruned, 'number');
+  assert.equal(typeof body.data.items, 'number');
+  const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+  const bulk = JSON.parse(fs.readFileSync(bulkPath, 'utf8'));
+  assert.equal(journal.operations[key].phase, 'completed');
+  assert.ok(journal.operations[key].fingerprint);
+  assert.equal(Object.values(bulk.sagas)[0].kind, 'splitwise_mirror');
+  assert.equal(Object.values(bulk.sagas)[0].operationJournalFingerprint, journal.operations[key].fingerprint);
+  assert.equal(Object.values(bulk.sagas)[0].operationKey, key);
+  assert.match(fs.readFileSync(marker, 'utf8'), /mirror:bulk-splitwise-mirror-journal/);
+  assert.match(fs.readFileSync(marker, 'utf8'), /kind:splitwise_mirror/);
+  assert.match(fs.readFileSync(marker, 'utf8'), /sync/);
+  assert.match(fs.readFileSync(marker, 'utf8'), /result:bulk-splitwise-mirror-journal/);
+
+  const replay = await fetch(`${base}/api/v1/splitwise/sync-shares`, {
+    method: 'POST',
+    headers: {
+      'X-Finance-Token': 'test-api-token',
+      'Idempotency-Key': key,
+    },
+  });
+  assert.equal(replay.status, 200);
+  const replayBody = await replay.json();
+  assert.equal(replayBody.data.ok, true);
+  assert.equal(replayBody.data.status, 'completed');
+});

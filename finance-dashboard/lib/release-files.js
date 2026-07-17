@@ -15,6 +15,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/bulk-operation-adapters.js',
   'lib/bulk-operation-fingerprint.js',
   'lib/bulk-operation-saga.js',
+  'lib/splitwise-mirror.js',
   'lib/repayment-confirmation-admission.js',
   'lib/repayment-confirmation-saga.js',
   'lib/repayment-confirmation-sidecars.js',
