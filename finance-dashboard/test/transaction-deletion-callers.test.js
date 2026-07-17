@@ -6,7 +6,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
+  REFERENCE_STEPS: TRANSACTION_DELETION_REFERENCE_STEPS,
+} = require('../lib/transaction-deletion-references');
+const {
   canonicalTransactionSnapshot,
+  createTransactionDeletionSaga,
   transactionDeletionFingerprint,
 } = require('../lib/transaction-deletion-saga');
 
@@ -23,6 +27,7 @@ const stateFiles = {
   RULES_PATH: 'rules.json',
   TRANSACTION_SAGAS_PATH: 'transaction-sagas.json',
   TRANSACTION_DELETION_SAGAS_PATH: 'transaction-deletion-sagas.json',
+  BULK_OPERATION_SAGAS_PATH: 'bulk-operation-sagas.json',
   OWES_TRUTH_PATH: 'owes-truth.json',
 };
 for (const [key, name] of Object.entries(stateFiles)) process.env[key] = path.join(dir, name);
@@ -88,6 +93,7 @@ function reset(rows = [manualSplit]) {
   writeJson(process.env.RECON_PATH, { enabled: false, months: {} });
   writeJson(process.env.PHANTOM_SEEN_PATH, { seen: {} });
   writeJson(process.env.PHANTOM_LOG_PATH, { deleted: [] });
+  writeJson(process.env.BULK_OPERATION_SAGAS_PATH, { schemaVersion: 1, sagas: {} });
 }
 
 function deletionState() {
@@ -306,6 +312,44 @@ test('replacement ownership blocks transaction and reference mutations before ef
   assert.equal(fakeActual.inspect().counts.update, 0);
   assert.equal(Object.keys(deletionState().sagas).length, 0);
   assert.ok(fs.existsSync(path.join(process.env.RECEIPTS_DIR, 'receipt.jpg')));
+});
+
+test('deletion remove passes canonical original into assertExternalAvailable', async () => {
+  reset();
+  let captured = null;
+  const api = {
+    async getTransactions() {
+      return [structuredClone(manualSplit)];
+    },
+    async deleteTransaction() {
+      throw new Error('should not delete before hook');
+    },
+    async sync() {},
+  };
+  const manager = createTransactionDeletionSaga({
+    sagaPath: process.env.TRANSACTION_DELETION_SAGAS_PATH,
+    planReferences: () => ({ steps: [], stats: {} }),
+    applyReferenceStep: async () => {},
+    referencesConverged: () => true,
+    referenceSteps: TRANSACTION_DELETION_REFERENCE_STEPS,
+    receiptFileState: () => ({ keep: [], remove: [] }),
+    unlinkReceiptFile: () => {},
+    assertExternalAvailable: (args) => {
+      captured = args;
+      throw new Error('hook-stop');
+    },
+  });
+
+  await assert.rejects(
+    manager.remove(api, {
+      accountId: 'account',
+      date: manualSplit.date,
+      transaction: manualSplit,
+    }),
+    /hook-stop/,
+  );
+  assert.equal(captured.original.id, manualSplit.id);
+  assert.equal(captured.accountId, 'account');
 });
 
 test('active deletion blocks a second delete and every replacement caller for its ids', async () => {

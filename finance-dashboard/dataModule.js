@@ -37,6 +37,10 @@ const {
   createRepaymentConfirmationSaga,
 } = require('./lib/repayment-confirmation-saga');
 const {
+  BulkOperationInProgressError,
+  createBulkOperationSaga,
+} = require('./lib/bulk-operation-saga');
+const {
   buildAdmissionPayload,
   RepaymentSuggestionInvalidError,
   resolveRepaymentEndpoints,
@@ -132,6 +136,7 @@ const REVIEW_STATE_PATH = statePath('reviewState');
 const TRANSACTION_SAGAS_PATH = statePath('transactionSagas');
 const TRANSACTION_DELETION_SAGAS_PATH = statePath('transactionDeletionSagas');
 const REPAYMENT_CONFIRMATION_SAGAS_PATH = statePath('repaymentConfirmationSagas');
+const BULK_OPERATION_SAGAS_PATH = statePath('bulkOperationSagas');
 const readJsonSafe = (p, fallback, validate) => readJsonFile(p, fallback, validate);
 const writeJsonSafe = (p, obj) => writeJsonFile(p, obj);
 
@@ -164,6 +169,7 @@ async function initApi() {
       await recoverTransactionSagas(api);
       await recoverTransactionDeletionSagas(api);
       await recoverRepaymentConfirmationSagas(api);
+      await recoverBulkOperationSagas(api);
       apiHealth.initializedAt = new Date().toISOString();
       apiHealth.lastError = null;
     } catch (error) {
@@ -3197,6 +3203,7 @@ async function resolvePayeeId(api, name) {
 let transactionSagaManager = null;
 let transactionDeletionSagaManager = null;
 let repaymentConfirmationSagaManager = null;
+let bulkOperationSagaManager = null;
 const replacementSagaResults = new WeakMap();
 
 function getTransactionSagaManager() {
@@ -3211,6 +3218,10 @@ function getTransactionSagaManager() {
       assertExternalAvailable: ({ accountId, original }) => {
         getTransactionDeletionSagaManager().assertAvailable({ accountId, transaction: original });
         getRepaymentConfirmationSagaManager().assertAvailable({
+          accountId,
+          ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
+        });
+        getBulkOperationSagaManager().assertAvailable({
           accountId,
           ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
         });
@@ -3230,11 +3241,16 @@ function getTransactionDeletionSagaManager() {
       referenceSteps: TRANSACTION_DELETION_REFERENCE_STEPS,
       receiptFileState: transactionDeletionReceiptFileState,
       unlinkReceiptFile: unlinkTransactionDeletionReceiptFile,
-      assertExternalAvailable: ({ accountId, original }) => {
+      assertExternalAvailable: ({ accountId, original, bulkDelegation }) => {
         getTransactionSagaManager().assertAvailable({ accountId, original });
         getRepaymentConfirmationSagaManager().assertAvailable({
           accountId,
           ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
+        });
+        getBulkOperationSagaManager().assertAvailable({
+          accountId,
+          ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
+          allowDeletionDelegation: bulkDelegation,
         });
       },
     });
@@ -3253,10 +3269,69 @@ function getRepaymentConfirmationSagaManager() {
       assertExternalAvailable: ({ accountId, ids }) => {
         getTransactionSagaManager().assertAvailable({ accountId, ids });
         getTransactionDeletionSagaManager().assertAvailable({ accountId, ids });
+        getBulkOperationSagaManager().assertAvailable({ accountId, ids });
       },
     });
   }
   return repaymentConfirmationSagaManager;
+}
+
+function getBulkOperationSagaManager() {
+  if (!bulkOperationSagaManager) {
+    bulkOperationSagaManager = createBulkOperationSaga({
+      sagaPath: BULK_OPERATION_SAGAS_PATH,
+      readRules: () => {
+        const store = readJsonSafe(RULES_PATH, { rules: [] });
+        return { ...store, rules: Array.isArray(store.rules) ? store.rules : [] };
+      },
+      writeRules: (patch) => {
+        const current = readJsonSafe(RULES_PATH, { rules: [] });
+        writeJsonSafe(RULES_PATH, { ...current, ...patch });
+      },
+      readPhantomSeen,
+      writePhantomSeen: (store) => writeJsonSafe(PHANTOM_SEEN_PATH, store),
+      readPhantomLog,
+      writePhantomLog: (store) => writeJsonSafe(PHANTOM_LOG_PATH, store),
+      deleteTransaction,
+      inspectDeletionState: () => getTransactionDeletionSagaManager().inspectState(),
+      recoverDeletionSagas: recoverTransactionDeletionSagas,
+      merchantCatalog: MERCHANT_CATALOG,
+      catalogTypeMatch: CATALOG_TYPE_MATCH,
+      resolveCatalogCategory,
+      buildCatInfo,
+      settleUpPayee: SETTLE_UP_PAYEE,
+      reimbCat: REIMB_CAT,
+      incomeGroup: INCOME_GROUP,
+      moneyMovementGroup: MONEY_MOVEMENT_GROUP,
+      todayYMD,
+      addDays,
+      assertExternalAvailable: ({ accountId, ids }) => {
+        getTransactionSagaManager().assertAvailable({ accountId, ids });
+        getTransactionDeletionSagaManager().assertAvailable({ accountId, ids });
+        getRepaymentConfirmationSagaManager().assertAvailable({ accountId, ids });
+      },
+    });
+  }
+  return bulkOperationSagaManager;
+}
+
+async function recoverBulkOperationSagas(actualApi, options) {
+  return getBulkOperationSagaManager().recover(actualApi, options);
+}
+
+function getBulkOperationResult(operationKey) {
+  if (!operationKey) return null;
+  return getBulkOperationSagaManager().resultForOperationKey(operationKey);
+}
+
+function proveBulkOperationJournalCompletion(operationKey, journalOperation) {
+  if (!operationKey || !journalOperation) return null;
+  return getBulkOperationSagaManager().proveTerminalJournalCompletion(operationKey, journalOperation);
+}
+
+function assertBulkOperationJournalAdmission({ operationKey, journalBinding, kind }) {
+  if (!operationKey || !journalBinding?.fingerprint) return;
+  getBulkOperationSagaManager().assertJournalAdmission({ operationKey, journalBinding, kind });
 }
 
 async function recoverTransactionSagas(actualApi, options) {
@@ -3277,6 +3352,7 @@ async function markTransactionSagasSynced(actualApi) {
     getTransactionSagaManager(),
     getTransactionDeletionSagaManager(),
     getRepaymentConfirmationSagaManager(),
+    getBulkOperationSagaManager(),
   ]) {
     try {
       await manager.markSynced(actualApi);
@@ -3294,6 +3370,7 @@ async function driveTransactionSagasForSync(actualApi) {
     getTransactionSagaManager(),
     getTransactionDeletionSagaManager(),
     getRepaymentConfirmationSagaManager(),
+    getBulkOperationSagaManager(),
   ]) {
     try {
       const result = await manager.recover(actualApi, { deferSync: true });
@@ -3321,10 +3398,15 @@ async function syncTransactionSagas(actualApi) {
   return { needsSync: recovery.needsSync };
 }
 
-function assertTransactionMutationAvailable({ accountId, ids, transaction } = {}) {
+function assertTransactionMutationAvailable({ accountId, ids, transaction, bulkDelegation } = {}) {
   getTransactionSagaManager().assertAvailable({ accountId, ids, original: transaction });
   getTransactionDeletionSagaManager().assertAvailable({ accountId, ids, transaction });
   getRepaymentConfirmationSagaManager().assertAvailable({ accountId, ids });
+  getBulkOperationSagaManager().assertAvailable({
+    accountId,
+    ids,
+    allowDeletionDelegation: bulkDelegation,
+  });
 }
 
 function assertTransactionReplacementAvailable(options) {
@@ -3654,7 +3736,31 @@ function payeeAlike(a, b) {
   return short.length >= 3 && long.includes(short);
 }
 
-async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, holdAgedDays = 5, holdObserveDays = 0, dryRun = false } = {}) {
+async function cleanupPhantoms({
+  window = 60,
+  agedDays = 14,
+  observeDays = 10,
+  holdAgedDays = 5,
+  holdObserveDays = 0,
+  dryRun = false,
+  operationKey = null,
+  journalBinding = null,
+  faultInjector = null,
+} = {}) {
+  if (!dryRun) {
+    const result = await withApi((api) => getBulkOperationSagaManager().run(api, {
+      kind: 'phantom_cleanup',
+      operationKey,
+      journalBinding,
+      params: { window, agedDays, observeDays, holdAgedDays, holdObserveDays },
+      faultInjector,
+      deferSync: true,
+    }));
+    if (result.status === 'unresolved') {
+      throw new Error(`phantom cleanup outcome unresolved (${result.auditOutcome?.failed || 0} failed item(s))`);
+    }
+    return result;
+  }
   return withApi(async (api) => {
     const today = todayYMD();
     const start = addDays(today, -Math.abs(window));
@@ -4101,11 +4207,21 @@ async function deleteTransaction({
   accountId,
   date,
   allowImported = false,
+  bulkDelegation = null,
   faultInjector,
 } = {}) {
   if (!id) throw new Error('id required');
   if (!accountId || !date) throw new Error('accountId and date required');
-  assertTransactionDeletionAvailable({ ids: [id] });
+  if (bulkDelegation) {
+    if (String(id) !== String(bulkDelegation.txnId)) {
+      throw new BulkOperationInProgressError();
+    }
+    if (String(accountId) !== String(bulkDelegation.accountId)) {
+      throw new BulkOperationInProgressError();
+    }
+    getBulkOperationSagaManager().assertDeletionDelegationAuthorized(bulkDelegation);
+  }
+  assertTransactionDeletionAvailable({ accountId, ids: [id], bulkDelegation });
   return withApi(async (api) => {
     const txns = await api.getTransactions(accountId, date, date);
     let transaction = txns.find((item) => String(item.id) === String(id));
@@ -4125,12 +4241,13 @@ async function deleteTransaction({
       String(transaction.id),
       ...(transaction.subtransactions || []).map((leg) => String(leg.id)),
     ];
-    assertTransactionDeletionAvailable({ ids, transaction });
+    assertTransactionDeletionAvailable({ accountId, ids, transaction, bulkDelegation });
     return getTransactionDeletionSagaManager().remove(api, {
       accountId,
       date,
       transaction,
       faultInjector,
+      bulkDelegation,
     });
   });
 }
@@ -4215,19 +4332,33 @@ async function applyRuleToTxns(api, rule, { months = 24 } = {}) {
   return applied;
 }
 
-async function saveRule({ match, categoryId, categoryName } = {}, { sync = true } = {}) {
+async function saveRule({ match, categoryId, categoryName } = {}, {
+  sync = true,
+  operationKey = null,
+  journalBinding = null,
+  faultInjector = null,
+} = {}) {
   const m = (match || '').trim();
   if (!m || !categoryId) throw new Error('match and categoryId required');
   const store = getRules();
+  if (!store || !Array.isArray(store.rules)) throw new Error('invalid rules store');
   const id = 'r' + Date.now().toString(36);
   const rule = { id, match: m, categoryId, categoryName: categoryName || '', created: todayYMD() };
-  // Replace any existing rule with the same match text (case-insensitive).
-  store.rules = store.rules.filter((r) => (r.match || '').toLowerCase() !== m.toLowerCase());
-  store.rules.push(rule);
-  const applied = await withApi((api) => applyRuleToTxns(api, rule));
-  if (applied && sync) await syncNow();
-  writeJsonSafe(RULES_PATH, store);
-  return { ok: true, id, applied };
+  const result = await withApi((api) => getBulkOperationSagaManager().run(api, {
+    kind: 'rules_save',
+    operationKey,
+    journalBinding,
+    params: { rule },
+    faultInjector,
+    deferSync: !sync,
+  }));
+  if (result.status === 'unresolved') {
+    throw new Error(`rule save outcome unresolved (${result.auditOutcome?.failed || 0} failed item(s))`);
+  }
+  if (result.failed) {
+    throw new Error(`rule save failed for ${result.failed} item(s)`);
+  }
+  return { ok: result.ok, needsSync: result.needsSync, id: result.id || id, applied: result.applied, status: result.status, auditOutcome: result.auditOutcome };
 }
 
 function deleteRule({ id } = {}) {
@@ -4484,29 +4615,34 @@ function getCatalogDisplay() {
 
 // Re-apply every rule (used on refresh + manual "apply now"). Successful work is
 // synced, but any failed stage is surfaced so refresh never claims full success.
-async function applyRules({ sync = true } = {}) {
-  const { rules } = getRules();
-  let total = 0;
-  let settleUpsMoved = 0;
-  const failures = [];
-  await withApi(async (api) => {
-    for (const r of rules) {
-      try { total += await applyRuleToTxns(api, r); }
-      catch (error) { failures.push({ stage: `rule:${r.id}`, error: error.message }); }
-    }
-    // Built-in catalog fills anything your rules didn't (yours already won above).
-    try { total += await applyBuiltinCatalog(api); }
-    catch (error) { failures.push({ stage: 'catalog', error: error.message }); }
-  });
-  // Rescue misfiled peer settle-ups on every refresh so income never inflates.
-  try {
-    const settleUps = await refileSettleUps({ sync: false });
-    settleUpsMoved = settleUps.moved || 0;
+async function applyRules({
+  sync = true,
+  operationKey = null,
+  journalBinding = null,
+  faultInjector = null,
+} = {}) {
+  const result = await withApi((api) => getBulkOperationSagaManager().run(api, {
+    kind: 'rules_apply',
+    operationKey,
+    journalBinding,
+    params: {},
+    faultInjector,
+    deferSync: !sync,
+  }));
+  if (result.status === 'unresolved') {
+    throw new Error(`categorization outcome unresolved (${result.failed || 0} failed item(s))`);
   }
-  catch (error) { failures.push({ stage: 'settle-ups', error: error.message }); }
-  if ((total || settleUpsMoved) && sync) await syncNow();
-  if (failures.length) throw new Error(`categorization failed in ${failures.length} stage(s)`);
-  return { ok: true, applied: total, settleUpsMoved };
+  if (result.failed) {
+    throw new Error(`categorization failed in ${result.failed} item(s)`);
+  }
+  return {
+    ok: result.ok,
+    needsSync: result.needsSync,
+    applied: result.applied,
+    settleUpsMoved: result.settleUpsMoved || 0,
+    status: result.status,
+    auditOutcome: result.auditOutcome,
+  };
 }
 
 // Force a payee to be treated as recurring even if detection didn't catch it
@@ -4814,6 +4950,9 @@ module.exports = {
   removeSplit,
   sweepReimbursementTags,
   cleanupPhantoms,
+  getBulkOperationResult,
+  proveBulkOperationJournalCompletion,
+  assertBulkOperationJournalAdmission,
   getPhantomLog,
   addReceipt,
   getReceipts,
@@ -4837,6 +4976,7 @@ module.exports = {
   replaceActualTransaction,
   recoverTransactionDeletionSagas,
   recoverRepaymentConfirmationSagas,
+  recoverBulkOperationSagas,
   recoverTransactionSagas,
   getMerchantHistory,
   deleteTransaction,

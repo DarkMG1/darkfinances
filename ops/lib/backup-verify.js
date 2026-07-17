@@ -30,6 +30,7 @@ const SIDECAR_FILES = [
   'review-state.json',
   'rules.json',
   'transaction-deletion-sagas.json',
+  'bulk-operation-sagas.json',
   'repayment-confirmation-sagas.json',
   'transaction-sagas.json',
   'venmo-truth.json',
@@ -123,6 +124,11 @@ function validateSidecar(name, text) {
       assertObject(`${name} months`, data.months);
       break;
     case 'transaction-deletion-sagas.json':
+      assertObject(name, data);
+      if (data.schemaVersion !== 1) throw new Error(`${name} must declare schemaVersion 1`);
+      assertObject(`${name} sagas`, data.sagas);
+      break;
+    case 'bulk-operation-sagas.json':
       assertObject(name, data);
       if (data.schemaVersion !== 1) throw new Error(`${name} must declare schemaVersion 1`);
       assertObject(`${name} sagas`, data.sagas);

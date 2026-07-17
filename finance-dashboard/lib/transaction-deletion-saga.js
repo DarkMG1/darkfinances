@@ -607,6 +607,7 @@ function createTransactionDeletionSaga({
     date,
     transaction,
     faultInjector,
+    bulkDelegation = null,
   }) {
     if (!accountId || !date) throw new Error('accountId and date required');
     const target = deletionTarget(transaction);
@@ -614,7 +615,9 @@ function createTransactionDeletionSaga({
       throw new Error('transaction deletion date does not match the canonical row');
     }
     assertAvailable({ accountId, transaction });
-    if (assertExternalAvailable) assertExternalAvailable({ accountId, transaction });
+    if (assertExternalAvailable) {
+      assertExternalAvailable({ accountId, original: transaction, bulkDelegation });
+    }
     const plan = referencePlan(target.ids);
     const now = new Date().toISOString();
     const saga = {

@@ -16,7 +16,7 @@ for name in \
   owes-truth.json passkey-credentials.json personal-config.json phantom-log.json \
   phantom-seen.json receipts.json reimb-links.json reimb-suggest.json \
   reconciliation.json recurring-overrides.json review-state.json rules.json \
-  operation-journal.json transaction-deletion-sagas.json repayment-confirmation-sagas.json transaction-sagas.json \
+  operation-journal.json transaction-deletion-sagas.json bulk-operation-sagas.json repayment-confirmation-sagas.json transaction-sagas.json \
   venmo-truth.json receipts
 do
   if [ -e "$dashboard/$name" ]; then files+=("$name"); fi

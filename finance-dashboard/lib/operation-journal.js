@@ -334,7 +334,13 @@ class OperationJournal {
           expose: true,
         });
       }
-      return { existing, fingerprint };
+      return {
+        existing,
+        fingerprint: existing.fingerprint,
+        fingerprintVersion: existing.fingerprintVersion,
+        method: existing.method,
+        route: existing.route,
+      };
     }
     const normalized = normalizedRequest(request);
     const fingerprint = requestFingerprint(request);
@@ -352,7 +358,13 @@ class OperationJournal {
       updatedAt: now,
     });
     this.writePruned(state);
-    return { existing: null, fingerprint };
+    return {
+      existing: null,
+      fingerprint,
+      fingerprintVersion: FINGERPRINT_VERSION,
+      method: normalized.method,
+      route: normalized.path,
+    };
   }
 
   localApplied(key, provisionalResult) {
@@ -421,6 +433,55 @@ class OperationJournal {
       completedAt: now,
       updatedAt: now,
       result: durableResult,
+    };
+    this.writePruned(state);
+    return state.operations[key];
+  }
+
+  reconcileFromTerminalProof(key, proof) {
+    const state = this.read();
+    const operation = this.requireVersioned(state, key);
+    if (!proof || proof.result === undefined) {
+      throw transitionError(`Operation ${key} requires terminal proof with a result`);
+    }
+    if (!proof.fingerprint || proof.fingerprint !== operation.fingerprint) {
+      throw transitionError(
+        `Operation ${key} terminal proof fingerprint does not match the journal record`,
+        'OPERATION_RECONCILE_PROOF_INVALID',
+      );
+    }
+    if (proof.fingerprintVersion !== operation.fingerprintVersion) {
+      throw transitionError(
+        `Operation ${key} terminal proof fingerprint version does not match the journal record`,
+        'OPERATION_RECONCILE_PROOF_INVALID',
+      );
+    }
+    const durableResult = cloneDurable(proof.result);
+    if (isCompleted(operation)) {
+      if (equivalent(operation.result, durableResult)) return operation;
+      throw transitionError(
+        `Operation ${key} already completed with a different result`,
+        'OPERATION_TRANSITION_CONFLICT',
+      );
+    }
+    if (isKnownFailed(operation)) {
+      throw transitionError(`Operation ${key} cannot reconcile from terminal proof while failed`);
+    }
+    if (![PHASES.STARTED, PHASES.LOCAL_APPLIED, PHASES.SYNC_UNKNOWN].includes(operation.phase)) {
+      throw transitionError(`Operation ${key} cannot reconcile from ${operation.phase}`);
+    }
+    const now = this.now();
+    state.operations[key] = {
+      ...operation,
+      status: 'completed',
+      phase: PHASES.COMPLETED,
+      completedAt: now,
+      updatedAt: now,
+      result: durableResult,
+      provisionalResult: Object.prototype.hasOwnProperty.call(operation, 'provisionalResult')
+        ? operation.provisionalResult
+        : durableResult,
+      localAppliedAt: operation.localAppliedAt || now,
     };
     this.writePruned(state);
     return state.operations[key];

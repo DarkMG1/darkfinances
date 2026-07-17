@@ -423,3 +423,62 @@ test('malformed terminal layouts cannot bypass legal transitions', (t) => {
     (error) => error.code === 'JSON_INVALID_SHAPE',
   );
 });
+
+test('reconcileFromTerminalProof completes started local_applied and sync_unknown records', (t) => {
+  const journal = fixture(t);
+  const terminal = { ok: true, status: 'completed', applied: 2 };
+  const reqA = request();
+  journal.start('reconcile-started', reqA);
+  const started = journal.get('reconcile-started');
+  journal.reconcileFromTerminalProof('reconcile-started', {
+    result: terminal,
+    fingerprint: started.fingerprint,
+    fingerprintVersion: started.fingerprintVersion,
+  });
+  assert.equal(journal.get('reconcile-started').phase, 'completed');
+  assert.deepEqual(journal.get('reconcile-started').result, terminal);
+
+  journal.start('reconcile-local', request());
+  journal.localApplied('reconcile-local', { ok: false, status: 'in_progress' });
+  const local = journal.get('reconcile-local');
+  journal.reconcileFromTerminalProof('reconcile-local', {
+    result: terminal,
+    fingerprint: local.fingerprint,
+    fingerprintVersion: local.fingerprintVersion,
+  });
+  assert.equal(journal.get('reconcile-local').phase, 'completed');
+  assert.deepEqual(journal.get('reconcile-local').result, terminal);
+
+  journal.start('reconcile-sync', request());
+  journal.localApplied('reconcile-sync', { ok: false, status: 'in_progress' });
+  journal.syncUnknown('reconcile-sync');
+  const sync = journal.get('reconcile-sync');
+  journal.reconcileFromTerminalProof('reconcile-sync', {
+    result: terminal,
+    fingerprint: sync.fingerprint,
+    fingerprintVersion: sync.fingerprintVersion,
+  });
+  assert.equal(journal.get('reconcile-sync').phase, 'completed');
+
+  journal.reconcileFromTerminalProof('reconcile-sync', {
+    result: terminal,
+    fingerprint: sync.fingerprint,
+    fingerprintVersion: sync.fingerprintVersion,
+  });
+  assert.throws(
+    () => journal.reconcileFromTerminalProof('reconcile-started', {
+      result: { ok: false },
+      fingerprint: started.fingerprint,
+      fingerprintVersion: started.fingerprintVersion,
+    }),
+    (error) => error.code === 'OPERATION_TRANSITION_CONFLICT',
+  );
+  assert.throws(
+    () => journal.reconcileFromTerminalProof('reconcile-started', {
+      result: terminal,
+      fingerprint: 'deadbeef'.repeat(8),
+      fingerprintVersion: started.fingerprintVersion,
+    }),
+    (error) => error.code === 'OPERATION_RECONCILE_PROOF_INVALID',
+  );
+});

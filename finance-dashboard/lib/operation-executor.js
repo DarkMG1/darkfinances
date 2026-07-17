@@ -29,12 +29,25 @@ function terminalFailure(operation) {
 }
 
 class OperationContext {
-  constructor(journal, key, onJournalError) {
+  constructor(journal, key, onJournalError, journalBinding = {}) {
     this.journal = journal;
     this.key = key;
     this.onJournalError = onJournalError;
+    this.fingerprint = journalBinding.fingerprint || null;
+    this.fingerprintVersion = journalBinding.fingerprintVersion ?? null;
+    this.method = journalBinding.method || null;
+    this.route = journalBinding.route || null;
     this.phase = PHASES.STARTED;
     this.effectBoundaryCrossed = false;
+  }
+
+  get journalBinding() {
+    return {
+      fingerprint: this.fingerprint,
+      fingerprintVersion: this.fingerprintVersion,
+      method: this.method,
+      route: this.route,
+    };
   }
 
   effectsMayExist() {
@@ -79,6 +92,35 @@ class OperationContext {
   }
 }
 
+async function tryReconcileExistingOperation({
+  journal,
+  key,
+  existing,
+  terminalProofResolver,
+  onJournalError,
+}) {
+  if (!terminalProofResolver || isCompleted(existing) || isKnownFailed(existing)) return null;
+  let proof = null;
+  try {
+    proof = await terminalProofResolver({ key, operation: existing });
+  } catch (error) {
+    if (onJournalError) onJournalError(error, 'reconcile-proof');
+    return null;
+  }
+  if (!proof || proof.result === undefined) return null;
+  let completed;
+  try {
+    completed = journal.reconcileFromTerminalProof(key, proof);
+  } catch (error) {
+    if (onJournalError) onJournalError(error, 'reconcile');
+    throw outcomeUnknown(error);
+  }
+  return {
+    result: completed.result === undefined ? null : completed.result,
+    operation: { key, replayed: true, reconciled: true },
+  };
+}
+
 async function executeJournaledOperation({
   journal,
   key,
@@ -86,9 +128,17 @@ async function executeJournaledOperation({
   handler,
   requiresCheckpoint = true,
   onJournalError,
+  terminalProofResolver,
   knownPreApplyFailure = (error) => error instanceof KnownPreApplyError,
 }) {
-  const { existing } = journal.start(key, request);
+  const admission = journal.start(key, request);
+  const { existing } = admission;
+  const journalBinding = {
+    fingerprint: admission.fingerprint,
+    fingerprintVersion: admission.fingerprintVersion,
+    method: admission.method,
+    route: admission.route,
+  };
   if (existing) {
     if (isCompleted(existing)) {
       return {
@@ -97,14 +147,23 @@ async function executeJournaledOperation({
       };
     }
     if (isKnownFailed(existing)) throw terminalFailure(existing);
+    const reconciled = await tryReconcileExistingOperation({
+      journal,
+      key,
+      existing,
+      terminalProofResolver,
+      onJournalError,
+    });
+    if (reconciled) return reconciled;
     throw outcomeUnknown();
   }
 
-  const context = new OperationContext(journal, key, onJournalError);
+  const context = new OperationContext(journal, key, onJournalError, journalBinding);
   let result;
   try {
     result = await handler(context);
   } catch (error) {
+    if (!context.effectBoundaryCrossed && error?.code === 'IDEMPOTENCY_KEY_REUSED') throw error;
     if (!context.effectBoundaryCrossed && knownPreApplyFailure(error)) {
       let failed;
       try {
@@ -142,4 +201,5 @@ module.exports = {
   executeJournaledOperation,
   outcomeUnknown,
   terminalFailure,
+  tryReconcileExistingOperation,
 };

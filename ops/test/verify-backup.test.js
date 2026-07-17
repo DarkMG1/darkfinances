@@ -43,6 +43,20 @@ test('validateSidecar narrowly validates transaction deletion saga state', () =>
   ));
 });
 
+test('validateSidecar narrowly validates bulk operation saga state', () => {
+  assert.throws(
+    () => validateSidecar(
+      'bulk-operation-sagas.json',
+      JSON.stringify({ schemaVersion: 2, sagas: {} }),
+    ),
+    /schemaVersion 1/,
+  );
+  assert.doesNotThrow(() => validateSidecar(
+    'bulk-operation-sagas.json',
+    JSON.stringify({ schemaVersion: 1, sagas: {} }),
+  ));
+});
+
 test('validateSidecar narrowly validates repayment confirmation saga state', () => {
   assert.throws(
     () => validateSidecar(
