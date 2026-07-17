@@ -17,6 +17,15 @@ legacy `status` never releases that ownership before v2 reconciliation succeeds.
 transactions also require one unique live owner across the Actual account before deletion and again
 before the saved `imported_id` is restored.
 
+Recovery enumerates every Actual account, including closed and off-budget accounts, and queries the
+full date range before acting. Any checkpointed original, replacement, restored, parent, or leg ID
+found outside the saga's recorded account leaves the saga nonterminal with an unknown outcome. The
+same rule applies when an uncheckpointed add is found by its saga-specific temporary replacement or
+restoration identity. Account enumeration or query failure is never interpreted as absence, and no
+cross-account financial-shape match may substitute for exact identity. Ordinary bank `imported_id`
+uniqueness remains scoped to the intended account. Existing record-v2 fingerprints and their canonical
+shape are unchanged.
+
 Rollback records replacement deletion, a separate restoration identity, restored parent/leg IDs,
 replacement-and-original to restored ID mappings, each reference-store write, sync uncertainty, and
 terminal `rolled_back`. Nonterminal records are never pruned; only the newest 100 terminal records are
@@ -26,6 +35,8 @@ Replacement reference migration preserves evidence. Removed legs map to the repl
 retained legs map only to a uniquely proven generated successor, and receipts, reimbursement
 snapshots/amounts, reconciliation, and phantom-seen values are retained while IDs change. Receipt
 bytes are never removed by this workflow; transaction-deletion cleanup belongs to PR-09.
+The deletion workflow is documented in `TRANSACTION_DELETION.md`; active replacement and deletion
+records enforce bidirectional parent/leg ownership before either operation is admitted.
 Reimbursement mappings are validated as one complete plan before the first sidecar write: endpoint
 self-collapses and duplicate mapped link, suggestion, or allocation relationships fail closed and
 enter the checkpointed rollback path without dropping or merging evidence.
@@ -37,7 +48,8 @@ becomes `legacy_unresolved`; recovery performs no date/amount guess and no Actua
 ## Deployment and rollback
 
 Before deployment or rollback, drain mutation traffic, take a verified backup containing Actual state,
-both journals, all reference sidecars, and receipt files, then inventory every v2 `phase`.
+the operation journal, both transaction saga files, all reference sidecars, and receipt files, then
+inventory every v2 replacement `phase` and every deletion `phase`.
 
 The previous server may serve mutations only when every saga is terminal (`completed` or `rolled_back`
 under v2 semantics). Although it safely skips active v2 records, its all-record 100-entry pruning and

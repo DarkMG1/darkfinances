@@ -26,7 +26,13 @@ const {
   todayYMD,
 } = require('./lib/date-only');
 const { readJsonFile, writeJsonFile } = require('./lib/json-store');
-const { rewriteTransactionReferences } = require('./lib/transaction-references');
+const {
+  REFERENCE_STEPS: TRANSACTION_DELETION_REFERENCE_STEPS,
+  rewriteTransactionDeletionReferences,
+} = require('./lib/transaction-deletion-references');
+const {
+  createTransactionDeletionSaga,
+} = require('./lib/transaction-deletion-saga');
 const {
   rewriteTransactionReplacementReferences,
 } = require('./lib/transaction-replacement-references');
@@ -116,6 +122,7 @@ const DEBT_PLANNER_PATH = statePath('debtPlanner');
 const RECON_PATH = statePath('reconciliation');
 const REVIEW_STATE_PATH = statePath('reviewState');
 const TRANSACTION_SAGAS_PATH = statePath('transactionSagas');
+const TRANSACTION_DELETION_SAGAS_PATH = statePath('transactionDeletionSagas');
 const readJsonSafe = (p, fallback, validate) => readJsonFile(p, fallback, validate);
 const writeJsonSafe = (p, obj) => writeJsonFile(p, obj);
 
@@ -146,6 +153,7 @@ async function initApi() {
       await loadBudgetResilient();
       apiReady = true;
       await recoverTransactionSagas(api);
+      await recoverTransactionDeletionSagas(api);
       apiHealth.initializedAt = new Date().toISOString();
       apiHealth.lastError = null;
     } catch (error) {
@@ -201,8 +209,7 @@ async function withApi(fn) {
 async function syncNow() {
   try {
     await initApi();
-    await api.sync();
-    await getTransactionSagaManager().markSynced(api);
+    await syncTransactionSagas(api);
     apiHealth.lastSyncAt = new Date().toISOString();
     apiHealth.lastError = null;
   } catch (error) {
@@ -236,8 +243,22 @@ function resetApi() {
 
 async function shutdownApi() {
   if (apiReady) {
-    await api.sync();
-    if (typeof api.shutdown === 'function') await api.shutdown();
+    let recoveryError = null;
+    let shutdownError = null;
+    try {
+      await syncTransactionSagas(api);
+    } catch (error) {
+      recoveryError = error;
+    }
+    try {
+      if (typeof api.shutdown === 'function') await api.shutdown();
+    } catch (error) {
+      shutdownError = error;
+    }
+    resetApi();
+    if (recoveryError) throw recoveryError;
+    if (shutdownError) throw shutdownError;
+    return;
   }
   resetApi();
 }
@@ -1299,6 +1320,7 @@ function addReimbLink({ inflow, expense, amount, person } = {}) {
   const inf = txnRef(inflow);
   const exp = txnRef(expense);
   if (inf.id === exp.id) throw new Error('cannot link a transaction to itself');
+  assertTransactionMutationAvailable({ ids: [inf.id, exp.id] });
   const alloc = amount == null ? null : fromCents(Math.abs(toCents(amount)));
   const store = readReimbLinks();
   const existing = store.links.find((l) => l.inflow.id === inf.id && l.expense.id === exp.id);
@@ -1313,6 +1335,7 @@ function addReimbLink({ inflow, expense, amount, person } = {}) {
 }
 function deleteReimbLink({ inflowId, expenseId } = {}) {
   if (!inflowId || !expenseId) throw new Error('inflowId and expenseId required');
+  assertTransactionMutationAvailable({ ids: [inflowId, expenseId] });
   const store = readReimbLinks();
   const before = store.links.length;
   store.links = store.links.filter((l) => !(l.inflow.id === inflowId && l.expense.id === expenseId));
@@ -1508,9 +1531,14 @@ async function suggestRepayments({ from, to } = {}) {
 // Re-derives the suggestion so a stale client can't act on a vanished match.
 async function confirmRepayment({ id, from, to } = {}) {
   if (!id) throw new Error('suggestion id required');
+  const requestedInflowId = id.startsWith('sg_') ? id.slice(3) : null;
+  assertTransactionMutationAvailable({ ids: [requestedInflowId] });
   const { suggestions } = await suggestRepayments({ from, to });
   const sg = suggestions.find((s) => s.id === id);
   if (!sg) throw new Error('suggestion no longer valid (already linked or changed) — refresh and retry');
+  assertTransactionMutationAvailable({
+    ids: [sg.inflow.id, ...sg.allocations.map((allocation) => allocation.expense?.id)],
+  });
   await setTransactionCategory({ id: sg.inflow.id, categoryId: reimbCategoryId(await withApi((api) => api.getCategoryGroups())) });
   for (const a of sg.allocations) addReimbLink({ inflow: sg.inflow, expense: a.expense, amount: a.amount, person: sg.person });
   const store = readReimbSuggest();
@@ -1527,6 +1555,7 @@ function reimbCategoryId(groups) {
 function dismissRepayment({ id, inflowId } = {}) {
   const infId = inflowId || (id && id.startsWith('sg_') ? id.slice(3) : null);
   if (!infId) throw new Error('inflowId (or sg_ id) required');
+  assertTransactionMutationAvailable({ ids: [infId] });
   const store = readReimbSuggest();
   if (!store.dismissed.includes(infId)) store.dismissed.push(infId);
   writeReimbSuggest(store);
@@ -1535,6 +1564,7 @@ function dismissRepayment({ id, inflowId } = {}) {
 // Undo a dismissal (lets a suggestion resurface).
 function undismissRepayment({ inflowId } = {}) {
   if (!inflowId) throw new Error('inflowId required');
+  assertTransactionMutationAvailable({ ids: [inflowId] });
   const store = readReimbSuggest();
   store.dismissed = store.dismissed.filter((x) => x !== inflowId);
   writeReimbSuggest(store);
@@ -2051,6 +2081,7 @@ async function getReconciliation({ month } = {}) {
 
 function setReconcileItem({ month, id, reconciled } = {}) {
   if (!month || !id) throw new Error('month and id required');
+  assertTransactionMutationAvailable({ ids: [id] });
   const store = readRecon();
   const m = store.months[month] || (store.months[month] = { done: false, doneAt: null, items: {} });
   if (!m.items || typeof m.items !== 'object') m.items = {};
@@ -2332,9 +2363,9 @@ async function getMerchantHistory({ payee, months = 12 } = {}) {
 // Write: safe split-aware category change
 // ---------------------------------------------------------------------------
 async function setTransactionCategory({ id, categoryId, isLeg, parentId, accountId, date }) {
-  if (isLeg && parentId && accountId) {
-    assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
-  }
+  assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
   return withApi(async (api) => {
     if (!isLeg) {
       // Simple, safe path for non-split transactions.
@@ -3119,6 +3150,7 @@ async function resolvePayeeId(api, name) {
 }
 
 let transactionSagaManager = null;
+let transactionDeletionSagaManager = null;
 const replacementSagaResults = new WeakMap();
 
 function getTransactionSagaManager() {
@@ -3130,17 +3162,93 @@ function getTransactionSagaManager() {
       applyReferenceStep: applyTransactionReferenceStep,
       referencesConverged: transactionReferencesConverged,
       referenceSteps: TRANSACTION_REFERENCE_STEPS,
+      assertExternalAvailable: ({ accountId, original }) => {
+        getTransactionDeletionSagaManager().assertAvailable({ accountId, transaction: original });
+      },
     });
   }
   return transactionSagaManager;
+}
+
+function getTransactionDeletionSagaManager() {
+  if (!transactionDeletionSagaManager) {
+    transactionDeletionSagaManager = createTransactionDeletionSaga({
+      sagaPath: TRANSACTION_DELETION_SAGAS_PATH,
+      planReferences: planTransactionReferenceDeletion,
+      applyReferenceStep: applyTransactionDeletionReferenceStep,
+      referencesConverged: transactionDeletionReferencesConverged,
+      referenceSteps: TRANSACTION_DELETION_REFERENCE_STEPS,
+      receiptFileState: transactionDeletionReceiptFileState,
+      unlinkReceiptFile: unlinkTransactionDeletionReceiptFile,
+      assertExternalAvailable: ({ accountId, transaction }) => {
+        getTransactionSagaManager().assertAvailable({ accountId, original: transaction });
+      },
+    });
+  }
+  return transactionDeletionSagaManager;
 }
 
 async function recoverTransactionSagas(actualApi, options) {
   return getTransactionSagaManager().recover(actualApi, options);
 }
 
-function assertTransactionReplacementAvailable({ accountId, ids } = {}) {
-  getTransactionSagaManager().assertAvailable({ accountId, ids });
+async function recoverTransactionDeletionSagas(actualApi, options) {
+  return getTransactionDeletionSagaManager().recover(actualApi, options);
+}
+
+async function markTransactionSagasSynced(actualApi) {
+  let firstError = null;
+  for (const manager of [getTransactionSagaManager(), getTransactionDeletionSagaManager()]) {
+    try {
+      await manager.markSynced(actualApi);
+    } catch (error) {
+      firstError ||= error;
+    }
+  }
+  if (firstError) throw firstError;
+}
+
+async function driveTransactionSagasForSync(actualApi) {
+  let needsSync = false;
+  const errors = [];
+  for (const manager of [getTransactionSagaManager(), getTransactionDeletionSagaManager()]) {
+    try {
+      const result = await manager.recover(actualApi, { deferSync: true });
+      needsSync ||= Boolean(result?.needsSync);
+      for (const entry of result?.errors || []) errors.push(entry);
+    } catch (error) {
+      errors.push({ sagaId: null, error });
+    }
+  }
+  return { needsSync, errors };
+}
+
+async function syncTransactionSagas(actualApi) {
+  const recovery = await driveTransactionSagasForSync(actualApi);
+  await actualApi.sync();
+
+  let terminalError = null;
+  try {
+    await markTransactionSagasSynced(actualApi);
+  } catch (error) {
+    terminalError = error;
+  }
+  if (terminalError) throw terminalError;
+  if (recovery.errors.length) throw recovery.errors[0].error;
+  return { needsSync: recovery.needsSync };
+}
+
+function assertTransactionMutationAvailable({ accountId, ids, transaction } = {}) {
+  getTransactionSagaManager().assertAvailable({ accountId, ids, original: transaction });
+  getTransactionDeletionSagaManager().assertAvailable({ accountId, ids, transaction });
+}
+
+function assertTransactionReplacementAvailable(options) {
+  assertTransactionMutationAvailable(options);
+}
+
+function assertTransactionDeletionAvailable(options) {
+  assertTransactionMutationAvailable(options);
 }
 
 async function assertTransactionImportedIdentityAvailable(api, { accountId, original }) {
@@ -3258,7 +3366,7 @@ async function splitTransaction({ id, accountId, date, legs } = {}) {
     if (cents === 0) throw new Error('each leg needs a non-zero amount');
     return { id: l.id || null, cents, categoryId: l.categoryId || null, name: (l.name || '').trim(), notes: (l.notes || '').trim() };
   });
-  assertTransactionReplacementAvailable({ accountId, ids: [id, ...norm.map((leg) => leg.id)] });
+  assertTransactionMutationAvailable({ ids: [id, ...norm.map((leg) => leg.id)] });
   return withApi(async (api) => {
     const txns = await api.getTransactions(accountId, date, date);
     const target = txns.find((t) => t.id === id);
@@ -3334,6 +3442,10 @@ async function reconcileSplitDeltas(api, { months = 3, apply = false } = {}) {
         payee: s.payee || undefined,
       }));
       try {
+        assertTransactionMutationAvailable({
+          accountId: a.id,
+          ids: [t.id, ...t.subtransactions.map((leg) => leg.id)],
+        });
         const replacement = addableTransaction(t, { category: undefined, subtransactions: subs });
         await replaceActualTransaction(api, {
           accountId: a.id,
@@ -3407,6 +3519,10 @@ async function sweepReimbursementTags({ tags, from, to } = {}) {
             };
           });
           if (changed) {
+            assertTransactionMutationAvailable({
+              accountId: a.id,
+              ids: [t.id, ...t.subtransactions.map((leg) => leg.id)],
+            });
             const replacement = addableTransaction(t, { category: undefined, subtransactions: subs });
             await replaceActualTransaction(api, {
               accountId: a.id,
@@ -3417,6 +3533,7 @@ async function sweepReimbursementTags({ tags, from, to } = {}) {
           }
         } else if (!t.is_parent) {
           if (t.amount < 0 && isSpendKind(t.category) && hasTargetTag(t.notes)) {
+            assertTransactionMutationAvailable({ accountId: a.id, ids: [t.id] });
             await api.updateTransaction(t.id, { category: reimbId });
             moved.push({ id: t.id, amount: d2(t.amount), leg: false });
           }
@@ -3486,6 +3603,7 @@ async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, h
 
       for (const p of pendings) {
         const id = String(p.id);
+        if (!dryRun) assertTransactionMutationAvailable({ accountId: acct.id, ids: [id] });
         liveIds.add(id);
         const amt = d2(p.amount);
         const payee = nameOf(p);
@@ -3530,7 +3648,11 @@ async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, h
     }
 
     // Forget ledger entries whose transaction is gone (cleared or removed).
-    for (const id of Object.keys(store.seen)) if (!liveIds.has(id) && !deleted.some((d) => d.id === id)) delete store.seen[id];
+    for (const id of Object.keys(store.seen)) {
+      if (liveIds.has(id) || deleted.some((d) => d.id === id)) continue;
+      if (!dryRun) assertTransactionMutationAvailable({ ids: [id] });
+      delete store.seen[id];
+    }
 
     if (!dryRun) {
       writeJsonSafe(PHANTOM_SEEN_PATH, store);
@@ -3580,9 +3702,19 @@ function decodeImageBase64(value) {
 
 // Persist a scanned receipt. `imageBase64` is the raw (optionally data-URI-prefixed)
 // image; OCR text/lines + a guessed total/date are stored for search + display.
-function addReceipt({ txnId, imageBase64, mime, ocrText, ocrLines, amount, date, source } = {}) {
+function addReceipt({
+  txnId,
+  imageBase64,
+  mime,
+  ocrText,
+  ocrLines,
+  amount,
+  date,
+  source,
+} = {}) {
   if (!txnId) throw new Error('txnId required');
   if (!imageBase64) throw new Error('imageBase64 required');
+  assertTransactionMutationAvailable({ ids: [txnId] });
   const normalizedAmount = amount == null ? null : fromCents(toCents(amount));
   const buf = decodeImageBase64(imageBase64);
   if (buf.length > 25 * 1024 * 1024) throw new Error('image too large (max 25MB)');
@@ -3648,6 +3780,16 @@ function getReceipts({ txnId } = {}) {
   for (const list of Object.values(store.byTxn)) for (const r of list) all.push(publicReceipt(r));
   return { receipts: all };
 }
+function assertReceiptMutationAvailable({ id } = {}) {
+  if (!id) throw new Error('id required');
+  const store = readReceipts();
+  for (const [txnId, receipts] of Object.entries(store.byTxn)) {
+    const receipt = receipts.find((candidate) => candidate.id === id);
+    if (!receipt) continue;
+    assertTransactionMutationAvailable({ ids: [txnId, receipt.txnId] });
+    return;
+  }
+}
 // Resolve a receipt id to its on-disk file for streaming.
 function getReceiptFile({ id } = {}) {
   if (!id) return null;
@@ -3663,6 +3805,7 @@ function getReceiptFile({ id } = {}) {
 }
 function deleteReceipt({ id } = {}) {
   if (!id) throw new Error('id required');
+  assertReceiptMutationAvailable({ id });
   const store = readReceipts();
   let removed = null;
   for (const [txn, list] of Object.entries(store.byTxn)) {
@@ -3694,6 +3837,95 @@ function safeReceiptPath(file) {
   const resolved = path.resolve(RECEIPTS_DIR, file);
   if (path.dirname(resolved) !== path.resolve(RECEIPTS_DIR)) throw new Error('invalid receipt file path');
   return resolved;
+}
+
+function isStateObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readTransactionDeletionReferenceStores() {
+  return {
+    receipts: readJsonSafe(
+      RECEIPTS_PATH,
+      { byTxn: {} },
+      (value) => isStateObject(value)
+        && isStateObject(value.byTxn)
+        && Object.values(value.byTxn).every(Array.isArray),
+    ),
+    links: readJsonSafe(
+      REIMB_LINKS_PATH,
+      { links: [] },
+      (value) => isStateObject(value) && Array.isArray(value.links),
+    ),
+    suggestions: readJsonSafe(
+      REIMB_SUGGEST_PATH,
+      { confirmed: {}, dismissed: [] },
+      (value) => isStateObject(value)
+        && isStateObject(value.confirmed)
+        && Array.isArray(value.dismissed),
+    ),
+    reconciliation: readJsonSafe(
+      RECON_PATH,
+      { enabled: false, months: {} },
+      (value) => isStateObject(value) && isStateObject(value.months),
+    ),
+    phantomSeen: readJsonSafe(
+      PHANTOM_SEEN_PATH,
+      { seen: {} },
+      (value) => isStateObject(value) && isStateObject(value.seen),
+    ),
+  };
+}
+
+function planTransactionReferenceDeletion(targetIds) {
+  const result = rewriteTransactionDeletionReferences(
+    readTransactionDeletionReferenceStores(),
+    targetIds,
+  );
+  for (const file of result.receiptFilesToDelete) safeReceiptPath(file);
+  return {
+    stats: result.stats,
+    receiptFilesToDelete: result.receiptFilesToDelete,
+  };
+}
+
+function applyTransactionDeletionReferenceStep(step, targetIds, _plan) {
+  const current = readTransactionDeletionReferenceStores();
+  const next = rewriteTransactionDeletionReferences(current, targetIds).stores[step];
+  const destinations = {
+    receipts: RECEIPTS_PATH,
+    links: REIMB_LINKS_PATH,
+    suggestions: REIMB_SUGGEST_PATH,
+    reconciliation: RECON_PATH,
+    phantomSeen: PHANTOM_SEEN_PATH,
+  };
+  if (!destinations[step]) throw new Error(`unknown transaction deletion reference step: ${step}`);
+  if (JSON.stringify(current[step]) !== JSON.stringify(next)) {
+    writeJsonSafe(destinations[step], next);
+  }
+}
+
+function transactionDeletionReferencesConverged(targetIds, _plan) {
+  const current = readTransactionDeletionReferenceStores();
+  const rewritten = rewriteTransactionDeletionReferences(current, targetIds);
+  return TRANSACTION_DELETION_REFERENCE_STEPS.every(
+    (step) => JSON.stringify(current[step]) === JSON.stringify(rewritten.stores[step]),
+  );
+}
+
+function transactionDeletionReceiptFileState(file) {
+  const resolved = safeReceiptPath(file);
+  const receipts = readTransactionDeletionReferenceStores().receipts;
+  const referenced = Object.values(receipts.byTxn)
+    .some((list) => list.some((receipt) => receipt?.file === file));
+  return { exists: fs.existsSync(resolved), referenced };
+}
+
+function unlinkTransactionDeletionReceiptFile(file) {
+  const state = transactionDeletionReceiptFileState(file);
+  if (state.referenced) throw new Error('refusing to delete a referenced receipt file');
+  const resolved = safeReceiptPath(file);
+  if (fs.existsSync(resolved)) fs.unlinkSync(resolved);
 }
 
 function readTransactionReferenceStores() {
@@ -3746,49 +3978,10 @@ function transactionReferencesConverged(idMap, _plan) {
   return true;
 }
 
-function updateTransactionReferences(idMap) {
-  const before = readTransactionReferenceStores();
-  const result = rewriteTransactionReferences(before, idMap);
-  const writes = [
-    [RECEIPTS_PATH, before.receipts, result.stores.receipts],
-    [REIMB_LINKS_PATH, before.links, result.stores.links],
-    [REIMB_SUGGEST_PATH, before.suggestions, result.stores.suggestions],
-    [RECON_PATH, before.reconciliation, result.stores.reconciliation],
-    [PHANTOM_SEEN_PATH, before.phantomSeen, result.stores.phantomSeen],
-  ].filter(([, previous, next]) => JSON.stringify(previous) !== JSON.stringify(next));
-
-  const movedFiles = [];
-  for (const file of result.receiptFilesToDelete) {
-    const source = safeReceiptPath(file);
-    if (!fs.existsSync(source)) continue;
-    const trash = `${source}.pending-delete-${process.pid}-${Date.now()}`;
-    fs.renameSync(source, trash);
-    movedFiles.push([source, trash]);
-  }
-
-  const written = [];
-  try {
-    for (const [file, previous, next] of writes) {
-      writeJsonSafe(file, next);
-      written.push([file, previous]);
-    }
-    for (const [, trash] of movedFiles) fs.unlinkSync(trash);
-    return result.stats;
-  } catch (error) {
-    for (const [file, previous] of written.reverse()) {
-      try { writeJsonSafe(file, previous); } catch (_) {}
-    }
-    for (const [source, trash] of movedFiles) {
-      try { if (fs.existsSync(trash)) fs.renameSync(trash, source); } catch (_) {}
-    }
-    throw error;
-  }
-}
-
 // Collapse a split back into a single plain transaction (RM's "remove split").
 // delete + re-add as a simple row so we never hit the unsafe in-place unsplit path.
 async function removeSplit({ id, accountId, date, categoryId } = {}) {
-  if (accountId && id) assertTransactionReplacementAvailable({ accountId, ids: [id] });
+  assertTransactionMutationAvailable({ ids: [id] });
   return withApi(async (api) => {
     if (!accountId || !date) throw new Error('accountId and date required');
     const txns = await api.getTransactions(accountId, date, date);
@@ -3819,26 +4012,42 @@ async function removeSplit({ id, accountId, date, categoryId } = {}) {
 // The automated phantom cleanup passes allowImported=true to remove stale pending
 // charges that fell off the feed. Every caller must still provide account + date
 // so authorization and sidecar cleanup are based on the canonical ledger row.
-async function deleteTransaction({ id, accountId, date, allowImported = false } = {}) {
+async function deleteTransaction({
+  id,
+  accountId,
+  date,
+  allowImported = false,
+  faultInjector,
+} = {}) {
   if (!id) throw new Error('id required');
   if (!accountId || !date) throw new Error('accountId and date required');
+  assertTransactionDeletionAvailable({ ids: [id] });
   return withApi(async (api) => {
     const txns = await api.getTransactions(accountId, date, date);
     let transaction = txns.find((item) => String(item.id) === String(id));
     if (!transaction) throw new Error('transaction not found');
     if (transaction.parent_id) {
       if (!allowImported) throw new Error('split legs cannot be deleted independently');
-      transaction = txns.find((item) => item.id === transaction.parent_id) || transaction;
+      const parent = txns.find(
+        (item) => String(item.id) === String(transaction.parent_id),
+      );
+      if (!parent) throw new Error('split parent not found');
+      transaction = parent;
     }
     if (!allowImported && transaction.imported_id) {
       throw new Error('Bank-imported transactions can’t be deleted — only ones you added manually.');
     }
-    readTransactionReferenceStores(); // fail before touching Actual if sidecars are unreadable
-    await api.deleteTransaction(transaction.id);
-    const idMap = { [String(transaction.id)]: null };
-    for (const leg of transaction.subtransactions || []) idMap[String(leg.id)] = null;
-    const references = updateTransactionReferences(idMap);
-    return { ok: true, deleted: String(transaction.id), references };
+    const ids = [
+      String(transaction.id),
+      ...(transaction.subtransactions || []).map((leg) => String(leg.id)),
+    ];
+    assertTransactionDeletionAvailable({ ids, transaction });
+    return getTransactionDeletionSagaManager().remove(api, {
+      accountId,
+      date,
+      transaction,
+      faultInjector,
+    });
   });
 }
 
@@ -3846,9 +4055,9 @@ async function deleteTransaction({ id, accountId, date, allowImported = false } 
 // (find-or-create); Actual keeps imported_payee + imported_id untouched so the
 // original bank description and future matching are preserved. Blank name clears it.
 async function setPayee({ id, payee, isLeg, parentId, accountId, date } = {}) {
-  if (isLeg && parentId && accountId) {
-    assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
-  }
+  assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
   return withApi(async (api) => {
     if (!isLeg) {
       const payeeId = await resolvePayeeId(api, payee);
@@ -3914,6 +4123,7 @@ async function applyRuleToTxns(api, rule, { months = 24 } = {}) {
       if (t.category) continue; // only uncategorized
       const name = (pn[t.payee] || t.imported_payee || '').toLowerCase();
       if (!name.includes(needle)) continue;
+      assertTransactionMutationAvailable({ accountId: a.id, ids: [t.id] });
       await api.updateTransaction(t.id, { category: rule.categoryId });
       applied++;
     }
@@ -3970,6 +4180,7 @@ async function refileSettleUps({ sync = true } = {}) {
         if (!meta || meta.kind !== 'income') continue; // only rescue misfiled income
         const hay = `${pn[t.payee] || t.imported_payee || ''} ${t.notes || ''}`;
         if (!SETTLE_UP_PAYEE.test(hay)) continue;
+        assertTransactionMutationAvailable({ accountId: a.id, ids: [t.id] });
         await api.updateTransaction(t.id, { category: reimbId });
         moved++;
       }
@@ -4088,11 +4299,21 @@ async function syncSplitwiseShareExpenses({ sync = true } = {}) {
         await api.addTransactions(acctId, [{ date: (it.date || todayYMD()).slice(0, 10), amount: amtCents, category: catId, notes, cleared: true }], { learnCategories: false, runTransfers: false });
         created++;
       } else if (ex.amount !== amtCents || (catId && ex.category !== catId)) {
+        assertTransactionMutationAvailable({ accountId: acctId, ids: [ex.id] });
         await api.updateTransaction(ex.id, { amount: amtCents, category: catId || ex.category || null });
         updated++;
       }
     }
-    for (const [id, t] of Object.entries(byTag)) if (!wanted.has(id)) { await api.deleteTransaction(t.id); pruned++; }
+    for (const [id, t] of Object.entries(byTag)) {
+      if (wanted.has(id)) continue;
+      await deleteTransaction({
+        id: t.id,
+        accountId: acctId,
+        date: t.date,
+        allowImported: true,
+      });
+      pruned++;
+    }
     if (sync) await syncNow();
     return { ok: true, account: SW_ACCOUNT_NAME, items: items.length, created, updated, pruned };
   });
@@ -4163,6 +4384,7 @@ async function applyBuiltinCatalog(api, { months = 24 } = {}) {
         if (entry.type === 'income' ? !(t.amount > 0) : !(t.amount < 0)) continue; // sign guard
         const cat = typeCat[entry.type];
         if (!cat) break;
+        assertTransactionMutationAvailable({ accountId: a.id, ids: [t.id] });
         await api.updateTransaction(t.id, { category: cat });
         applied++;
         break;
@@ -4215,9 +4437,9 @@ function markRecurring({ payee, isBill } = {}) {
 // Write: safe split-aware notes change (mirrors setTransactionCategory)
 // ---------------------------------------------------------------------------
 async function setTransactionNotes({ id, notes, isLeg, parentId, accountId, date }) {
-  if (isLeg && parentId && accountId) {
-    assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
-  }
+  assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
   return withApi(async (api) => {
     if (!isLeg) {
       await api.updateTransaction(id, { notes: notes || null });
@@ -4259,6 +4481,7 @@ async function setTransactionNotes({ id, notes, isLeg, parentId, accountId, date
 async function setTransactionDate({ id, date, isLeg }) {
   if (isLeg) throw new Error('A split leg inherits its parent’s date — move the parent instead.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) throw new Error('date must be YYYY-MM-DD');
+  assertTransactionMutationAvailable({ ids: [id] });
   return withApi(async (api) => {
     await api.updateTransaction(id, { date });
     return { ok: true, date };
@@ -4509,6 +4732,7 @@ module.exports = {
   addReceipt,
   getReceipts,
   getReceiptFile,
+  assertReceiptMutationAvailable,
   deleteReceipt,
   getReimbursementLedger,
   getReconciliation,
@@ -4520,9 +4744,12 @@ module.exports = {
   SagaInterruption,
   addableTransaction,
   assertReconstructableTransaction,
+  assertTransactionDeletionAvailable,
+  assertTransactionMutationAvailable,
   assertTransactionReplacementAvailable,
   transactionReplacementMap,
   replaceActualTransaction,
+  recoverTransactionDeletionSagas,
   recoverTransactionSagas,
   getMerchantHistory,
   deleteTransaction,

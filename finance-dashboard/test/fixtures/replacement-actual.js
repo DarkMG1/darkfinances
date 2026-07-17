@@ -2,13 +2,21 @@
 
 let rows = [];
 let payees = [];
+let accounts = [];
 let sequence = 0;
 let createPayeeCalls = 0;
 let syncError = null;
 
-function configure({ transactions, payeeRows = [] }) {
+function configure({ transactions, payeeRows = [], accountRows = null }) {
   rows = structuredClone(transactions || []);
   payees = structuredClone(payeeRows);
+  accounts = accountRows
+    ? structuredClone(accountRows)
+    : [...new Set(rows.map((row) => String(row.account || 'account')))]
+      .map((id) => ({ id, name: id, closed: false, offbudget: false }));
+  if (!accounts.length) {
+    accounts = [{ id: 'account', name: 'account', closed: false, offbudget: false }];
+  }
   sequence = 0;
   createPayeeCalls = 0;
   syncError = null;
@@ -18,6 +26,7 @@ function inspect() {
   return {
     rows: structuredClone(rows),
     payees: structuredClone(payees),
+    accounts: structuredClone(accounts),
     createPayeeCalls,
   };
 }
@@ -28,6 +37,9 @@ async function sync() {
   if (syncError) throw syncError;
 }
 async function shutdown() {}
+async function getAccounts() {
+  return structuredClone(accounts);
+}
 
 function setSyncError(error) {
   syncError = error;
@@ -81,6 +93,7 @@ module.exports = {
   createPayee,
   deleteTransaction,
   downloadBudget,
+  getAccounts,
   getPayees,
   getTransactions,
   init,

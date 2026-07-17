@@ -22,15 +22,72 @@ test('validateSidecar enforces owes-truth schema version', () => {
   })));
 });
 
-test('validateReceiptReferences requires receipt files to exist', () => {
+test('validateSidecar narrowly validates transaction deletion saga state', () => {
+  assert.throws(
+    () => validateSidecar(
+      'transaction-deletion-sagas.json',
+      JSON.stringify({ schemaVersion: 2, sagas: {} }),
+    ),
+    /schemaVersion 1/,
+  );
+  assert.throws(
+    () => validateSidecar(
+      'transaction-deletion-sagas.json',
+      JSON.stringify({ schemaVersion: 1, sagas: [] }),
+    ),
+    /sagas must be an object/,
+  );
+  assert.doesNotThrow(() => validateSidecar(
+    'transaction-deletion-sagas.json',
+    JSON.stringify({ schemaVersion: 1, sagas: {} }),
+  ));
+});
+
+test('validateReceiptReferences supports live and legacy metadata shapes', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-receipts-'));
   fs.mkdirSync(path.join(root, 'receipts'));
   fs.writeFileSync(path.join(root, 'receipts', 'one.jpg'), 'image');
   assert.throws(
-    () => validateReceiptReferences([{ path: 'receipts/missing.jpg' }], root),
+    () => validateReceiptReferences({
+      byTxn: { txn: [{ id: 'missing', txnId: 'txn', file: 'missing.jpg' }] },
+    }, root),
     /missing receipt file/
   );
+  assert.doesNotThrow(() => validateReceiptReferences({
+    schemaVersion: 1,
+    unknown: { keep: true },
+    byTxn: { txn: [{ id: 'r1', txnId: 'txn', file: 'one.jpg' }] },
+  }, root));
   assert.doesNotThrow(() => validateReceiptReferences([{ path: 'receipts/one.jpg' }], root));
+  assert.throws(
+    () => validateReceiptReferences({
+      byTxn: { txn: [{ id: 'unsafe', txnId: 'txn', file: '../one.jpg' }] },
+    }, root),
+    /unsafe receipt path/
+  );
+});
+
+test('validateSidecar accepts live deletion-reference store shapes', () => {
+  assert.doesNotThrow(() => validateSidecar(
+    'receipts.json',
+    JSON.stringify({ schemaVersion: 1, byTxn: { txn: [] }, unknown: true }),
+  ));
+  assert.doesNotThrow(() => validateSidecar(
+    'reimb-links.json',
+    JSON.stringify({ schemaVersion: 1, links: [], unknown: true }),
+  ));
+  assert.doesNotThrow(() => validateSidecar(
+    'reimb-suggest.json',
+    JSON.stringify({ schemaVersion: 1, confirmed: {}, dismissed: [], unknown: true }),
+  ));
+  assert.doesNotThrow(() => validateSidecar(
+    'reconciliation.json',
+    JSON.stringify({ schemaVersion: 1, enabled: false, months: {}, unknown: true }),
+  ));
+  assert.doesNotThrow(() => validateSidecar(
+    'phantom-seen.json',
+    JSON.stringify({ schemaVersion: 1, seen: {}, unknown: true }),
+  ));
 });
 
 test('verify-backup accepts archives with embedded manifest and checksums', (t) => {
@@ -40,7 +97,17 @@ test('verify-backup accepts archives with embedded manifest and checksums', (t) 
   const destination = path.join(root, 'backups');
   fs.mkdirSync(path.join(dashboard, 'receipts'), { recursive: true });
   fs.writeFileSync(path.join(dashboard, 'goals.json'), '[]\n');
-  fs.writeFileSync(path.join(dashboard, 'receipts.json'), '[{"id":"r1","path":"receipts/one.jpg"}]\n');
+  fs.writeFileSync(
+    path.join(dashboard, 'receipts.json'),
+    '{"schemaVersion":1,"byTxn":{"txn":[{"id":"r1","txnId":"txn","file":"one.jpg"}]}}\n',
+  );
+  fs.writeFileSync(path.join(dashboard, 'reimb-links.json'), '{"links":[]}\n');
+  fs.writeFileSync(
+    path.join(dashboard, 'reimb-suggest.json'),
+    '{"confirmed":{},"dismissed":[]}\n',
+  );
+  fs.writeFileSync(path.join(dashboard, 'reconciliation.json'), '{"enabled":false,"months":{}}\n');
+  fs.writeFileSync(path.join(dashboard, 'phantom-seen.json'), '{"seen":{}}\n');
   fs.writeFileSync(path.join(dashboard, 'receipts', 'one.jpg'), 'image');
 
   const backupScript = path.resolve(__dirname, '..', 'bin', 'backup-dashboard-runtime.sh');
@@ -59,7 +126,15 @@ test('verify-backup accepts archives with embedded manifest and checksums', (t) 
   const manifest = buildManifest({
     dashboardDir: dashboard,
     archivePath: archive,
-    files: ['goals.json', 'receipts.json', 'receipts'],
+    files: [
+      'goals.json',
+      'receipts.json',
+      'reimb-links.json',
+      'reimb-suggest.json',
+      'reconciliation.json',
+      'phantom-seen.json',
+      'receipts',
+    ],
   });
   assert.equal(manifest.kind, 'darkfinances-dashboard-runtime-backup');
   assert.match(manifest.recovery.postRestoreChecks.join(' '), /ping/);

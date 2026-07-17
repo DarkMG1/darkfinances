@@ -194,6 +194,7 @@ Depending on enabled features, runtime state can include:
 - `receipts.json` and `receipts/`
 - rules, reconciliation, reimbursement-link, override, and goal stores
 - `review-state.json` and `operation-journal.json`
+- `transaction-sagas.json` and `transaction-deletion-sagas.json`
 - `passkey-credentials.json` and `.sessions/`
 
 These files may contain sensitive financial or identity information. Keep them private and never commit
@@ -211,7 +212,8 @@ npm run lint
 ```
 
 The tests cover request security, enrollment, demo isolation, schemas, dates, reports, snapshot
-validation, JSON recovery, serial execution, and transaction replacement/rollback.
+validation, JSON recovery, serial execution, transaction replacement/rollback, and crash-convergent
+transaction deletion.
 
 For a destructive mutation smoke test, use an isolated Actual clone only:
 
