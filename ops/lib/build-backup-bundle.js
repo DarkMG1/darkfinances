@@ -26,6 +26,8 @@ const {
   runtimeArtifactId,
   assertRequiredStoresOnDisk,
 } = require('./backup-bundle-manifest');
+const { buildGenerationBinding, embedActiveGenerationBindingsForBuild } = require('./restore-generation-binding');
+const { generationBindingArtifactId } = require('./generation-binding-artifact');
 const { assertSafeRelativePath } = require('./backup-bundle-verify');
 const { sha256File } = require('./backup-verify');
 
@@ -107,18 +109,24 @@ function buildManifest({
   provenance = {},
 }) {
   const archiveName = path.basename(archivePath);
+  const generationId = generationBindingArtifactId({
+    runtimeRoot: path.join(stagingRoot, RUNTIME_PREFIX.slice(0, -1)),
+    runtimeEntries,
+    inventory,
+  });
   return {
     kind: BUNDLE_KIND,
     schemaVersion: BUNDLE_SCHEMA_VERSION,
     createdAt: new Date().toISOString(),
     artifact: {
-      id: runtimeArtifactId(runtimeEntries),
+      id: generationId,
       bundleName: archiveName,
     },
     provenance: {
       sourceCommit: provenance.sourceCommit ?? gitCommit(),
       releaseManifestDigest: provenance.releaseManifestDigest ?? null,
       runtimeBackupManifestDigest: provenance.runtimeBackupManifestDigest ?? null,
+      actualDataGeneration: provenance.actualDataGeneration ?? null,
       dashboardRelative: 'runtime',
     },
     runtimeState: {
@@ -126,6 +134,23 @@ function buildManifest({
       inventoryDigest: inventoryDigest(inventory),
       storeCount: inventory.storeCount,
     },
+    generationBinding: buildGenerationBinding({
+      kind: BUNDLE_KIND,
+      schemaVersion: BUNDLE_SCHEMA_VERSION,
+      artifact: { id: generationId },
+      provenance: {
+        sourceCommit: provenance.sourceCommit ?? gitCommit(),
+        releaseManifestDigest: provenance.releaseManifestDigest ?? null,
+        actualDataGeneration: provenance.actualDataGeneration ?? null,
+      },
+      runtimeState: {
+        inventoryDigest: inventoryDigest(inventory),
+      },
+      files: runtimeEntries,
+    }, provenance, {
+      runtimeRoot: path.join(stagingRoot, RUNTIME_PREFIX.slice(0, -1)),
+      inventory,
+    }),
     restoreTooling: {
       nodeEngine: SUPPORTED_NODE_ENGINE,
       verifyEntrypoint: VERIFY_ENTRYPOINT,
@@ -154,6 +179,7 @@ function buildBackupBundle({
   dashboardDir,
   archivePath,
   provenance = {},
+  embedGenerationBindings = true,
 }) {
   if (!dashboardDir || !archivePath) {
     throw new Error('dashboardDir and archivePath are required');
@@ -161,6 +187,12 @@ function buildBackupBundle({
 
   const inventory = loadBackupStateInventory();
   const stagingRoot = fs.mkdtempSync(path.join(require('os').tmpdir(), 'darkfinances-bundle-build-'));
+  const resolvedProvenance = {
+    sourceCommit: provenance.sourceCommit ?? gitCommit(),
+    releaseManifestDigest: provenance.releaseManifestDigest ?? null,
+    runtimeBackupManifestDigest: provenance.runtimeBackupManifestDigest ?? null,
+    actualDataGeneration: provenance.actualDataGeneration ?? null,
+  };
   try {
     const runtimeRoot = path.join(stagingRoot, RUNTIME_PREFIX.slice(0, -1));
     fs.mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
@@ -197,6 +229,14 @@ function buildBackupBundle({
 
     assertRequiredStoresOnDisk(runtimeRoot, inventory);
 
+    if (embedGenerationBindings) {
+      embedActiveGenerationBindingsForBuild({
+        runtimeRoot,
+        inventory,
+        provenance: resolvedProvenance,
+      });
+    }
+
     const toolingRoot = path.join(stagingRoot, 'tooling');
     fs.mkdirSync(toolingRoot, { recursive: true, mode: 0o700 });
     const copiedTooling = copyBundleTooling({ destinationRoot: stagingRoot });
@@ -208,7 +248,7 @@ function buildBackupBundle({
       toolingFiles: copiedTooling,
       stagingRoot,
       inventory,
-      provenance,
+      provenance: resolvedProvenance,
     });
 
     fs.mkdirSync(path.dirname(archivePath), { recursive: true, mode: 0o700 });

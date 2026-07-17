@@ -8,10 +8,14 @@ const {
   VERIFY_ENTRYPOINT,
   SUPPORTED_NODE_ENGINE,
 } = require('./backup-bundle-schema');
+const { generationBindingArtifactId } = require('./generation-binding-artifact');
 
 function toolingSourceRelativeFromBundlePath(bundlePath) {
   if (bundlePath === 'tooling/ops/bin/verify-backup-bundle.js') {
     return 'ops/lib/verify-backup-bundle-standalone.js';
+  }
+  if (bundlePath === 'tooling/ops/bin/restore-dashboard-runtime.js') {
+    return 'ops/lib/staged-restore-cli.js';
   }
   if (!bundlePath.startsWith('tooling/')) {
     throw new Error(`expected tooling bundle path: ${bundlePath}`);
@@ -72,12 +76,17 @@ function assertRequiredStoresOnDisk(runtimeRoot, inventory) {
   }
 }
 
-function assertManifestProvenanceFields(manifest, bundleRoot) {
+function assertManifestProvenanceFields(manifest, bundleRoot, inventory) {
   const manifestPaths = new Set(manifest.files.map((entry) => entry.path));
   const runtimeEntries = runtimeEntriesFromManifest(manifest);
   const toolingFiles = toolingEntriesFromManifest(manifest).map((entry) => entry.path);
+  const runtimeRoot = path.join(bundleRoot, RUNTIME_PREFIX.slice(0, -1));
 
-  const expectedArtifactId = runtimeArtifactId(runtimeEntries);
+  const expectedArtifactId = generationBindingArtifactId({
+    runtimeRoot,
+    runtimeEntries,
+    inventory,
+  });
   if (manifest.artifact.id !== expectedArtifactId) {
     throw new Error('manifest.artifact.id mismatch');
   }

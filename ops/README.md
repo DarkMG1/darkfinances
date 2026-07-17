@@ -313,27 +313,46 @@ install -m 700 ops/bin/restore-dashboard-runtime.sh \
   "$HOME/.local/bin/restore-dashboard-runtime.sh"
 ```
 
-Preview first:
+Preview first (performs every PR-16 archive check, generation-binding validation, and preflight
+without writing destination bytes):
 
 ```bash
-"$HOME/.local/bin/restore-dashboard-runtime.sh" /path/to/dashboard-runtime-<timestamp>.tgz
+RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
+  "$HOME/.local/bin/restore-dashboard-runtime.sh" \
+  /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
 ```
 
-Dry run prints archive contents and exits without writing. To restore:
+Dry run exits `2` on success. Live swap requires PR-18 writer quiescence evidence plus `CONFIRM=1`:
 
 ```bash
-systemctl --user stop finance-dashboard.service
-CONFIRM=1 "$HOME/.local/bin/restore-dashboard-runtime.sh" \
-  /path/to/dashboard-runtime-<timestamp>.tgz
-systemctl --user start finance-dashboard.service
+RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
+  CONFIRM=1 "$HOME/.local/bin/restore-dashboard-runtime.sh" \
+  /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
 ```
 
 The helper:
 
-- Refuses to restore while the dashboard service is active.
-- Rejects absolute paths and path traversal in the archive.
-- Creates a fresh pre-restore backup.
-- Restores private modes on JSON and receipt files.
+- Accepts only PR-16 verified backup bundles (sidecar manifest, checksum, embedded manifest, closed-world inventory).
+- Validates generation binding for active operation-journal entries and saga stores before swap.
+- Builds a complete replacement tree in private staging; destination-only stale files are removed.
+- Refuses unknown destination files outside the documented narrow exclusions.
+- Uses a fixed control directory under the destination (`.darkfinances-restore/`) with journal schema v2,
+  pre-restore snapshot manifest, and private work staging. Interrupted restores resume on the next invocation
+  without an explicit work root; symlinked destination/control paths are rejected.
+- Performs crash-convergent per-file same-filesystem rename replacement (not a single globally atomic swap),
+  with journaled rollback phases (`rollback_in_progress`, `rollback_failed`, `rolled_back`) driven by the
+  snapshot manifest rather than post-mutation live-tree enumeration.
+- Re-verifies archive SHA-256 and manifest artifact ID before treating a `complete` journal as idempotent.
+- Re-verifies the full installed destination closed-world tree (bytes, modes, sidecar schemas, receipt
+  references) against the bound manifest before returning `complete`; destination drift fails closed.
+- Serializes live restores with an atomic `restore.lock` in the control root (`O_EXCL`); concurrent
+  invocations fail with `restore already in progress`.
+- Requires a PR-18 quiescence admission token with TTL and bindings to archive SHA-256 and destination path;
+  generation evidence is re-read immediately before the first mutation.
+- Fsyncs journals (write-temp-then-rename), staged files, and parent directories at mutation boundaries where
+  the platform supports it.
+- Refuses restore without a PR-18 quiescence admission token (this script does not stop/start services).
+- Dry-run uses temporary staging only and must not create the destination tree or persistent control paths.
 
 Afterward, verify `/api/v1/ping`, browser passkey login, the app, receipts, reimbursements, and
 reconciliation state.
