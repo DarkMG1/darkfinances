@@ -9,6 +9,7 @@ import { Avatar, Card, CardTitle, EmptyState, ErrorState, PendingPill } from '@/
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
 import { addDateOnlyDays, monthEnd, useFinanceToday } from '@/lib/date-only';
+import { buildNonSpendingMetrics } from '@/lib/spending-metrics.js';
 import { useSelectedMonth } from '@/lib/selectedMonth';
 import { categoryColors, colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
 
@@ -135,6 +136,10 @@ export default function Spending() {
   const netIncome = totalIncome - totalSpend;
   const reimbursementTotal = Math.abs(entries.find(([cat]) => /^reimbursement$/i.test(cat))?.[1] ?? 0);
   const refundTotal = refundEntries.reduce((sum, [, amt]) => sum + Math.abs(amt), 0);
+  const nonSpending = useMemo(
+    () => buildNonSpendingMetrics({ reimbursementTotal, refundTotal }),
+    [reimbursementTotal, refundTotal],
+  );
   const budgetLeft = budgets.data?.totalRemaining ?? 0;
   const budgetTarget = budgets.data?.totalTarget || budgets.data?.totalBudgeted || 0;
   const budgetSpent = budgets.data?.totalSpent ?? totalSpend;
@@ -331,10 +336,38 @@ export default function Spending() {
 
           <SectionTitle>Non-Spending</SectionTitle>
           <Card style={styles.groupCard}>
-            <PlainRow icon="cross.case" label="Tax Deductible" value="$0" />
-            <PlainRow icon="arrow.uturn.backward.circle" label="Reimbursements" value={fmtPos(reimbursementTotal)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Reimbursement') })} />
-            <PlainRow icon="minus.circle" label="Refunds & Credits" value={refundTotal ? `-${fmtPos(refundTotal)}` : '$0'} />
-            <PlainRow icon="arrow.left.arrow.right.circle" label="Transfers" value="0" last />
+            <PlainRow
+              testID="spending-non-spending-tax-deductible"
+              icon="cross.case"
+              label="Tax Deductible"
+              value={nonSpending.taxDeductible.display}
+              untracked={nonSpending.taxDeductible.kind === 'untracked'}
+              accessibilityLabel={nonSpending.taxDeductible.accessibilityLabel}
+            />
+            <PlainRow
+              testID="spending-non-spending-reimbursements"
+              icon="arrow.uturn.backward.circle"
+              label="Reimbursements"
+              value={nonSpending.reimbursements.display}
+              accessibilityLabel={`Reimbursements, ${nonSpending.reimbursements.accessibilityValue}`}
+              onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Reimbursement') })}
+            />
+            <PlainRow
+              testID="spending-non-spending-refunds"
+              icon="minus.circle"
+              label="Refunds & Credits"
+              value={nonSpending.refunds.display}
+              accessibilityLabel={`Refunds & Credits, ${nonSpending.refunds.accessibilityValue}`}
+            />
+            <PlainRow
+              testID="spending-non-spending-transfers"
+              icon="arrow.left.arrow.right.circle"
+              label="Transfers"
+              value={nonSpending.transfers.display}
+              untracked={nonSpending.transfers.kind === 'untracked'}
+              accessibilityLabel={nonSpending.transfers.accessibilityLabel}
+              last
+            />
           </Card>
         </>
       )}
@@ -530,16 +563,31 @@ function TagBreakdownRow({ label, count, kind, onPress, testID }: { label: strin
   );
 }
 
-function PlainRow({ icon, label, value, onPress, last }: { icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; last?: boolean }) {
+function PlainRow({ icon, label, value, onPress, last, testID, untracked, accessibilityLabel }: {
+  icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; last?: boolean; testID?: string; untracked?: boolean; accessibilityLabel?: string;
+}) {
+  const a11yLabel = accessibilityLabel ?? `${label}, ${value}`;
   const inner = (
     <>
       <SymbolView name={icon} tintColor={colors.text} size={18} resizeMode="scaleAspectFit" style={styles.plainIcon} />
       <Text style={styles.plainTitle}>{label}</Text>
-      <Text style={styles.plainValue}>{value}</Text>
+      <Text style={[styles.plainValue, untracked && styles.plainValueUntracked]} accessibilityElementsHidden importantForAccessibility="no">{value}</Text>
     </>
   );
-  if (onPress) return <Pressable accessibilityRole="button" accessibilityLabel={`${label}, ${value}`} onPress={onPress} style={({ pressed }) => [styles.plainRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{inner}</Pressable>;
-  return <View style={[styles.plainRow, last && styles.lastRow]}>{inner}</View>;
+  if (onPress) {
+    return (
+      <Pressable
+        testID={testID}
+        accessibilityRole="button"
+        accessibilityLabel={a11yLabel}
+        onPress={onPress}
+        style={({ pressed }) => [styles.plainRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}
+      >
+        {inner}
+      </Pressable>
+    );
+  }
+  return <View testID={testID} accessible accessibilityLabel={a11yLabel} style={[styles.plainRow, last && styles.lastRow]}>{inner}</View>;
 }
 
 function OutlineButton({ label, onPress }: { label: string; onPress: () => void }) {
@@ -623,6 +671,7 @@ const styles = StyleSheet.create({
   plainIcon: { width: 30 },
   plainTitle: { color: colors.text, fontSize: 14, fontWeight: '600', flex: 1 },
   plainValue: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  plainValueUntracked: { color: colors.muted, fontSize: 13, fontWeight: '600' },
   outlineBtn: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, borderRadius: 10, alignItems: 'center', paddingVertical: 10, marginHorizontal: 16, marginVertical: 14 },
   outlineText: { color: colors.accentLight, fontSize: 13, fontWeight: '700' },
   emptyCopy: { color: colors.muted, fontSize: 13, padding: 16 },
