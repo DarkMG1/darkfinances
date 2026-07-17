@@ -229,15 +229,111 @@ const apiHealth = {
 };
 
 let sagaRecoverCompleted = false;
+const TERMINAL_TRANSACTION_REPLACEMENT = new Set(['completed', 'rolled_back', 'legacy_unresolved', 'aborted']);
+const TERMINAL_TRANSACTION_DELETION = new Set(['completed']);
+const TERMINAL_REPAYMENT_CONFIRMATION = new Set(['completed']);
+const TERMINAL_REIMBURSEMENT_LINK = new Set(['completed']);
+const TERMINAL_BULK_OPERATION = new Set(['completed', 'unresolved']);
+let operationalSagaHealth = {
+  recoveryCompleted: false,
+  lastRecoveryAt: null,
+  lastCheckedAt: null,
+  nonterminal: { byStore: {}, total: 0 },
+  errors: [],
+  needsSync: false,
+  ready: false,
+};
+
+function normalizeOperationalRecoveryError(store, entry, caught = null) {
+  if (caught) {
+    return {
+      store,
+      sagaId: null,
+      message: String(caught?.message || caught),
+      code: caught?.code || null,
+    };
+  }
+  return {
+    store,
+    sagaId: entry?.sagaId ?? null,
+    message: String(entry?.error?.message || entry?.error),
+    code: entry?.error?.code || null,
+  };
+}
+
+function countOperationalSagaNonterminal() {
+  const byStore = {
+    transactionReplacement: countNonterminalSagas(TRANSACTION_SAGAS_PATH, TERMINAL_TRANSACTION_REPLACEMENT),
+    transactionDeletion: countNonterminalSagas(TRANSACTION_DELETION_SAGAS_PATH, TERMINAL_TRANSACTION_DELETION),
+    repaymentConfirmation: countNonterminalSagas(REPAYMENT_CONFIRMATION_SAGAS_PATH, TERMINAL_REPAYMENT_CONFIRMATION),
+    reimbursementLinks: countNonterminalSagas(REIMBURSEMENT_LINK_SAGAS_PATH, TERMINAL_REIMBURSEMENT_LINK),
+    bulkOperations: countNonterminalSagas(BULK_OPERATION_SAGAS_PATH, TERMINAL_BULK_OPERATION),
+  };
+  const total = Object.values(byStore).reduce((sum, count) => sum + count, 0);
+  return { byStore, total };
+}
+
+function countNonterminalSagas(storePath, terminalPhases) {
+  const state = readJsonSafe(storePath, { sagas: {} });
+  return Object.values(state.sagas || {}).filter((saga) => !terminalPhases.has(saga?.phase)).length;
+}
+
+function refreshOperationalSagaHealth({ recovery } = {}) {
+  const nonterminal = countOperationalSagaNonterminal();
+  if (recovery?.errors) operationalSagaHealth.errors = recovery.errors;
+  if (recovery && Object.prototype.hasOwnProperty.call(recovery, 'needsSync')) {
+    operationalSagaHealth.needsSync = recovery.needsSync;
+  }
+  operationalSagaHealth = {
+    recoveryCompleted: sagaRecoverCompleted,
+    lastRecoveryAt: operationalSagaHealth.lastRecoveryAt,
+    lastCheckedAt: new Date().toISOString(),
+    nonterminal,
+    errors: operationalSagaHealth.errors,
+    needsSync: operationalSagaHealth.needsSync,
+    ready: apiReady
+      && sagaRecoverCompleted
+      && operationalSagaHealth.errors.length === 0
+      && nonterminal.total === 0,
+  };
+  return operationalSagaHealth;
+}
+
+async function driveOperationalSagaRecovery(actualApi, { deferSync = true } = {}) {
+  let needsSync = false;
+  const errors = [];
+  const recoverers = [
+    ['transactionReplacement', () => recoverTransactionSagas(actualApi, { deferSync })],
+    ['transactionDeletion', () => recoverTransactionDeletionSagas(actualApi, { deferSync })],
+    ['repaymentConfirmation', () => recoverRepaymentConfirmationSagas(actualApi, { deferSync })],
+    ['reimbursementLinks', () => recoverReimbursementLinkSagas(actualApi)],
+    ['bulkOperations', () => recoverBulkOperationSagas(actualApi, { deferSync })],
+  ];
+  for (const [store, recover] of recoverers) {
+    try {
+      const result = await recover();
+      needsSync ||= Boolean(result?.needsSync);
+      for (const entry of result?.errors || []) {
+        errors.push(normalizeOperationalRecoveryError(store, entry));
+      }
+    } catch (error) {
+      errors.push(normalizeOperationalRecoveryError(store, null, error));
+    }
+  }
+  return { needsSync, errors };
+}
 
 async function recoverOperationalSagas() {
-  if (sagaRecoverCompleted) return;
-  await recoverTransactionSagas(api);
-  await recoverTransactionDeletionSagas(api);
-  await recoverRepaymentConfirmationSagas(api);
-  await recoverReimbursementLinkSagas(api);
-  await recoverBulkOperationSagas(api);
+  if (sagaRecoverCompleted) return operationalSagaHealth;
+  const recovery = await driveOperationalSagaRecovery(api, { deferSync: false });
   sagaRecoverCompleted = true;
+  operationalSagaHealth.lastRecoveryAt = new Date().toISOString();
+  refreshOperationalSagaHealth({ recovery });
+  const blockingBulk = recovery.errors.find((entry) => entry.code === 'BULK_OPERATION_OUTCOME_UNKNOWN');
+  if (blockingBulk) {
+    throw new BulkOperationOutcomeUnknownError(blockingBulk.message);
+  }
+  return operationalSagaHealth;
 }
 
 async function ensureApiReady({ skipRecover = false } = {}) {
@@ -338,11 +434,22 @@ async function syncNow() {
   return coordinator.runRecover(async () => {
     try {
       await ensureApiReady();
-      await syncTransactionSagas(api);
+      const recovery = await syncTransactionSagas(api);
+      refreshOperationalSagaHealth({
+        recovery: {
+          needsSync: recovery.needsSync,
+          errors: recovery.errors.map((entry) => ({
+            store: entry.store || 'unknown',
+            sagaId: entry.sagaId ?? null,
+            message: String(entry.error?.message || entry.error),
+          })),
+        },
+      });
       coordinator.invalidateGeneration();
       apiHealth.lastSyncAt = new Date().toISOString();
       apiHealth.lastError = null;
     } catch (error) {
+      refreshOperationalSagaHealth();
       apiHealth.lastErrorAt = new Date().toISOString();
       apiHealth.lastError = String(error?.message || error);
       throw error;
@@ -371,6 +478,16 @@ async function bankSync({ sync = true, throwOnBankError = false } = {}) {
 function resetApi() {
   apiReady = false;
   initPromise = null;
+  sagaRecoverCompleted = false;
+  operationalSagaHealth = {
+    recoveryCompleted: false,
+    lastRecoveryAt: null,
+    lastCheckedAt: null,
+    nonterminal: { byStore: {}, total: 0 },
+    errors: [],
+    needsSync: false,
+    ready: false,
+  };
 }
 
 async function performActualShutdown() {
@@ -400,13 +517,15 @@ async function shutdownApi() {
 }
 
 function getHealth() {
+  if (sagaRecoverCompleted) refreshOperationalSagaHealth();
   return {
-    ready: apiReady,
+    ready: apiReady && sagaRecoverCompleted && operationalSagaHealth.ready,
     initializing: !!initPromise && !apiReady,
     initializedAt: apiHealth.initializedAt,
     lastSyncAt: apiHealth.lastSyncAt,
     lastErrorAt: apiHealth.lastErrorAt,
     lastError: apiHealth.lastError,
+    operationalSagas: { ...operationalSagaHealth },
   };
 }
 
@@ -3642,24 +3761,11 @@ async function markTransactionSagasSynced(actualApi) {
 }
 
 async function driveTransactionSagasForSync(actualApi) {
-  let needsSync = false;
-  const errors = [];
-  for (const manager of [
-    getTransactionSagaManager(),
-    getTransactionDeletionSagaManager(),
-    getRepaymentConfirmationSagaManager(),
-    getReimbursementLinkSagaManager(),
-    getBulkOperationSagaManager(),
-  ]) {
-    try {
-      const result = await manager.recover(actualApi, { deferSync: true });
-      needsSync ||= Boolean(result?.needsSync);
-      for (const entry of result?.errors || []) errors.push(entry);
-    } catch (error) {
-      errors.push({ sagaId: null, error });
-    }
-  }
-  return { needsSync, errors };
+  const recovery = await driveOperationalSagaRecovery(actualApi, { deferSync: true });
+  return {
+    needsSync: recovery.needsSync,
+    errors: recovery.errors.map((entry) => ({ sagaId: entry.sagaId, error: new Error(entry.message), store: entry.store })),
+  };
 }
 
 async function syncTransactionSagas(actualApi) {
@@ -3674,7 +3780,7 @@ async function syncTransactionSagas(actualApi) {
   }
   if (terminalError) throw terminalError;
   if (recovery.errors.length) throw recovery.errors[0].error;
-  return { needsSync: recovery.needsSync };
+  return recovery;
 }
 
 function assertTransactionMutationAvailable({ accountId, ids, transaction, bulkDelegation } = {}) {

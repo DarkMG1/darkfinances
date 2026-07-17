@@ -32,6 +32,14 @@ Manual link admission and apply run under one Actual coordinator write scope. Ap
 re-locates live endpoints, re-reads sidecar links, and revalidates sign/category/capacity
 before write so concurrent links cannot exceed shared capacity.
 
+## Operational saga health
+
+Startup and sync recovery drive every operational saga family independently; one broken
+record cannot block recovery of unrelated healthy sagas. `getHealth()` and `/api/v1/ping`
+expose `operationalSagas` (nonterminal counts, recovery errors, readiness). The process
+is not `ready` while any operational saga remains nonterminal or reported a recovery error
+after the latest recovery pass.
+
 ## Field agreement
 
 When both `allocationCents` and `amount` are sent, they must agree exactly (400).
