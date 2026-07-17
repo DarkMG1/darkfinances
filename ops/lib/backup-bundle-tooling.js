@@ -1,0 +1,85 @@
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
+
+const OPS_TOOLING_FILES = Object.freeze([
+  'ops/lib/backup-bundle-schema.js',
+  'ops/lib/backup-bundle-inventory.js',
+  'ops/lib/backup-bundle-verify.js',
+  'ops/lib/backup-state-inventory.json',
+  'ops/lib/backup-verify.js',
+  'ops/lib/list-backup-sidecars.js',
+  'ops/lib/list-backup-runtime-members.js',
+  'ops/lib/verify-backup-bundle-standalone.js',
+]);
+
+const DASHBOARD_TOOLING_SEED = 'finance-dashboard/lib/runtime-state-store.js';
+
+function resolveRequireTarget(baseFile, request) {
+  let target = path.normalize(path.join(path.dirname(baseFile), request));
+  if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
+    target = path.join(target, 'index.js');
+  } else if (!fs.existsSync(target) && fs.existsSync(`${target}.js`)) {
+    target = `${target}.js`;
+  }
+  return target;
+}
+
+function collectLibClosure(seedAbsPaths) {
+  const seen = new Set();
+  const queue = [...seedAbsPaths];
+  while (queue.length > 0) {
+    const abs = queue.shift();
+    if (!abs.startsWith(REPO_ROOT) || !fs.existsSync(abs)) continue;
+    const rel = path.relative(REPO_ROOT, abs).replace(/\\/g, '/');
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    const src = fs.readFileSync(abs, 'utf8');
+    for (const match of src.matchAll(/require\(['"](\.\.?\/[^'"]+)['"]\)/g)) {
+      queue.push(resolveRequireTarget(abs, match[1]));
+    }
+  }
+  return [...seen].sort();
+}
+
+function dashboardToolingFiles() {
+  const seed = path.join(REPO_ROOT, DASHBOARD_TOOLING_SEED);
+  return collectLibClosure([seed]).filter((rel) => rel.startsWith('finance-dashboard/lib/'));
+}
+
+function bundleToolingSourcePaths() {
+  return [...OPS_TOOLING_FILES, ...dashboardToolingFiles()].sort();
+}
+
+function bundleDestinationRelative(sourceRelative) {
+  if (sourceRelative === 'ops/lib/verify-backup-bundle-standalone.js') {
+    return 'tooling/ops/bin/verify-backup-bundle.js';
+  }
+  return path.posix.join('tooling', sourceRelative);
+}
+
+function copyBundleTooling({ sourceRoot = REPO_ROOT, destinationRoot }) {
+  const copied = [];
+  for (const sourceRelative of bundleToolingSourcePaths()) {
+    const source = path.join(sourceRoot, sourceRelative);
+    const destinationRelative = bundleDestinationRelative(sourceRelative);
+    const destination = path.join(destinationRoot, destinationRelative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(source, destination);
+    fs.chmodSync(destination, 0o600);
+    copied.push(destinationRelative.replace(/\\/g, '/'));
+  }
+  return copied.sort();
+}
+
+module.exports = {
+  OPS_TOOLING_FILES,
+  DASHBOARD_TOOLING_SEED,
+  dashboardToolingFiles,
+  bundleToolingSourcePaths,
+  bundleDestinationRelative,
+  copyBundleTooling,
+};
