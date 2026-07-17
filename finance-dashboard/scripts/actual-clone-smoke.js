@@ -34,13 +34,14 @@ const data = require('../dataModule');
 (async () => {
   const marker = `DarkFinances clone smoke ${Date.now()}`;
   let account;
+  let category;
   try {
     await data.initApi();
-    const accounts = await data.api.getAccounts();
+    const accounts = await data.getAccounts();
     account = accounts.find((item) => !item.closed && !item.offbudget);
     if (!account) throw new Error('clone has no on-budget account');
-    const groups = await data.api.getCategoryGroups();
-    const category = groups.find((group) => !group.is_income)?.categories?.[0];
+    const categories = await data.getCategories();
+    category = categories[0];
     if (!category) throw new Error('clone has no expense category');
     const date = process.env.TEST_DATE || new Date().toISOString().slice(0, 10);
 
@@ -52,10 +53,11 @@ const data = require('../dataModule');
       categoryId: category.id,
       notes: '[clone-smoke]',
     });
-    const payees = await data.api.getPayees();
-    const payee = payees.find((item) => item.name === marker);
-    const created = (await data.api.getTransactions(account.id, date, date))
-      .find((item) => item.payee === payee?.id || item.imported_payee === marker);
+    const created = (await data.getTransactions({
+      accountId: account.id,
+      start: date,
+      end: date,
+    })).find((item) => item.payee === marker || item.notes === '[clone-smoke]');
     if (!created) throw new Error('manual transaction was not created');
 
     const split = await data.splitTransaction({
@@ -105,12 +107,14 @@ const data = require('../dataModule');
     if (account) {
       try {
         const today = process.env.TEST_DATE || new Date().toISOString().slice(0, 10);
-        const payees = await data.api.getPayees();
-        const payee = payees.find((item) => item.name === marker);
-        const rows = await data.api.getTransactions(account.id, today, today);
+        const rows = await data.getTransactions({
+          accountId: account.id,
+          start: today,
+          end: today,
+        });
         let deleted = false;
         for (const row of rows) {
-          if (row.payee !== payee?.id && row.imported_payee !== marker) continue;
+          if (row.payee !== marker && row.notes !== '[clone-smoke]') continue;
           await data.deleteTransaction({
             id: row.id,
             accountId: account.id,
@@ -122,7 +126,7 @@ const data = require('../dataModule');
         if (deleted) await data.syncNow();
       } catch (_) {}
     }
-    try { await data.api.shutdown(); } catch (_) {}
+    try { await data.shutdownApi(); } catch (_) {}
     fs.rmSync(sidecars, { recursive: true, force: true });
   }
 })().catch((error) => {

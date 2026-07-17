@@ -70,6 +70,7 @@ const {
 const { statePath } = require('./lib/state-registry');
 const { myShareExpenseCents, loadSplitwiseMirrorResolutions, owesSnapshotMaxAgeMs, preflightSplitwiseMirrorAdmission, SplitwiseMirrorSnapshotError } = require('./lib/splitwise-mirror');
 const { BulkOperationOutcomeUnknownError } = require('./lib/bulk-operation-saga');
+const { getActualCoordinator } = require('./lib/actual-coordinator');
 const ACTUAL_API_PATH = process.env.ACTUAL_API_PATH || '@actual-app/api';
 const api = require(ACTUAL_API_PATH);
 
@@ -173,7 +174,7 @@ async function recoverOperationalSagas() {
   sagaRecoverCompleted = true;
 }
 
-async function initApi({ skipRecover = false } = {}) {
+async function ensureApiReady({ skipRecover = false } = {}) {
   if (!apiReady) {
     if (!initPromise) {
       initPromise = (async () => {
@@ -192,14 +193,20 @@ async function initApi({ skipRecover = false } = {}) {
     await initPromise;
   }
   if (!skipRecover) {
+    await recoverOperationalSagas();
+  }
+}
+
+async function initApi({ skipRecover = false } = {}) {
+  return getActualCoordinator().runRecover(async () => {
     try {
-      await recoverOperationalSagas();
+      await ensureApiReady({ skipRecover });
     } catch (error) {
       apiHealth.lastErrorAt = new Date().toISOString();
       apiHealth.lastError = String(error?.message || error);
       throw error;
     }
-  }
+  }, { label: 'initApi' });
 }
 
 function isRecoverableActualCacheError(error) {
@@ -236,40 +243,62 @@ async function loadBudgetResilient() {
   }
 }
 
-async function withApi(fn) {
-  await initApi();
-  return fn(api);
+async function withApi(fn, { mode = 'read', skipRecover = false } = {}) {
+  const coordinator = getActualCoordinator();
+  const body = async () => {
+    await ensureApiReady({ skipRecover });
+    return fn(api);
+  };
+  if (mode === 'write') return coordinator.runWrite(body, { label: 'withApi:write' });
+  return coordinator.runRead(body, { label: 'withApi:read' });
+}
+
+function runActualRead(fn, options = {}) {
+  return withApi(fn, { mode: 'read', ...options });
+}
+
+function runActualWrite(fn) {
+  return withApi(fn, { mode: 'write' });
+}
+
+function runActualRecover(fn, options = {}) {
+  return getActualCoordinator().runRecover(fn, options);
 }
 
 // Pull the latest changes from the Actual server into the local cache. Used by a
 // periodic timer in server.js so the dashboard never serves stale post-sync data.
 async function syncNow() {
-  try {
-    await initApi();
-    await syncTransactionSagas(api);
-    apiHealth.lastSyncAt = new Date().toISOString();
-    apiHealth.lastError = null;
-  } catch (error) {
-    apiHealth.lastErrorAt = new Date().toISOString();
-    apiHealth.lastError = String(error?.message || error);
-    throw error;
-  }
+  const coordinator = getActualCoordinator();
+  return coordinator.runRecover(async () => {
+    try {
+      await ensureApiReady();
+      await syncTransactionSagas(api);
+      coordinator.invalidateGeneration();
+      apiHealth.lastSyncAt = new Date().toISOString();
+      apiHealth.lastError = null;
+    } catch (error) {
+      apiHealth.lastErrorAt = new Date().toISOString();
+      apiHealth.lastError = String(error?.message || error);
+      throw error;
+    }
+  }, { label: 'syncNow' });
 }
 
 // Manual "Sync with bank": fetch fresh transactions from linked banks (SimpleFIN)
 // then pull deltas. Resilient — even if the bank fetch fails (provider down), we
 // still sync the ledger and report the warning instead of throwing.
 async function bankSync({ sync = true, throwOnBankError = false } = {}) {
-  await initApi();
-  let warning = null;
-  try {
-    await api.runBankSync();
-  } catch (e) {
-    if (throwOnBankError) throw e;
-    warning = (e && e.message) || 'bank fetch failed';
-  }
-  if (sync) await syncNow();
-  return { ok: !warning, warning, at: new Date().toISOString() };
+  return withApi(async (actualApi) => {
+    let warning = null;
+    try {
+      await actualApi.runBankSync();
+    } catch (e) {
+      if (throwOnBankError) throw e;
+      warning = (e && e.message) || 'bank fetch failed';
+    }
+    if (sync) await syncTransactionSagas(actualApi);
+    return { ok: !warning, warning, at: new Date().toISOString() };
+  }, { mode: 'write' });
 }
 
 // Force a full re-download on next access (used by /api/refresh).
@@ -278,7 +307,7 @@ function resetApi() {
   initPromise = null;
 }
 
-async function shutdownApi() {
+async function performActualShutdown() {
   if (apiReady) {
     let recoveryError = null;
     let shutdownError = null;
@@ -298,6 +327,10 @@ async function shutdownApi() {
     return;
   }
   resetApi();
+}
+
+async function shutdownApi() {
+  return getActualCoordinator().shutdownHandoff(() => performActualShutdown());
 }
 
 function getHealth() {
@@ -771,7 +804,7 @@ async function createTransaction({ accountId, amount, payee, date, categoryId, n
     if (sync) await syncNow(); // persist the write back to the Actual server
     const id = Array.isArray(res) ? res[0] : res && Array.isArray(res.added) ? res.added[0] : null;
     return { ok: true, id: id || null };
-  });
+  }, { mode: 'write' });
 }
 
 function summarize(leaves, catInfo) {
@@ -1069,7 +1102,7 @@ async function setBudgetAmount({ month, categoryId, amount } = {}) {
       writeJsonSafe(BUDGET_SETTINGS_PATH, settings);
     }
     return { ok: true, month: m, categoryId, amount: fromCents(cents) };
-  });
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
@@ -1616,7 +1649,7 @@ async function confirmRepayment({
     ...prepared,
     operationIdentity,
     faultInjector,
-  }));
+  }), { mode: 'write' });
 }
 function reimbCategoryId(groups) {
   for (const g of groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) return c.id;
@@ -2471,7 +2504,7 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
       previousId: String(id),
       references,
     };
-  });
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
@@ -3601,7 +3634,7 @@ async function splitTransaction({ id, accountId, date, legs } = {}) {
       legIds: (added.subtransactions || []).map((leg) => String(leg.id)),
       references,
     };
-  });
+  }, { mode: 'write' });
 }
 
 // A pending split can post at a different amount. Discovery is read-only by
@@ -3666,7 +3699,7 @@ async function reconcileSplitDeltas(api, { months = 3, apply = false } = {}) {
 }
 // Self-contained wrapper for refresh (preview) and explicit confirmation (apply).
 async function reconcileSplits({ apply = false } = {}) {
-  const result = await withApi((api) => reconcileSplitDeltas(api, { apply }));
+  const result = await withApi((api) => reconcileSplitDeltas(api, { apply }), { mode: apply ? 'write' : 'read' });
   if (result.fixed) await syncNow();
   if (result.failures.length) {
     throw new Error(`failed to reconcile ${result.failures.length} split transaction(s)`);
@@ -3743,7 +3776,7 @@ async function sweepReimbursementTags({ tags, from, to } = {}) {
       }
     }
     return { ok: true, moved: moved.length, tags: targetTags, items: moved };
-  });
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
@@ -3791,7 +3824,7 @@ async function cleanupPhantoms({
       params: { window, agedDays, observeDays, holdAgedDays, holdObserveDays },
       faultInjector,
       deferSync: true,
-    }));
+    }), { mode: 'write' });
     if (result.status === 'unresolved') {
       throw new Error(`phantom cleanup outcome unresolved (${result.auditOutcome?.failed || 0} failed item(s))`);
     }
@@ -3886,7 +3919,7 @@ async function cleanupPhantoms({
       writeJsonSafe(PHANTOM_LOG_PATH, log);
     }
     return { ok: true, dryRun: !!dryRun, deletedCount: deleted.length, deleted, flaggedAged, watching: Object.keys(store.seen).length };
-  });
+  }, { mode: dryRun ? 'read' : 'write' });
 }
 function getPhantomLog({ limit = 100 } = {}) {
   const log = readPhantomLog();
@@ -4229,7 +4262,7 @@ async function removeSplit({ id, accountId, date, categoryId } = {}) {
       previousId: String(parent.id),
       references,
     };
-  });
+  }, { mode: 'write' });
 }
 
 // Permanently remove a transaction. Deleting a split parent removes its legs too.
@@ -4285,7 +4318,7 @@ async function deleteTransaction({
       faultInjector,
       bulkDelegation,
     });
-  });
+  }, { mode: 'write' });
 }
 
 // Rename a transaction's payee (RM "rename"). Resolves the free-text name to a payee
@@ -4330,7 +4363,7 @@ async function setPayee({ id, payee, isLeg, parentId, accountId, date } = {}) {
       previousId: String(id),
       references,
     };
-  });
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
@@ -4387,7 +4420,7 @@ async function saveRule({ match, categoryId, categoryName } = {}, {
     params: { rule },
     faultInjector,
     deferSync: !sync,
-  }));
+  }), { mode: 'write' });
   if (result.status === 'unresolved') {
     throw new Error(`rule save outcome unresolved (${result.auditOutcome?.failed || 0} failed item(s))`);
   }
@@ -4438,7 +4471,7 @@ async function refileSettleUps({ sync = true } = {}) {
     }
     if (moved && sync) await syncNow();
     return { ok: true, moved };
-  });
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
@@ -4531,9 +4564,8 @@ function validateSplitwiseMirrorSnapshotRaw(truth, { now = Date.now(), maxAgeMs 
   return truth.othersPaidItems;
 }
 async function preflightSplitwiseMirrorShareSync() {
-  await initApi({ skipRecover: true });
-  return preflightSplitwiseMirrorAdmission({
-    api,
+  return withApi(async (actualApi) => preflightSplitwiseMirrorAdmission({
+    api: actualApi,
     readTruth: () => readJsonSafe(OWES_TRUTH_PATH, null),
     validateSnapshot: validateSplitwiseMirrorSnapshot,
     readResolutions: readSplitwiseMirrorResolutions,
@@ -4541,7 +4573,7 @@ async function preflightSplitwiseMirrorShareSync() {
     categoryName: SW_CATEGORY_NAME,
     accountRangeStart: '1900-01-01',
     accountRangeEnd: '9999-12-31',
-  });
+  }), { mode: 'read', skipRecover: true });
 }
 async function syncSplitwiseShareExpenses({
   sync = true,
@@ -4556,7 +4588,7 @@ async function syncSplitwiseShareExpenses({
     params: {},
     faultInjector,
     deferSync: !sync,
-  }));
+  }), { mode: 'write' });
   if (result.status === 'unresolved') {
     throw new BulkOperationOutcomeUnknownError('Splitwise mirror outcome unresolved');
   }
@@ -4663,7 +4695,7 @@ async function applyRules({
     params: {},
     faultInjector,
     deferSync: !sync,
-  }));
+  }), { mode: 'write' });
   if (result.status === 'unresolved') {
     throw new Error(`categorization outcome unresolved (${result.failed || 0} failed item(s))`);
   }
@@ -4726,7 +4758,7 @@ async function setTransactionNotes({ id, notes, isLeg, parentId, accountId, date
       previousId: String(id),
       references,
     };
-  });
+  }, { mode: 'write' });
 }
 
 // Move a transaction to a different date. Handy for refunds that post the month
@@ -4740,7 +4772,7 @@ async function setTransactionDate({ id, date, isLeg }) {
   return withApi(async (api) => {
     await api.updateTransaction(id, { date });
     return { ok: true, date };
-  });
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
@@ -4941,11 +4973,13 @@ async function getReports({ month } = {}) {
 }
 
 module.exports = {
-  api,
   config,
   initApi,
   getHealth,
   withApi,
+  runActualRead,
+  runActualWrite,
+  runActualRecover,
   syncNow,
   bankSync,
   resetApi,
@@ -5048,3 +5082,13 @@ module.exports = {
   saveGoal,
   deleteGoal,
 };
+
+Object.defineProperty(module.exports, 'api', {
+  enumerable: true,
+  get() {
+    if (process.env.ALLOW_RAW_ACTUAL_API === '1') return api;
+    throw new Error(
+      'Direct data.api access bypasses the Actual coordinator; use runActualRead/runActualWrite or set ALLOW_RAW_ACTUAL_API=1 for tests',
+    );
+  },
+});
