@@ -1,0 +1,24 @@
+appId: dev.darkmg1.finances
+---
+- launchApp:
+    clearState: true
+- tapOn:
+    id: onboarding-demo-button
+    optional: true
+- openLink: darkfinances:///settings
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: settings-screen
+- scroll
+- assertVisible:
+    id: settings-notifications-unavailable
+- assertNotVisible:
+    id: settings-notif-bills
+    optional: true
+- assertNotVisible:
+    id: settings-notif-weekly
+    optional: true
+- assertVisible:
+    id: settings-screen

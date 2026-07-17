@@ -3,8 +3,9 @@ import {
   clearFinanceOperationReconciliationDiagnostic,
   prepareFinanceOperationProfilePurge,
 } from '@/lib/finance-operations';
+import { purgeNotificationProfileState } from '@/lib/notifications';
+import { purgeProfileGeneration } from '@/lib/notification-reconciliation';
 import { abortFinanceRequests } from '@/lib/request-lifecycle';
-import { clearFinanceNotifications } from '@/lib/notifications';
 import { clearFinanceQueries, queryClient } from '@/lib/query-client';
 import { clearFinanceWidget } from '@/lib/widgets';
 
@@ -23,14 +24,11 @@ export async function purgeFinanceProfile(
   operationScope: string | null,
 ): Promise<void> {
   prepareFinanceOperationProfilePurge(operationScope);
+  purgeProfileGeneration(scope);
   abortFinanceRequests();
   await clearFinanceQueries();
   queryClient.getMutationCache().clear();
-  if (scope) {
-    await clearFinanceNotifications(scope).catch(() => {});
-  } else {
-    await clearFinanceNotifications().catch(() => {});
-  }
+  await purgeNotificationProfileState(scope).catch(() => {});
   clearFinanceWidget();
   await purgeReceiptCache();
   clearFinanceOperationReconciliationDiagnostic();

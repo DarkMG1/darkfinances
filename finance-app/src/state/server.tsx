@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import * as SecureStore from 'expo-secure-store';
 import { normalizeServerUrl } from '@/api/client/server-url';
 import { financeOperationProfileScope } from '@/lib/finance-operations';
+import { activateNotificationScope, getProfileGeneration } from '@/lib/notification-reconciliation';
 import { purgeFinanceProfile } from '@/lib/profile-purge';
 import { financeServerScope } from '@/lib/query-client';
 import { kv } from '@/lib/storage';
@@ -65,6 +66,10 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
         storedToken = null;
       }
       setToken(storedToken);
+      activateNotificationScope(
+        financeServerScope(storedUrl, storedToken, storedDemo),
+        getProfileGeneration(),
+      );
       setReady(true);
     })();
   }, []);
@@ -103,6 +108,10 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
         setToken(nextToken);
         setFaceId(nextFaceId);
         setDemo(nextDemo);
+        activateNotificationScope(
+          financeServerScope(nextUrl, nextToken, nextDemo),
+          getProfileGeneration(),
+        );
       } catch (error) {
         // Keep the persisted identity tuple coherent if any storage write fails.
         // Query clearing is intentionally not rolled back; stale financial data

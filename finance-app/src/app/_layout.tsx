@@ -29,6 +29,7 @@ import {
 import { queryClient } from '@/lib/query-client';
 import { purgeLegacyReceiptCopies } from '@/lib/receipts';
 import { Loading } from '@/components/ui';
+import { NotificationReconciliationOwner } from '@/components/notification-reconciliation-owner';
 import { NotificationRouter } from '@/components/notification-router';
 import { colors } from '@/theme/colors';
 
@@ -347,6 +348,7 @@ function RootNav() {
   return (
     <View style={styles.appShell}>
       {content}
+      {configured ? <NotificationReconciliationOwner /> : null}
       {configured ? <NotificationRouter /> : null}
       {configured && demo ? (
         <View pointerEvents="none" style={styles.demoWatermark}>

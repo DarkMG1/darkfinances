@@ -14,13 +14,19 @@ function readExtraFlag(name: string): boolean {
   return extra?.[name] === true;
 }
 
+function pluginIncluded(name: string): boolean {
+  const plugins = Constants.expoConfig?.plugins ?? [];
+  return plugins.some((plugin) => (Array.isArray(plugin) ? plugin[0] : plugin) === name);
+}
+
 export function getFinanceCapabilities(): FinanceCapabilities {
   const freeSideload = readExtraFlag('freeSideload');
+  const notifications = !freeSideload && pluginIncluded('expo-notifications');
   const widgets = !freeSideload && Platform.OS === 'ios';
   return {
     widgets,
     appGroups: !freeSideload,
-    notifications: true,
+    notifications,
     offlineSnapshot: false,
     freeSideload,
   };
