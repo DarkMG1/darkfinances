@@ -21,11 +21,15 @@ function terminalFailure(operation) {
   const status = Number.isInteger(storedStatus) && storedStatus >= 400 && storedStatus <= 599
     ? storedStatus
     : 400;
-  return new AppError(operation.error?.message || 'The operation failed before local application', {
+  const error = new AppError(operation.error?.message || 'The operation failed before local application', {
     code: operation.error?.code || 'OPERATION_FAILED',
     status,
     expose: true,
   });
+  if (Array.isArray(operation.error?.issues) && operation.error.issues.length) {
+    error.issues = operation.error.issues;
+  }
+  return error;
 }
 
 class OperationContext {
@@ -130,6 +134,7 @@ async function executeJournaledOperation({
   onJournalError,
   terminalProofResolver,
   knownPreApplyFailure = (error) => error instanceof KnownPreApplyError,
+  preApplyValidate,
 }) {
   const admission = journal.start(key, request);
   const { existing } = admission;
@@ -161,6 +166,7 @@ async function executeJournaledOperation({
   const context = new OperationContext(journal, key, onJournalError, journalBinding);
   let result;
   try {
+    if (preApplyValidate) preApplyValidate();
     result = await handler(context);
   } catch (error) {
     if (!context.effectBoundaryCrossed && error?.code === 'IDEMPOTENCY_KEY_REUSED') throw error;

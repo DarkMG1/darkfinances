@@ -131,6 +131,7 @@ test('server security boundaries fail closed', async (t) => {
     body: '{}',
   });
   assert.equal(result.response.status, 403);
+  assert.equal(result.body.code, 'CORS_ORIGIN_REJECTED');
 
   result = await request(base, '/auth/register/start_DISABLED', { method: 'POST' });
   assert.equal(result.response.status, 404);

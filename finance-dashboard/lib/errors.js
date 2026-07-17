@@ -72,6 +72,9 @@ function classifyError(error) {
   if (/splitwise snapshot/i.test(message)) {
     return new AppError(message, { code: 'STALE_UPSTREAM_DATA', status: 503, expose: true, cause: error });
   }
+  if (/too large|payload too large|exceeds the maximum (encoded|decoded)? receipt size/i.test(message)) {
+    return new AppError(message, { code: 'PAYLOAD_TOO_LARGE', status: 413, expose: true, cause: error });
+  }
   if (
     /\brequired\b|must be|must sum|invalid|unsupported|unsafe|at least|non-zero|greater than|bad debtor pattern|cannot|can't|can’t/i.test(message)
   ) {

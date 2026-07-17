@@ -25,6 +25,25 @@ const {
 } = require('./lib/mutation-route-registry');
 const { parse, schemas } = require('./lib/validation');
 const { readReleaseIdentity } = require('./lib/release-identity');
+const { boundedJsonMiddleware } = require('./lib/bounded-json');
+const {
+  DEFAULT_MAX_JSON_BYTES,
+  RECEIPT_MAX_JSON_BYTES,
+} = require('./lib/receipt-limits');
+const {
+  apiErrorMiddleware,
+  sendApiError,
+  sendApiErrorCode,
+} = require('./lib/request-envelope');
+const {
+  findMutationContract,
+  parsePhantomCleanupRequest,
+  parseReceiptRequest,
+  parseRecurringOverrideRequest,
+  validateLegacyMutationRequest,
+  validateVersionedMutationRequest,
+  versionedRouteExists,
+} = require('./lib/request-contract');
 
 const {
   generateRegistrationOptions,
@@ -129,7 +148,17 @@ function rateLimit(name, max, windowMs) {
       for (const [k, value] of rateBuckets) if (value.resetAt <= now) rateBuckets.delete(k);
     }
     if (bucket.count > max) {
-      res.setHeader('Retry-After', String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
+      const retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSeconds));
+      if (req.path.startsWith('/api/')) {
+        const error = new AppError('Too many requests', {
+          code: 'RATE_LIMITED',
+          status: 429,
+          expose: true,
+        });
+        error.retryAfterSeconds = retryAfterSeconds;
+        return sendApiError(req, res, error);
+      }
       return res.status(429).json({ error: 'Too many requests' });
     }
     return next();
@@ -159,13 +188,13 @@ app.use((req, res, next) => {
   next();
 });
 
-const defaultJsonParser = express.json({ limit: '1mb' });
-const receiptJsonParser = express.json({ limit: '25mb' });
 const isVersionedApiPath = (value) => /^\/api\/v1(?:\/|$)/i.test(value || '');
 const isVersionedApiRequest = (req) => isVersionedApiPath(req.baseUrl) || isVersionedApiPath(req.originalUrl);
 const isReceiptUpload = (req) =>
   req.method === 'POST' && /^\/api(?:\/v1)?\/receipts\/?$/i.test(req.path);
-app.use((req, res, next) => isReceiptUpload(req) ? next() : defaultJsonParser(req, res, next));
+const defaultJsonMiddleware = boundedJsonMiddleware({ limit: DEFAULT_MAX_JSON_BYTES });
+const receiptJsonMiddleware = boundedJsonMiddleware({ limit: RECEIPT_MAX_JSON_BYTES });
+app.use((req, res, next) => (isReceiptUpload(req) ? receiptJsonMiddleware : defaultJsonMiddleware)(req, res, next));
 app.use(session({
   store: new FileStore({
     path: SESSION_DIR,
@@ -183,6 +212,7 @@ app.use(session({
 app.use((req, res, next) => {
   const origin = req.get('Origin');
   if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && origin !== ORIGIN) {
+    if (req.path.startsWith('/api/')) return sendApiErrorCode(req, res, 'CORS_ORIGIN_REJECTED');
     return res.status(403).json({ error: 'Origin not allowed' });
   }
   next();
@@ -352,27 +382,16 @@ const data = require('./dataModule');
 // request flagged demo (header X-Demo-Mode:1 or ?demo=1) before the resolvers run.
 const demo = require('./demoData');
 function isDemo(req) { return requestClaimsDemo(req); }
-const MONEY_REQUEST_BOUNDARIES = [
-  { pattern: /^\/transactions\/?$/i, schema: schemas.createTransaction, label: 'transaction' },
-  { pattern: /^\/transactions\/[^/]+\/split\/?$/i, schema: schemas.splitTransaction, label: 'transaction split' },
-  { pattern: /^\/budgets\/?$/i, schema: schemas.budget, label: 'budget amount' },
-  { pattern: /^\/manual-assets\/?$/i, schema: schemas.manualAsset, label: 'manual asset' },
-  { pattern: /^\/goals\/?$/i, schema: schemas.goal, label: 'goal' },
-  { pattern: /^\/receipts\/?$/i, schema: schemas.receipt, label: 'receipt' },
-  { pattern: /^\/reimb-links\/?$/i, schema: schemas.reimbLink, label: 'reimbursement link' },
-  { pattern: /^\/owes-config\/?$/i, schema: schemas.owesConfig, label: 'reimbursement configuration' },
-];
-function validateMoneyRequestBoundary(req, res, next) {
-  if (req.method !== 'POST') return next();
+function validateLegacyMutationBoundary(req, res, next) {
+  if (!['POST', 'DELETE', 'PATCH'].includes(req.method)) return next();
   // Versioned real writes validate inside their admitted operation so a known
   // pre-effect rejection is durable and replayable. Demo and legacy requests
   // retain this outer boundary because they are not operation-journaled.
   if (isVersionedApiRequest(req) && !isDemo(req)) return next();
-  const requestPath = req.path.replace(/^\/api(?:\/v1)?(?=\/|$)/i, '') || '/';
-  const boundary = MONEY_REQUEST_BOUNDARIES.find(({ pattern }) => pattern.test(requestPath));
-  if (!boundary) return next();
+  const contract = findMutationContract(req);
+  if (!contract) return next();
   try {
-    parse(boundary.schema, req.body, boundary.label);
+    validateLegacyMutationRequest(req);
     return next();
   } catch (error) {
     return sendApiError(req, res, error);
@@ -409,7 +428,7 @@ function demoMiddleware(v1mode) {
         /^goals(?:\/[^/]+)?$/i,
         /^refresh$/i,
       ].some((pattern) => pattern.test(p));
-      if (!knownWrite) return res.status(404).json({ error: 'Demo endpoint not found' });
+      if (!knownWrite) return sendApiErrorCode(req, res, 'NOT_FOUND');
       return send({ ok: true, demo: true });
     }
     if (p === 'report.csv') {
@@ -496,7 +515,7 @@ function demoMiddleware(v1mode) {
       case 'owes-config': return send({ expected: {}, debtorPatterns: {}, tripStart: {}, swNet: [], settledExt: [] });
       case 'reimb-links': return send(demo.reimbLinks(req.query.id ? String(req.query.id) : undefined));
       default: {
-        return res.status(404).json({ error: 'Demo endpoint not found' });
+        return sendApiErrorCode(req, res, 'NOT_FOUND');
       }
     }
   };
@@ -591,12 +610,9 @@ app.get('/demo', (req, res) => res.sendFile(path.join(__dirname, 'public', 'inde
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Demo mode for the legacy web API (runs after the passkey gate above).
-app.use((req, res, next) => isReceiptUpload(req) && !isVersionedApiPath(req.path)
-  ? receiptJsonParser(req, res, next)
-  : next());
 app.use((req, res, next) => isVersionedApiPath(req.path)
   ? next()
-  : validateMoneyRequestBoundary(req, res, next));
+  : validateLegacyMutationBoundary(req, res, next));
 app.use(demoMiddleware(false));
 
 // ---- Endpoint resolvers (shared by legacy /api and versioned /api/v1) -------
@@ -703,15 +719,14 @@ async function finalizeBulkMutation(operation, mutate, { kind } = {}) {
 }
 
 async function setRecurring(req, operation) {
-  const { key } = parse(schemas.keyParam, req.params, 'recurring key');
-  const { status, hidden, forced, isBill, cancellation } = parse(schemas.recurringOverride, req.body, 'recurring override');
+  const { key, status, hidden, forced, isBill, cancellation } = parseRecurringOverrideRequest(req);
   return runActualProjectionMutation(
     () => applyLocal(operation, () =>
       data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation })),
   );
 }
 async function markRecurring(req, operation) {
-  const { payee, isBill } = parse(schemas.markRecurring, req.body, 'recurring merchant');
+  const { payee, isBill } = parse(schemas.markRecurring, req.body, 'recurring mark');
   return runActualProjectionMutation(
     () => applyLocal(operation, () => data.markRecurring({ payee, isBill })),
   );
@@ -729,7 +744,7 @@ async function splitTxn(req, operation) {
 }
 async function unsplitTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
-  const { accountId, date, categoryId } = parse(schemas.unsplitTransaction, req.body, 'remove split');
+  const { accountId, date, categoryId } = parse(schemas.unsplitTransaction, req.body, 'transaction unsplit');
   data.assertTransactionMutationAvailable({ ids: [id] });
   const result = await applyLocal(operation, () => data.removeSplit({ id, accountId, date, categoryId }));
   await syncAfterLocal(operation);
@@ -738,7 +753,7 @@ async function unsplitTxn(req, operation) {
 }
 async function setPayeeH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
-  const { payee, isLeg, parentId, accountId, date } = parse(schemas.setPayee, req.body, 'transaction payee');
+  const { payee, isLeg, parentId, accountId, date } = parse(schemas.setPayee, req.body, 'payee update');
   data.assertTransactionMutationAvailable({
     ids: isLeg ? [parentId, id] : [id],
   });
@@ -776,7 +791,7 @@ async function bankSyncH(_req, operation) {
   };
 }
 async function phantomCleanupH(req, operation) {
-  const query = parse(schemas.phantomCleanupQuery, req.query, 'phantom cleanup query');
+  const query = parsePhantomCleanupRequest(req);
   const dryRun = query.dryRun === '1' || query.dryRun === 'true';
   if (dryRun) {
     return applyLocal(operation, () => data.cleanupPhantoms({
@@ -801,7 +816,7 @@ async function phantomCleanupH(req, operation) {
 const phantomLogH = (req) => Promise.resolve(data.getPhantomLog({ limit: Number(req.query.limit) || 100 }));
 // Receipts
 async function addReceiptH(req, operation) {
-  const receipt = parse(schemas.receipt, req.body, 'receipt');
+  const receipt = parseReceiptRequest(req);
   data.assertTransactionMutationAvailable({
     ids: [receipt.txnId],
   });
@@ -847,10 +862,16 @@ async function deleteReceiptH(req, operation) {
 function receiptImageH(req, res) {
   try {
     const f = data.getReceiptFile({ id: req.params.id });
-    if (!f) return res.status(404).json({ error: 'not found' });
+    if (!f) return sendApiErrorCode(req, res, 'NOT_FOUND');
     const mime = String(f.mime || '').toLowerCase();
     const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
-    if (!allowed.has(mime)) return res.status(415).json({ error: 'unsupported receipt image type' });
+    if (!allowed.has(mime)) {
+      return sendApiError(req, res, new AppError('unsupported receipt image type', {
+        code: 'UNSUPPORTED_MEDIA_TYPE',
+        status: 415,
+        expose: true,
+      }));
+    }
     res.type(mime);
     res.setHeader('Content-Disposition', 'inline; filename="receipt-image"');
     res.setHeader('Cache-Control', 'private, max-age=86400');
@@ -948,7 +969,7 @@ async function deleteManualAssetH(req, operation) {
 }
 async function setNotes(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
-  const { notes, isLeg, parentId, accountId, date } = parse(schemas.setNotes, req.body, 'transaction notes');
+  const { notes, isLeg, parentId, accountId, date } = parse(schemas.setNotes, req.body, 'notes update');
   data.assertTransactionMutationAvailable({
     ids: isLeg ? [parentId, id] : [id],
   });
@@ -960,7 +981,7 @@ async function setNotes(req, operation) {
 }
 async function setDateH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
-  const { date, isLeg } = parse(schemas.setDate, req.body, 'transaction date');
+  const { date, isLeg } = parse(schemas.setDate, req.body, 'date update');
   data.assertTransactionMutationAvailable({ ids: [id] });
   const result = await applyLocal(operation, () => data.setTransactionDate({ id, date, isLeg }));
   await syncAfterLocal(operation);
@@ -984,7 +1005,7 @@ async function deleteGoal(req, operation) {
 
 async function setCategory(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
-  const { categoryId, isLeg, parentId, accountId, date } = parse(schemas.setCategory, req.body, 'transaction category');
+  const { categoryId, isLeg, parentId, accountId, date } = parse(schemas.setCategory, req.body, 'category update');
   data.assertTransactionMutationAvailable({
     ids: isLeg ? [parentId, id] : [id],
   });
@@ -1148,19 +1169,6 @@ async function reportCsv(req, res) {
 }
 
 // Raw responders for the legacy web API; enveloped {data}/{error} responders for v1.
-function sendApiError(req, res, error) {
-  const classified = classifyError(error);
-  if (classified.status >= 500) {
-    console.error(`[request:${req.requestId}]`, (error && error.stack) || error);
-  }
-  const body = {
-    error: classified.expose ? classified.message : 'Request failed',
-    code: classified.code,
-    requestId: req.requestId,
-  };
-  if (error && Array.isArray(error.issues)) body.issues = error.issues;
-  return res.status(classified.status).json(body);
-}
 const runHandler = (req, fn, operation) => {
   if (operation) return fn(req, operation);
   return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)
@@ -1215,6 +1223,7 @@ async function executeVersionedMutation(req, fn, mutationRoute) {
       url: req.originalUrl,
       body: req.body,
     },
+    preApplyValidate: () => validateVersionedMutationRequest(req),
     handler: (operation) => fn(req, operation),
     requiresCheckpoint: mutationRoute.requiresCheckpoint,
     onJournalError: operationJournalError,
@@ -1320,13 +1329,13 @@ function v1Auth(req, res, next) {
   if (req.session && req.session.authenticated) return next(); // browser (passkey)
   const headerTok = req.get('X-Finance-Token') || (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
   if (tokenOk(headerTok)) return next(); // native app (token)
-  return res.status(401).json({ error: 'UNAUTHENTICATED' });
+  return sendApiErrorCode(req, res, 'UNAUTHENTICATED');
 }
 
 const v1 = express.Router();
 v1.use((req, res, next) => {
   const origin = req.get('Origin');
-  if (origin && origin !== ORIGIN) return res.status(403).json({ error: 'Origin not allowed' });
+  if (origin && origin !== ORIGIN) return sendApiErrorCode(req, res, 'CORS_ORIGIN_REJECTED');
   if (origin === ORIGIN) res.header('Access-Control-Allow-Origin', ORIGIN);
   res.header('Vary', 'Origin');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Finance-Token, X-Demo-Mode, Idempotency-Key');
@@ -1335,10 +1344,15 @@ v1.use((req, res, next) => {
   next();
 });
 v1.use(v1Auth);
-v1.use((req, res, next) => req.method === 'POST' && /^\/receipts\/?$/i.test(req.path)
-  ? receiptJsonParser(req, res, next)
-  : next());
-v1.use(validateMoneyRequestBoundary);
+v1.use((req, res, next) => {
+  if (!isDemo(req) || !['POST', 'DELETE'].includes(req.method)) return next();
+  try {
+    validateVersionedMutationRequest(req);
+    return next();
+  } catch (error) {
+    return sendApiError(req, res, error);
+  }
+});
 v1.use(demoMiddleware(true)); // demo mode for native clients (after token/session auth)
 const registeredV1MutationRoutes = new Set();
 function registerV1Mutation(method, route, handler) {
@@ -1457,7 +1471,12 @@ const missingV1MutationRoutes = MUTATION_ROUTES
 if (missingV1MutationRoutes.length) {
   throw new Error(`Unregistered versioned mutation routes: ${missingV1MutationRoutes.map(({ method, path: route }) => `${method} ${route}`).join(', ')}`);
 }
+v1.use((req, res) => {
+  if (versionedRouteExists(req)) return sendApiErrorCode(req, res, 'METHOD_NOT_ALLOWED');
+  return sendApiErrorCode(req, res, 'NOT_FOUND');
+});
 app.use('/api/v1', v1);
+app.use(apiErrorMiddleware());
 
 // ---- Freshness: keep the local Actual cache in sync with the server ---------
 const SYNC_INTERVAL_MS = 10 * 60 * 1000; // every 10 min
