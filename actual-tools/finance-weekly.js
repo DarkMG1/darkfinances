@@ -10,6 +10,7 @@
  */
 const api = require('@actual-app/api');
 const { addDays, todayYMD } = require('./lib/date-only');
+const { buildToolCategoryInfo, classifiedLeavesForAccountTransactions } = require('./lib/transfer-classification');
 
 const c2 = (cents) => (Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (cents) => (cents < 0 ? '-$' : '$') + c2(cents);
@@ -17,7 +18,6 @@ const signed = (cents) => (cents < 0 ? '-$' : '+$') + c2(cents);
 
 const MM_CAT = /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i;
 const REIMB_CAT = /^reimbursement$/i;
-const TRANSFER_PAYEE = /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i;
 
 (async () => {
   await api.init({ dataDir: process.env.FIX_DATA_DIR, serverURL: process.env.ACTUAL_SERVER_URL, password: process.env.ACTUAL_PASSWORD });
@@ -28,20 +28,8 @@ const TRANSFER_PAYEE = /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i;
   const lastStart = addDays(today, -13), lastEnd = addDays(today, -7);
 
   const groups = await api.getCategoryGroups();
-  const catInfo = {};
-  for (const g of groups) {
-    const inc = g.is_income === true || /^income$/i.test(g.name || '');
-    const mm = /money\s*movement/i.test(g.name || '');
-    for (const c of (g.categories || [])) {
-      let k = 'spend';
-      if (inc) k = 'income';
-      else if (REIMB_CAT.test(c.name || '')) k = 'reimb';
-      else if (mm || MM_CAT.test(c.name || '')) k = 'mm';
-      catInfo[c.id] = { name: c.name, kind: k };
-    }
-  }
+  const catInfo = buildToolCategoryInfo(groups);
   const nameOf = (id) => (id && catInfo[id] ? catInfo[id].name : '(uncategorized)');
-  const kindOf = (id) => (id && catInfo[id] ? catInfo[id].kind : 'uncat');
   const payees = await api.getPayees();
   const pn = {}; for (const p of payees) pn[p.id] = p.name || '';
   const accounts = await api.getAccounts();
@@ -49,23 +37,20 @@ const TRANSFER_PAYEE = /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i;
   const leaves = [];
   for (const a of accounts) {
     const tx = await api.getTransactions(a.id, lastStart, today);
-    for (const t of tx) {
-      const payeeName = pn[t.payee] || '';
-      const pTransfer = !!(t.transfer_id || t.transferred_id) || TRANSFER_PAYEE.test(payeeName);
-      const isSplit = t.subtransactions && t.subtransactions.length;
-      const ls = isSplit
-        ? t.subtransactions.map((s) => ({ amount: s.amount, catId: s.category, transfer: !!s.transfer_id }))
-        : [{ amount: t.amount, catId: t.category, transfer: pTransfer }];
-      for (const lf of ls) {
-        let kind = kindOf(lf.catId);
-        if (kind === 'uncat' && (lf.transfer || pTransfer)) kind = 'mm';
-        leaves.push({ date: t.date, payee: payeeName, amount: lf.amount, catName: lf.catId ? nameOf(lf.catId) : (kind === 'mm' ? 'Transfer' : '(uncategorized)'), kind, onbudget: !a.offbudget });
-      }
+    for (const lf of classifiedLeavesForAccountTransactions(tx, catInfo, a, (t) => pn[t.payee] || '')) {
+      leaves.push({
+        date: lf.date,
+        payee: lf.payee,
+        amount: lf.amount,
+        catName: lf.kind === 'transfer' ? 'Transfer' : lf.catId ? nameOf(lf.catId) : '(uncategorized)',
+        kind: lf.kind,
+        onbudget: lf.onbudget,
+      });
     }
   }
 
   const inRange = (d, a, b) => d >= a && d <= b;
-  const isReal = (e) => e.onbudget && (e.kind === 'spend' || e.kind === 'uncat');
+  const isReal = (e) => e.onbudget && (e.kind === 'spend' || (e.kind === 'uncat' && e.amount < 0));
   const catKey = (e) => (e.kind === 'uncat' ? 'Uncategorized' : e.catName);
 
   function week(a, b) {

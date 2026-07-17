@@ -4,12 +4,12 @@
    are summarized (net) rather than line-listed. */
 const api = require('@actual-app/api');
 const { todayYMD } = require('./lib/date-only');
+const { buildToolCategoryInfo, classifiedLeavesForAccountTransactions } = require('./lib/transfer-classification');
 const c2 = (c) => (Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (c) => (c < 0 ? '-$' : '$') + c2(c);
 
 const MM_CAT = /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i;
 const REIMB_CAT = /^reimbursement$/i;
-const TRANSFER_PAYEE = /\btransfer\s*:?\s*(to|from)\b/i;
 
 (async () => {
   await api.init({ dataDir: process.env.FIX_DATA_DIR, serverURL: process.env.ACTUAL_SERVER_URL, password: process.env.ACTUAL_PASSWORD });
@@ -19,20 +19,8 @@ const TRANSFER_PAYEE = /\btransfer\s*:?\s*(to|from)\b/i;
   const monthStart = today.slice(0, 8) + '01';
 
   const groups = await api.getCategoryGroups();
-  const catInfo = {};
-  for (const g of groups) {
-    const inc = g.is_income === true || /^income$/i.test(g.name || '');
-    const mm = /money\s*movement/i.test(g.name || '');
-    for (const c of g.categories || []) {
-      let k = 'spend';
-      if (inc) k = 'income';
-      else if (REIMB_CAT.test(c.name || '')) k = 'reimb';
-      else if (mm || MM_CAT.test(c.name || '')) k = 'mm';
-      catInfo[c.id] = { name: c.name, kind: k };
-    }
-  }
+  const catInfo = buildToolCategoryInfo(groups);
   const nameOf = (id) => (id && catInfo[id] ? catInfo[id].name : '(uncategorized)');
-  const kindOf = (id) => (id && catInfo[id] ? catInfo[id].kind : 'uncat');
 
   const payees = await api.getPayees();
   const pn = {}; for (const p of payees) pn[p.id] = p.name || '';
@@ -42,28 +30,18 @@ const TRANSFER_PAYEE = /\btransfer\s*:?\s*(to|from)\b/i;
   const rows = [];
   for (const a of accounts) {
     const tx = await api.getTransactions(a.id, monthStart, today);
-    for (const t of tx) {
-      const payeeName = pn[t.payee] || '';
-      const pTransfer = !!(t.transfer_id || t.transferred_id) || TRANSFER_PAYEE.test(payeeName);
-      const isSplit = t.subtransactions && t.subtransactions.length;
-      const legs = isSplit
-        ? t.subtransactions.map((s) => ({ amount: s.amount, catId: s.category, notes: s.notes || t.notes, transfer: !!s.transfer_id }))
-        : [{ amount: t.amount, catId: t.category, notes: t.notes, transfer: pTransfer }];
-      for (const lf of legs) {
-        let kind = kindOf(lf.catId);
-        if (kind === 'uncat' && (lf.transfer || pTransfer)) kind = 'mm';
-        rows.push({
-          date: t.date,
-          payee: payeeName || '(no payee)',
-          acct: (an[a.id] || '').replace(/\s*\(.*$/, '').slice(0, 18),
-          amount: lf.amount,
-          catName: lf.catId ? nameOf(lf.catId) : kind === 'mm' ? 'Transfer' : '(uncategorized)',
-          kind,
-          notes: (lf.notes || '').replace(/\s+/g, ' ').slice(0, 44),
-          onbudget: !a.offbudget,
-          split: !!isSplit,
-        });
-      }
+    for (const lf of classifiedLeavesForAccountTransactions(tx, catInfo, a, (t) => pn[t.payee] || '')) {
+      rows.push({
+        date: lf.date,
+        payee: lf.payee || '(no payee)',
+        acct: (an[a.id] || '').replace(/\s*\(.*$/, '').slice(0, 18),
+        amount: lf.amount,
+        catName: lf.kind === 'transfer' ? 'Transfer' : lf.catId ? nameOf(lf.catId) : '(uncategorized)',
+        kind: lf.kind,
+        notes: (lf.notes || '').replace(/\s+/g, ' ').slice(0, 44),
+        onbudget: lf.onbudget,
+        split: !!lf.isLeg,
+      });
     }
   }
 

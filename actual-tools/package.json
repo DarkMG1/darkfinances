@@ -5,7 +5,7 @@
   "type": "commonjs",
   "description": "Deterministic Actual/Splitwise/Venmo CLI tools for DarkFinances",
   "scripts": {
-    "check": "for file in *.js; do node --check \"$file\"; done && node --test test/*.test.js",
+    "check": "for file in *.js lib/*.js; do node --check \"$file\"; done && node --test test/*.test.js",
     "test": "npm run check"
   },
   "dependencies": {

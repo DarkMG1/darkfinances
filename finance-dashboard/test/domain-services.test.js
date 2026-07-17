@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildCategoryInfo, transactionLeaves, summarizeCents } = require('../lib/domain/classification');
+const { buildCategoryInfo, transactionLeaves, summarizeCents, classifyTransactionLeaves, buildTransferIndex } = require('../lib/domain/classification');
 const { fromCents, sumCents, toCents } = require('../lib/domain/money');
 const { accountsForMetric, migrateAccountOverrides } = require('../lib/account-overrides');
 const { metricValue } = require('../lib/metric-provenance');
@@ -42,6 +42,25 @@ test('classification excludes movement and reimbursement without float drift', (
     totalSpendCents: 12345,
     totalIncomeCents: 100001,
   });
+});
+
+test('Actual transfer identity excludes paired legs from spending summaries', () => {
+  const info = buildCategoryInfo([
+    { name: 'Money Movement', categories: [{ id: 'transfer', name: 'Transfer' }] },
+    { name: 'Spending', categories: [{ id: 'food', name: 'Food' }] },
+  ], patterns);
+  const pair = classifyTransactionLeaves(
+    { id: 'out', amount: -900, transfer_id: 'in', category: 'transfer' },
+    info,
+    {
+      accountId: 'checking',
+      transferIndex: buildTransferIndex([
+        { transaction: { id: 'out', amount: -900, transfer_id: 'in', category: 'transfer' }, accountId: 'checking' },
+        { transaction: { id: 'in', amount: 900, transfer_id: 'out', category: 'transfer' }, accountId: 'savings' },
+      ]),
+    },
+  );
+  assert.equal(summarizeCents(pair, info).totalSpendCents, 0);
 });
 
 test('split parents flatten to cent-preserving leaves', () => {

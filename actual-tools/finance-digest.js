@@ -20,13 +20,16 @@
  */
 const api = require('@actual-app/api');
 const { addDays, todayYMD } = require('./lib/date-only');
+const {
+  buildToolCategoryInfo,
+  classifiedLeavesForAccountTransactions,
+} = require('./lib/transfer-classification');
 
 const c2 = (cents) => (Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (cents) => (cents < 0 ? '-$' : '$') + c2(cents);
 
 const MM_CAT = /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i;
 const REIMB_CAT = /^reimbursement$/i;
-const TRANSFER_PAYEE = /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i;
 
 (async () => {
   await api.init({ dataDir: process.env.FIX_DATA_DIR, serverURL: process.env.ACTUAL_SERVER_URL, password: process.env.ACTUAL_PASSWORD });
@@ -37,20 +40,8 @@ const TRANSFER_PAYEE = /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i;
   const monthStart = today.slice(0, 8) + '01';
 
   const groups = await api.getCategoryGroups();
-  const catInfo = {}; // id -> { name, group, kind }
-  for (const g of groups) {
-    const incomeGroup = g.is_income === true || /^income$/i.test(g.name || '');
-    const mmGroup = /money\s*movement/i.test(g.name || '');
-    for (const c of (g.categories || [])) {
-      let kind = 'spend';
-      if (incomeGroup) kind = 'income';
-      else if (REIMB_CAT.test(c.name || '')) kind = 'reimb';
-      else if (mmGroup || MM_CAT.test(c.name || '')) kind = 'mm';
-      catInfo[c.id] = { name: c.name, group: g.name, kind };
-    }
-  }
+  const catInfo = buildToolCategoryInfo(groups);
   const nameOf = (id) => (id && catInfo[id] ? catInfo[id].name : '(uncategorized)');
-  const kindOf = (id) => (id && catInfo[id] ? catInfo[id].kind : 'uncat');
 
   const payees = await api.getPayees();
   const pn = {}; for (const p of payees) pn[p.id] = p.name || '';
@@ -63,27 +54,24 @@ const TRANSFER_PAYEE = /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i;
   for (const a of accounts) {
     const tx = await api.getTransactions(a.id, '2000-01-01', today);
     let bal = 0;
-    for (const t of tx) {
-      bal += t.amount;
-      const payeeName = pn[t.payee] || '';
-      const parentTransfer = !!(t.transfer_id || t.transferred_id) || TRANSFER_PAYEE.test(payeeName);
-      const isSplit = t.subtransactions && t.subtransactions.length;
-      const leaves = isSplit
-        ? t.subtransactions.map((s) => ({ amount: s.amount, catId: s.category, transfer: !!(s.transfer_id) }))
-        : [{ amount: t.amount, catId: t.category, transfer: parentTransfer }];
-      for (const lf of leaves) {
-        let kind = kindOf(lf.catId);
-        if (kind === 'uncat' && (lf.transfer || parentTransfer)) kind = 'mm';
-        const entry = { date: t.date, payee: payeeName, acct: a.name, amount: lf.amount, onbudget: !a.offbudget, catName: lf.catId ? nameOf(lf.catId) : (kind === 'mm' ? 'Transfer' : '(uncategorized)'), kind };
-        if (t.date === yesterday) yLeaves.push(entry);
-        if (t.date >= monthStart && t.date <= today) mLeaves.push(entry);
-      }
+    for (const t of tx) bal += t.amount;
+    for (const lf of classifiedLeavesForAccountTransactions(tx, catInfo, a, (t) => pn[t.payee] || '')) {
+      const entry = {
+        date: lf.date,
+        payee: lf.payee,
+        acct: a.name,
+        amount: lf.amount,
+        onbudget: lf.onbudget,
+        catName: lf.kind === 'transfer' ? 'Transfer' : lf.catId ? nameOf(lf.catId) : '(uncategorized)',
+        kind: lf.kind,
+      };
+      if (entry.date === yesterday) yLeaves.push(entry);
+      if (entry.date >= monthStart && entry.date <= today) mLeaves.push(entry);
     }
     balances.push({ name: a.name, offbudget: !!a.offbudget, bal });
   }
 
-  // Real spend = on-budget accounts only (excludes investment/off-budget noise), spend + uncategorized.
-  const isReal = (e) => e.onbudget && (e.kind === 'spend' || e.kind === 'uncat');
+  const isReal = (e) => e.onbudget && (e.kind === 'spend' || (e.kind === 'uncat' && e.amount < 0));
   const catKey = (e) => (e.kind === 'uncat' ? 'Uncategorized' : e.catName);
 
   const yReal = yLeaves.filter(isReal);
@@ -96,7 +84,7 @@ const TRANSFER_PAYEE = /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i;
   const catRows = Object.entries(byCat).map(([name, cents]) => ({ name, spent: -cents })).filter((r) => Math.abs(r.spent) >= 1).sort((a, b) => b.spent - a.spent);
 
   const mmByName = {};
-  for (const e of mLeaves.filter((e) => e.kind === 'mm' || e.kind === 'reimb')) {
+  for (const e of mLeaves.filter((e) => e.kind === 'mm' || e.kind === 'reimb' || e.kind === 'transfer')) {
     const k = mmByName[e.catName] || (mmByName[e.catName] = { out: 0, inn: 0, net: 0 });
     k.net += e.amount; if (e.amount < 0) k.out += -e.amount; else k.inn += e.amount;
   }
