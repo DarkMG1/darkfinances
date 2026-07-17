@@ -28,6 +28,11 @@ const {
 const { readJsonFile, writeJsonFile, JsonStoreError } = require('./lib/json-store');
 const { readRuntimeStateByPath, writeRuntimeStateByPath, RuntimeStateError } = require('./lib/runtime-state-store');
 const {
+  RECEIPT_MAX_DECODED_BYTES,
+  exactBase64DecodedBytes,
+  stripBase64Envelope,
+} = require('./lib/receipt-limits');
+const {
   REFERENCE_STEPS: TRANSACTION_DELETION_REFERENCE_STEPS,
   rewriteTransactionDeletionReferences,
 } = require('./lib/transaction-deletion-references');
@@ -3967,10 +3972,13 @@ function detectedImageMime(buffer) {
   return null;
 }
 function decodeImageBase64(value) {
-  const clean = String(value).replace(/^data:[^;]+;base64,/, '').replace(/\s+/g, '');
+  const clean = stripBase64Envelope(value);
   if (!clean || clean.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(clean)) throw new Error('invalid base64 image');
+  const estimated = exactBase64DecodedBytes(clean);
+  if (estimated > RECEIPT_MAX_DECODED_BYTES) throw new Error('image too large (max 25MB)');
   const buffer = Buffer.from(clean, 'base64');
   if (!buffer.length) throw new Error('empty image');
+  if (buffer.length > RECEIPT_MAX_DECODED_BYTES) throw new Error('image too large (max 25MB)');
   return buffer;
 }
 
@@ -3991,7 +3999,6 @@ function addReceipt({
   assertTransactionMutationAvailable({ ids: [txnId] });
   const normalizedAmount = amount == null ? null : fromCents(toCents(amount));
   const buf = decodeImageBase64(imageBase64);
-  if (buf.length > 25 * 1024 * 1024) throw new Error('image too large (max 25MB)');
   const m = (mime || 'image/jpeg').toLowerCase();
   if (!EXT_FOR_MIME[m]) throw new Error('unsupported receipt image type');
   const detected = detectedImageMime(buf);
@@ -5043,6 +5050,7 @@ module.exports = {
   getReceiptFile,
   assertReceiptMutationAvailable,
   deleteReceipt,
+  decodeImageBase64,
   getReimbursementLedger,
   getReconciliation,
   setReconcileItem,

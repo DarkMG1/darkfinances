@@ -1,6 +1,14 @@
 const { z } = require('zod');
 const { RequestValidationError } = require('./errors');
 const { toCents } = require('./domain/money');
+const { sanitizeIssues } = require('./request-issues');
+const {
+  RECEIPT_MAX_BASE64_CHARS,
+  RECEIPT_MAX_DECODED_BYTES,
+  exactBase64DecodedBytes,
+  isStrictBase64,
+  stripBase64Envelope,
+} = require('./receipt-limits');
 
 const nonEmpty = (max = 200) => z.string().trim().min(1).max(max);
 const optionalText = (max = 8000) => z.string().max(max).optional().nullable();
@@ -24,12 +32,6 @@ const nonNegativeCentAmount = z.number({ invalid_type_error: 'cent amount must b
   .min(0, 'cent amount must be non-negative')
   .max(MAX_MONEY_CENTS, 'cent amount is outside the supported range')
   .refine((value) => !Object.is(value, -0), 'cent amount must not be negative zero');
-const owesConfig = z.object({
-  expected: z.record(z.record(nonNegativeCentAmount)).optional(),
-  manualTrips: z.record(z.array(z.object({
-    amount: money.refine((value) => value >= 0, 'amount must be non-negative'),
-  }).passthrough())).optional(),
-}).passthrough();
 
 function validDateOnly(value) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
@@ -44,6 +46,24 @@ function validDateOnly(value) {
 
 const dateOnly = z.string().refine(validDateOnly, 'date must be a real YYYY-MM-DD date');
 const monthOnly = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'month must be YYYY-MM');
+
+const owesTripEntry = z.object({
+  event: z.string().max(200).optional(),
+  amount: money.refine((value) => value >= 0, 'amount must be non-negative'),
+}).strict();
+
+const owesConfig = z.object({
+  expected: z.record(z.record(nonNegativeCentAmount)).optional(),
+  debtorPatterns: z.record(z.string().max(500)).optional(),
+  tripStart: z.record(dateOnly).optional(),
+  swNet: z.array(z.string().max(200)).max(1000).optional(),
+  settledExt: z.array(z.string().max(200)).max(1000).optional(),
+  autoReimbTags: z.array(z.string().max(100)).max(100).optional(),
+  eventStatus: z.record(z.string().max(80)).optional(),
+  autoDetectExcludeEvents: z.array(z.string().max(200)).max(1000).optional(),
+  manualTrips: z.record(z.array(owesTripEntry)).optional(),
+}).strict();
+
 const nullableIdentifier = identifier.optional().nullable();
 const accountRole = z.enum(['operating_cash', 'protected_savings', 'credit_card', 'loan', 'investment', 'excluded', 'unknown']);
 
@@ -138,6 +158,26 @@ const schemas = {
     date: dateOnly,
   }).strict(),
 
+  deleteTransactionBody: z.object({
+    id: identifier.optional(),
+    accountId: identifier.optional(),
+    date: dateOnly.optional(),
+  }).strict(),
+
+  confirmRepaymentQuery: z.object({
+    from: dateOnly.optional(),
+    to: dateOnly.optional(),
+  }).strict(),
+
+  confirmRepaymentBody: z.object({
+    id: identifier.optional(),
+  }).strict(),
+
+  dismissRepaymentBody: z.object({
+    id: identifier.optional(),
+    inflowId: identifier.optional(),
+  }).strict(),
+
   budget: z.object({
     month: monthOnly.optional(),
     categoryId: identifier,
@@ -215,7 +255,18 @@ const schemas = {
     txnId: identifier,
     accountId: identifier,
     transactionDate: dateOnly,
-    imageBase64: z.string().min(1).max(34_000_000),
+    imageBase64: z.string().min(1, 'imageBase64 is required').transform(stripBase64Envelope).pipe(
+      z.string().max(RECEIPT_MAX_BASE64_CHARS).superRefine((encoded, ctx) => {
+        if (!isStrictBase64(encoded)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'invalid receipt image encoding' });
+          return;
+        }
+        const decoded = exactBase64DecodedBytes(encoded);
+        if (decoded > RECEIPT_MAX_DECODED_BYTES) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'payload exceeds the maximum allowed size' });
+        }
+      }),
+    ),
     mime: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']),
     ocrText: z.string().max(8000).optional(),
     ocrLines: z.array(z.string().max(1000)).max(200).optional(),
@@ -270,11 +321,15 @@ const schemas = {
 function parse(schema, value, label = 'request') {
   const result = schema.safeParse(value ?? {});
   if (result.success) return result.data;
-  const issues = result.error.issues.map((issue) => ({
+  const issues = sanitizeIssues(result.error.issues.map((issue) => ({
     path: issue.path.join('.'),
     message: issue.message,
-  }));
-  const summary = issues.slice(0, 3).map((issue) => `${issue.path || label}: ${issue.message}`).join('; ');
+    code: issue.code,
+  })));
+  const summary = issues.slice(0, 3).map((issue) => {
+    if (/unknown fields are not allowed/i.test(issue.message)) return `${label}: unknown fields are not allowed`;
+    return `${issue.path || label}: ${issue.message}`;
+  }).join('; ');
   throw new RequestValidationError(`Invalid ${label}: ${summary}`, issues);
 }
 

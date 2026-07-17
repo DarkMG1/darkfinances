@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { readJsonFile, writeJsonFile } = require('./json-store');
 const { AppError } = require('./errors');
+const { sanitizeIssues } = require('./request-issues');
 const { statePath } = require('./state-registry');
 
 const OUTER_SCHEMA_VERSION = 1;
@@ -112,6 +113,24 @@ function isObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function validIssue(value) {
+  return isObject(value)
+    && typeof value.path === 'string'
+    && value.path.length >= 1
+    && value.path.length <= 32
+    && typeof value.message === 'string'
+    && value.message.length >= 1
+    && value.message.length <= 160
+    && !/base64|secret|token|password/i.test(value.path)
+    && !/base64|secret|token|password/i.test(value.message);
+}
+
+function validIssues(value) {
+  if (value === undefined) return true;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 8) return false;
+  return value.every(validIssue);
+}
+
 function validError(value) {
   return isObject(value)
     && /^[A-Z0-9_:-]{1,64}$/.test(value.code || '')
@@ -124,7 +143,8 @@ function validError(value) {
     })
     && Number.isInteger(value.status)
     && value.status >= 400
-    && value.status <= 599;
+    && value.status <= 599
+    && validIssues(value.issues);
 }
 
 function validLegacyOperation(key, operation) {
@@ -236,7 +256,11 @@ function sanitizeError(error) {
   const status = Number.isInteger(requestedStatus) && requestedStatus >= 400 && requestedStatus <= 599
     ? requestedStatus
     : 400;
-  return { code, message, status };
+  const durable = { code, message, status };
+  if (Array.isArray(error?.issues) && error.issues.length) {
+    durable.issues = sanitizeIssues(error.issues).slice(0, 8);
+  }
+  return durable;
 }
 
 function isVersioned(operation) {

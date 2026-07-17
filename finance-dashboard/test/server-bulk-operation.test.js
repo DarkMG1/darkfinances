@@ -539,9 +539,9 @@ test('pruned journal cannot reconcile a different fingerprint from stale bulk ev
     method: 'POST',
     headers: { 'X-Finance-Token': 'test-api-token', 'Idempotency-Key': key },
   });
-  assert.equal(attack.status, 409);
+  assert.equal(attack.status, 400);
   const attackBody = await attack.json();
-  assert.equal(attackBody.code, 'IDEMPOTENCY_KEY_REUSED');
+  assert.equal(attackBody.code, 'INVALID_REQUEST');
   assert.equal(fs.readFileSync(marker, 'utf8'), markerBefore);
   const bulkAfterAttack = JSON.parse(fs.readFileSync(bulkPath, 'utf8'));
   assert.equal(bulkAfterAttack.sagas.bulk1.operationJournalFingerprint, boundFingerprint);

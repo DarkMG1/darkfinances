@@ -20,6 +20,13 @@ test('transaction creation rejects unknown fields and zero amounts', () => {
   );
 });
 
+test('owesConfig rejects unknown fields', () => {
+  assert.throws(
+    () => parse(schemas.owesConfig, { expected: { trip: { alex: 100 } }, extra: true }),
+    RequestValidationError,
+  );
+});
+
 test('split validation bounds legs and accepts exact signed values', () => {
   const value = parse(schemas.splitTransaction, {
     id: 'txn-from-endpoint-builder',

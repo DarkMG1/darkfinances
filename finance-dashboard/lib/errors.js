@@ -61,6 +61,14 @@ function classifyError(error) {
       { code: error.code, status: 500, expose: true, cause: error }
     );
   }
+  if (error?.name === 'RuntimeStateError' || String(error?.code || '').startsWith('RUNTIME_STATE_')) {
+    return new AppError(error.message, {
+      code: error.code || 'RUNTIME_STATE_ERROR',
+      status: 500,
+      expose: true,
+      cause: error,
+    });
+  }
 
   const message = String(error?.message || error || 'Unexpected error');
   if (/not found/i.test(message)) {
@@ -71,6 +79,9 @@ function classifyError(error) {
   }
   if (/splitwise snapshot/i.test(message)) {
     return new AppError(message, { code: 'STALE_UPSTREAM_DATA', status: 503, expose: true, cause: error });
+  }
+  if (/too large|payload too large|exceeds the maximum (encoded|decoded)? receipt size/i.test(message)) {
+    return new AppError(message, { code: 'PAYLOAD_TOO_LARGE', status: 413, expose: true, cause: error });
   }
   if (
     /\brequired\b|must be|must sum|invalid|unsupported|unsafe|at least|non-zero|greater than|bad debtor pattern|cannot|can't|can’t/i.test(message)
