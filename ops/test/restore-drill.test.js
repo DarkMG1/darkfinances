@@ -31,6 +31,7 @@ const {
   lockPathForLayout,
 } = require('../lib/restore-instance-lock');
 const { writeProductionDashboard, PRODUCTION_SHAPED } = require('./fixtures/backup-bundle-dashboard-fixtures');
+const { findExecutableInPath } = require('../lib/ops-command-runners');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const restoreShell = path.join(repoRoot, 'ops/bin/restore-dashboard-runtime.sh');
@@ -918,6 +919,44 @@ test('oversized restore journal is rejected with controlled error', (t) => {
     () => readJournal(layout.journalPath),
     /restore journal exceeds size limit/,
   );
+});
+
+function isolatedToolPath(root, toolNames) {
+  const bin = path.join(root, 'isolated-bin');
+  fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+  for (const name of toolNames) {
+    const resolved = findExecutableInPath(name, process.env);
+    if (!resolved) throw new Error(`${name} not found for test setup`);
+    fs.symlinkSync(resolved, path.join(bin, name));
+  }
+  return bin;
+}
+
+test('shell live restore releases lock when writer discovery fails on PATH', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-lock-writer-fail-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeTerminalSagaDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
+  const ctx = restoreDrillContext(root, destination, archive);
+  const layout = controlLayoutForDestination(destination);
+  const tarOnlyPath = isolatedToolPath(root, ['tar']);
+  assert.throws(
+    () => runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      dryRun: false,
+      confirm: true,
+      env: {
+        ...ctx.env,
+        PATH: tarOnlyPath,
+      },
+    }),
+    /live-quiescent|systemctl unavailable|unknown state/i,
+  );
+  assert.equal(fs.existsSync(lockPathForLayout(layout)), false);
 });
 
 test('concurrent live restore rejects second invocation while first holds lock', async (t) => {

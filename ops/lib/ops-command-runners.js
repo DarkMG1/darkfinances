@@ -6,8 +6,66 @@ const path = require('path');
 
 const SAFE_UNIT_PATTERN = /^[A-Za-z0-9@._-]+$/;
 const SAFE_CONTAINER_PATTERN = /^[A-Za-z0-9_.-]+$/;
+const SAFE_COMMAND_NAME_PATTERN = /^[A-Za-z0-9._+-]+$/;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_CAPTURE_BYTES = 64 * 1024;
+const MAX_PATH_ENTRIES = 256;
+const MAX_PATH_ENTRY_LENGTH = 4096;
+const MAX_CANDIDATE_PATH_LENGTH = 4096;
+
+function isSafeCommandName(name) {
+  if (typeof name !== 'string' || !name || name.length > 255) return false;
+  if (name.includes('/') || name.includes('\\') || name.includes('\0')) return false;
+  return SAFE_COMMAND_NAME_PATTERN.test(name);
+}
+
+function pathDelimiter(platform = process.platform) {
+  return platform === 'win32' ? ';' : ':';
+}
+
+function splitPathEnv(pathEnv, platform = process.platform) {
+  if (typeof pathEnv !== 'string' || !pathEnv) return [];
+  return pathEnv.split(pathDelimiter(platform));
+}
+
+function isExecutableCandidate(candidatePath) {
+  try {
+    const lstat = fs.lstatSync(candidatePath);
+    if (lstat.isDirectory()) return false;
+    if (!lstat.isFile() && !lstat.isSymbolicLink()) return false;
+    fs.accessSync(candidatePath, fs.constants.X_OK);
+    const resolved = lstat.isSymbolicLink() ? fs.statSync(candidatePath) : lstat;
+    return resolved.isFile();
+  } catch {
+    return false;
+  }
+}
+
+function findExecutableInPath(name, env = process.env, platform = process.platform) {
+  if (!isSafeCommandName(name)) return null;
+  const entries = splitPathEnv(env.PATH, platform);
+  const limit = Math.min(entries.length, MAX_PATH_ENTRIES);
+  const extensions = platform === 'win32'
+    ? splitPathEnv(env.PATHEXT || '.EXE;.CMD;.BAT;.COM', platform)
+    : [''];
+
+  for (let index = 0; index < limit; index += 1) {
+    const entry = entries[index];
+    if (!entry || entry.length > MAX_PATH_ENTRY_LENGTH) continue;
+    const dir = path.resolve(entry);
+    for (const extension of extensions) {
+      const suffix = extension && !extension.startsWith('.') ? `.${extension}` : extension;
+      const candidate = path.join(dir, `${name}${suffix}`);
+      if (candidate.length > MAX_CANDIDATE_PATH_LENGTH) continue;
+      if (isExecutableCandidate(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+function commandExists(name, env = process.env) {
+  return findExecutableInPath(name, env) !== null;
+}
 
 function assertSafeUnit(unit) {
   if (typeof unit !== 'string' || !SAFE_UNIT_PATTERN.test(unit)) {
@@ -61,10 +119,7 @@ function createDefaultRunners(env = process.env, options = {}) {
 
   return {
     commandTimeoutMs: timeoutMs,
-    commandExists(name) {
-      const result = spawnBounded('command', ['-v', name], { env, timeoutMs: 5000 });
-      return result.status === 0;
-    },
+    commandExists: (name) => commandExists(name, env),
 
     systemctl(args, runOptions = {}) {
       return spawnBounded('systemctl', args, { env: runOptions.env || env, timeoutMs });
@@ -177,8 +232,17 @@ function createDefaultRunners(env = process.env, options = {}) {
 module.exports = {
   SAFE_UNIT_PATTERN,
   SAFE_CONTAINER_PATTERN,
+  SAFE_COMMAND_NAME_PATTERN,
   DEFAULT_COMMAND_TIMEOUT_MS,
   MAX_CAPTURE_BYTES,
+  MAX_PATH_ENTRIES,
+  MAX_PATH_ENTRY_LENGTH,
+  MAX_CANDIDATE_PATH_LENGTH,
+  isSafeCommandName,
+  splitPathEnv,
+  isExecutableCandidate,
+  findExecutableInPath,
+  commandExists,
   createDefaultRunners,
   assertSafeUnit,
   assertSafeContainer,
