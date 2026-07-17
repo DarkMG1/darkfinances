@@ -8,6 +8,8 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/domain/classification.js',
   'lib/domain/money.js',
   'lib/errors.js',
+  'lib/graceful-shutdown.js',
+  'lib/http-server-drain.js',
   'lib/json-store.js',
   'lib/metric-provenance.js',
   'lib/mutation-route-registry.js',
