@@ -7,6 +7,7 @@ import { purgeOtaProfileState } from '@/lib/auto-update';
 import { mutationOutcomeHaptics } from '@/lib/haptics';
 import { purgeNotificationProfileState } from '@/lib/notifications';
 import { purgeProfileGeneration } from '@/lib/notification-reconciliation';
+import { purgeReconnectRefreshProfileState } from '@/lib/reconnect-refresh';
 import { abortFinanceRequests } from '@/lib/request-lifecycle';
 import { clearFinanceQueries, queryClient } from '@/lib/query-client';
 import { clearFinanceWidget } from '@/lib/widgets';
@@ -27,6 +28,7 @@ export async function purgeFinanceProfile(
 ): Promise<void> {
   prepareFinanceOperationProfilePurge(operationScope);
   purgeProfileGeneration(scope);
+  purgeReconnectRefreshProfileState(scope);
   purgeOtaProfileState();
   if (operationScope) mutationOutcomeHaptics.purgeScope(operationScope);
   abortFinanceRequests();

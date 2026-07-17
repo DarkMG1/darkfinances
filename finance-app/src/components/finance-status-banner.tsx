@@ -1,24 +1,12 @@
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { usePing } from '@/api/hooks/finance.hooks';
-import { queryClient } from '@/lib/query-client';
 import { colors } from '@/theme/colors';
 
 export function FinanceStatusBanner() {
   const insets = useSafeAreaInsets();
   const ping = usePing();
-  const wasUnavailable = useRef(false);
-  useEffect(() => {
-    if (ping.isError) {
-      wasUnavailable.current = true;
-      return;
-    }
-    if (ping.isSuccess && wasUnavailable.current) {
-      wasUnavailable.current = false;
-      void queryClient.invalidateQueries();
-    }
-  }, [ping.isError, ping.isSuccess]);
   const syncError = ping.data?.actual?.lastError;
   if (!ping.isError && !syncError) return null;
 

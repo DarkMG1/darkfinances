@@ -89,6 +89,16 @@ function releaseIdentity() {
   return readReleaseIdentity(RELEASE_MANIFEST_PATH, __dirname);
 }
 
+function buildSourceFreshness() {
+  const release = releaseIdentity();
+  return {
+    cacheGeneration: actualCoordinator.getHealth().generation,
+    sourceRevision: release?.contract || release?.lockSha256 || null,
+    financeTimeZone: FINANCE_TIME_ZONE,
+    observedAt: Date.now(),
+  };
+}
+
 // Defense-in-depth: the Actual API occasionally rejects a batch write out-of-band
 // (a promise that escapes the awaited call). Continuing after an unknown write
 // failure can expose partial state, so mark the process unhealthy and let systemd
@@ -1503,6 +1513,7 @@ v1.get('/ping', env(async () => {
     requestAdmission: requestAdmission.getHealth(),
     queuedMutations: mutationQueue.size,
     release: releaseIdentity(),
+    sourceFreshness: buildSourceFreshness(),
   };
 }));
 v1.get('/accounts', env(resolvers.accounts));

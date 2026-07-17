@@ -31,6 +31,8 @@ import { purgeLegacyReceiptCopies } from '@/lib/receipts';
 import { Loading } from '@/components/ui';
 import { NotificationReconciliationOwner } from '@/components/notification-reconciliation-owner';
 import { NotificationRouter } from '@/components/notification-router';
+import { ReconnectRefreshOwner } from '@/components/reconnect-refresh-owner';
+import { noteReconnectForegroundCoincidence } from '@/lib/reconnect-refresh-registry';
 import { colors } from '@/theme/colors';
 
 const UNLOCK_FADE_ACTIVE_SETTLE_MS = 40;
@@ -138,6 +140,7 @@ function RootNav() {
 
   const reconcileOperations = useCallback(() => {
     if (!ready || !configured || demo) return;
+    noteReconnectForegroundCoincidence();
     void reconcileFinanceOperationsOnForeground({
       reconcile: () => reconcilePendingFinanceOperations({ serverUrl, token, demo }),
       refreshCompletedQueries: () => refreshActiveFinanceQueriesForScope(queryClient, scope),
@@ -349,6 +352,7 @@ function RootNav() {
     <View style={styles.appShell}>
       {content}
       {configured ? <NotificationReconciliationOwner /> : null}
+      {configured ? <ReconnectRefreshOwner /> : null}
       {configured ? <NotificationRouter /> : null}
       {configured && demo ? (
         <View pointerEvents="none" style={styles.demoWatermark}>
