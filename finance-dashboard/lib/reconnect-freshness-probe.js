@@ -27,8 +27,8 @@ function createReconnectFreshnessProbeService(deps) {
   const deployIdentity = deps.deployIdentity ?? (() => null);
   const now = deps.now ?? (() => Date.now());
 
-  /** @type {Promise<Record<string, unknown>> | null} */
-  let inFlight = null;
+  /** @type {Map<string, Promise<Record<string, unknown>>>} */
+  const inFlightByPrincipal = new Map();
 
   async function performProbe() {
     return coordinator.runRead(async () => {
@@ -57,14 +57,29 @@ function createReconnectFreshnessProbeService(deps) {
     }, { label: 'reconnect-freshness-probe' });
   }
 
-  async function runProbe() {
-    const coalesced = inFlight != null;
-    if (!inFlight) {
-      inFlight = performProbe().finally(() => {
-        inFlight = null;
+  /**
+   * Runs a direct Actual accounts probe under coordinator read ordering, then
+   * atomically invalidates and republishes the accounts cache entry. Evidence is
+   * bounded to the probed accounts snapshot; the generation flush forces all
+   * cachedActual readers to miss and source-read on next GET.
+   *
+   * Coalescing is scoped per admission principal only — responses never cross auth.
+   */
+  async function runProbe(principalKey = 'anonymous') {
+    const key = String(principalKey || 'anonymous');
+    let coalesced = false;
+    let flight = inFlightByPrincipal.get(key);
+    if (flight) {
+      coalesced = true;
+    } else {
+      flight = performProbe().finally(() => {
+        if (inFlightByPrincipal.get(key) === flight) {
+          inFlightByPrincipal.delete(key);
+        }
       });
+      inFlightByPrincipal.set(key, flight);
     }
-    const result = await inFlight;
+    const result = await flight;
     return { ...result, coalesced };
   }
 
@@ -73,7 +88,7 @@ function createReconnectFreshnessProbeService(deps) {
     ACCOUNTS_CACHE_KEY,
     deriveSourceObservedRevision,
     runProbe,
-    getInFlight: () => inFlight,
+    getInFlight: (principalKey = 'anonymous') => inFlightByPrincipal.get(String(principalKey || 'anonymous')) ?? null,
   };
 }
 

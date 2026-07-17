@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { usePing } from '@/api/hooks/finance.hooks';
+import { applyPingAvailabilityTransition } from '@/lib/finance-status-ping-recovery';
 import {
   getReconnectConnectivityPhase,
   requestReconnectServerRecovery,
@@ -11,19 +12,18 @@ import { colors } from '@/theme/colors';
 export function FinanceStatusBanner() {
   const insets = useSafeAreaInsets();
   const ping = usePing();
-  const wasUnavailable = useRef(false);
+  const recoveryState = useRef({ wasUnavailable: false });
 
   useEffect(() => {
-    if (ping.isError) {
-      wasUnavailable.current = true;
-      return;
+    const next = applyPingAvailabilityTransition(recoveryState.current, {
+      isError: ping.isError,
+      isSuccess: ping.isSuccess,
+      connectivityPhase: getReconnectConnectivityPhase(),
+    });
+    if (next.recoveryRequested) {
+      requestReconnectServerRecovery();
     }
-    if (ping.isSuccess && wasUnavailable.current) {
-      wasUnavailable.current = false;
-      if (getReconnectConnectivityPhase() === 'online') {
-        requestReconnectServerRecovery();
-      }
-    }
+    recoveryState.current = { wasUnavailable: next.wasUnavailable };
   }, [ping.isError, ping.isSuccess]);
 
   const syncError = ping.data?.actual?.lastError;

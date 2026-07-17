@@ -43,11 +43,13 @@ async function waitForServer(base, child, logs) {
   throw new Error(`server startup timeout: ${logs.value}`);
 }
 
-async function apiRequest(base, pathname, { method = 'GET', key, body } = {}) {
+async function apiRequest(base, pathname, { method = 'GET', key, body, demo = false, token = 'test-api-token', headers = {} } = {}) {
   const response = await fetch(`${base}${pathname}`, {
     method,
     headers: {
-      'X-Finance-Token': 'test-api-token',
+      ...(demo ? { 'X-Demo-Mode': '1' } : {}),
+      ...(token != null && token !== '' ? { 'X-Finance-Token': token } : {}),
+      ...headers,
       ...(key ? { 'Idempotency-Key': key } : {}),
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
     },
@@ -176,7 +178,62 @@ function spawnServer(dir, port, preloadBody, extraEnv = {}) {
   });
   child.stdout.on('data', (chunk) => { logs.value += chunk; });
   child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  return { child, logs, base: `http://127.0.0.1:${port}`, marker: path.join(dir, 'marker.log') };
+  return { child, logs, base: `http://127.0.0.1:${port}`, marker: path.join(dir, 'marker.log'), dir };
+}
+
+function barrierMockBody({ markLine = '' } = {}) {
+  return `
+    ${markLine}
+    const fs = require('fs');
+    const path = require('path');
+    const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
+    let accountsSource = [{ id: 'a1', name: 'Source-A', balance: 100 }];
+    const gatePath = (name) => path.join(path.dirname(process.env.TEST_MARKER), name + '.gate');
+    const waitGate = async (name) => {
+      while (!fs.existsSync(gatePath(name))) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+    const mock = {
+      initApi: async () => ({ ok: true }),
+      shutdownApi: async () => ({ ok: true }),
+      getHealth: () => ({ ready: true }),
+      syncNow: async () => ({ ok: true }),
+      getAccounts: async () => {
+        const fromProbe = (new Error().stack || '').includes('reconnect-freshness-probe');
+        if (fromProbe) {
+          mark('probe:enter');
+          await waitGate('probe');
+          mark('probe:read:' + accountsSource[0].name);
+        }
+        return accountsSource.map((entry) => ({ ...entry }));
+      },
+      setRecurringOverride: async () => {
+        mark('mutation:enter');
+        accountsSource = [{ id: 'a1', name: 'Source-Write', balance: 300 }];
+        await waitGate('mutation');
+        mark('mutation:end');
+        return { ok: true };
+      },
+    };
+    require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
+  `;
+}
+
+function releaseGate(dir, name) {
+  fs.writeFileSync(path.join(dir, `${name}.gate`), '1');
+}
+
+async function waitForMarkerLine(marker, line, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(marker)) {
+      const content = fs.readFileSync(marker, 'utf8');
+      if (content.split('\n').includes(line)) return;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`marker line not seen: ${line}`);
 }
 
 test('deriveSourceObservedRevision changes when probe source changes', () => {
@@ -217,16 +274,40 @@ test('concurrent probe requests coalesce to one direct read', async () => {
     coordinator,
     readAccountsProbe: async () => {
       reads += 1;
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await new Promise((resolve) => setImmediate(resolve));
       return [{ id: 'a1', name: 'X', balance: 1 }];
     },
     financeTimeZone: 'America/Los_Angeles',
     deployIdentity: () => null,
   });
-  const [first, second] = await Promise.all([service.runProbe(), service.runProbe()]);
+  const [first, second] = await Promise.all([service.runProbe('token:api'), service.runProbe('token:api')]);
   assert.equal(reads, 1);
   assert.equal(first.coalesced, false);
   assert.equal(second.coalesced, true);
+});
+
+test('probe coalescing is scoped per principal and never crosses auth', async () => {
+  const coordinator = new ActualCoordinator('probe-principal');
+  let reads = 0;
+  const service = createReconnectFreshnessProbeService({
+    coordinator,
+    readAccountsProbe: async () => {
+      reads += 1;
+      await new Promise((resolve) => setImmediate(resolve));
+      return [{ id: 'a1', name: `Read-${reads}`, balance: reads }];
+    },
+    financeTimeZone: 'America/Los_Angeles',
+    deployIdentity: () => null,
+  });
+  const [tokenA, tokenB, demoA] = await Promise.all([
+    service.runProbe('token:api'),
+    service.runProbe('token:api'),
+    service.runProbe('demo'),
+  ]);
+  assert.equal(reads, 2);
+  assert.equal(tokenB.coalesced, true);
+  assert.equal(demoA.coalesced, false);
+  assert.notEqual(tokenA.sourceObservedRevision, demoA.sourceObservedRevision);
 });
 
 test('warm cached accounts=A, source B without invalidation, reconnect GET then accounts returns B', async (t) => {
@@ -370,4 +451,107 @@ test('repeated reconnect probes bump cache generation monotonically', async (t) 
   assert.ok(second.body.data.cacheGenerationAfter > first.body.data.cacheGenerationAfter);
   assert.equal(first.body.data.coalesced, false);
   assert.equal(second.body.data.coalesced, false);
+});
+
+test('Promise.all probe then write serializes with barriers and write wins cache', async (t) => {
+  const port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-probe-first-'));
+  const markLine = `const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');`;
+  const { child, logs, base, marker } = spawnServer(dir, port, barrierMockBody({ markLine }));
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch (_) {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitForServer(base, child, logs);
+  await apiRequest(base, '/api/v1/accounts');
+
+  const probePromise = apiRequest(base, '/api/v1/reconnect-freshness');
+  await waitForMarkerLine(marker, 'probe:enter');
+  const mutationPromise = apiRequest(base, '/api/v1/recurring/r1/override', {
+    method: 'POST',
+    key: 'probe-first-barrier',
+    body: { status: 'active', hidden: false },
+  });
+  assert.equal(
+    fs.existsSync(marker) && fs.readFileSync(marker, 'utf8').includes('mutation:enter'),
+    false,
+    'mutation must wait behind in-flight probe read',
+  );
+  releaseGate(dir, 'probe');
+  await waitForMarkerLine(marker, 'probe:read:Source-A');
+  await waitForMarkerLine(marker, 'mutation:enter');
+  releaseGate(dir, 'mutation');
+  const [probe, mutation] = await Promise.all([probePromise, mutationPromise]);
+  assert.equal(probe.response.status, 200);
+  assert.equal(mutation.response.status, 200);
+
+  const markerLines = fs.readFileSync(marker, 'utf8').trim().split('\n');
+  assert.ok(markerLines.indexOf('probe:enter') < markerLines.indexOf('mutation:end'));
+  assert.ok(markerLines.indexOf('probe:read:Source-A') < markerLines.indexOf('mutation:end'));
+
+  const accounts = await apiRequest(base, '/api/v1/accounts');
+  assert.equal(accounts.body.data[0].name, 'Source-Write');
+  assert.ok(probe.body.data.cacheGenerationAfter > probe.body.data.cacheGenerationBefore);
+});
+
+test('Promise.all write then probe serializes with barriers and write wins cache', async (t) => {
+  const port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-write-first-'));
+  const markLine = `const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');`;
+  const { child, logs, base, marker } = spawnServer(dir, port, barrierMockBody({ markLine }));
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch (_) {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitForServer(base, child, logs);
+  await apiRequest(base, '/api/v1/accounts');
+
+  const mutationPromise = apiRequest(base, '/api/v1/recurring/r1/override', {
+    method: 'POST',
+    key: 'write-first-barrier',
+    body: { status: 'active', hidden: false },
+  });
+  await waitForMarkerLine(marker, 'mutation:enter');
+  const probePromise = apiRequest(base, '/api/v1/reconnect-freshness');
+  assert.equal(
+    fs.existsSync(marker) && fs.readFileSync(marker, 'utf8').includes('probe:enter'),
+    false,
+    'probe must wait behind in-flight mutation write',
+  );
+  releaseGate(dir, 'mutation');
+  await waitForMarkerLine(marker, 'mutation:end');
+  await waitForMarkerLine(marker, 'probe:enter');
+  releaseGate(dir, 'probe');
+  await waitForMarkerLine(marker, 'probe:read:Source-Write');
+  const [mutation, probe] = await Promise.all([mutationPromise, probePromise]);
+  assert.equal(mutation.response.status, 200);
+  assert.equal(probe.response.status, 200);
+
+  const markerLines = fs.readFileSync(marker, 'utf8').trim().split('\n');
+  assert.ok(markerLines.indexOf('mutation:end') < markerLines.indexOf('probe:read:Source-Write'));
+
+  const accounts = await apiRequest(base, '/api/v1/accounts');
+  assert.equal(accounts.body.data[0].name, 'Source-Write');
+});
+
+test('demo and token principals do not coalesce reconnect probe responses', async (t) => {
+  const port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-principal-'));
+  const markLine = `const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');`;
+  const { child, logs, base, marker } = spawnServer(dir, port, accountsMockBody({ markLine }));
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch (_) {}
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+  });
+  await waitForServer(base, child, logs);
+  const [tokenProbe, demoProbe] = await Promise.all([
+    apiRequest(base, '/api/v1/reconnect-freshness'),
+    apiRequest(base, '/api/v1/reconnect-freshness', { demo: true, token: null }),
+  ]);
+  assert.equal(tokenProbe.response.status, 200);
+  assert.equal(demoProbe.response.status, 404);
+  assert.equal(demoProbe.body.code, 'RECONNECT_FRESHNESS_DEMO_UNSUPPORTED');
+  assert.equal(tokenProbe.body.data.coalesced, false);
+  assert.equal(tokenProbe.body.data.probeKind, 'actual-direct-accounts');
+  assert.match(fs.readFileSync(marker, 'utf8'), /probe:Source-A/);
 });

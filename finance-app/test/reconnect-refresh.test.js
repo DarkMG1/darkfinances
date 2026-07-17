@@ -33,6 +33,8 @@ const {
   noteReconnectForegroundCoincidence,
   registerReconnectForegroundCoincidence,
   registerReconnectRefreshRetry,
+  registerReconnectServerRecovery,
+  registerReconnectConnectivityPhase,
   resetReconnectRefreshRegistryForTests: resetRegistry,
 } = require('../src/lib/reconnect-refresh-registry');
 
@@ -537,7 +539,95 @@ test('finance status banner routes online ping recovery through reconnect owner'
   const banner = fs.readFileSync(path.join(__dirname, '../src/components/finance-status-banner.tsx'), 'utf8');
   assert.match(banner, /requestReconnectServerRecovery/);
   assert.match(banner, /getReconnectConnectivityPhase/);
+  assert.match(banner, /applyPingAvailabilityTransition/);
   assert.doesNotMatch(banner, /invalidateQueries/);
+});
+
+test('ping error then success while online triggers exactly one owner recovery', () => {
+  const { applyPingAvailabilityTransition } = require('../src/lib/finance-status-ping-recovery');
+  resetRegistry();
+  let recoveryCalls = 0;
+  registerReconnectServerRecovery(() => {
+    recoveryCalls += 1;
+    return true;
+  });
+  registerReconnectConnectivityPhase(() => 'online');
+
+  let state = { wasUnavailable: false };
+  state = applyPingAvailabilityTransition(state, { isError: true, isSuccess: false, connectivityPhase: 'online' });
+  assert.equal(state.wasUnavailable, true);
+  assert.equal(state.recoveryRequested, false);
+
+  state = applyPingAvailabilityTransition(state, { isError: false, isSuccess: true, connectivityPhase: 'online' });
+  assert.equal(state.recoveryRequested, true);
+  if (state.recoveryRequested) {
+    const { requestReconnectServerRecovery } = require('../src/lib/reconnect-refresh-registry');
+    requestReconnectServerRecovery();
+  }
+  assert.equal(recoveryCalls, 1);
+
+  state = applyPingAvailabilityTransition(state, { isError: false, isSuccess: true, connectivityPhase: 'online' });
+  assert.equal(state.recoveryRequested, false);
+  resetRegistry();
+});
+
+test('generation flush refetches category and transaction queries even when accounts revision unchanged', async () => {
+  const client = queryClient();
+  const sharedRevision = 'same-accounts-rev';
+  let accountRequests = 0;
+  let categoryRequests = 0;
+  let transactionRequests = 0;
+  const accounts = activateFinanceQuery(client, {
+    key: ['accounts', SCOPE_A],
+    scope: SCOPE_A,
+    initialData: [{ id: 'a1', name: 'Cached-A', revision: sharedRevision }],
+    queryFn: async () => {
+      accountRequests += 1;
+      return [{ id: 'a1', name: 'Fresh-B', revision: sharedRevision }];
+    },
+  });
+  const categories = activateFinanceQuery(client, {
+    key: ['categories', SCOPE_A],
+    scope: SCOPE_A,
+    initialData: [{ id: 'c1', name: 'Cat-A' }],
+    queryFn: async () => {
+      categoryRequests += 1;
+      return [{ id: 'c1', name: 'Cat-B' }];
+    },
+  });
+  const transactions = activateFinanceQuery(client, {
+    key: ['transactions', SCOPE_A],
+    scope: SCOPE_A,
+    initialData: { items: [{ id: 't1', payee: 'Tx-A' }] },
+    queryFn: async () => {
+      transactionRequests += 1;
+      return { items: [{ id: 't1', payee: 'Tx-B' }] };
+    },
+  });
+
+  const owner = createReconnectRefreshOwner({
+    scope: SCOPE_A,
+    profileGeneration: 1,
+    fetchSourceFreshness: async () => probePayload(5, sharedRevision, 4),
+    reconcileOperations: async () => ({ checked: 0, completed: 0, failed: 0, unresolved: 0 }),
+    refreshActiveQueries: async () => refreshActiveFinanceQueriesForScope(client, SCOPE_A),
+  });
+
+  try {
+    owner.startRefresh('manual');
+    while (owner.isInFlight()) await Promise.resolve();
+    assert.equal(accountRequests, 1);
+    assert.equal(categoryRequests, 1);
+    assert.equal(transactionRequests, 1);
+    assert.equal(client.getQueryData(['categories', SCOPE_A])[0].name, 'Cat-B');
+    assert.equal(client.getQueryData(['transactions', SCOPE_A]).items[0].payee, 'Tx-B');
+  } finally {
+    accounts.unsubscribe();
+    categories.unsubscribe();
+    transactions.unsubscribe();
+    owner.dispose();
+    client.clear();
+  }
 });
 
 test('client reconnect refresh calls reconnect-freshness endpoint contract', () => {
