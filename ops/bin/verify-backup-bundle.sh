@@ -8,19 +8,11 @@ if [ -z "$archive" ] || [ ! -f "$archive" ]; then
   exit 2
 fi
 
-extracted="${DARKFINANCES_BUNDLE_EXTRACT_DIR:-}"
-temp=""
-cleanup() {
-  if [ -n "$temp" ] && [ -d "$temp" ]; then
-    rm -rf "$temp"
-  fi
-}
-trap cleanup EXIT
-
-if [ -z "$extracted" ]; then
-  temp="$(mktemp -d "${TMPDIR:-/tmp}/darkfinances-bundle-verify.XXXXXX")"
-  extracted="$temp"
+ops_root="$(cd "$(dirname "$0")/.." && pwd)"
+verifier="$ops_root/lib/verify-backup-bundle-archive.js"
+if [ ! -f "$verifier" ]; then
+  echo "missing archive verifier: $verifier" >&2
+  exit 2
 fi
 
-tar -xzf "$archive" -C "$extracted"
-node "$extracted/tooling/ops/bin/verify-backup-bundle.js" "$extracted"
+node "$verifier" "$archive"

@@ -21,6 +21,11 @@ const {
   lastGoodRelativePath,
 } = require('./backup-bundle-inventory');
 const { copyBundleTooling, bundleToolingSourcePaths } = require('./backup-bundle-tooling');
+const {
+  toolingDigest,
+  runtimeArtifactId,
+  assertRequiredStoresOnDisk,
+} = require('./backup-bundle-manifest');
 const { assertSafeRelativePath } = require('./backup-bundle-verify');
 const { sha256File } = require('./backup-verify');
 
@@ -43,18 +48,18 @@ function fileInventoryEntry(relativePath, absolutePath) {
   };
 }
 
-function collectRuntimeFiles(dashboardDir, inventory) {
+function collectRuntimeFiles(runtimeRoot, inventory) {
   const entries = [];
   const seen = new Set();
 
   for (const store of inventory.stores) {
-    const primary = path.join(dashboardDir, store.filename);
+    const primary = path.join(runtimeRoot, store.filename);
     if (fs.existsSync(primary)) {
       const relative = `${RUNTIME_PREFIX}${store.filename}`;
       entries.push(fileInventoryEntry(relative, primary));
       seen.add(relative);
       if (allowsLastGoodSidecar(store)) {
-        const lastGood = path.join(dashboardDir, lastGoodRelativePath(store.filename));
+        const lastGood = path.join(runtimeRoot, lastGoodRelativePath(store.filename));
         if (fs.existsSync(lastGood)) {
           const lastGoodRelative = `${RUNTIME_PREFIX}${lastGoodRelativePath(store.filename)}`;
           entries.push(fileInventoryEntry(lastGoodRelative, lastGood));
@@ -64,7 +69,7 @@ function collectRuntimeFiles(dashboardDir, inventory) {
     }
   }
 
-  const receiptsDir = path.join(dashboardDir, inventory.auxiliary.receiptsDirectory);
+  const receiptsDir = path.join(runtimeRoot, inventory.auxiliary.receiptsDirectory);
   if (fs.existsSync(receiptsDir)) {
     const children = fs.readdirSync(receiptsDir).sort();
     for (const child of children) {
@@ -80,34 +85,21 @@ function collectRuntimeFiles(dashboardDir, inventory) {
   }
 
   if (entries.length === 0) {
-    throw new Error(`no runtime files found in ${dashboardDir}`);
+    throw new Error(`no runtime files found in ${runtimeRoot}`);
   }
 
   return entries.sort((a, b) => a.path.localeCompare(b.path));
 }
 
-function toolingDigest(stagingRoot, toolingFiles) {
-  const hash = crypto.createHash('sha256');
-  for (const relative of toolingFiles.sort()) {
-    hash.update(relative);
-    hash.update(fs.readFileSync(path.join(stagingRoot, relative)));
+function removePartialArtifacts(archivePath) {
+  for (const suffix of ['', '.manifest.json', '.sha256']) {
+    const target = `${archivePath}${suffix}`;
+    if (fs.existsSync(target)) fs.rmSync(target, { force: true });
   }
-  return hash.digest('hex');
-}
-
-function runtimeArtifactId(runtimeEntries) {
-  const hash = crypto.createHash('sha256');
-  for (const entry of runtimeEntries) {
-    hash.update(entry.path);
-    hash.update(entry.sha256);
-    hash.update(String(entry.bytes));
-  }
-  return hash.digest('hex');
 }
 
 function buildManifest({
   archivePath,
-  dashboardDir,
   runtimeEntries,
   toolingFiles,
   stagingRoot,
@@ -203,14 +195,15 @@ function buildBackupBundle({
       }
     }
 
+    assertRequiredStoresOnDisk(runtimeRoot, inventory);
+
     const toolingRoot = path.join(stagingRoot, 'tooling');
     fs.mkdirSync(toolingRoot, { recursive: true, mode: 0o700 });
     const copiedTooling = copyBundleTooling({ destinationRoot: stagingRoot });
 
-    const runtimeEntries = collectRuntimeFiles(dashboardDir, inventory);
+    const runtimeEntries = collectRuntimeFiles(runtimeRoot, inventory);
     const manifest = buildManifest({
       archivePath,
-      dashboardDir,
       runtimeEntries,
       toolingFiles: copiedTooling,
       stagingRoot,
@@ -237,6 +230,9 @@ function buildBackupBundle({
     fs.writeFileSync(`${archivePath}.sha256`, `${checksum}  ${path.basename(archivePath)}\n`, { mode: 0o600 });
 
     return manifest;
+  } catch (error) {
+    removePartialArtifacts(archivePath);
+    throw error;
   } finally {
     fs.rmSync(stagingRoot, { recursive: true, force: true });
   }
@@ -247,4 +243,5 @@ module.exports = {
   buildManifest,
   collectRuntimeFiles,
   runtimeArtifactId,
+  removePartialArtifacts,
 };

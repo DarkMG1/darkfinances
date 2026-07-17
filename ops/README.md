@@ -262,8 +262,20 @@ ops/bin/verify-backup-bundle.sh /path/to/dashboard-runtime-backup-bundle-<timest
 sha256sum -c dashboard-runtime-backup-bundle-<timestamp>.tgz.sha256
 ```
 
+The shell verifier runs the full archive trust chain: archive checksum sidecar, embedded/sidecar
+manifest parity, tar member/type/closed-world parity, bounded preflight, private temp extraction,
+extracted-tree verification, and optional publish to `DARKFINANCES_BUNDLE_EXTRACT_DIR` only after
+success. Untrusted archives are never certified by merely extracting and invoking the standalone tree
+verifier.
+
+For trusted pre-extracted bundle trees (for example after a successful archive verify), use the
+embedded `tooling/ops/bin/verify-backup-bundle.js`. That entrypoint skips archive checksum,
+sidecar/embedded parity, and tar member checks; do not use it as the first verifier for untrusted
+`.tgz` input.
+
 The verifier is read-only. It rejects symlinks, path traversal, duplicate paths, unexpected
-members, digest/size/mode mismatch, future bundle schema versions, and unsafe private modes.
+members, digest/size/mode mismatch, future bundle schema versions, missing required runtime stores,
+tampered provenance fields, archive bombs, and unsafe private modes.
 Passkey credential payloads are validated but never logged.
 
 Regenerate the committed inventory snapshot after registry changes:

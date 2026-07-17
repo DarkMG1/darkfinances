@@ -12,6 +12,8 @@ const {
   RUNTIME_PREFIX,
   SENSITIVE_RUNTIME_BASENAMES,
   VERIFY_ENTRYPOINT,
+  ARCHIVE_MAX_MEMBER_COUNT,
+  ARCHIVE_MAX_DECLARED_BYTES,
   assertSupportedBundleSchemaVersion,
 } = require('./backup-bundle-schema');
 const {
@@ -21,6 +23,10 @@ const {
   isExcludedRuntimeBasename,
   lastGoodRelativePath,
 } = require('./backup-bundle-inventory');
+const {
+  assertManifestProvenanceFields,
+  assertRequiredRuntimeStores,
+} = require('./backup-bundle-manifest');
 const {
   validateSidecar,
   validateReceiptReferences,
@@ -54,6 +60,20 @@ function assertSafeRelativePath(relativePath, label = 'path') {
     throw new Error(`unsafe ${label}: ${relativePath}`);
   }
   return normalized;
+}
+
+function assertNoUnicodeNormalizationCollisions(members, label = 'archive member') {
+  const seen = new Map();
+  for (const member of members) {
+    for (const form of ['NFC', 'NFD']) {
+      const key = member.normalize(form);
+      const prior = seen.get(key);
+      if (prior && prior !== member) {
+        throw new Error(`unicode normalization collision for ${label}: ${prior} vs ${member}`);
+      }
+      seen.set(key, member);
+    }
+  }
 }
 
 function redactErrorMessage(message) {
@@ -110,8 +130,8 @@ function readManifestFromArchive(archivePath) {
 
   const listing = spawnSync('tar', ['-tzf', archivePath], { encoding: 'utf8' });
   if (listing.status !== 0) throw new Error(listing.stderr || 'tar listing failed');
-  const members = new Set(listing.stdout.trim().split('\n').filter(Boolean));
-  if (!members.has(EMBEDDED_MANIFEST)) {
+  const members = listing.stdout.trim().split('\n').filter(Boolean);
+  if (!members.includes(EMBEDDED_MANIFEST)) {
     throw new Error(`archive is missing embedded ${EMBEDDED_MANIFEST}`);
   }
 
@@ -123,11 +143,12 @@ function readManifestFromArchive(archivePath) {
   }
 
   const checksumPath = `${archivePath}.sha256`;
-  if (fs.existsSync(checksumPath)) {
-    const expected = fs.readFileSync(checksumPath, 'utf8').trim().split(/\s+/)[0];
-    const actual = sha256File(archivePath);
-    if (expected !== actual) throw new Error('archive checksum mismatch');
+  if (!fs.existsSync(checksumPath)) {
+    throw new Error(`missing archive checksum sidecar: ${checksumPath}`);
   }
+  const expected = fs.readFileSync(checksumPath, 'utf8').trim().split(/\s+/)[0];
+  const actual = sha256File(archivePath);
+  if (expected !== actual) throw new Error('archive checksum mismatch');
 
   return manifest;
 }
@@ -196,7 +217,65 @@ function assertTarMembersSafe(members) {
     seen.add(member);
     if (member.includes('..')) throw new Error(`unsafe archive member: ${member}`);
   }
+  assertNoUnicodeNormalizationCollisions(members, 'archive member');
   return seen;
+}
+
+function assertArchivePreflightBounds(manifest) {
+  const memberCount = manifest.files.length + 1;
+  if (memberCount > ARCHIVE_MAX_MEMBER_COUNT) {
+    throw new Error(`archive member count exceeds bound: ${memberCount}`);
+  }
+  let declaredBytes = 0;
+  for (const entry of manifest.files) {
+    declaredBytes += entry.bytes;
+    if (declaredBytes > ARCHIVE_MAX_DECLARED_BYTES) {
+      throw new Error(`archive declared bytes exceed bound: ${declaredBytes}`);
+    }
+  }
+}
+
+function parseTarVerboseListing(archivePath) {
+  const listing = spawnSync('tar', ['-tvf', archivePath], { encoding: 'utf8' });
+  if (listing.status !== 0) throw new Error(listing.stderr || 'tar verbose listing failed');
+  const entries = [];
+  for (const line of listing.stdout.split('\n')) {
+    if (!line.trim()) continue;
+    const match = line.match(/^([\-ldbcps])([rwx-]{9})\s+\d+\s+\S+\s+\S+\s+(\d+)\s+.+\s+(.+)$/);
+    if (!match) throw new Error(`unable to parse tar listing line: ${line}`);
+    entries.push({
+      type: match[1],
+      size: Number(match[3]),
+      path: match[4],
+    });
+  }
+  return entries;
+}
+
+function assertTarEntryTypesSafe(archivePath) {
+  const entries = parseTarVerboseListing(archivePath);
+  let uncompressedBytes = 0;
+  for (const entry of entries) {
+    assertSafeRelativePath(entry.path, 'archive member');
+    if (entry.type === 'l') throw new Error(`symbolic links are forbidden in archive: ${entry.path}`);
+    if (entry.type === 'h') throw new Error(`hard links are forbidden in archive: ${entry.path}`);
+    if (entry.type === 'b' || entry.type === 'c') {
+      throw new Error(`device nodes are forbidden in archive: ${entry.path}`);
+    }
+    if (entry.type === 'p') throw new Error(`FIFO entries are forbidden in archive: ${entry.path}`);
+    if (entry.type !== '-' && entry.type !== 'd') {
+      throw new Error(`unsupported archive entry type ${entry.type} for ${entry.path}`);
+    }
+    if (entry.type === '-') {
+      uncompressedBytes += entry.size;
+      if (uncompressedBytes > ARCHIVE_MAX_DECLARED_BYTES) {
+        throw new Error(`archive uncompressed bytes exceed bound: ${uncompressedBytes}`);
+      }
+    }
+  }
+  if (entries.length > ARCHIVE_MAX_MEMBER_COUNT) {
+    throw new Error(`archive member count exceeds bound: ${entries.length}`);
+  }
 }
 
 function assertManifestMatchesArchive(manifestPaths, archiveMembers) {
@@ -205,8 +284,7 @@ function assertManifestMatchesArchive(manifestPaths, archiveMembers) {
   if (!actual.has(EMBEDDED_MANIFEST)) {
     throw new Error(`archive is missing embedded ${EMBEDDED_MANIFEST}`);
   }
-  expected.delete(EMBEDDED_MANIFEST);
-  actual.delete(EMBEDDED_MANIFEST);
+  expected.add(EMBEDDED_MANIFEST);
   for (const member of actual) {
     if (!expected.has(member)) throw new Error(`unexpected archive member: ${member}`);
   }
@@ -221,17 +299,75 @@ function extractArchiveTo(archivePath, destination) {
   if (extract.status !== 0) throw new Error(extract.stderr || 'tar extract failed');
 }
 
+function listBundleTreePaths(bundleRoot) {
+  const paths = [];
+  function walk(relativeDir) {
+    const absoluteDir = relativeDir ? path.join(bundleRoot, relativeDir) : bundleRoot;
+    for (const name of fs.readdirSync(absoluteDir).sort()) {
+      const relativePath = relativeDir ? `${relativeDir}/${name}` : name;
+      const absolutePath = path.join(bundleRoot, relativePath);
+      const stat = fs.lstatSync(absolutePath);
+      if (stat.isSymbolicLink()) {
+        throw new Error(`symbolic links are forbidden: ${relativePath}`);
+      }
+      if (stat.isDirectory()) {
+        walk(relativePath);
+      } else if (stat.isFile()) {
+        paths.push(relativePath.replace(/\\/g, '/'));
+      } else {
+        throw new Error(`unsupported bundle tree entry: ${relativePath}`);
+      }
+    }
+  }
+  walk('');
+  return paths.sort();
+}
+
+function assertClosedWorldTree(bundleRoot, manifestPaths) {
+  const expected = new Set([...manifestPaths, EMBEDDED_MANIFEST]);
+  const actual = listBundleTreePaths(bundleRoot);
+  for (const relativePath of actual) {
+    if (!expected.has(relativePath)) {
+      throw new Error(`unexpected bundle tree file: ${relativePath}`);
+    }
+  }
+  for (const relativePath of expected) {
+    if (!actual.includes(relativePath)) {
+      throw new Error(`bundle tree missing ${relativePath}`);
+    }
+  }
+}
+
+function publishVerifiedTree(sourceRoot, destinationRoot) {
+  fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  for (const entry of fs.readdirSync(destinationRoot)) {
+    fs.rmSync(path.join(destinationRoot, entry), { recursive: true, force: true });
+  }
+  for (const relativePath of listBundleTreePaths(sourceRoot)) {
+    const source = path.join(sourceRoot, relativePath);
+    const destination = path.join(destinationRoot, relativePath);
+    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(source, destination);
+    fs.chmodSync(destination, fs.statSync(source).mode & 0o777);
+  }
+}
+
 function verifyExtractedTree({
   bundleRoot,
   manifest,
   inventory,
   toolingRoot = path.join(bundleRoot, 'tooling'),
   readOnly = true,
+  trustedPreExtracted = false,
 }) {
   assertManifestStructure(manifest);
   validateManifestInventory(manifest, inventory);
 
   const manifestPaths = validateManifestFiles(manifest);
+  assertRequiredRuntimeStores(inventory, manifestPaths);
+  assertManifestProvenanceFields(manifest, bundleRoot);
+  assertClosedWorldTree(bundleRoot, manifestPaths);
+
   const validateBackupSidecar = loadValidateBackupSidecar(toolingRoot);
   const runtimeRoot = path.join(bundleRoot, RUNTIME_PREFIX.slice(0, -1));
 
@@ -297,8 +433,8 @@ function verifyExtractedTree({
     }
   }
 
-  if (readOnly) {
-    // Verification is read-only: callers must not pass staging mutation hooks here.
+  if (readOnly && !trustedPreExtracted) {
+    // Archive verification always extracts to a private temp directory first.
   }
 
   return manifest;
@@ -307,6 +443,7 @@ function verifyExtractedTree({
 function verifyBackupBundleArchive({
   archivePath,
   bundleRoot = null,
+  publishDir = process.env.DARKFINANCES_BUNDLE_EXTRACT_DIR || null,
   readOnly = true,
 }) {
   if (!archivePath || !fs.existsSync(archivePath)) {
@@ -314,9 +451,13 @@ function verifyBackupBundleArchive({
   }
 
   const manifest = readManifestFromArchive(archivePath);
+  assertManifestStructure(manifest);
+  assertArchivePreflightBounds(manifest);
+
   const members = assertTarMembersSafe(listTarMembers(archivePath));
+  assertTarEntryTypesSafe(archivePath);
+
   const manifestPaths = new Set(manifest.files.map((entry) => assertSafeRelativePath(entry.path)));
-  manifestPaths.add(EMBEDDED_MANIFEST);
   assertManifestMatchesArchive(manifestPaths, members);
 
   let extractedRoot = bundleRoot;
@@ -329,12 +470,18 @@ function verifyBackupBundleArchive({
 
   try {
     const inventory = inventoryFromBundle(extractedRoot);
-    return verifyExtractedTree({
+    const verified = verifyExtractedTree({
       bundleRoot: extractedRoot,
       manifest,
       inventory,
       readOnly,
     });
+
+    if (publishDir) {
+      publishVerifiedTree(extractedRoot, publishDir);
+    }
+
+    return verified;
   } finally {
     if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -365,10 +512,15 @@ function stageRuntimeFromBundle({
 
 module.exports = {
   assertSafeRelativePath,
+  assertNoUnicodeNormalizationCollisions,
   redactErrorMessage,
   verifyBackupBundleArchive,
   verifyExtractedTree,
   stageRuntimeFromBundle,
   readManifestFromArchive,
   inventoryFromBundle,
+  assertArchivePreflightBounds,
+  assertTarEntryTypesSafe,
+  assertClosedWorldTree,
+  publishVerifiedTree,
 };

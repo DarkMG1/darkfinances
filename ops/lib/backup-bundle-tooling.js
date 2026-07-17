@@ -9,6 +9,7 @@ const OPS_TOOLING_FILES = Object.freeze([
   'ops/lib/backup-bundle-schema.js',
   'ops/lib/backup-bundle-inventory.js',
   'ops/lib/backup-bundle-verify.js',
+  'ops/lib/backup-bundle-manifest.js',
   'ops/lib/backup-state-inventory.json',
   'ops/lib/backup-verify.js',
   'ops/lib/list-backup-sidecars.js',

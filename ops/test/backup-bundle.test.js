@@ -18,19 +18,25 @@ const {
 const {
   BUNDLE_KIND,
   BUNDLE_SCHEMA_VERSION,
+  EMBEDDED_MANIFEST,
   VERIFY_ENTRYPOINT,
+  ARCHIVE_MAX_MEMBER_COUNT,
+  ARCHIVE_MAX_DECLARED_BYTES,
 } = require('../lib/backup-bundle-schema');
-const { buildBackupBundle } = require('../lib/build-backup-bundle');
+const { buildBackupBundle, removePartialArtifacts } = require('../lib/build-backup-bundle');
 const {
   redactErrorMessage,
   stageRuntimeFromBundle,
   verifyBackupBundleArchive,
   verifyExtractedTree,
   inventoryFromBundle,
+  assertArchivePreflightBounds,
 } = require('../lib/backup-bundle-verify');
 const { writeProductionDashboard } = require('./fixtures/backup-bundle-dashboard-fixtures');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
+const verifyShell = path.join(repoRoot, 'ops/bin/verify-backup-bundle.sh');
+const archiveVerifier = path.join(repoRoot, 'ops/lib/verify-backup-bundle-archive.js');
 
 function mkRoot(t, prefix) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -58,6 +64,35 @@ function extractBundle(archive, destination) {
   assert.equal(extract.status, 0, extract.stderr);
 }
 
+function runShellVerify(archive, env = {}) {
+  return spawnSync('bash', [verifyShell, archive], {
+    env: { ...process.env, ...env },
+    encoding: 'utf8',
+  });
+}
+
+function snapshotTree(root) {
+  const files = [];
+  function walk(relativeDir) {
+    const absoluteDir = relativeDir ? path.join(root, relativeDir) : root;
+    if (!fs.existsSync(absoluteDir)) return;
+    for (const name of fs.readdirSync(absoluteDir).sort()) {
+      const relativePath = relativeDir ? `${relativeDir}/${name}` : name;
+      const absolutePath = path.join(root, relativePath);
+      const stat = fs.lstatSync(absolutePath);
+      files.push({
+        path: relativePath,
+        isSymlink: stat.isSymbolicLink(),
+        isFile: stat.isFile(),
+        isDirectory: stat.isDirectory(),
+      });
+      if (stat.isDirectory()) walk(relativePath);
+    }
+  }
+  walk('');
+  return files;
+}
+
 test('backup-state-inventory matches STATE_REGISTRY with 28 backup stores', () => {
   const inventory = assertInventoryMatchesRegistry();
   assert.equal(inventory.storeCount, 28);
@@ -76,6 +111,7 @@ test('generate-backup-state-inventory is deterministic and parity-enforced', () 
 test('bundle tooling closure resolves within dashboard lib seeds', () => {
   const tooling = bundleToolingSourcePaths();
   assert.ok(tooling.includes('ops/lib/backup-verify.js'));
+  assert.ok(tooling.includes('ops/lib/backup-bundle-manifest.js'));
   assert.ok(tooling.includes('finance-dashboard/lib/runtime-state-store.js'));
   for (const relative of dashboardToolingFiles()) {
     assert.ok(fs.existsSync(path.join(repoRoot, relative)), relative);
@@ -91,19 +127,13 @@ test('build and verify relocatable bundle under alternate prefix without reposit
   writeProductionDashboard(dashboard, { includeLastGood: true });
 
   const archive = buildBundle(backups, dashboard);
-  extractBundle(archive, extract);
 
-  const verify = spawnSync('bash', [
-    path.join(repoRoot, 'ops/bin/verify-backup-bundle.sh'),
-    archive,
-  ], {
-    env: {
-      ...denyRepoEnv(root),
-      DARKFINANCES_BUNDLE_EXTRACT_DIR: extract,
-    },
-    encoding: 'utf8',
+  const verify = runShellVerify(archive, {
+    ...denyRepoEnv(root),
+    DARKFINANCES_BUNDLE_EXTRACT_DIR: extract,
   });
   assert.equal(verify.status, 0, verify.stderr || verify.stdout);
+  assert.equal(fs.existsSync(path.join(extract, 'runtime/passkey-credentials.json')), true);
 
   const manifest = JSON.parse(fs.readFileSync(path.join(extract, 'bundle-manifest.json'), 'utf8'));
   assert.equal(manifest.kind, BUNDLE_KIND);
@@ -130,23 +160,96 @@ test('build and verify relocatable bundle under alternate prefix without reposit
   assert.equal(fs.existsSync(path.join(staging, 'receipts/r1.jpg')), true);
 });
 
+test('shell verify rejects appended archive bytes and checksum tamper', (t) => {
+  const root = mkRoot(t, 'darkfinances-shell-checksum-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+
+  const corrupt = path.join(root, 'corrupt.tgz');
+  fs.copyFileSync(archive, corrupt);
+  fs.copyFileSync(`${archive}.manifest.json`, `${corrupt}.manifest.json`);
+  fs.copyFileSync(`${archive}.sha256`, `${corrupt}.sha256`);
+  fs.appendFileSync(corrupt, 'truncated');
+
+  assert.throws(
+    () => verifyBackupBundleArchive({ archivePath: corrupt }),
+    /archive checksum mismatch/,
+  );
+
+  const shell = runShellVerify(corrupt, denyRepoEnv(root));
+  assert.notEqual(shell.status, 0);
+  assert.match(shell.stderr + shell.stdout, /archive checksum mismatch/);
+});
+
+test('shell verify rejects sidecar and embedded manifest drift', (t) => {
+  const root = mkRoot(t, 'darkfinances-shell-drift-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  const manifest = JSON.parse(fs.readFileSync(`${archive}.manifest.json`, 'utf8'));
+  const drifted = { ...manifest, schemaVersion: 99 };
+  fs.writeFileSync(`${archive}.manifest.json`, `${JSON.stringify(drifted, null, 2)}\n`);
+
+  assert.throws(
+    () => verifyBackupBundleArchive({ archivePath: archive }),
+    /embedded manifest does not match sidecar manifest|unsupported bundle schemaVersion 99/,
+  );
+
+  const shell = runShellVerify(archive, denyRepoEnv(root));
+  assert.notEqual(shell.status, 0);
+});
+
+test('shell verify rejects trimmed manifest omitting required passkey store', (t) => {
+  const root = mkRoot(t, 'darkfinances-shell-trim-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  const extract = path.join(root, 'publish');
+  fs.mkdirSync(extract, { recursive: true, mode: 0o700 });
+  extractBundle(archive, extract);
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(extract, EMBEDDED_MANIFEST), 'utf8'));
+  manifest.files = manifest.files.filter((entry) => entry.path !== 'runtime/passkey-credentials.json');
+  fs.writeFileSync(path.join(extract, EMBEDDED_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`);
+  fs.writeFileSync(`${archive}.manifest.json`, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  const standalone = spawnSync(process.execPath, [
+    path.join(extract, 'tooling/ops/bin/verify-backup-bundle.js'),
+    extract,
+  ], { encoding: 'utf8' });
+  assert.notEqual(standalone.status, 0);
+  assert.match(standalone.stderr + standalone.stdout, /required runtime store missing/);
+
+  assert.throws(
+    () => verifyBackupBundleArchive({ archivePath: archive, bundleRoot: extract }),
+    /required runtime store missing|embedded manifest does not match/,
+  );
+});
+
+test('build rejects missing required runtime store and removes partial artifacts', (t) => {
+  const root = mkRoot(t, 'darkfinances-build-required-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard);
+  fs.rmSync(path.join(dashboard, 'goals.json'));
+
+  const archive = path.join(root, 'partial.tgz');
+  assert.throws(
+    () => buildBackupBundle({ dashboardDir: dashboard, archivePath: archive }),
+    /required runtime store missing at build time: goals.json/,
+  );
+  assert.equal(fs.existsSync(archive), false);
+  assert.equal(fs.existsSync(`${archive}.manifest.json`), false);
+  assert.equal(fs.existsSync(`${archive}.sha256`), false);
+
+  removePartialArtifacts(archive);
+});
+
 test('verify rejects checksum corruption and missing tooling', (t) => {
   const root = mkRoot(t, 'darkfinances-bundle-bad-');
   const dashboard = path.join(root, 'dashboard');
   writeProductionDashboard(dashboard);
   const archive = buildBundle(root, dashboard);
-
-  const corrupt = `${archive}.corrupt`;
-  fs.copyFileSync(archive, corrupt);
-  fs.copyFileSync(`${archive}.manifest.json`, `${corrupt}.manifest.json`);
-  fs.copyFileSync(`${archive}.sha256`, `${corrupt}.sha256`);
-  const checksumLine = fs.readFileSync(`${corrupt}.sha256`, 'utf8').replace(path.basename(archive), path.basename(corrupt));
-  fs.writeFileSync(`${corrupt}.sha256`, checksumLine);
-  fs.appendFileSync(corrupt, 'truncated');
-  assert.throws(
-    () => verifyBackupBundleArchive({ archivePath: corrupt }),
-    /archive checksum mismatch/,
-  );
 
   const extract = path.join(root, 'extract');
   extractBundle(archive, extract);
@@ -183,9 +286,10 @@ test('verify rejects future bundle schema, unsafe tar paths, and unexpected memb
   }
   spawnSync('tar', ['-C', staging, '-czf', futureArchive, '.'], { encoding: 'utf8' });
   fs.writeFileSync(`${futureArchive}.manifest.json`, `${JSON.stringify(futureManifest, null, 2)}\n`);
+  fs.writeFileSync(`${futureArchive}.sha256`, `${require('../lib/backup-verify').sha256File(futureArchive)}  future.tgz\n`);
   assert.throws(
     () => verifyBackupBundleArchive({ archivePath: futureArchive }),
-    /unsupported bundle schemaVersion 99/,
+    /unsupported bundle schemaVersion 99|embedded manifest does not match/,
   );
 
   const unsafeArchive = path.join(root, 'unsafe.tgz');
@@ -210,9 +314,113 @@ test('verify rejects future bundle schema, unsafe tar paths, and unexpected memb
   fs.writeFileSync(path.join(unsafeStage, 'bundle-manifest.json'), `${JSON.stringify(unsafeManifest, null, 2)}\n`);
   spawnSync('tar', ['-C', unsafeStage, '-czf', unsafeArchive, 'bundle-manifest.json', 'runtime'], { encoding: 'utf8' });
   fs.writeFileSync(`${unsafeArchive}.manifest.json`, `${JSON.stringify(unsafeManifest, null, 2)}\n`);
+  fs.writeFileSync(`${unsafeArchive}.sha256`, `${require('../lib/backup-verify').sha256File(unsafeArchive)}  unsafe.tgz\n`);
   assert.throws(
     () => verifyBackupBundleArchive({ archivePath: unsafeArchive }),
     /unsafe|symbolic links are forbidden|unexpected archive member|duplicate/,
+  );
+});
+
+test('failed symlink archive verify leaves no residue in publish destination', (t) => {
+  const root = mkRoot(t, 'darkfinances-symlink-residue-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  const manifest = JSON.parse(fs.readFileSync(`${archive}.manifest.json`, 'utf8'));
+
+  const hostile = path.join(root, 'hostile.tgz');
+  const stage = path.join(root, 'hostile-stage');
+  fs.mkdirSync(path.join(stage, 'runtime'), { recursive: true, mode: 0o700 });
+  extractBundle(archive, stage);
+  fs.rmSync(path.join(stage, 'runtime/goals.json'));
+  fs.symlinkSync('/etc/passwd', path.join(stage, 'runtime/goals.json'));
+  const hostileManifest = {
+    ...manifest,
+    files: manifest.files.map((entry) => (
+      entry.path === 'runtime/goals.json'
+        ? { ...entry, sha256: '0'.repeat(64), bytes: 1 }
+        : entry
+    )),
+  };
+  fs.writeFileSync(path.join(stage, EMBEDDED_MANIFEST), `${JSON.stringify(hostileManifest, null, 2)}\n`);
+  spawnSync('tar', ['-C', stage, '-czf', hostile, EMBEDDED_MANIFEST, ...hostileManifest.files.map((e) => e.path)], { encoding: 'utf8' });
+  fs.writeFileSync(`${hostile}.manifest.json`, `${JSON.stringify(hostileManifest, null, 2)}\n`);
+  fs.writeFileSync(`${hostile}.sha256`, `${require('../lib/backup-verify').sha256File(hostile)}  hostile.tgz\n`);
+
+  const publish = path.join(root, 'publish');
+  fs.mkdirSync(publish, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(publish, 'keep.txt'), 'stay\n');
+  const before = snapshotTree(publish);
+
+  const shell = runShellVerify(hostile, {
+    ...denyRepoEnv(root),
+    DARKFINANCES_BUNDLE_EXTRACT_DIR: publish,
+  });
+  assert.notEqual(shell.status, 0);
+  assert.deepEqual(snapshotTree(publish), before);
+});
+
+test('verify rejects tampered toolingDigest and artifact.id without self-repair', (t) => {
+  const root = mkRoot(t, 'darkfinances-provenance-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  const extract = path.join(root, 'extract');
+  extractBundle(archive, extract);
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(extract, EMBEDDED_MANIFEST), 'utf8'));
+  const before = JSON.stringify(manifest);
+  manifest.restoreTooling.toolingDigest = '0'.repeat(64);
+  fs.writeFileSync(path.join(extract, EMBEDDED_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`);
+
+  const inventory = inventoryFromBundle(extract);
+  assert.throws(
+    () => verifyExtractedTree({ bundleRoot: extract, manifest, inventory }),
+    /toolingDigest mismatch/,
+  );
+  assert.equal(fs.readFileSync(path.join(extract, EMBEDDED_MANIFEST), 'utf8'), `${JSON.stringify(manifest, null, 2)}\n`);
+
+  const manifest2 = JSON.parse(before);
+  manifest2.artifact.id = '0'.repeat(64);
+  assert.throws(
+    () => verifyExtractedTree({ bundleRoot: extract, manifest: manifest2, inventory }),
+    /artifact.id mismatch/,
+  );
+});
+
+test('verify rejects archive bounds before extraction', (t) => {
+  const root = mkRoot(t, 'darkfinances-bounds-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  const manifest = JSON.parse(fs.readFileSync(`${archive}.manifest.json`, 'utf8'));
+
+  const hugeManifest = {
+    ...manifest,
+    files: [
+      ...manifest.files,
+      {
+        path: 'runtime/bomb.json',
+        sha256: '0'.repeat(64),
+        bytes: ARCHIVE_MAX_DECLARED_BYTES,
+        mode: 0o600,
+      },
+    ],
+  };
+  assert.throws(
+    () => assertArchivePreflightBounds(hugeManifest),
+    /declared bytes exceed bound/,
+  );
+
+  const manyFiles = Array.from({ length: ARCHIVE_MAX_MEMBER_COUNT }, (_, index) => ({
+    path: `runtime/pad-${index}.json`,
+    sha256: '0'.repeat(64),
+    bytes: 2,
+    mode: 0o600,
+  }));
+  assert.throws(
+    () => assertArchivePreflightBounds({ files: manyFiles }),
+    /member count exceeds bound/,
   );
 });
 
@@ -295,4 +503,18 @@ test('build-backup-bundle.sh produces a verifiable archive', (t) => {
   assert.equal(build.status, 0, build.stderr);
   const archive = build.stdout.trim();
   verifyBackupBundleArchive({ archivePath: archive });
+});
+
+test('archive verifier entrypoint enforces full trust chain under hidden repo relocation', (t) => {
+  const root = mkRoot(t, 'darkfinances-hidden-repo-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+
+  const result = spawnSync(process.execPath, [archiveVerifier, archive], {
+    env: denyRepoEnv(root),
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /verify-backup-bundle: ok/);
 });

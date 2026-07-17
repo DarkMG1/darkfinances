@@ -7,6 +7,7 @@ const path = require('path');
 const bundleRoot = path.resolve(process.argv[2] || '');
 if (!bundleRoot || !fs.existsSync(bundleRoot)) {
   process.stderr.write('Usage: verify-backup-bundle.js <extracted-bundle-root>\n');
+  process.stderr.write('Trusted pre-extracted trees only; untrusted archives require verify-backup-bundle-archive.js\n');
   process.exit(2);
 }
 
@@ -31,5 +32,6 @@ verifyExtractedTree({
   inventory,
   toolingRoot,
   readOnly: true,
+  trustedPreExtracted: true,
 });
 process.stdout.write('verify-backup-bundle: ok\n');

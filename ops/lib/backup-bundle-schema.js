@@ -18,6 +18,9 @@ const SENSITIVE_RUNTIME_BASENAMES = Object.freeze([
   'passkey-credentials.json',
 ]);
 
+const ARCHIVE_MAX_MEMBER_COUNT = 4096;
+const ARCHIVE_MAX_DECLARED_BYTES = 512 * 1024 * 1024;
+
 function assertSupportedBundleSchemaVersion(version) {
   if (version !== BUNDLE_SCHEMA_VERSION) {
     throw new Error(`unsupported bundle schemaVersion ${version}`);
@@ -43,6 +46,8 @@ module.exports = {
   SUPPORTED_NODE_ENGINE,
   REQUIRED_BINARIES,
   SENSITIVE_RUNTIME_BASENAMES,
+  ARCHIVE_MAX_MEMBER_COUNT,
+  ARCHIVE_MAX_DECLARED_BYTES,
   assertSupportedBundleSchemaVersion,
   assertSupportedInventorySchemaVersion,
 };
