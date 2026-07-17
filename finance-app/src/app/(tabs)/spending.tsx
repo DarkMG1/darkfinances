@@ -3,13 +3,13 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { useRouter } from 'expo-router';
 import Svg, { Circle } from 'react-native-svg';
-import { useBudgets, useInsights, useSpending, useTags, useToday, useTrends } from '@/api/hooks/finance.hooks';
+import { useBudgets, useInsights, useReimbursement, useSpending, useTags, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { Screen } from '@/components/screen';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, PendingPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
 import { addDateOnlyDays, monthEnd, useFinanceToday } from '@/lib/date-only';
-import { buildNonSpendingMetrics } from '@/lib/spending-metrics.js';
+import { buildBudgetMetrics, buildNonSpendingMetrics } from '@/lib/spending-metrics.js';
 import { useSelectedMonth } from '@/lib/selectedMonth';
 import { categoryColors, colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
 
@@ -60,6 +60,10 @@ function totalSpendBucket(category: string, group?: string) {
   return 'spending';
 }
 
+function spendingMetricA11y(rowLabel: string, metric: { display: string; accessibilityLabel?: string; accessibilityValue?: string }) {
+  return metric.accessibilityLabel ?? `${rowLabel}, ${metric.accessibilityValue ?? metric.display}`;
+}
+
 export default function Spending() {
   const router = useRouter();
   const financeToday = useFinanceToday();
@@ -78,6 +82,7 @@ export default function Spending() {
   const trends = useTrends(60);
   const spending = useSpending(spendingParams, { enabled: !useCurrentToday });
   const budgets = useBudgets(apiMonth);
+  const reimb = useReimbursement({ from: selectedWindow.start, to: selectedWindow.end });
   const insights = useInsights(apiMonth);
   const tags = useTags();
   const cur = useCurrentToday ? today.data?.spending.current : spending.data?.current;
@@ -134,16 +139,28 @@ export default function Spending() {
   const totalSpend = cur?.totalSpend ?? 0;
   const totalIncome = cur?.totalIncome ?? 0;
   const netIncome = totalIncome - totalSpend;
-  const reimbursementTotal = Math.abs(entries.find(([cat]) => /^reimbursement$/i.test(cat))?.[1] ?? 0);
   const refundTotal = refundEntries.reduce((sum, [, amt]) => sum + Math.abs(amt), 0);
   const nonSpending = useMemo(
-    () => buildNonSpendingMetrics({ reimbursementTotal, refundTotal }),
-    [reimbursementTotal, refundTotal],
+    () => buildNonSpendingMetrics({
+      reimbursement: {
+        fronted: reimb.data?.summary?.fronted,
+        isLoading: reimb.isLoading,
+        isError: reimb.isError,
+        hasData: reimb.data != null,
+      },
+      refundTotal,
+    }),
+    [reimb.data, reimb.isLoading, reimb.isError, refundTotal],
   );
-  const budgetLeft = budgets.data?.totalRemaining ?? 0;
-  const budgetTarget = budgets.data?.totalTarget || budgets.data?.totalBudgeted || 0;
-  const budgetSpent = budgets.data?.totalSpent ?? totalSpend;
-  const budgetPct = budgetTarget > 0 ? Math.min(100, Math.max(0, (budgetSpent / budgetTarget) * 100)) : 0;
+  const budgetMetrics = useMemo(
+    () => buildBudgetMetrics({
+      data: budgets.data,
+      isLoading: budgets.isLoading,
+      isError: budgets.isError,
+      totalSpend,
+    }),
+    [budgets.data, budgets.isLoading, budgets.isError, totalSpend],
+  );
 
   // Real-spend merchants come from the backend (excludes transfers/investments/
   // CC payments/reimbursement), so savings moves and brokerage buys never show up.
@@ -153,6 +170,7 @@ export default function Spending() {
     insights.refetch(),
     trends.refetch(),
     budgets.refetch(),
+    reimb.refetch(),
   ]);
   const categoryParams = (name: string, bucket?: string) => ({
     name,
@@ -215,15 +233,34 @@ export default function Spending() {
             <View style={styles.budgetBody}>
               <View style={styles.budgetMain}>
                 <Text style={styles.mutedLabel}>Left for spending</Text>
-                <Text style={styles.budgetValue}>{budgetLeft < 0 ? '-' : ''}{fmtPos(Math.abs(budgetLeft))}</Text>
+                {budgetMetrics.showRetry ? (
+                  <Pressable
+                    testID="spending-budget-retry"
+                    accessibilityRole="button"
+                    accessibilityLabel="Budget unavailable, tap to retry"
+                    onPress={() => { haptics.tap(); budgets.refetch(); }}
+                    style={({ pressed }) => [pressed && { opacity: 0.65 }]}
+                  >
+                    <Text style={[styles.budgetValue, styles.budgetValueMuted]} accessibilityElementsHidden importantForAccessibility="no">{budgetMetrics.left.display}</Text>
+                  </Pressable>
+                ) : (
+                  <Text
+                    testID="spending-budget-left"
+                    style={[styles.budgetValue, budgetMetrics.left.kind !== 'computed' && styles.budgetValueMuted]}
+                    accessibilityLabel={spendingMetricA11y('Left for spending', budgetMetrics.left)}
+                  >
+                    {budgetMetrics.left.display}
+                  </Text>
+                )}
               </View>
               <View style={styles.budgetFacts}>
-                <Text style={styles.budgetFact}>{budgetPct.toFixed(0)}% of target used</Text>
+                <Text style={styles.budgetFact} testID="spending-budget-pct-label">{budgetMetrics.pctLabel}</Text>
                 {refundTotal > 0.005 ? <Text style={styles.budgetFact}>{fmtPos(refundTotal)} refunds shown separately</Text> : null}
+                {budgetMetrics.showRetry ? <Text style={styles.budgetFact}>Tap amount to retry</Text> : null}
               </View>
             </View>
             <View style={styles.progressTrack}>
-              <View style={[styles.progressFill, { width: `${budgetPct}%` }]} />
+              {budgetMetrics.showProgress ? <View style={[styles.progressFill, { width: `${budgetMetrics.progressPct}%` }]} /> : null}
             </View>
           </Card>
 
@@ -349,15 +386,17 @@ export default function Spending() {
               icon="arrow.uturn.backward.circle"
               label="Reimbursements"
               value={nonSpending.reimbursements.display}
-              accessibilityLabel={`Reimbursements, ${nonSpending.reimbursements.accessibilityValue}`}
-              onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Reimbursement') })}
+              untracked={nonSpending.reimbursements.kind !== 'computed'}
+              accessibilityLabel={spendingMetricA11y('Reimbursements', nonSpending.reimbursements)}
+              onPress={() => router.push('/reimbursement' as never)}
             />
             <PlainRow
               testID="spending-non-spending-refunds"
               icon="minus.circle"
               label="Refunds & Credits"
               value={nonSpending.refunds.display}
-              accessibilityLabel={`Refunds & Credits, ${nonSpending.refunds.accessibilityValue}`}
+              untracked={nonSpending.refunds.kind !== 'computed'}
+              accessibilityLabel={spendingMetricA11y('Refunds & Credits', nonSpending.refunds)}
             />
             <PlainRow
               testID="spending-non-spending-transfers"
@@ -633,6 +672,7 @@ const styles = StyleSheet.create({
   budgetMain: { flex: 1, minWidth: 0 },
   mutedLabel: { color: colors.muted, fontSize: 12, fontWeight: '600' },
   budgetValue: { color: colors.text, fontSize: 24, fontWeight: '800', marginTop: 4, letterSpacing: -0.5 },
+  budgetValueMuted: { color: colors.untrackedLabel, fontSize: 20, fontWeight: '700' },
   budgetFacts: { alignItems: 'flex-end', gap: 3, maxWidth: '48%' },
   budgetFact: { color: colors.muted, fontSize: 11, textAlign: 'right' },
   progressTrack: { height: 5, borderRadius: 3, backgroundColor: colors.surface2, margin: 16, marginTop: 14, overflow: 'hidden' },
@@ -671,7 +711,7 @@ const styles = StyleSheet.create({
   plainIcon: { width: 30 },
   plainTitle: { color: colors.text, fontSize: 14, fontWeight: '600', flex: 1 },
   plainValue: { color: colors.text, fontSize: 15, fontWeight: '700' },
-  plainValueUntracked: { color: colors.muted, fontSize: 13, fontWeight: '600' },
+  plainValueUntracked: { color: colors.untrackedLabel, fontSize: 13, fontWeight: '600' },
   outlineBtn: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, borderRadius: 10, alignItems: 'center', paddingVertical: 10, marginHorizontal: 16, marginVertical: 14 },
   outlineText: { color: colors.accentLight, fontSize: 13, fontWeight: '700' },
   emptyCopy: { color: colors.muted, fontSize: 13, padding: 16 },
