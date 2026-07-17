@@ -111,7 +111,8 @@ export function useAccounts(options?: { enabled?: boolean }) {
 }
 
 export function useTransactions(
-  params: { start?: string; end?: string; accountId?: string; category?: string; bucket?: string; budgetOnly?: boolean; collapse?: boolean } = {}
+  params: { start?: string; end?: string; accountId?: string; category?: string; bucket?: string; budgetOnly?: boolean; collapse?: boolean } = {},
+  options?: { enabled?: boolean },
 ) {
   const query = { ...params, budgetOnly: params.budgetOnly ? 1 : undefined, collapse: params.collapse ? 1 : undefined };
   return useFinanceQuery<Transaction[]>({
@@ -120,6 +121,7 @@ export function useTransactions(
     params: query,
     queryKey: [API_ENDPOINTS.transactions.key, params.start, params.end, params.accountId, params.category, params.bucket, params.budgetOnly ? 'budget' : 'all', params.collapse ? 'c' : 'x'],
     staleTime: 60_000,
+    enabled: options?.enabled,
   });
 }
 
@@ -339,13 +341,14 @@ export function useCategories() {
   });
 }
 
-export function useRecurring(window?: number) {
+export function useRecurring(window?: number, options?: { enabled?: boolean }) {
   return useFinanceQuery<Recurring>({
     endpoint: API_ENDPOINTS.recurring.endpoint,
     method: API_ENDPOINTS.recurring.method,
     params: window ? { window } : undefined,
     queryKey: [API_ENDPOINTS.recurring.key, window ?? 'default'],
     staleTime: 300_000,
+    enabled: options?.enabled,
   });
 }
 
@@ -792,12 +795,13 @@ export function useDeleteReimbLink() {
 }
 
 // Repayment auto-matcher: suggested matches of incoming payments to what people owe.
-export function useRepaymentSuggestions() {
+export function useRepaymentSuggestions(options?: { enabled?: boolean }) {
   return useFinanceQuery<RepaymentSuggestions>({
     endpoint: API_ENDPOINTS.repaymentSuggestions.endpoint,
     method: API_ENDPOINTS.repaymentSuggestions.method,
     queryKey: [API_ENDPOINTS.repaymentSuggestions.key],
     staleTime: 60_000,
+    enabled: options?.enabled,
   });
 }
 

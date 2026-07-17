@@ -39,19 +39,10 @@ appId: dev.darkmg1.finances
     id: settings-reconcile-row
 - scroll
 - assertVisible:
+    id: settings-notifications-unavailable
+- assertNotVisible:
     id: settings-notif-bills
-- tapOn:
-    id: settings-notif-bills
-- tapOn:
-    id: settings-notif-bills
-- tapOn:
-    id: settings-notif-large-charge
-- assertVisible:
-    id: settings-large-charge-threshold-input
-- tapOn:
-    id: settings-large-charge-threshold-input
-- eraseText
-- inputText: 450
+    optional: true
 - tapOn:
     id: settings-check-updates-button
     optional: true

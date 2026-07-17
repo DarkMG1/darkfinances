@@ -12,6 +12,8 @@ import { authenticate, isBiometricAvailable } from '@/lib/biometric';
 import { DASHBOARD_WIDGETS, useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { buildRedactedDiagnostics } from '@/lib/diagnostics';
 import { DEFAULT_LOW_BALANCE, DEFAULT_THRESHOLD, ensurePermission, getNotifSettings, NOTIF, notifyNotifSettingsChanged } from '@/lib/notifications';
+import { getFinanceCapabilities } from '@/lib/capabilities';
+import { isNotificationReconciliationActive } from '@/lib/notification-reconciliation-active';
 import { kv } from '@/lib/storage';
 import { colors } from '@/theme/colors';
 
@@ -34,6 +36,12 @@ export default function Settings() {
   const setReconcileEnabled = useSetReconcileEnabled();
   const [reconEnabled, setReconEnabled] = useState<boolean | null>(null);
   const dashboard = useDashboardWidgets();
+  const capabilities = getFinanceCapabilities();
+  const notificationsAvailable = isNotificationReconciliationActive({
+    configured: !!serverUrl && !!token,
+    demo,
+    notificationsCapable: capabilities.notifications,
+  });
 
   useEffect(() => {
     isBiometricAvailable().then(setBioAvailable);
@@ -42,6 +50,7 @@ export default function Settings() {
   const reconEnabledValue = reconEnabled ?? !!reconPending.data?.enabled;
 
   const toggleNotif = async (key: NotifKey, value: boolean) => {
+    if (!notificationsAvailable) return;
     if (value && !(await ensurePermission())) {
       Alert.alert('Notifications off', 'Enable notifications for DarkFinances in iOS Settings to use alerts.');
       return;
@@ -285,25 +294,40 @@ export default function Settings() {
 
       <CardTitle>Notifications</CardTitle>
       <Card style={{ marginBottom: 16 }}>
-        <NotifSwitch testID="settings-notif-bills" label="Bills due" sub="Remind me the day before" value={notif.bills} onChange={(v) => toggleNotif('bills', v)} />
-        <NotifSwitch testID="settings-notif-large-charge" label="Large charges" sub={`Alert over $${notif.threshold}`} value={notif.largeCharge} onChange={(v) => toggleNotif('largeCharge', v)} />
+        {!notificationsAvailable ? (
+          <View testID="settings-notifications-unavailable">
+            <Text style={styles.switchLabel}>Alerts unavailable</Text>
+            <Text style={styles.switchSub}>
+              {demo
+                ? 'Notification alerts do not run in demo mode. Turn off demo mode to configure alerts.'
+                : capabilities.freeSideload
+                  ? 'This sideload build does not include notification support. Use a full release build to enable alerts.'
+                  : 'Connect to your server to configure on-device alerts.'}
+            </Text>
+          </View>
+        ) : (
+          <>
+        <NotifSwitch testID="settings-notif-bills" label="Bills due" sub="Remind me the day before" value={notif.bills} onChange={(v) => toggleNotif('bills', v)} disabled={!notificationsAvailable} />
+        <NotifSwitch testID="settings-notif-large-charge" label="Large charges" sub={`Alert over $${notif.threshold}`} value={notif.largeCharge} onChange={(v) => toggleNotif('largeCharge', v)} disabled={!notificationsAvailable} />
         {notif.largeCharge ? (
           <View style={styles.thresholdRow}>
             <Text style={styles.switchSub}>Large-charge threshold ($)</Text>
             <TextInput testID="settings-large-charge-threshold-input" style={styles.thresholdInput} value={thresholdText} onChangeText={setThresholdText} onBlur={saveThreshold} keyboardType="decimal-pad" />
           </View>
         ) : null}
-        <NotifSwitch testID="settings-notif-low-balance" label="Low balance" sub={`Alert under $${notif.lowBalanceThreshold} in a cash account`} value={notif.lowBalance} onChange={(v) => toggleNotif('lowBalance', v)} />
+        <NotifSwitch testID="settings-notif-low-balance" label="Low balance" sub={`Alert under $${notif.lowBalanceThreshold} in a cash account`} value={notif.lowBalance} onChange={(v) => toggleNotif('lowBalance', v)} disabled={!notificationsAvailable} />
         {notif.lowBalance ? (
           <View style={styles.thresholdRow}>
             <Text style={styles.switchSub}>Low-balance threshold ($)</Text>
             <TextInput testID="settings-low-balance-threshold-input" style={styles.thresholdInput} value={lowText} onChangeText={setLowText} onBlur={saveLowThreshold} keyboardType="decimal-pad" />
           </View>
         ) : null}
-        <NotifSwitch testID="settings-notif-new-sub" label="New subscriptions" sub="When a new recurring charge appears" value={notif.newSub} onChange={(v) => toggleNotif('newSub', v)} />
-        <NotifSwitch testID="settings-notif-repayments" label="Repayments to review" sub="When an incoming payment may settle a debt" value={notif.repayments} onChange={(v) => toggleNotif('repayments', v)} />
-        <NotifSwitch testID="settings-notif-weekly" label="Weekly digest" sub="Sunday 9am check-in" value={notif.weekly} onChange={(v) => toggleNotif('weekly', v)} last />
+        <NotifSwitch testID="settings-notif-new-sub" label="New subscriptions" sub="When a new recurring charge appears" value={notif.newSub} onChange={(v) => toggleNotif('newSub', v)} disabled={!notificationsAvailable} />
+        <NotifSwitch testID="settings-notif-repayments" label="Repayments to review" sub="When an incoming payment may settle a debt" value={notif.repayments} onChange={(v) => toggleNotif('repayments', v)} disabled={!notificationsAvailable} />
+        <NotifSwitch testID="settings-notif-weekly" label="Weekly digest" sub="Sunday 9am check-in" value={notif.weekly} onChange={(v) => toggleNotif('weekly', v)} last disabled={!notificationsAvailable} />
         <Text style={styles.notifHint}>Alerts are on-device and refresh when you open the app.</Text>
+          </>
+        )}
       </Card>
 
       <CardTitle>About</CardTitle>
@@ -332,14 +356,14 @@ export default function Settings() {
   );
 }
 
-function NotifSwitch({ label, sub, value, onChange, last, testID }: { label: string; sub: string; value: boolean; onChange: (v: boolean) => void; last?: boolean; testID?: string }) {
+function NotifSwitch({ label, sub, value, onChange, last, testID, disabled }: { label: string; sub: string; value: boolean; onChange: (v: boolean) => void; last?: boolean; testID?: string; disabled?: boolean }) {
   return (
     <View style={[styles.switchRow, styles.notifRow, last && { borderBottomWidth: 0 }]}>
       <View style={{ flex: 1, paddingRight: 12 }}>
         <Text style={styles.switchLabel}>{label}</Text>
         <Text style={styles.switchSub}>{sub}</Text>
       </View>
-      <Switch testID={testID} value={value} onValueChange={onChange} trackColor={{ true: colors.accent }} />
+      <Switch testID={testID} value={value} onValueChange={onChange} disabled={disabled} trackColor={{ true: colors.accent }} />
     </View>
   );
 }

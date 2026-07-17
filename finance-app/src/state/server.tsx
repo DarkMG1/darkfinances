@@ -2,8 +2,17 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import * as SecureStore from 'expo-secure-store';
 import { normalizeServerUrl } from '@/api/client/server-url';
 import { financeOperationProfileScope } from '@/lib/finance-operations';
+import {
+  activateNotificationScope,
+  getProfileGeneration,
+  hasPersistedSuspensionEvidence,
+} from '@/lib/notification-reconciliation';
 import { purgeFinanceProfile } from '@/lib/profile-purge';
 import { financeServerScope } from '@/lib/query-client';
+import {
+  rollbackPersistedServerIdentity,
+  shouldReactivateOldScopeAfterSetConfigFailure,
+} from '@/lib/server-config-set';
 import { kv } from '@/lib/storage';
 
 const TOKEN_KEY = 'finance_token';
@@ -82,12 +91,15 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
       const identityChanged = nextUrl !== serverUrl || nextToken !== token || nextDemo !== demo;
       const oldScope = financeServerScope(serverUrl, token, demo);
       const oldOperationScope = financeOperationProfileScope(serverUrl, token, demo);
+      let tokenWriteMayHaveOccurred = false;
+      let reactCommitted = false;
 
       try {
         if (identityChanged) {
           await purgeFinanceProfile(oldScope, oldOperationScope);
         }
         if (next.token !== undefined) {
+          tokenWriteMayHaveOccurred = true;
           if (nextToken) {
             await SecureStore.setItemAsync(TOKEN_KEY, nextToken, {
               keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
@@ -103,25 +115,43 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
         setToken(nextToken);
         setFaceId(nextFaceId);
         setDemo(nextDemo);
+        reactCommitted = true;
+        activateNotificationScope(
+          financeServerScope(nextUrl, nextToken, nextDemo),
+          getProfileGeneration(),
+        );
       } catch (error) {
         // Keep the persisted identity tuple coherent if any storage write fails.
         // Query clearing is intentionally not rolled back; stale financial data
         // is safer to discard than to restore under an uncertain identity.
-        try {
-          kv.setString(URL_KEY, serverUrl);
-          kv.setBool(FACEID_KEY, faceId);
-          kv.setBool(DEMO_KEY, demo);
-        } catch {}
-        if (next.token !== undefined) {
-          try {
-            if (token) {
-              await SecureStore.setItemAsync(TOKEN_KEY, token, {
-                keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-              });
-            } else {
-              await SecureStore.deleteItemAsync(TOKEN_KEY);
-            }
-          } catch {}
+        const rollbackOk = await rollbackPersistedServerIdentity({
+          kv,
+          secureStore: SecureStore,
+          keys: {
+            url: URL_KEY,
+            faceId: FACEID_KEY,
+            demo: DEMO_KEY,
+            token: TOKEN_KEY,
+          },
+          previous: {
+            serverUrl,
+            token,
+            faceId,
+            demo,
+          },
+          tokenWriteMayHaveOccurred,
+          secureStoreOptions: {
+            keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+          },
+        }).catch(() => false);
+        if (shouldReactivateOldScopeAfterSetConfigFailure({
+          identityChanged,
+          rollbackOk,
+          reactCommitted,
+          oldScope,
+          hasPersistedSuspension: hasPersistedSuspensionEvidence,
+        })) {
+          activateNotificationScope(oldScope, getProfileGeneration());
         }
         throw error;
       }

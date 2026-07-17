@@ -3,7 +3,6 @@ import { ColorValue, StyleSheet, View } from 'react-native';
 import { Tabs } from 'expo-router';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
-import { NotificationScheduler } from '@/components/notification-scheduler';
 import { WidgetSync } from '@/components/widget-sync';
 import { FinanceStatusBanner } from '@/components/finance-status-banner';
 import { haptics } from '@/lib/haptics';
@@ -19,7 +18,6 @@ export default function TabsLayout() {
   const glass = isLiquidGlassAvailable();
   return (
     <View style={{ flex: 1 }}>
-    <NotificationScheduler />
     <WidgetSync />
     <Tabs
       screenListeners={{ tabPress: () => haptics.tap() }}
