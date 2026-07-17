@@ -36,6 +36,9 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'package.json',
   'public/index.html',
   'public/login.html',
+  'public/vendor/THIRD-PARTY-NOTICES.txt',
+  'public/vendor/chart-js.manifest.json',
+  'public/vendor/chart.umd.js',
   'server.js',
 ]);
 

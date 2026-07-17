@@ -211,6 +211,21 @@ npm test
 npm run lint
 ```
 
+`npm test` is read-only. It verifies the committed Chart.js vendor asset against
+`public/vendor/chart-js.manifest.json`, the repository-root lockfile entry, and the installed
+package when present. It does not rewrite vendor files.
+
+Maintainers pin or regenerate the browser Chart.js bundle after changing the locked package
+version:
+
+```bash
+npm run vendor:chart-js:pin
+```
+
+That command copies `node_modules/chart.js/dist/chart.umd.js` into `public/vendor/`, refreshes
+the manifest and MIT notice, and must be run from a repository-root install where `chart.js` is
+present.
+
 The tests cover request security, enrollment, demo isolation, schemas, dates, reports, snapshot
 validation, JSON recovery, serial execution, transaction replacement/rollback, crash-convergent
 transaction deletion, and crash-convergent repayment confirmation.
