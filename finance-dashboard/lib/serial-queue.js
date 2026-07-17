@@ -1,14 +1,20 @@
 class SerialQueue {
-  constructor(name = 'queue') {
+  constructor(name = 'queue', { maxPending = 0 } = {}) {
     this.name = name;
+    this.maxPending = Number.isInteger(maxPending) && maxPending > 0 ? maxPending : 0;
     this.pending = 0;
     this.tail = Promise.resolve();
     this.closed = false;
+    this.rejectedOverCapacity = 0;
   }
 
   run(task) {
     if (typeof task !== 'function') throw new TypeError('SerialQueue task must be a function');
     if (this.closed) return Promise.reject(new Error(`${this.name} is closed`));
+    if (this.maxPending > 0 && this.pending >= this.maxPending) {
+      this.rejectedOverCapacity += 1;
+      return Promise.reject(new Error(`${this.name} pending capacity exceeded (${this.maxPending})`));
+    }
     this.pending += 1;
     const execute = () => Promise.resolve().then(task);
     const result = this.tail.then(execute, execute);

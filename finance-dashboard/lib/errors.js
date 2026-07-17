@@ -39,6 +39,30 @@ class AccountNotFoundError extends AppError {
   }
 }
 
+class AdmissionOverloadedError extends AppError {
+  constructor(message, { retryAfterSeconds = 1, requiresIdempotencyKeyReuse = true } = {}) {
+    super(message, {
+      code: 'ADMISSION_OVERLOADED',
+      status: 429,
+      expose: true,
+    });
+    this.name = 'AdmissionOverloadedError';
+    this.retryAfterSeconds = retryAfterSeconds;
+    this.requiresIdempotencyKeyReuse = requiresIdempotencyKeyReuse;
+  }
+}
+
+class AdmissionUnavailableError extends AppError {
+  constructor(message = 'Request admission is unavailable') {
+    super(message, {
+      code: 'ADMISSION_UNAVAILABLE',
+      status: 503,
+      expose: true,
+    });
+    this.name = 'AdmissionUnavailableError';
+  }
+}
+
 class TransactionNotFoundError extends AppError {
   constructor() {
     super('Transaction not found', {
@@ -110,6 +134,8 @@ function classifyError(error) {
 
 module.exports = {
   AccountNotFoundError,
+  AdmissionOverloadedError,
+  AdmissionUnavailableError,
   AppError,
   ForecastMoneyValidationError,
   KnownPreApplyError,

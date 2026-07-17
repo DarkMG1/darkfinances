@@ -1,4 +1,4 @@
-const { AppError, classifyError } = require('./errors');
+const { AppError, classifyError, AdmissionOverloadedError, AdmissionUnavailableError } = require('./errors');
 const { sanitizeIssues } = require('./request-issues');
 
 const API_ERROR_CODES = Object.freeze({
@@ -7,6 +7,8 @@ const API_ERROR_CODES = Object.freeze({
   METHOD_NOT_ALLOWED: { status: 405, message: 'Method not allowed' },
   NOT_FOUND: { status: 404, message: 'Not found' },
   RATE_LIMITED: { status: 429, message: 'Too many requests' },
+  ADMISSION_OVERLOADED: { status: 429, message: 'Too many requests' },
+  ADMISSION_UNAVAILABLE: { status: 503, message: 'Service unavailable' },
 });
 
 function apiErrorBody(error, req) {
@@ -18,6 +20,15 @@ function apiErrorBody(error, req) {
   };
   if (error && Array.isArray(error.issues) && error.issues.length) {
     body.issues = sanitizeIssues(error.issues);
+  }
+  if (error?.requiresIdempotencyKeyReuse === true) {
+    body.requiresIdempotencyKeyReuse = true;
+  }
+  if (error instanceof AdmissionOverloadedError || error instanceof AdmissionUnavailableError) {
+    body.admission = {
+      retryAfterSeconds: error.retryAfterSeconds ?? undefined,
+      requiresIdempotencyKeyReuse: error.requiresIdempotencyKeyReuse ?? undefined,
+    };
   }
   return { status: classified.status, body };
 }
@@ -31,6 +42,9 @@ function sendApiError(req, res, error) {
   if (classified.status === 429) {
     const retryAfter = error?.retryAfterSeconds;
     if (retryAfter != null) res.setHeader('Retry-After', String(retryAfter));
+  }
+  if (classified.status === 503 && error?.retryAfterSeconds != null) {
+    res.setHeader('Retry-After', String(error.retryAfterSeconds));
   }
   return res.status(payload.status).json(payload.body);
 }

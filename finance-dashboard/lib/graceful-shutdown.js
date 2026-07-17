@@ -47,6 +47,7 @@ async function runGracefulShutdown({
   signal = 'UNKNOWN',
   httpServer,
   mutationQueue,
+  requestAdmission,
   shutdownApi,
   stopPeriodicSync = () => {},
   totalTimeoutMs = resolveTimeoutMs(process.env.FINANCE_SHUTDOWN_TIMEOUT_MS, DEFAULT_TOTAL_TIMEOUT_MS),
@@ -62,6 +63,11 @@ async function runGracefulShutdown({
 
   stopPeriodicSync();
   log('periodic-sync-stopped');
+
+  if (requestAdmission) {
+    requestAdmission.closeAdmission();
+    log('request-admission-stopped');
+  }
 
   mutationQueue.close();
   log('mutation-admission-stopped');

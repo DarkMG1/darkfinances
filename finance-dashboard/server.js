@@ -16,6 +16,15 @@ const { FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { SerialQueue } = require('./lib/serial-queue');
 const { bindGracefulShutdownSignals } = require('./lib/graceful-shutdown');
 const { getActualCoordinator } = require('./lib/actual-coordinator');
+const { loadAdmissionLimitsConfig } = require('./lib/admission-limits-config');
+const {
+  resetRequestAdmissionController,
+} = require('./lib/request-admission');
+const {
+  withMutationAdmission,
+  withOperationStatusAdmission,
+  withReadAdmission,
+} = require('./lib/request-admission-runtime');
 const { OperationJournal } = require('./lib/operation-journal');
 const { executeJournaledOperation } = require('./lib/operation-executor');
 const { reconcileOperationJournalFromProof } = require('./lib/operation-reconciliation');
@@ -57,7 +66,11 @@ const app = express();
 const cache = new NodeCache({ stdTTL: 300 }); // 5 min cache
 const actualCoordinator = getActualCoordinator();
 actualCoordinator.bindCache(cache);
-const mutationQueue = new SerialQueue('finance-mutations');
+const admissionLimitsConfig = loadAdmissionLimitsConfig();
+const requestAdmission = resetRequestAdmissionController(admissionLimitsConfig);
+const mutationQueue = new SerialQueue('finance-mutations', {
+  maxPending: admissionLimitsConfig.mutationGlobalPending,
+});
 const operationJournal = new OperationJournal();
 const RELEASE_MANIFEST_PATH = process.env.RELEASE_MANIFEST_PATH || path.join(__dirname, 'release-manifest.json');
 const runtimeHealth = {
@@ -1150,31 +1163,37 @@ function csvEscape(v) {
 }
 async function reportCsv(req, res) {
   try {
-    const rep = await data.getMonthlyReport({ month: req.query.month });
-    const net = Math.round((rep.summary.totalIncome - rep.summary.totalSpend) * 100) / 100;
-    const lines = [
-      `Monthly report,${rep.month}`,
-      `Total income,${rep.summary.totalIncome}`,
-      `Total spend,${rep.summary.totalSpend}`,
-      `Net,${net}`,
-      '',
-      'Date,Payee,Account,Category,Amount,Notes',
-    ];
-    for (const t of rep.transactions) {
-      lines.push([t.date, csvEscape(t.payee), csvEscape(t.account), csvEscape(t.category || ''), t.amount, csvEscape(t.notes || '')].join(','));
-    }
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="finance-${rep.month}.csv"`);
-    res.send(lines.join('\n'));
+    await withReadAdmission(req, actualCoordinator, async () => {
+      const rep = await data.getMonthlyReport({ month: req.query.month });
+      const net = Math.round((rep.summary.totalIncome - rep.summary.totalSpend) * 100) / 100;
+      const lines = [
+        `Monthly report,${rep.month}`,
+        `Total income,${rep.summary.totalIncome}`,
+        `Total spend,${rep.summary.totalSpend}`,
+        `Net,${net}`,
+        '',
+        'Date,Payee,Account,Category,Amount,Notes',
+      ];
+      for (const t of rep.transactions) {
+        lines.push([t.date, csvEscape(t.payee), csvEscape(t.account), csvEscape(t.category || ''), t.amount, csvEscape(t.notes || '')].join(','));
+      }
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="finance-${rep.month}.csv"`);
+      res.send(lines.join('\n'));
+    }, { admission: requestAdmission });
   } catch (e) { sendApiError(req, res, e); }
 }
 
 // Raw responders for the legacy web API; enveloped {data}/{error} responders for v1.
 const runHandler = (req, fn, operation) => {
   if (operation) return fn(req, operation);
-  return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)
-    ? mutationQueue.run(() => fn(req))
-    : fn(req);
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    return withMutationAdmission(req, operationJournal, () => mutationQueue.run(() => fn(req)), {
+      isDemo,
+      admission: requestAdmission,
+    });
+  }
+  return withReadAdmission(req, actualCoordinator, () => fn(req), { admission: requestAdmission });
 };
 const raw = (fn) => async (req, res) => {
   try { res.json(await runHandler(req, fn)); } catch (e) { sendApiError(req, res, e); }
@@ -1206,11 +1225,11 @@ async function bulkTerminalProofResolver({ key, operation }) {
   };
 }
 
-async function readOperationStatus(key) {
-  return mutationQueue.run(() => reconcileOperationJournalFromProof(operationJournal, key, {
+async function readOperationStatus(req, key) {
+  return withOperationStatusAdmission(req, () => mutationQueue.run(() => reconcileOperationJournalFromProof(operationJournal, key, {
     proofResolver: bulkTerminalProofResolver,
     onJournalError: operationJournalError,
-  }));
+  })), { admission: requestAdmission });
 }
 
 async function executeVersionedMutation(req, fn, mutationRoute) {
@@ -1243,7 +1262,12 @@ const env = (fn, mutationRoute = null) => async (req, res) => {
           expose: true,
         });
       }
-      const execution = await mutationQueue.run(() => executeVersionedMutation(req, fn, mutationRoute));
+      const execution = await withMutationAdmission(
+        req,
+        operationJournal,
+        () => mutationQueue.run(() => executeVersionedMutation(req, fn, mutationRoute)),
+        { isDemo, admission: requestAdmission },
+      );
       return res.json({ data: execution.result, operation: execution.operation });
     }
     const result = await runHandler(req, fn);
@@ -1365,7 +1389,7 @@ function registerV1Mutation(method, route, handler) {
   v1[method.toLowerCase()](route, env(handler, definition));
 }
 v1.get('/operations/:key', env(async (req) => {
-  const operation = await readOperationStatus(req.params.key);
+  const operation = await readOperationStatus(req, req.params.key);
   if (!operation) {
     throw new AppError('Operation not found', {
       code: 'OPERATION_NOT_FOUND',
@@ -1391,6 +1415,7 @@ v1.get('/ping', env(async () => {
     financeTimeZone: FINANCE_TIME_ZONE,
     actual,
     actualCoordinator: actualCoordinator.getHealth(),
+    requestAdmission: requestAdmission.getHealth(),
     queuedMutations: mutationQueue.size,
     release: releaseIdentity(),
   };
@@ -1517,6 +1542,7 @@ const httpServer = app.listen(PORT, '127.0.0.1', () => {
 bindGracefulShutdownSignals({
   httpServer,
   mutationQueue,
+  requestAdmission,
   shutdownApi: () => data.shutdownApi(),
   stopPeriodicSync: () => {
     if (periodicSyncTimer) clearInterval(periodicSyncTimer);
