@@ -1,14 +1,23 @@
 import React, { useMemo, useState } from 'react';
-import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useBudgets, useSetBudget, useTrends } from '@/api/hooks/finance.hooks';
 import { BudgetCategory } from '@/api/generated/types';
+import {
+  MutationFieldError,
+  MutationFormBanner,
+  MutationLiveRegion,
+  MutationSheet,
+  MutationSubmitButton,
+} from '@/components/mutation-form';
 import { PushScreen } from '@/components/screen';
 import { Card, CardTitle, EmptyState, ErrorState } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { GroupedBars, MonthNavigator, ProgressBar, trendPeriodComplete } from '@/components/charts';
 import { categoryEnvelopeDebtDisplay, categoryReserveDisplay } from '@/lib/budget-category-display';
+import { useMutationForm } from '@/hooks/useMutationForm';
 import { haptics } from '@/lib/haptics';
+import { collectFieldErrors, parseStrictMoneyDollars, validateMoneyField } from '@/lib/mutation-form-validation';
 import { useCurrentMonthKey, useSelectedMonth } from '@/lib/selectedMonth';
 import { colors, fmtPos } from '@/theme/colors';
 
@@ -64,24 +73,46 @@ export default function Budgets() {
 
   const openEdit = (c: BudgetCategory, groupName: string) => {
     haptics.tap();
+    form.clearErrors();
     setEditing({ ...c, groupName });
     setTargetText(c.budgeted > 0 ? String(c.budgeted) : '');
   };
 
-  const save = () => {
-    if (!editing) return;
-    const amount = parseFloat(targetText.replace(/[^0-9.]/g, '')) || 0;
-    setBudget.mutate(
-      { month: b?.month, categoryId: editing.id, amount },
-      {
-        onSuccess: () => setEditing(null),
-        onError: (e) => Alert.alert('Could not save', e?.error || e?.message || 'Failed to update the target.'),
-      }
-    );
+  const fields = useMemo(() => ({
+    targetText,
+    categoryId: editing?.id ?? '',
+    month: b?.month,
+  }), [b?.month, editing?.id, targetText]);
+
+  const form = useMutationForm({
+    formId: editing ? `budget-${editing.id}-${month}` : 'budget-none',
+    fields,
+    setFields: () => {},
+    persistDraft: false,
+    mutation: setBudget,
+    mutationLabel: 'Save budget',
+    fieldOrder: ['targetText'],
+    onSuccessClose: () => setEditing(null),
+    onRefetch: () => budgets.refetch(),
+    validate: (f) => collectFieldErrors({
+      targetText: validateMoneyField(f.targetText, { label: 'Target', allowZero: true }),
+    }),
+    buildVariables: (f) => ({
+      month: f.month as string | undefined,
+      categoryId: String(f.categoryId),
+      amount: parseStrictMoneyDollars(String(f.targetText), { allowZero: true }) ?? 0,
+    }),
+  });
+
+  const save = () => form.submit();
+  const closeSheet = () => {
+    if (!form.requestDismiss()) return;
+    setEditing(null);
   };
 
   return (
     <PushScreen testID="budgets-screen" onRefresh={onRefresh}>
+      <MutationLiveRegion message={form.announce} />
       <MonthNavigator months={availMonths} selected={month} onSelect={setMonth} currentKey={curKey} />
       {chart.length > 1 ? (
         <Card style={{ marginBottom: 20 }}>
@@ -185,42 +216,49 @@ export default function Budgets() {
         </>
       )}
 
-      <Modal visible={!!editing} animationType="slide" transparent onRequestClose={() => setEditing(null)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-          <Pressable style={styles.modalBg} onPress={() => setEditing(null)}>
-            <Pressable testID="budgets-edit-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
-              <Text style={styles.sheetTitle}>{editing?.name}</Text>
-              <Text style={styles.sheetSub}>{editing?.groupName} · spent {editing ? fmtPos(editing.spent) : ''} · projected {editing ? fmtPos(editing.projected ?? editing.spent) : ''}</Text>
+      <MutationSheet
+        visible={!!editing}
+        title={editing?.name ?? 'Budget'}
+        testID="budgets-edit-sheet"
+        bottomInset={insets.bottom}
+        canDismiss={form.canDismiss}
+        onRequestClose={closeSheet}
+      >
+        <MutationFormBanner outcome={form.outcome} onRetry={form.retry} onRefetch={() => budgets.refetch()} />
+        <Text style={styles.sheetSub}>{editing?.groupName} · spent {editing ? fmtPos(editing.spent) : ''} · projected {editing ? fmtPos(editing.projected ?? editing.spent) : ''}</Text>
 
-              <Text style={styles.field}>Monthly target</Text>
-              <View style={styles.inputRow}>
-                <Text style={styles.dollar}>$</Text>
-                <TextInput
-                  testID="budgets-target-input"
-                  style={styles.input}
-                  value={targetText}
-                  onChangeText={setTargetText}
-                  placeholder="0"
-                  placeholderTextColor={colors.muted}
-                  keyboardType="decimal-pad"
-                  autoFocus
-                />
-              </View>
+        <Text style={[styles.field, form.getFieldError('targetText') && { color: '#ff6b6b' }]}>Monthly target</Text>
+        <View style={styles.inputRow}>
+          <Text style={styles.dollar}>$</Text>
+          <TextInput
+            testID="budgets-target-input"
+            style={[styles.input, form.getFieldError('targetText') && { borderColor: '#ff6b6b' }]}
+            value={targetText}
+            onChangeText={setTargetText}
+            placeholder="0"
+            placeholderTextColor={colors.muted}
+            keyboardType="decimal-pad"
+            autoFocus
+            accessibilityLabel="Monthly target"
+          />
+        </View>
+        <MutationFieldError error={form.getFieldError('targetText')} testID="budgets-target-error" />
 
-              <Pressable testID="budgets-save-target-button" style={({ pressed }) => [styles.saveBtn, pressed && { opacity: 0.85 }]} onPress={save} disabled={setBudget.isPending}>
-                <Text style={styles.saveText}>{setBudget.isPending ? 'Saving…' : 'Save target'}</Text>
-              </Pressable>
-              <Pressable
-                testID="budgets-clear-target-button"
-                style={({ pressed }) => [styles.clearBtn, pressed && { opacity: 0.7 }]}
-                onPress={() => { setTargetText('0'); }}
-              >
-                <Text style={styles.clearText}>Clear target</Text>
-              </Pressable>
-            </Pressable>
-          </Pressable>
-        </KeyboardAvoidingView>
-      </Modal>
+        <MutationSubmitButton
+          testID="budgets-save-target-button"
+          label="Save target"
+          pendingLabel="Saving…"
+          onPress={save}
+          disabled={form.isLocked}
+        />
+        <Pressable
+          testID="budgets-clear-target-button"
+          style={({ pressed }) => [styles.clearBtn, pressed && { opacity: 0.7 }]}
+          onPress={() => { setTargetText('0'); }}
+        >
+          <Text style={styles.clearText}>Clear target</Text>
+        </Pressable>
+      </MutationSheet>
     </PushScreen>
   );
 }

@@ -175,6 +175,28 @@ haptic errors are swallowed and never change mutation results.
 Inventory and behavioral tests live in `test/haptic-call-site-inventory.js` and
 `test/mutation-outcome-haptics.test.js`.
 
+## Mutation form UX (PR-37)
+
+Sheets and full-screen mutation flows preserve user input on recoverable errors.
+Shared helpers live under `src/lib/mutation-form-*.js`, `src/hooks/useMutationForm.ts`,
+`src/hooks/useMutationAction.ts`, and `src/components/mutation-form.tsx`.
+
+- Client validation uses the same strict money, date, and allocation rules as the
+  request contract; the server remains authoritative for terminal outcomes.
+- API `issues[]` paths map to inline field errors with VoiceOver live-region
+  announcements and focus on the first invalid field.
+- Recoverable transport/admission/sync-unknown failures keep the sheet open and
+  offer **Retry** with the same idempotency key — copy never tells users to mint
+  new keys.
+- Stale/conflict responses trigger targeted refetch; saga-owned 409s stay open
+  with retry guidance.
+- Submit buttons lock while `useFinanceMutation` is pending (including status
+  reconciliation); dismiss is blocked until the in-flight operation settles.
+- Profile purge clears in-memory mutation drafts via `purgeMutationFormDrafts`.
+- Outcome haptics remain owned exclusively by `useFinanceMutation` (PR-40).
+
+Tests: `test/mutation-form-*.test.js`. Maestro: `.maestro/mutation-validation-errors.yaml`.
+
 ## Demo mode
 
 Tap **Use demo data** during onboarding. Demo mode uses the dashboard's isolated synthetic fixtures,

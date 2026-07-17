@@ -1,12 +1,21 @@
-import React, { useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import React, { useMemo, useRef, useState } from 'react';
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useDeleteEvent, useEvents, useSaveEvent } from '@/api/hooks/finance.hooks';
+import {
+  MutationFieldError,
+  MutationFormBanner,
+  MutationLiveRegion,
+  MutationSubmitButton,
+} from '@/components/mutation-form';
 import { Card, CardTitle } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
-import { isDateOnly, useEditableFinanceDate } from '@/lib/date-only';
+import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationForm } from '@/hooks/useMutationForm';
+import { useEditableFinanceDate } from '@/lib/date-only';
 import { haptics } from '@/lib/haptics';
+import { collectFieldErrors, validateDateOnlyField, validateRequiredText } from '@/lib/mutation-form-validation';
 import { colors } from '@/theme/colors';
 
 export default function Events() {
@@ -20,40 +29,53 @@ export default function Events() {
   const { value: start, setValue: setStart, resetToToday, today } = useEditableFinanceDate();
   const [members, setMembers] = useState('');
   const [group, setGroup] = useState('');
+  const nameRef = useRef<TextInput>(null);
+  const startRef = useRef<TextInput>(null);
 
-  const canAdd = name.trim().length >= 2 && !saveEvent.isPending;
+  const fields = useMemo(() => ({ name, start, members, group }), [group, members, name, start]);
 
-  const add = () => {
-    if (!canAdd) return;
-    const startDate = start.trim() || today;
-    if (!isDateOnly(startDate)) {
-      Alert.alert('Invalid start date', 'Use a real date in YYYY-MM-DD format.');
-      return;
-    }
-    haptics.tap();
-    saveEvent.mutate(
-      { name: name.trim(), start: startDate, members: members.trim(), group: group.trim() },
-      {
-        onSuccess: (r) => {
-          setName('');
-          setMembers('');
-          setGroup('');
-          resetToToday();
-          Alert.alert(
-            'Trip created',
-            `Tag any charge with #ev-${r?.event?.slug} to add it to “${r?.event?.name}”.` +
-              (group.trim() ? '\n\nSplitwise data for this group will pull in on the next refresh.' : ''),
-          );
-        },
-        onError: (e) => Alert.alert('Could not create trip', e.error || 'Please try again.'),
-      },
-    );
-  };
+  const form = useMutationForm({
+    formId: 'events-create',
+    fields,
+    setFields: () => {},
+    persistDraft: true,
+    mutation: saveEvent,
+    mutationLabel: 'Create trip',
+    fieldOrder: ['name', 'start'],
+    fieldRefs: { name: nameRef, start: startRef },
+    onRefetch: () => events.refetch(),
+    validate: (f) => collectFieldErrors({
+      name: validateRequiredText(f.name, 'Trip name'),
+      start: validateDateOnlyField(String(f.start).trim() || today, 'Start date'),
+    }),
+    buildVariables: (f) => ({
+      name: String(f.name).trim(),
+      start: String(f.start).trim() || today,
+      members: String(f.members).trim(),
+      group: String(f.group).trim(),
+    }),
+    onSuccessClose: () => {
+      setName('');
+      setMembers('');
+      setGroup('');
+      resetToToday();
+    },
+  });
+
+  const deleteAction = useMutationAction({
+    mutation: deleteEvent,
+    mutationLabel: 'Delete trip',
+    onSuccess: () => events.refetch(),
+  });
 
   const remove = (slug: string, label: string) =>
     Alert.alert('Delete trip?', `Remove “${label}”? Tagged transactions keep their #ev-${slug} tag but the trip disappears from this list.`, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => { haptics.tap(); deleteEvent.mutate({ slug }); } },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => { haptics.tap(); deleteAction.run({ slug }); },
+      },
     ]);
 
   const list = events.data?.events ?? [];
@@ -61,6 +83,8 @@ export default function Events() {
   return (
     <ScrollView testID="events-screen" style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
       <Stack.Screen options={{ title: 'Trips & Events' }} />
+      <MutationLiveRegion message={form.announce || deleteAction.announce} />
+      <MutationFormBanner outcome={form.outcome ?? deleteAction.outcome} onRetry={() => { form.retry(); deleteAction.retry(); }} onRefetch={() => events.refetch()} />
 
       <Text style={styles.intro}>
         Create a trip or event, then tag its charges with <Text style={styles.mono}>#ev-slug</Text> from any transaction’s notes. If you link a Splitwise
@@ -70,20 +94,47 @@ export default function Events() {
       <CardTitle style={{ marginTop: 8 }}>New trip / event</CardTitle>
       <Card>
         <Text style={styles.label}>Name</Text>
-        <TextInput testID="events-name-input" style={styles.input} value={name} onChangeText={setName} placeholder="e.g. Summer trip 2026" placeholderTextColor={colors.muted} autoCorrect={false} />
+        <TextInput
+          testID="events-name-input"
+          ref={nameRef}
+          style={[styles.input, form.getFieldError('name') && styles.inputError]}
+          value={name}
+          onChangeText={setName}
+          placeholder="e.g. Summer trip 2026"
+          placeholderTextColor={colors.muted}
+          autoCorrect={false}
+          accessibilityLabel="Trip name"
+        />
+        <MutationFieldError error={form.getFieldError('name')} testID="events-name-error" />
 
         <Text style={[styles.label, { marginTop: 12 }]}>Start date</Text>
-        <TextInput testID="events-start-input" style={styles.input} value={start} onChangeText={setStart} placeholder="YYYY-MM-DD" placeholderTextColor={colors.muted} autoCapitalize="none" autoCorrect={false} />
+        <TextInput
+          testID="events-start-input"
+          ref={startRef}
+          style={[styles.input, form.getFieldError('start') && styles.inputError]}
+          value={start}
+          onChangeText={setStart}
+          placeholder="YYYY-MM-DD"
+          placeholderTextColor={colors.muted}
+          autoCapitalize="none"
+          autoCorrect={false}
+          accessibilityLabel="Start date"
+        />
+        <MutationFieldError error={form.getFieldError('start')} testID="events-start-error" />
 
         <Text style={[styles.label, { marginTop: 12 }]}>People (comma-separated)</Text>
-        <TextInput testID="events-members-input" style={styles.input} value={members} onChangeText={setMembers} placeholder="e.g. alex, sam, jordan" placeholderTextColor={colors.muted} autoCapitalize="none" autoCorrect={false} />
+        <TextInput testID="events-members-input" style={styles.input} value={members} onChangeText={setMembers} placeholder="e.g. alex, sam, jordan" placeholderTextColor={colors.muted} autoCapitalize="none" autoCorrect={false} accessibilityLabel="People" />
 
         <Text style={[styles.label, { marginTop: 12 }]}>Splitwise group (optional)</Text>
-        <TextInput testID="events-group-input" style={styles.input} value={group} onChangeText={setGroup} placeholder="Exact Splitwise group name" placeholderTextColor={colors.muted} autoCorrect={false} />
+        <TextInput testID="events-group-input" style={styles.input} value={group} onChangeText={setGroup} placeholder="Exact Splitwise group name" placeholderTextColor={colors.muted} autoCorrect={false} accessibilityLabel="Splitwise group" />
 
-        <Pressable testID="events-create-button" style={({ pressed }) => [styles.addBtn, !canAdd && { opacity: 0.4 }, pressed && { opacity: 0.85 }]} onPress={add} disabled={!canAdd}>
-          <Text style={styles.addText}>{saveEvent.isPending ? 'Saving…' : 'Create trip'}</Text>
-        </Pressable>
+        <MutationSubmitButton
+          testID="events-create-button"
+          label="Create trip"
+          pendingLabel="Saving…"
+          onPress={form.submit}
+          disabled={form.isLocked}
+        />
       </Card>
 
       <CardTitle style={{ marginTop: 24 }}>Your trips{list.length ? ` (${list.length})` : ''}</CardTitle>
@@ -99,46 +150,32 @@ export default function Events() {
               onLongPress={() => remove(e.slug, e.name)}
               onPress={() => { haptics.tap(); router.push({ pathname: '/tag/[tag]', params: { tag: `ev-${e.slug}` } }); }}
             >
-              <View style={{ flex: 1, minWidth: 0 }}>
-                <Text style={styles.name} numberOfLines={1}>{e.name}</Text>
-                <Text style={styles.sub} numberOfLines={1}>
-                  <Text style={styles.mono}>#ev-{e.slug}</Text>
-                  {e.members?.length ? ` · ${e.members.length} ${e.members.length === 1 ? 'person' : 'people'}` : ''}
-                  {e.group ? ' · Splitwise linked' : ''}
-                </Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rowName}>{e.name}</Text>
+                <Text style={styles.rowSub}>#{`ev-${e.slug}`}{e.start ? ` · starts ${e.start}` : ''}</Text>
               </View>
-              <View style={{ alignItems: 'flex-end' }}>
-                <Text style={styles.count}>{e.taggedCount || 0}</Text>
-                <Text style={styles.countLbl}>charges</Text>
-              </View>
+              <Text style={styles.chev}>›</Text>
             </Pressable>
           ))}
         </Card>
       ) : (
-        <Card>
-          <Text style={styles.empty}>No trips yet. Create one above, then tag its charges with the #ev tag it gives you.</Text>
-        </Card>
+        <Card><Text style={styles.empty}>No trips yet — create one above.</Text></Card>
       )}
-
-      {list.length ? <Text style={styles.hint}>Tap a trip to see its tagged charges. Long-press to delete.</Text> : null}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  intro: { color: colors.muted, fontSize: 13, lineHeight: 19 },
-  mono: { fontFamily: 'Menlo', fontSize: 12, color: colors.accentLight },
-  label: { color: colors.muted, fontSize: 12, fontWeight: '600', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
-  input: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15 },
-  addBtn: { backgroundColor: colors.accent, borderRadius: 10, paddingVertical: 12, alignItems: 'center', marginTop: 14 },
-  addText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  intro: { color: colors.muted, fontSize: 13, lineHeight: 19, marginBottom: 4 },
+  mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', color: colors.accentLight },
+  label: { color: colors.muted, fontSize: 12, fontWeight: '600', marginBottom: 6 },
+  input: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, minHeight: 44 },
+  inputError: { borderColor: '#ff6b6b' },
   list: { paddingVertical: 2 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
-  name: { color: colors.text, fontSize: 15, fontWeight: '600' },
-  sub: { color: colors.muted, fontSize: 13, marginTop: 2 },
-  count: { color: colors.text, fontSize: 16, fontWeight: '700' },
-  countLbl: { color: colors.muted, fontSize: 11 },
-  empty: { color: colors.muted, fontSize: 14, lineHeight: 20 },
-  hint: { color: colors.muted, fontSize: 12, marginTop: 12, textAlign: 'center' },
+  row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, minHeight: 44 },
+  rowName: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  rowSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  chev: { color: colors.muted, fontSize: 20, fontWeight: '700' },
+  empty: { color: colors.muted, fontSize: 14 },
 });

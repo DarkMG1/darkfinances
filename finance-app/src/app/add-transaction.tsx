@@ -1,10 +1,23 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useNavigation, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAccounts, useCategories, useCreateTransaction } from '@/api/hooks/finance.hooks';
+import {
+  MutationFieldError,
+  MutationFormBanner,
+  MutationLiveRegion,
+  MutationSubmitButton,
+} from '@/components/mutation-form';
 import { Card, CardTitle } from '@/components/ui';
+import { useMutationForm } from '@/hooks/useMutationForm';
 import { haptics } from '@/lib/haptics';
+import {
+  collectFieldErrors,
+  parseStrictMoneyDollars,
+  validateDateOnlyField,
+  validateMoneyField,
+} from '@/lib/mutation-form-validation';
 import { colors } from '@/theme/colors';
 import { useEditableFinanceDate } from '@/lib/date-only';
 
@@ -28,23 +41,54 @@ export default function AddTransaction() {
   const [categoryName, setCategoryName] = useState('');
   const [pickingCat, setPickingCat] = useState(false);
   const amountRef = useRef<TextInput>(null);
+  const dateRef = useRef<TextInput>(null);
 
   const accts = useMemo(() => accounts.data ?? [], [accounts.data]);
-  // General manual entry: surface on-budget (spending) accounts first and default
-  // to the first one — typically checking. Cash spending itself is tracked by
-  // categorizing the synced ATM withdrawal as "Cash & ATM", not as a fake account.
   const ordered = useMemo(
     () => [...accts].sort((a, b) => Number(a.offbudget) - Number(b.offbudget)),
-    [accts]
+    [accts],
   );
   const selectedAccount = accountId ?? ordered.find((a) => !a.offbudget)?.id ?? ordered[0]?.id ?? null;
 
+  const fields = useMemo(() => ({
+    kind,
+    amount,
+    payee,
+    date,
+    notes,
+    accountId: selectedAccount,
+    categoryId,
+  }), [amount, categoryId, date, kind, notes, payee, selectedAccount]);
+
+  const form = useMutationForm({
+    formId: 'add-transaction',
+    fields,
+    setFields: () => {},
+    persistDraft: false,
+    mutation: create,
+    mutationLabel: 'Add transaction',
+    fieldOrder: ['amount', 'accountId', 'date', 'payee', 'notes', 'categoryId'],
+    fieldRefs: { amount: amountRef, date: dateRef },
+    onSuccessClose: () => router.back(),
+    validate: (f) => collectFieldErrors({
+      amount: validateMoneyField(f.amount, { label: 'Amount' }),
+      accountId: f.accountId ? null : 'Pick an account.',
+      date: validateDateOnlyField(f.date, 'Date'),
+    }),
+    buildVariables: (f) => {
+      const value = parseStrictMoneyDollars(String(f.amount))!;
+      return {
+        accountId: String(f.accountId),
+        amount: f.kind === 'expense' ? -value : value,
+        payee: String(f.payee).trim() || undefined,
+        date: String(f.date),
+        categoryId: f.categoryId || undefined,
+        notes: String(f.notes).trim() || undefined,
+      };
+    },
+  });
+
   useEffect(() => {
-    // Focus only after the NATIVE push transition fully ends. InteractionManager
-    // resolves before react-native-screens finishes its native animation, so the
-    // keyboard slid up mid-transition and jittered. transitionEnd is the reliable
-    // "screen finished animating in" signal; the timeout is a fallback for when the
-    // event doesn't fire (e.g. reduce-motion is enabled).
     let focused = false;
     const focus = () => {
       if (focused) return;
@@ -61,35 +105,12 @@ export default function AddTransaction() {
     };
   }, [navigation]);
 
-  const submit = () => {
-    const value = parseFloat(amount.replace(/[^0-9.]/g, ''));
-    if (!isFinite(value) || value <= 0) {
-      Alert.alert('Amount', 'Enter an amount greater than zero.');
-      return;
-    }
-    if (!selectedAccount) {
-      Alert.alert('Account', 'Pick an account.');
-      return;
-    }
-    create.mutate(
-      {
-        accountId: selectedAccount,
-        amount: kind === 'expense' ? -value : value,
-        payee: payee.trim() || undefined,
-        date,
-        categoryId: categoryId || undefined,
-        notes: notes.trim() || undefined,
-      },
-      {
-        onSuccess: () => router.back(),
-        onError: (e) => Alert.alert('Could not add', e?.error || e?.message || 'Failed to add the transaction.'),
-      }
-    );
-  };
-
   return (
     <KeyboardAvoidingView testID="add-transaction-screen" style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
     <ScrollView style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
+      <MutationLiveRegion message={form.announce} />
+      <MutationFormBanner outcome={form.outcome} onRetry={form.retry} />
+
       <View style={styles.typeRow}>
         {(['expense', 'income'] as Kind[]).map((k) => (
           <Pressable testID={`add-transaction-type-${k}${kind === k ? '-selected' : ''}`} key={k} style={({ pressed }) => [styles.typeBtn, kind === k && (k === 'expense' ? styles.typeExpense : styles.typeIncome), pressed && { opacity: 0.8 }]} onPress={() => { haptics.tap(); setKind(k); }}>
@@ -103,14 +124,17 @@ export default function AddTransaction() {
         <TextInput
           testID="add-transaction-amount-input"
           ref={amountRef}
-          style={styles.amountInput}
+          style={[styles.amountInput, form.getFieldError('amount') ? styles.inputError : null]}
           value={amount}
           onChangeText={setAmount}
           placeholder="0.00"
           placeholderTextColor={colors.muted}
           keyboardType="decimal-pad"
+          accessibilityLabel="Amount"
+          accessibilityHint={form.getFieldError('amount') ? `Error: ${form.getFieldError('amount')}` : undefined}
         />
       </View>
+      <MutationFieldError error={form.getFieldError('amount')} testID="add-transaction-amount-error" />
 
       <CardTitle>Account</CardTitle>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
@@ -123,16 +147,29 @@ export default function AddTransaction() {
           );
         })}
       </ScrollView>
+      <MutationFieldError error={form.getFieldError('accountId')} testID="add-transaction-account-error" />
 
       <CardTitle>Payee</CardTitle>
       <Card>
-        <TextInput testID="add-transaction-payee-input" style={styles.input} value={payee} onChangeText={setPayee} placeholder="Who was it?" placeholderTextColor={colors.muted} autoCapitalize="words" />
+        <TextInput testID="add-transaction-payee-input" style={styles.input} value={payee} onChangeText={setPayee} placeholder="Who was it?" placeholderTextColor={colors.muted} autoCapitalize="words" accessibilityLabel="Payee" />
       </Card>
 
       <CardTitle>Date</CardTitle>
       <Card>
-        <TextInput testID="add-transaction-date-input" style={styles.input} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" placeholderTextColor={colors.muted} autoCapitalize="none" />
+        <TextInput
+          testID="add-transaction-date-input"
+          ref={dateRef}
+          style={[styles.input, form.getFieldError('date') ? styles.inputError : null]}
+          value={date}
+          onChangeText={setDate}
+          placeholder="YYYY-MM-DD"
+          placeholderTextColor={colors.muted}
+          autoCapitalize="none"
+          accessibilityLabel="Date"
+          accessibilityHint={form.getFieldError('date') ? `Error: ${form.getFieldError('date')}` : undefined}
+        />
       </Card>
+      <MutationFieldError error={form.getFieldError('date')} testID="add-transaction-date-error" />
 
       <CardTitle>Category</CardTitle>
       <Pressable testID="add-transaction-category-picker" onPress={() => { haptics.tap(); setPickingCat(true); }} style={({ pressed }) => pressed && { opacity: 0.7 }}>
@@ -144,12 +181,16 @@ export default function AddTransaction() {
 
       <CardTitle>Notes</CardTitle>
       <Card>
-        <TextInput testID="add-transaction-notes-input" style={[styles.input, { minHeight: 44, textAlignVertical: 'top' }]} value={notes} onChangeText={setNotes} placeholder="Add a note…" placeholderTextColor={colors.muted} multiline />
+        <TextInput testID="add-transaction-notes-input" style={[styles.input, { minHeight: 44, textAlignVertical: 'top' }]} value={notes} onChangeText={setNotes} placeholder="Add a note…" placeholderTextColor={colors.muted} multiline accessibilityLabel="Notes" />
       </Card>
 
-      <Pressable testID="add-transaction-submit-button" style={({ pressed }) => [styles.submit, (create.isPending || pressed) && { opacity: 0.7 }]} onPress={submit} disabled={create.isPending}>
-        <Text style={styles.submitText}>{create.isPending ? 'Adding…' : 'Add transaction'}</Text>
-      </Pressable>
+      <MutationSubmitButton
+        testID="add-transaction-submit-button"
+        label="Add transaction"
+        pendingLabel="Adding…"
+        onPress={form.submit}
+        disabled={form.isLocked}
+      />
       <Text style={styles.warn}>This writes to your real budget.</Text>
 
       <Modal visible={pickingCat} animationType="slide" transparent onRequestClose={() => setPickingCat(false)}>
@@ -191,8 +232,9 @@ const styles = StyleSheet.create({
   amountWrap: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginVertical: 12 },
   amountSign: { fontSize: 34, fontWeight: '800' },
   amountInput: { color: colors.text, fontSize: 44, fontWeight: '800', letterSpacing: -1.5, minWidth: 140, textAlign: 'center', padding: 0 },
+  inputError: { borderWidth: 1, borderColor: '#ff6b6b' },
   chips: { gap: 8, paddingVertical: 4, paddingRight: 8 },
-  chip: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, maxWidth: 200 },
+  chip: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, maxWidth: 200, minHeight: 44, justifyContent: 'center' },
   chipActive: { backgroundColor: colors.accent, borderColor: colors.accent },
   chipText: { color: colors.muted, fontSize: 13, fontWeight: '600' },
   chipTextActive: { color: '#fff' },
@@ -200,13 +242,11 @@ const styles = StyleSheet.create({
   pickRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   pickValue: { color: colors.text, fontSize: 15, flex: 1 },
   pickArrow: { color: colors.muted, fontSize: 20, fontWeight: '700' },
-  submit: { backgroundColor: colors.accent, borderRadius: 12, paddingVertical: 15, alignItems: 'center', marginTop: 20 },
-  submitText: { color: '#fff', fontSize: 16, fontWeight: '700' },
   warn: { color: colors.muted, fontSize: 12, textAlign: 'center', marginTop: 10 },
   modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 },
   sheetTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 12 },
-  catOption: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  catOption: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, minHeight: 44 },
   catOptionText: { color: colors.text, fontSize: 15 },
   catOptionGroup: { color: colors.muted, fontSize: 12 },
 });

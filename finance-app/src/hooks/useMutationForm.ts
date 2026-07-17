@@ -1,0 +1,204 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { UseMutationResult } from '@tanstack/react-query';
+import type { FinanceError } from '@/api/client/requests';
+import { mapClientValidationOutcome, mapMutationApiError } from '@/lib/mutation-form-errors';
+import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
+import {
+  clearMutationFormDraft,
+  getMutationFormDraft,
+  setMutationFormDraft,
+} from '@/lib/mutation-form-draft-store';
+import { hapticClientValidationRejected } from '@/lib/haptics';
+import { useServerConfig } from '@/state/server';
+
+export type MutationFormPhase = 'idle' | 'submitting' | 'reconciling' | 'success' | 'error';
+
+export interface UseMutationFormOptions<TFields extends Record<string, unknown>, TVariables> {
+  formId: string;
+  fields: TFields;
+  setFields: React.Dispatch<React.SetStateAction<TFields>>;
+  mutation: UseMutationResult<unknown, FinanceError, TVariables>;
+  buildVariables: (fields: TFields) => TVariables;
+  validate?: (fields: TFields) => Record<string, string>;
+  fieldOrder?: string[];
+  fieldPathOverrides?: Record<string, string>;
+  mutationLabel?: string;
+  onSuccessClose?: () => void;
+  onRefetch?: () => void | Promise<unknown>;
+  persistDraft?: boolean;
+  fieldRefs?: Partial<Record<keyof TFields, React.RefObject<{ focus?: () => void } | null>>>;
+}
+
+export interface UseMutationFormResult<TFields extends Record<string, unknown>> {
+  phase: MutationFormPhase;
+  outcome: MappedMutationOutcome | null;
+  fieldErrors: Partial<Record<keyof TFields, string>>;
+  summary: string | null;
+  isLocked: boolean;
+  canDismiss: boolean;
+  announce: string;
+  submit: () => void;
+  retry: () => void;
+  clearErrors: () => void;
+  requestDismiss: () => boolean;
+  focusFirstInvalid: () => void;
+  getFieldError: (field: keyof TFields) => string | undefined;
+  getFieldA11y: (field: keyof TFields, label: string) => {
+    accessibilityLabel: string;
+    accessibilityHint?: string;
+  };
+}
+
+function focusRef(ref?: React.RefObject<{ focus?: () => void } | null>) {
+  ref?.current?.focus?.();
+}
+
+export function useMutationForm<TFields extends Record<string, unknown>, TVariables>({
+  formId,
+  fields,
+  setFields,
+  mutation,
+  buildVariables,
+  validate,
+  fieldOrder = [],
+  fieldPathOverrides,
+  mutationLabel = 'Save',
+  onSuccessClose,
+  onRefetch,
+  persistDraft = true,
+  fieldRefs = {},
+}: UseMutationFormOptions<TFields, TVariables>): UseMutationFormResult<TFields> {
+  const { scope, demo } = useServerConfig();
+  const scopeDigest = demo ? 'demo' : scope;
+  const [phase, setPhase] = useState<MutationFormPhase>('idle');
+  const [outcome, setOutcome] = useState<MappedMutationOutcome | null>(null);
+  const [announce, setAnnounce] = useState('');
+  const closedRef = useRef(false);
+  const variablesRef = useRef<TVariables | null>(null);
+
+  useEffect(() => {
+    if (!persistDraft) return;
+    const draft = getMutationFormDraft(scopeDigest, formId);
+    if (draft) setFields((prev) => ({ ...prev, ...draft }));
+  }, [formId, persistDraft, scopeDigest, setFields]);
+
+  useEffect(() => {
+    if (!persistDraft) return;
+    setMutationFormDraft(scopeDigest, formId, fields);
+  }, [fields, formId, persistDraft, scopeDigest]);
+
+  const isLocked = mutation.isPending || phase === 'submitting' || phase === 'reconciling';
+
+  const fieldErrors = useMemo(() => {
+    if (!outcome?.fieldErrors) return {} as Partial<Record<keyof TFields, string>>;
+    return outcome.fieldErrors as Partial<Record<keyof TFields, string>>;
+  }, [outcome]);
+
+  const focusFirstInvalid = useCallback(() => {
+    const target = outcome?.firstField as keyof TFields | undefined;
+    if (target && fieldRefs[target]) {
+      focusRef(fieldRefs[target]);
+      return;
+    }
+    for (const field of fieldOrder) {
+      if (outcome?.fieldErrors?.[field] && fieldRefs[field as keyof TFields]) {
+        focusRef(fieldRefs[field as keyof TFields]);
+        return;
+      }
+    }
+  }, [fieldOrder, fieldRefs, outcome]);
+
+  const handleError = useCallback((error: FinanceError) => {
+    const mapped = mapMutationApiError(error, { fieldPathOverrides, fieldOrder, mutationLabel });
+    setOutcome(mapped);
+    setPhase('error');
+    setAnnounce(mapped.announce);
+    if (mapped.requiresRefetch) void onRefetch?.();
+    requestAnimationFrame(() => focusFirstInvalid());
+  }, [fieldOrder, fieldPathOverrides, focusFirstInvalid, mutationLabel, onRefetch]);
+
+  const runMutation = useCallback((variables: TVariables) => {
+    variablesRef.current = variables;
+    closedRef.current = false;
+    setPhase(mutation.isPending ? 'submitting' : 'reconciling');
+    setOutcome(null);
+    mutation.mutate(variables, {
+      onSuccess: () => {
+        setPhase('success');
+        setAnnounce(`${mutationLabel} succeeded.`);
+        clearMutationFormDraft(scopeDigest, formId);
+        if (!closedRef.current) {
+          closedRef.current = true;
+          onSuccessClose?.();
+        }
+      },
+      onError: (error) => handleError(error),
+    });
+  }, [formId, handleError, mutation, mutationLabel, onSuccessClose, scopeDigest]);
+
+  const submit = useCallback(() => {
+    if (isLocked) return;
+    if (validate) {
+      const clientErrors = validate(fields);
+      if (Object.keys(clientErrors).length) {
+        const mapped = mapClientValidationOutcome(clientErrors, fieldOrder);
+        setOutcome(mapped);
+        setPhase('error');
+        setAnnounce(mapped.announce);
+        hapticClientValidationRejected();
+        requestAnimationFrame(() => focusFirstInvalid());
+        return;
+      }
+    }
+    runMutation(buildVariables(fields));
+  }, [buildVariables, fieldOrder, fields, focusFirstInvalid, isLocked, runMutation, validate]);
+
+  const retry = useCallback(() => {
+    if (isLocked) return;
+    if (variablesRef.current != null) {
+      runMutation(variablesRef.current);
+      return;
+    }
+    submit();
+  }, [isLocked, runMutation, submit]);
+
+  const clearErrors = useCallback(() => {
+    setOutcome(null);
+    setPhase('idle');
+    setAnnounce('');
+  }, []);
+
+  const requestDismiss = useCallback(() => {
+    if (isLocked) return false;
+    clearMutationFormDraft(scopeDigest, formId);
+    clearErrors();
+    return true;
+  }, [clearErrors, formId, isLocked, scopeDigest]);
+
+  const getFieldError = useCallback((field: keyof TFields) => fieldErrors[field], [fieldErrors]);
+
+  const getFieldA11y = useCallback((field: keyof TFields, label: string) => {
+    const err = fieldErrors[field];
+    return {
+      accessibilityLabel: label,
+      accessibilityHint: err ? `Error: ${err}` : undefined,
+    };
+  }, [fieldErrors]);
+
+  return {
+    phase,
+    outcome,
+    fieldErrors,
+    summary: outcome?.summary ?? null,
+    isLocked,
+    canDismiss: !isLocked,
+    announce,
+    submit,
+    retry,
+    clearErrors,
+    requestDismiss,
+    focusFirstInvalid,
+    getFieldError,
+    getFieldA11y,
+  };
+}

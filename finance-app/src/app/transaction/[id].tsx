@@ -29,7 +29,10 @@ import {
 } from '@/api/hooks/finance.hooks';
 import { ReimbLinkEndpoint, ReimbTxnRef, Transaction } from '@/api/generated/types';
 import { Card, CardTitle, TagChips } from '@/components/ui';
-import { haptics } from '@/lib/haptics';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationAction } from '@/hooks/useMutationAction';
+import { useScreenMutationFeedback } from '@/hooks/useScreenMutationFeedback';
+import { haptics, hapticClientValidationRejected } from '@/lib/haptics';
 import { formatAllocationDollars, parseStrictAllocationDollars } from '@/lib/allocation-parse';
 import { CapturedReceipt, pickReceiptFromLibrary, scanReceiptFromCamera } from '@/lib/receipts';
 import { categoryIcon } from '@/theme/categoryIcons';
@@ -152,8 +155,52 @@ export default function TransactionDetail() {
 
   const links = useReimbLinks(txnId);
   const counterpartyLinks = useReimbLinks(linkTarget?.id);
+  const receipts = useReceipts(txnId);
+  const addReceipt = useAddReceipt();
+  const delReceipt = useDeleteReceipt();
   const addLink = useAddReimbLink();
   const delLink = useDeleteReimbLink();
+  const linkAction = useMutationAction({
+    mutation: addLink,
+    mutationLabel: 'Link reimbursement',
+    onRefetch: () => { links.refetch(); counterpartyLinks.refetch(); detail.refetch(); },
+  });
+  const unlinkAction = useMutationAction({
+    mutation: delLink,
+    mutationLabel: 'Unlink reimbursement',
+    onRefetch: () => { links.refetch(); counterpartyLinks.refetch(); detail.refetch(); },
+  });
+  const receiptAction = useMutationAction({
+    mutation: addReceipt,
+    mutationLabel: 'Upload receipt',
+    onRefetch: () => receipts.refetch(),
+  });
+  const deleteReceiptAction = useMutationAction({
+    mutation: delReceipt,
+    mutationLabel: 'Delete receipt',
+    onRefetch: () => receipts.refetch(),
+  });
+  const deleteTxnAction = useMutationAction({
+    mutation: del,
+    mutationLabel: 'Delete transaction',
+  });
+  const screenFeedback = useScreenMutationFeedback({
+    mutationLabel: 'Update transaction',
+    onRefetch: () => detail.refetch(),
+    fieldOrder: ['date', 'payee', 'allocationCents'],
+  });
+  const activeMutationOutcome = linkAction.outcome
+    ?? unlinkAction.outcome
+    ?? receiptAction.outcome
+    ?? deleteReceiptAction.outcome
+    ?? deleteTxnAction.outcome
+    ?? screenFeedback.outcome;
+  const activeAnnounce = linkAction.announce
+    || unlinkAction.announce
+    || receiptAction.announce
+    || deleteReceiptAction.announce
+    || deleteTxnAction.announce
+    || screenFeedback.announce;
   const search = useSearch(linkQuery);
 
   const thisRef: ReimbTxnRef = {
@@ -188,18 +235,20 @@ export default function TransactionDetail() {
   };
 
   const submitLink = () => {
-    if (!linkTarget) return;
+    if (!linkTarget || linkAction.isLocked) return;
     const cents = parseStrictAllocationDollars(allocationText);
     if (cents == null || cents <= 0) {
-      Alert.alert('Invalid amount', 'Enter a positive dollar amount with at most two decimal places (e.g. 20.00).');
+      screenFeedback.reportClientValidation('Enter a positive dollar amount with at most two decimal places (e.g. 20.00).', { allocationCents: 'Invalid allocation amount.' });
+      hapticClientValidationRejected();
       return;
     }
     if (suggestedAllocationCents == null) {
-      Alert.alert('Capacity unavailable', 'Link capacity is still loading or needs legacy review. Refresh and try again.');
+      screenFeedback.reportClientValidation('Link capacity is still loading or needs legacy review. Refresh and try again.');
       return;
     }
     if (cents > suggestedAllocationCents) {
-      Alert.alert('Too much', `This link can allocate at most ${fmtPos(suggestedAllocationCents / 100)} based on remaining capacity on both sides.`);
+      screenFeedback.reportClientValidation(`This link can allocate at most ${fmtPos(suggestedAllocationCents / 100)} based on remaining capacity on both sides.`, { allocationCents: 'Allocation exceeds remaining capacity.' });
+      hapticClientValidationRejected();
       return;
     }
     const ref: ReimbTxnRef = {
@@ -215,7 +264,7 @@ export default function TransactionDetail() {
       ? { inflow: thisRef, expense: ref, allocationCents: cents }
       : { inflow: ref, expense: thisRef, allocationCents: cents };
     haptics.tap();
-    addLink.mutate(vars, {
+    linkAction.run(vars, {
       onSuccess: () => {
         setLinking(false);
         setLinkTarget(null);
@@ -223,15 +272,6 @@ export default function TransactionDetail() {
         setAllocationText('');
         links.refetch();
         counterpartyLinks.refetch();
-      },
-      onError: (e) => {
-        if (e.status === 409) {
-          links.refetch();
-          counterpartyLinks.refetch();
-          Alert.alert('Could not link', e.error || 'This transaction changed. Refresh and try again.');
-          return;
-        }
-        Alert.alert('Could not link', e.error || 'Please try again.');
       },
     });
   };
@@ -246,22 +286,13 @@ export default function TransactionDetail() {
 
   const createLink = (t: Transaction) => openAllocationFor(t);
   const removeLink = (other: ReimbLinkEndpoint) => {
+    if (unlinkAction.isLocked) return;
     haptics.tap();
-    delLink.mutate(
+    unlinkAction.run(
       income
         ? { inflowId: txnId, expenseId: other.id, expectedVersion: other.linkVersion }
         : { inflowId: other.id, expenseId: txnId, expectedVersion: other.linkVersion },
-      {
-        onSuccess: () => { links.refetch(); },
-        onError: (e) => {
-          if (e.status === 409) {
-            links.refetch();
-            Alert.alert('Could not unlink', e.error || 'This link changed. Refresh and try again.');
-            return;
-          }
-          Alert.alert('Could not unlink', e.error || 'Please try again.');
-        },
-      },
+      { onSuccess: () => { links.refetch(); counterpartyLinks.refetch(); } },
     );
   };
 
@@ -287,7 +318,7 @@ export default function TransactionDetail() {
         onError: (error) => {
           setCategoryName(previous.category);
           setCategoryId(previous.categoryId);
-          Alert.alert('Could not change category', error.error || 'Please try again.');
+          screenFeedback.reportError(error, 'Change category');
         },
       },
     );
@@ -308,7 +339,7 @@ export default function TransactionDetail() {
             `“${payeeName}” will always be categorized as ${category}.` +
               (r?.applied ? `\n\nApplied to ${r.applied} past transaction${r.applied === 1 ? '' : 's'}.` : ''),
           ),
-        onError: (e) => Alert.alert('Could not save rule', e.error || 'Please try again.'),
+        onError: (e) => screenFeedback.reportError(e, 'Save rule'),
       }
     );
   };
@@ -317,7 +348,7 @@ export default function TransactionDetail() {
       { payee: payeeName },
       {
         onSuccess: () => Alert.alert('Marked as recurring', `“${payeeName}” will appear in Subscriptions once it has at least two charges.`),
-        onError: (e) => Alert.alert('Could not mark recurring', e.error || 'Please try again.'),
+        onError: (e) => screenFeedback.reportError(e, 'Mark recurring'),
       }
     );
   };
@@ -334,21 +365,15 @@ export default function TransactionDetail() {
           text: 'Delete',
           style: 'destructive',
           onPress: () =>
-            del.mutate(
+            deleteTxnAction.run(
               { id: txnId, accountId, date: currentDate },
-              {
-                onSuccess: () => { router.back(); },
-                onError: (e) => Alert.alert('Could not delete', e.error || 'Please try again.'),
-              }
+              { onSuccess: () => { router.back(); } },
             ),
         },
       ]
     );
   };
   // Receipts — scan/attach, view full-screen, delete. OCR runs on-device (Vision).
-  const receipts = useReceipts(txnId);
-  const addReceipt = useAddReceipt();
-  const delReceipt = useDeleteReceipt();
   const receiptSource = useReceiptImageSource();
   const receiptList = receipts.data?.receipts ?? [];
   const [scanning, setScanning] = useState(false);
@@ -356,13 +381,10 @@ export default function TransactionDetail() {
 
   const uploadCapture = (cap: CapturedReceipt | null) => {
     if (!cap) { setScanning(false); return; }
-    if (!cap.base64) { setScanning(false); Alert.alert('Could not read image', 'Please try again.'); return; }
-    addReceipt.mutate(
+    if (!cap.base64) { setScanning(false); screenFeedback.reportClientValidation('Could not read image. Please try again.'); return; }
+    receiptAction.run(
       { txnId, accountId, transactionDate: currentDate, imageBase64: cap.base64, mime: cap.mime, ocrText: cap.ocrText, ocrLines: cap.ocrLines, amount: cap.amount, date: cap.date, source: cap.source ?? 'camera' },
-      {
-        onSuccess: () => { setScanning(false); },
-        onError: (e) => { setScanning(false); Alert.alert('Upload failed', e.error || 'Please try again.'); },
-      }
+      { onSettled: () => setScanning(false) },
     );
   };
   const reviewCapture = (cap: CapturedReceipt | null) => {
@@ -389,7 +411,7 @@ export default function TransactionDetail() {
   const removeReceipt = (id: string) => {
     Alert.alert('Delete receipt', 'Remove this receipt image?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => delReceipt.mutate({ id }, { onSuccess: () => { setViewerId(null); } }) },
+      { text: 'Delete', style: 'destructive', onPress: () => deleteReceiptAction.run({ id }, { onSuccess: () => { setViewerId(null); } }) },
     ]);
   };
 
@@ -417,7 +439,7 @@ export default function TransactionDetail() {
         onError: (e) => {
           setCategoryName(previous.category);
           setCategoryId(previous.categoryId);
-          Alert.alert('Could not move', e.error || 'Please try again.');
+          screenFeedback.reportError(e, 'Move transaction');
         },
       }
     );
@@ -442,7 +464,11 @@ export default function TransactionDetail() {
   };
   const doSetDate = (picked?: string) => {
     const next = (picked || dateText || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(next)) { Alert.alert('Invalid date', 'Use the format YYYY-MM-DD, e.g. 2026-06-30.'); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(next)) {
+      screenFeedback.reportClientValidation('Use the format YYYY-MM-DD, e.g. 2026-06-30.', { date: 'Invalid date format.' });
+      hapticClientValidationRejected();
+      return;
+    }
     if (next === currentDate) { setDating(false); return; }
     setDate.mutate(
       { id: txnId, date: next, isLeg },
@@ -453,7 +479,7 @@ export default function TransactionDetail() {
           setDating(false);
           router.replace({ pathname: '/transaction/[id]', params: { id: txnId, accountId, date: next } });
         },
-        onError: (e) => { setDateText(currentDate || financeTodayValue); Alert.alert('Could not change date', e.error || 'Please try again.'); },
+        onError: (e) => { setDateText(currentDate || financeTodayValue); screenFeedback.reportError(e, 'Change date'); },
       }
     );
   };
@@ -470,7 +496,7 @@ export default function TransactionDetail() {
       { id: txnId, payee: next, isLeg, parentId, accountId, date: currentDate },
       {
         onSuccess: followReplacement,
-        onError: (e) => { setPayeeNameLocal(prev); Alert.alert('Could not rename', e.error || 'Please try again.'); },
+        onError: (e) => { setPayeeNameLocal(prev); screenFeedback.reportError(e, 'Rename payee'); },
       }
     );
   };
@@ -582,6 +608,19 @@ export default function TransactionDetail() {
         options={{
           headerShown: false,
         }}
+      />
+
+      <MutationLiveRegion message={activeAnnounce} />
+      <MutationFormBanner
+        outcome={activeMutationOutcome}
+        onRetry={() => {
+          linkAction.retry();
+          unlinkAction.retry();
+          receiptAction.retry();
+          deleteReceiptAction.retry();
+          deleteTxnAction.retry();
+        }}
+        onRefetch={() => { detail.refetch(); links.refetch(); receipts.refetch(); }}
       />
 
       <View style={[styles.menuHero, { paddingTop: insets.top + 14 }]}>

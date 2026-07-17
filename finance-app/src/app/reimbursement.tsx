@@ -1,10 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useConfirmRepayment, useDismissRepayment, useReimbursement, useRepaymentSuggestions } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, Pill } from '@/components/ui';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { SkeletonList } from '@/components/skeleton';
+import { useMutationAction } from '@/hooks/useMutationAction';
 import { OwesPerson, ReimbLeg, RepaymentSuggestion } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { colors, fmtDate, fmtPos, fmtSignedMoney } from '@/theme/colors';
@@ -59,6 +61,16 @@ export default function Reimbursement() {
   const suggestions = useRepaymentSuggestions();
   const confirm = useConfirmRepayment();
   const dismiss = useDismissRepayment();
+  const confirmAction = useMutationAction({
+    mutation: confirm,
+    mutationLabel: 'Confirm repayment',
+    onRefetch: () => { suggestions.refetch(); reimb.refetch(); },
+  });
+  const dismissAction = useMutationAction({
+    mutation: dismiss,
+    mutationLabel: 'Dismiss suggestion',
+    onRefetch: () => suggestions.refetch(),
+  });
   const [acting, setActing] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
@@ -88,17 +100,18 @@ export default function Reimbursement() {
   }, [reimb.data]);
 
   const onConfirm = (s: RepaymentSuggestion) => {
+    if (confirmAction.isLocked) return;
     setActing(s.id);
     haptics.tap();
-    confirm.mutate({ id: s.id }, {
-      onSuccess: () => { setActing(null); },
-      onError: (e) => { setActing(null); Alert.alert('Could not confirm', e.error || 'Refresh and try again.'); },
+    confirmAction.run({ id: s.id }, {
+      onSettled: () => setActing(null),
     });
   };
   const onDismiss = (s: RepaymentSuggestion) => {
+    if (dismissAction.isLocked) return;
     setActing(s.id);
     haptics.tap();
-    dismiss.mutate({ id: s.id, inflowId: s.inflow.id }, { onSuccess: () => setActing(null), onError: () => setActing(null) });
+    dismissAction.run({ id: s.id, inflowId: s.inflow.id }, { onSettled: () => setActing(null) });
   };
 
   const toggle = (key: string) => { haptics.tap(); setOpen((o) => ({ ...o, [key]: !o[key] })); };
@@ -136,6 +149,12 @@ export default function Reimbursement() {
 
   return (
     <PushScreen testID="reimbursement-screen" onRefresh={() => Promise.all([reimb.refetch(), suggestions.refetch()])}>
+      <MutationLiveRegion message={confirmAction.announce || dismissAction.announce} />
+      <MutationFormBanner
+        outcome={confirmAction.outcome ?? dismissAction.outcome}
+        onRetry={() => { confirmAction.retry(); dismissAction.retry(); }}
+        onRefetch={() => { suggestions.refetch(); reimb.refetch(); }}
+      />
       {loading ? (
         <SkeletonList rows={5} />
       ) : reimb.isError && !reimb.data ? (

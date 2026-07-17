@@ -1,0 +1,82 @@
+import { useCallback, useRef, useState } from 'react';
+import type { UseMutationResult } from '@tanstack/react-query';
+import type { FinanceError } from '@/api/client/requests';
+import { mapMutationApiError } from '@/lib/mutation-form-errors';
+import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
+
+export interface UseMutationActionOptions<TVariables> {
+  mutation: UseMutationResult<unknown, FinanceError, TVariables>;
+  mutationLabel?: string;
+  onSuccess?: () => void;
+  onRefetch?: () => void | Promise<unknown>;
+  fieldPathOverrides?: Record<string, string>;
+}
+
+export interface UseMutationActionResult<TVariables> {
+  outcome: MappedMutationOutcome | null;
+  summary: string | null;
+  isLocked: boolean;
+  announce: string;
+  run: (variables: TVariables, options?: { onSuccess?: (data: unknown) => void; onSettled?: () => void }) => void;
+  retry: () => void;
+  clear: () => void;
+}
+
+export function useMutationAction<TVariables>({
+  mutation,
+  mutationLabel = 'Update',
+  onSuccess,
+  onRefetch,
+  fieldPathOverrides,
+}: UseMutationActionOptions<TVariables>): UseMutationActionResult<TVariables> {
+  const [outcome, setOutcome] = useState<MappedMutationOutcome | null>(null);
+  const [announce, setAnnounce] = useState('');
+  const lastVars = useRef<TVariables | null>(null);
+  const lastSuccess = useRef<((data: unknown) => void) | undefined>(undefined);
+
+  const isLocked = mutation.isPending;
+
+  const run = useCallback((variables: TVariables, options?: { onSuccess?: (data: unknown) => void; onSettled?: () => void }) => {
+    if (isLocked) return;
+    lastVars.current = variables;
+    lastSuccess.current = options?.onSuccess;
+    setOutcome(null);
+    mutation.mutate(variables, {
+      onSuccess: (data) => {
+        setOutcome(null);
+        setAnnounce(`${mutationLabel} succeeded.`);
+        options?.onSuccess?.(data);
+        onSuccess?.();
+      },
+      onError: (error) => {
+        const mapped = mapMutationApiError(error, { fieldPathOverrides, mutationLabel });
+        setOutcome(mapped);
+        setAnnounce(mapped.announce);
+        if (mapped.requiresRefetch) void onRefetch?.();
+      },
+      onSettled: () => {
+        options?.onSettled?.();
+      },
+    });
+  }, [fieldPathOverrides, isLocked, mutation, mutationLabel, onRefetch, onSuccess]);
+
+  const retry = useCallback(() => {
+    if (isLocked || lastVars.current == null) return;
+    run(lastVars.current, { onSuccess: lastSuccess.current });
+  }, [isLocked, run]);
+
+  const clear = useCallback(() => {
+    setOutcome(null);
+    setAnnounce('');
+  }, []);
+
+  return {
+    outcome,
+    summary: outcome?.summary ?? null,
+    isLocked,
+    announce,
+    run,
+    retry,
+    clear,
+  };
+}

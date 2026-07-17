@@ -1,11 +1,20 @@
-import React, { useState } from 'react';
-import { Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import React, { useMemo, useRef, useState } from 'react';
+import { FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Stack } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useApplyRules, useCategories, useDeleteRule, useRules, useSaveRule } from '@/api/hooks/finance.hooks';
+import {
+  MutationFieldError,
+  MutationFormBanner,
+  MutationLiveRegion,
+  MutationSubmitButton,
+} from '@/components/mutation-form';
 import { Card, CardTitle } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
+import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationForm } from '@/hooks/useMutationForm';
 import { haptics } from '@/lib/haptics';
+import { collectFieldErrors } from '@/lib/mutation-form-validation';
 import { colors } from '@/theme/colors';
 
 export default function Rules() {
@@ -20,38 +29,40 @@ export default function Rules() {
   const [catId, setCatId] = useState('');
   const [catName, setCatName] = useState('');
   const [picking, setPicking] = useState(false);
+  const matchRef = useRef<TextInput>(null);
 
-  const canAdd = match.trim().length >= 2 && !!catId && !saveRule.isPending;
+  const fields = useMemo(() => ({ match, categoryId: catId }), [catId, match]);
 
-  const add = () => {
-    if (!canAdd) return;
-    saveRule.mutate(
-      { match: match.trim(), categoryId: catId, categoryName: catName },
-      {
-        onSuccess: (r) => {
-          setMatch('');
-          setCatId('');
-          setCatName('');
-          Alert.alert('Rule added', `“${match.trim()}” → ${catName}.` + (r?.applied ? `\n\nApplied to ${r.applied} past transaction${r.applied === 1 ? '' : 's'}.` : ''));
-        },
-        onError: (e) => Alert.alert('Could not add rule', e.error || 'Please try again.'),
-      }
-    );
-  };
+  const addForm = useMutationForm({
+    formId: 'rules-add',
+    fields,
+    setFields: () => {},
+    persistDraft: false,
+    mutation: saveRule,
+    mutationLabel: 'Add rule',
+    fieldOrder: ['match', 'categoryId'],
+    fieldRefs: { match: matchRef },
+    onRefetch: () => rules.refetch(),
+    validate: (f) => collectFieldErrors({
+      match: String(f.match).trim().length >= 2 ? null : 'Enter at least two characters to match.',
+      categoryId: f.categoryId ? null : 'Choose a category.',
+    }),
+    buildVariables: (f) => ({
+      match: String(f.match).trim(),
+      categoryId: String(f.categoryId),
+      categoryName: catName,
+    }),
+    onSuccessClose: () => {
+      setMatch('');
+      setCatId('');
+      setCatName('');
+    },
+  });
 
-  const remove = (id: string, label: string) =>
-    Alert.alert('Delete rule?', `Stop auto-categorizing “${label}”? Existing transactions keep their category.`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => deleteRule.mutate({ id }) },
-    ]);
+  const deleteAction = useMutationAction({ mutation: deleteRule, mutationLabel: 'Delete rule', onSuccess: () => rules.refetch() });
+  const applyAction = useMutationAction({ mutation: applyRules, mutationLabel: 'Apply rules', onSuccess: () => rules.refetch() });
 
-  const applyAll = () => {
-    haptics.tap();
-    applyRules.mutate(undefined, {
-      onSuccess: (r) => Alert.alert('Rules applied', r?.applied ? `Categorized ${r.applied} transaction${r.applied === 1 ? '' : 's'}.` : 'No uncategorized transactions matched.'),
-      onError: (e) => Alert.alert('Could not apply rules', e.error || 'Please try again.'),
-    });
-  };
+  const remove = (id: string) => deleteAction.run({ id });
 
   const list = rules.data?.rules ?? [];
   const catalog = rules.data?.catalog ?? [];
@@ -59,6 +70,12 @@ export default function Rules() {
   return (
     <ScrollView testID="rules-screen" style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
       <Stack.Screen options={{ title: 'Rules' }} />
+      <MutationLiveRegion message={addForm.announce || deleteAction.announce || applyAction.announce} />
+      <MutationFormBanner
+        outcome={addForm.outcome ?? deleteAction.outcome ?? applyAction.outcome}
+        onRetry={() => { addForm.retry(); deleteAction.retry(); applyAction.retry(); }}
+        onRefetch={() => rules.refetch()}
+      />
 
       <Text style={styles.intro}>Automatically categorize transactions whose payee contains your text. Rules apply to matching uncategorized transactions now and to new ones as they sync.</Text>
 
@@ -67,29 +84,37 @@ export default function Rules() {
         <Text style={styles.label}>When payee contains</Text>
         <TextInput
           testID="rules-match-input"
-          style={styles.input}
+          ref={matchRef}
+          style={[styles.input, addForm.getFieldError('match') && styles.inputError]}
           value={match}
           onChangeText={setMatch}
           placeholder="e.g. Spotify"
           placeholderTextColor={colors.muted}
           autoCapitalize="none"
           autoCorrect={false}
+          accessibilityLabel="When payee contains"
         />
+        <MutationFieldError error={addForm.getFieldError('match')} testID="rules-match-error" />
         <Text style={[styles.label, { marginTop: 12 }]}>Set category to</Text>
         <Pressable testID="rules-category-picker" style={({ pressed }) => [styles.pickRow, pressed && { opacity: 0.7 }]} onPress={() => { haptics.tap(); setPicking(true); }}>
           <Text style={[styles.pickValue, !catName && { color: colors.muted }]}>{catName || 'Choose a category'}</Text>
           <Text style={styles.pickArrow}>›</Text>
         </Pressable>
-        <Pressable testID="rules-add-button" style={({ pressed }) => [styles.addBtn, !canAdd && { opacity: 0.4 }, pressed && { opacity: 0.85 }]} onPress={add} disabled={!canAdd}>
-          <Text style={styles.addText}>{saveRule.isPending ? 'Saving…' : 'Add rule'}</Text>
-        </Pressable>
+        <MutationFieldError error={addForm.getFieldError('categoryId')} testID="rules-category-error" />
+        <MutationSubmitButton
+          testID="rules-add-button"
+          label="Add rule"
+          pendingLabel="Saving…"
+          onPress={addForm.submit}
+          disabled={addForm.isLocked}
+        />
       </Card>
 
       <View style={styles.listHeader}>
         <CardTitle style={{ marginTop: 0 }}>Your rules{list.length ? ` (${list.length})` : ''}</CardTitle>
         {list.length ? (
-          <Pressable testID="rules-apply-button" onPress={applyAll} disabled={applyRules.isPending} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
-            <Text style={styles.applyLink}>{applyRules.isPending ? 'Applying…' : 'Apply now'}</Text>
+          <Pressable testID="rules-apply-button" onPress={() => { haptics.tap(); applyAction.run(undefined); }} disabled={applyAction.isLocked} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+            <Text style={styles.applyLink}>{applyAction.isLocked ? 'Applying…' : 'Apply now'}</Text>
           </Pressable>
         ) : null}
       </View>
@@ -104,7 +129,7 @@ export default function Rules() {
                 <Text style={styles.ruleMatch} numberOfLines={1}>“{r.match}”</Text>
                 <Text style={styles.ruleCat} numberOfLines={1}>→ {r.categoryName || 'category'}</Text>
               </View>
-              <Pressable testID={`rules-delete-${r.id}`} hitSlop={8} onPress={() => remove(r.id, r.match)} disabled={deleteRule.isPending} style={({ pressed }) => pressed && { opacity: 0.5 }}>
+              <Pressable testID={`rules-delete-${r.id}`} hitSlop={8} onPress={() => remove(r.id)} disabled={deleteAction.isLocked} style={({ pressed }) => pressed && { opacity: 0.5 }}>
                 <Text style={styles.del}>Delete</Text>
               </Pressable>
             </View>
@@ -166,7 +191,8 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   intro: { color: colors.muted, fontSize: 13, lineHeight: 19 },
   label: { color: colors.muted, fontSize: 12, fontWeight: '600', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
-  input: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15 },
+  input: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, minHeight: 44 },
+  inputError: { borderColor: '#ff6b6b' },
   pickRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 11 },
   pickValue: { color: colors.text, fontSize: 15, flex: 1 },
   pickArrow: { color: colors.muted, fontSize: 20, fontWeight: '700' },

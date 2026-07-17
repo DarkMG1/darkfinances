@@ -4,6 +4,8 @@ import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCategories, useSplitTransaction, useTransaction, useUnsplitTransaction } from '@/api/hooks/finance.hooks';
 import { Avatar } from '@/components/ui';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationAction } from '@/hooks/useMutationAction';
 import { haptics } from '@/lib/haptics';
 import { colors, fmtPos } from '@/theme/colors';
 
@@ -52,6 +54,18 @@ export default function SplitEditor() {
   const categories = useCategories();
   const split = useSplitTransaction();
   const unsplit = useUnsplitTransaction();
+  const splitAction = useMutationAction({
+    mutation: split,
+    mutationLabel: 'Save split',
+    onRefetch: () => detail.refetch(),
+  });
+  const unsplitAction = useMutationAction({
+    mutation: unsplit,
+    mutationLabel: 'Remove split',
+    onRefetch: () => detail.refetch(),
+  });
+  const activeOutcome = splitAction.outcome ?? unsplitAction.outcome;
+  const mutationLocked = splitAction.isLocked || unsplitAction.isLocked;
 
   const [mode, setMode] = useState<Mode>('equal');
   const [legs, setLegs] = useState<Leg[]>([]);
@@ -140,17 +154,16 @@ export default function SplitEditor() {
       name: l.name.trim() || undefined,
       notes: l.notes.trim() || undefined,
     }));
-    split.mutate(
+    splitAction.run(
       { id: d.id, accountId: d.accountId, date: d.date, legs: payload },
       {
         onSuccess: (result) => {
           router.replace({
             pathname: '/transaction/[id]',
-            params: { id: result?.id || d.id, accountId: d.accountId, date: d.date },
+            params: { id: (result as { id?: string })?.id || d.id, accountId: d.accountId, date: d.date },
           });
         },
-        onError: (e) => Alert.alert('Could not save split', e.error || 'Please try again.'),
-      }
+      },
     );
   };
 
@@ -162,17 +175,16 @@ export default function SplitEditor() {
         text: 'Remove split',
         style: 'destructive',
         onPress: () =>
-          unsplit.mutate(
+          unsplitAction.run(
             { id: d.id, accountId: d.accountId, date: d.date, categoryId: legs[0]?.catId ?? null },
             {
               onSuccess: (result) => {
                 router.replace({
                   pathname: '/transaction/[id]',
-                  params: { id: result?.id || d.id, accountId: d.accountId, date: d.date },
+                  params: { id: (result as { id?: string })?.id || d.id, accountId: d.accountId, date: d.date },
                 });
               },
-              onError: (e) => Alert.alert('Could not remove split', e.error || 'Please try again.'),
-            }
+            },
           ),
       },
     ]);
@@ -188,12 +200,19 @@ export default function SplitEditor() {
           <Text style={styles.topCancel}>Cancel</Text>
         </Pressable>
         <Text style={styles.topTitle}>Split</Text>
-        <Pressable testID="split-save-button" onPress={doSave} disabled={!canSave || split.isPending} hitSlop={12} style={({ pressed }) => pressed && { opacity: 0.6 }}>
-          <Text style={[styles.topSave, (!canSave || split.isPending) && { opacity: 0.4 }]}>{split.isPending ? 'Saving…' : 'Save'}</Text>
+        <Pressable testID="split-save-button" onPress={doSave} disabled={!canSave || mutationLocked} hitSlop={12} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+          <Text style={[styles.topSave, (!canSave || mutationLocked) && { opacity: 0.4 }]}>{splitAction.isLocked ? 'Saving…' : 'Save'}</Text>
         </Pressable>
       </View>
 
+      <MutationLiveRegion message={splitAction.announce || unsplitAction.announce} />
+
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 40 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
+        <MutationFormBanner
+          outcome={activeOutcome}
+          onRetry={() => { splitAction.retry(); unsplitAction.retry(); }}
+          onRefetch={() => detail.refetch()}
+        />
         {!d ? (
           <Text style={styles.loading}>{detail.isError ? 'Could not load transaction.' : 'Loading…'}</Text>
         ) : (
@@ -314,8 +333,8 @@ export default function SplitEditor() {
             ) : null}
 
             {d.isSplit ? (
-              <Pressable testID="split-unsplit-button" onPress={doUnsplit} disabled={unsplit.isPending} style={({ pressed }) => [styles.unsplitBtn, pressed && { opacity: 0.7 }]}>
-                <Text style={styles.unsplitText}>{unsplit.isPending ? 'Removing…' : 'Remove split'}</Text>
+              <Pressable testID="split-unsplit-button" onPress={doUnsplit} disabled={mutationLocked} style={({ pressed }) => [styles.unsplitBtn, pressed && { opacity: 0.7 }]}>
+                <Text style={styles.unsplitText}>{unsplitAction.isLocked ? 'Removing…' : 'Remove split'}</Text>
               </Pressable>
             ) : null}
           </>
