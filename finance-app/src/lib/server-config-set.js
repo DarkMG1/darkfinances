@@ -15,7 +15,7 @@
  *   };
  *   keys: { url: string; faceId: string; demo: string; token: string };
  *   previous: { serverUrl: string | null; token: string | null; faceId: boolean; demo: boolean };
- *   tokenTouched: boolean;
+ *   tokenWriteMayHaveOccurred: boolean;
  *   secureStoreOptions?: Record<string, unknown>;
  * }} input
  */
@@ -25,12 +25,12 @@ async function rollbackPersistedServerIdentity(input) {
     secureStore,
     keys,
     previous,
-    tokenTouched,
+    tokenWriteMayHaveOccurred,
     secureStoreOptions = {},
   } = input;
 
   let kvRollbackOk = false;
-  let tokenRollbackOk = !tokenTouched;
+  let tokenRollbackOk = !tokenWriteMayHaveOccurred;
 
   try {
     kv.setString(keys.url, previous.serverUrl);
@@ -45,7 +45,7 @@ async function rollbackPersistedServerIdentity(input) {
     kvRollbackOk = false;
   }
 
-  if (tokenTouched) {
+  if (tokenWriteMayHaveOccurred) {
     try {
       if (previous.token) {
         await secureStore.setItemAsync(keys.token, previous.token, secureStoreOptions);
@@ -65,7 +65,6 @@ async function rollbackPersistedServerIdentity(input) {
 /**
  * @param {{
  *   identityChanged: boolean;
- *   purgeCompleted: boolean;
  *   rollbackOk: boolean;
  *   reactCommitted: boolean;
  *   oldScope: string | undefined;
@@ -75,13 +74,12 @@ async function rollbackPersistedServerIdentity(input) {
 function shouldReactivateOldScopeAfterSetConfigFailure(input) {
   const {
     identityChanged,
-    purgeCompleted,
     rollbackOk,
     reactCommitted,
     oldScope,
     hasPersistedSuspension,
   } = input;
-  if (!identityChanged || !purgeCompleted || !rollbackOk || reactCommitted || !oldScope) {
+  if (!identityChanged || !rollbackOk || reactCommitted || !oldScope) {
     return false;
   }
   return hasPersistedSuspension(oldScope);

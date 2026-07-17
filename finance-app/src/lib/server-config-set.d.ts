@@ -19,7 +19,7 @@ export interface RollbackPersistedServerIdentityInput {
   };
   keys: { url: string; faceId: string; demo: string; token: string };
   previous: ServerIdentityTuple;
-  tokenTouched: boolean;
+  tokenWriteMayHaveOccurred: boolean;
   secureStoreOptions?: Record<string, unknown>;
 }
 
@@ -27,7 +27,6 @@ export function rollbackPersistedServerIdentity(input: RollbackPersistedServerId
 
 export function shouldReactivateOldScopeAfterSetConfigFailure(input: {
   identityChanged: boolean;
-  purgeCompleted: boolean;
   rollbackOk: boolean;
   reactCommitted: boolean;
   oldScope: string | undefined;

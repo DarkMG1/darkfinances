@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
+  NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED,
   activateNotificationScope,
   beginReconciliation,
   bindNotificationScopeSuspensionPersistence,
@@ -11,7 +12,9 @@ const {
   purgeProfileGeneration,
   resetNotificationReconciliationState,
   simulateNotificationScopeSuspensionModuleReset,
+  suspendNotificationScope,
 } = require('../src/lib/notification-reconciliation');
+const { SUSPENSION_KEY_PREFIX } = require('../src/lib/notification-scope-suspension');
 const {
   rollbackPersistedServerIdentity,
   shouldReactivateOldScopeAfterSetConfigFailure,
@@ -57,6 +60,7 @@ function createSecureStore(initial = {}) {
   let failNextWrite = false;
   let failNextRead = false;
   let failRollbackWrite = false;
+  let applyThenThrowWrite = false;
   return {
     tokens,
     failNextWrite(value) {
@@ -68,7 +72,15 @@ function createSecureStore(initial = {}) {
     failRollbackWrite(value) {
       failRollbackWrite = value;
     },
+    applyThenThrowWrite(value) {
+      applyThenThrowWrite = value;
+    },
     async setItemAsync(key, value) {
+      if (applyThenThrowWrite) {
+        applyThenThrowWrite = false;
+        tokens.set(key, value);
+        throw new Error('secure store apply-then-throw');
+      }
       if (failNextWrite) {
         failNextWrite = false;
         throw new Error('secure store write failed');
@@ -96,12 +108,18 @@ function createSecureStore(initial = {}) {
   };
 }
 
-function createSuspensionStore() {
+function createSuspensionStore(options = {}) {
   const values = new Map();
+  const throwScopeKey = options.throwOnSuspensionWriteForScope
+    ? `${SUSPENSION_KEY_PREFIX}${options.throwOnSuspensionWriteForScope}`
+    : null;
   return {
     kv: {
       getString: (key) => (values.has(key) ? values.get(key) : null),
       setString: (key, value) => {
+        if (throwScopeKey && key === throwScopeKey && value != null) {
+          throw new Error('mmkv suspension write failed');
+        }
         if (value == null) values.delete(key);
         else values.set(key, value);
       },
@@ -130,31 +148,42 @@ async function simulateSetConfigFailure(input) {
     previous,
     next,
     identityChanged,
+    partialPurgeAfterTombstone,
+    purgeFailsBeforeTombstone,
     failAfterPurge,
   } = input;
   const oldScope = financeServerScope(previous.serverUrl, previous.token, previous.demo);
-  let purgeCompleted = false;
+  let tokenWriteMayHaveOccurred = false;
   let reactCommitted = false;
 
   try {
     if (identityChanged) {
-      purgeProfileGeneration(oldScope);
-      purgeCompleted = true;
+      if (purgeFailsBeforeTombstone) {
+        await purgeFailsBeforeTombstone();
+      } else {
+        purgeProfileGeneration(oldScope);
+        if (partialPurgeAfterTombstone) {
+          throw partialPurgeAfterTombstone;
+        }
+      }
     }
     if (next.token !== undefined) {
+      tokenWriteMayHaveOccurred = true;
       if (next.token) {
         await secureStore.setItemAsync(TOKEN_KEY, next.token);
       } else {
         await secureStore.deleteItemAsync(TOKEN_KEY);
       }
     }
-    await failAfterPurge(store);
-    store.kv.setString(URL_KEY, next.serverUrl ?? null);
+    if (failAfterPurge) {
+      await failAfterPurge(store);
+    }
+    store.kv.setString(URL_KEY, next.serverUrl ?? previous.serverUrl);
     store.kv.setBool(FACEID_KEY, next.faceId ?? previous.faceId);
     store.kv.setBool(DEMO_KEY, next.demo ?? previous.demo);
     reactCommitted = true;
     activateNotificationScope(
-      financeServerScope(next.serverUrl ?? null, next.token ?? previous.token, next.demo ?? previous.demo),
+      financeServerScope(next.serverUrl ?? previous.serverUrl, next.token ?? previous.token, next.demo ?? previous.demo),
       getProfileGeneration(),
     );
   } catch (error) {
@@ -163,11 +192,10 @@ async function simulateSetConfigFailure(input) {
       secureStore,
       keys: { url: URL_KEY, faceId: FACEID_KEY, demo: DEMO_KEY, token: TOKEN_KEY },
       previous,
-      tokenTouched: next.token !== undefined,
+      tokenWriteMayHaveOccurred,
     }).catch(() => false);
     if (shouldReactivateOldScopeAfterSetConfigFailure({
       identityChanged,
-      purgeCompleted,
       rollbackOk,
       reactCommitted,
       oldScope,
@@ -201,7 +229,7 @@ test('rollbackPersistedServerIdentity verifies restored KV and token tuple', asy
     secureStore,
     keys: { url: URL_KEY, faceId: FACEID_KEY, demo: DEMO_KEY, token: TOKEN_KEY },
     previous: previousIdentity(),
-    tokenTouched: true,
+    tokenWriteMayHaveOccurred: true,
   });
 
   assert.equal(ok, true);
@@ -223,17 +251,37 @@ test('rollbackPersistedServerIdentity returns false when token rollback fails', 
     secureStore,
     keys: { url: URL_KEY, faceId: FACEID_KEY, demo: DEMO_KEY, token: TOKEN_KEY },
     previous: previousIdentity(),
-    tokenTouched: true,
+    tokenWriteMayHaveOccurred: true,
   });
 
   assert.equal(ok, false);
+});
+
+test('rollbackPersistedServerIdentity skips token rollback when token write never started', async () => {
+  const store = createIdentityStore({
+    [URL_KEY]: 'https://old.example',
+    [FACEID_KEY]: 'true',
+    [DEMO_KEY]: 'false',
+  });
+  const secureStore = createSecureStore({ [TOKEN_KEY]: 'old-token' });
+  secureStore.failRollbackWrite(true);
+
+  const ok = await rollbackPersistedServerIdentity({
+    kv: store.kv,
+    secureStore,
+    keys: { url: URL_KEY, faceId: FACEID_KEY, demo: DEMO_KEY, token: TOKEN_KEY },
+    previous: previousIdentity(),
+    tokenWriteMayHaveOccurred: false,
+  });
+
+  assert.equal(ok, true);
+  assert.equal(await secureStore.getItemAsync(TOKEN_KEY), 'old-token');
 });
 
 test('shouldReactivateOldScopeAfterSetConfigFailure requires durable purge tombstone', () => {
   const oldScope = financeServerScope('https://old.example', 'old-token', false);
   assert.equal(shouldReactivateOldScopeAfterSetConfigFailure({
     identityChanged: true,
-    purgeCompleted: true,
     rollbackOk: true,
     reactCommitted: false,
     oldScope,
@@ -241,12 +289,120 @@ test('shouldReactivateOldScopeAfterSetConfigFailure requires durable purge tombs
   }), false);
   assert.equal(shouldReactivateOldScopeAfterSetConfigFailure({
     identityChanged: true,
-    purgeCompleted: false,
     rollbackOk: true,
     reactCommitted: false,
     oldScope,
     hasPersistedSuspension: () => true,
+  }), true);
+});
+
+test('partial purge after tombstone reactivates old scope even when purge did not return', async () => {
+  const store = createIdentityStore({
+    [URL_KEY]: 'https://old.example',
+    [FACEID_KEY]: 'true',
+    [DEMO_KEY]: 'false',
+  });
+  const secureStore = createSecureStore({ [TOKEN_KEY]: 'old-token' });
+  const previous = previousIdentity();
+  const oldScope = financeServerScope(previous.serverUrl, previous.token, previous.demo);
+  const purgeError = new Error('clearFinanceQueries failed');
+
+  await assert.rejects(
+    () => simulateSetConfigFailure({
+      store,
+      secureStore,
+      previous,
+      next: { serverUrl: 'https://new.example', token: 'new-token' },
+      identityChanged: true,
+      partialPurgeAfterTombstone: purgeError,
+    }),
+    (error) => error === purgeError,
+  );
+
+  assert.equal(isNotificationScopeSuspended(oldScope), false);
+  beginReconciliation('scheduled', getProfileGeneration(), oldScope);
+});
+
+test('suspension persistence failure before tombstone does not reactivate or bump generation', () => {
+  const oldScope = financeServerScope('https://old.example', 'old-token', false);
+  const unrelatedScope = financeServerScope('https://other.example', 'other-token', false);
+  bindNotificationScopeSuspensionPersistence(createSuspensionStore({
+    throwOnSuspensionWriteForScope: oldScope,
+  }));
+  purgeProfileGeneration(unrelatedScope);
+  simulateNotificationScopeSuspensionModuleReset();
+  const generationBefore = getProfileGeneration();
+
+  assert.throws(
+    () => suspendNotificationScope(oldScope),
+    (error) => error.message === 'mmkv suspension write failed',
+  );
+
+  assert.equal(getProfileGeneration(), generationBefore);
+  assert.equal(hasPersistedSuspensionEvidence(oldScope), false);
+  assert.equal(isNotificationScopeSuspended(oldScope), false);
+  assert.equal(isNotificationScopeSuspended(unrelatedScope), true);
+  assert.equal(shouldReactivateOldScopeAfterSetConfigFailure({
+    identityChanged: true,
+    rollbackOk: true,
+    reactCommitted: false,
+    oldScope,
+    hasPersistedSuspension: hasPersistedSuspensionEvidence,
   }), false);
+});
+
+test('partial purge before token write reactivates when SecureStore rollback would fail', async () => {
+  const store = createIdentityStore({
+    [URL_KEY]: 'https://old.example',
+    [FACEID_KEY]: 'true',
+    [DEMO_KEY]: 'false',
+  });
+  const secureStore = createSecureStore({ [TOKEN_KEY]: 'old-token' });
+  secureStore.failRollbackWrite(true);
+  const previous = previousIdentity();
+  const oldScope = financeServerScope(previous.serverUrl, previous.token, previous.demo);
+
+  await assert.rejects(
+    () => simulateSetConfigFailure({
+      store,
+      secureStore,
+      previous,
+      next: { serverUrl: 'https://new.example', token: 'new-token' },
+      identityChanged: true,
+      partialPurgeAfterTombstone: new Error('clearFinanceQueries failed'),
+    }),
+    (error) => error.message === 'clearFinanceQueries failed',
+  );
+
+  assert.equal(isNotificationScopeSuspended(oldScope), false);
+  assert.equal(await secureStore.getItemAsync(TOKEN_KEY), 'old-token');
+});
+
+test('apply-then-throw token mutation stays fail-closed when rollback cannot verify', async () => {
+  const store = createIdentityStore({
+    [URL_KEY]: 'https://old.example',
+    [FACEID_KEY]: 'true',
+    [DEMO_KEY]: 'false',
+  });
+  const secureStore = createSecureStore({ [TOKEN_KEY]: 'old-token' });
+  secureStore.applyThenThrowWrite(true);
+  secureStore.failRollbackWrite(true);
+  const previous = previousIdentity();
+  const oldScope = financeServerScope(previous.serverUrl, previous.token, previous.demo);
+
+  await assert.rejects(
+    () => simulateSetConfigFailure({
+      store,
+      secureStore,
+      previous,
+      next: { serverUrl: 'https://new.example', token: 'new-token' },
+      identityChanged: true,
+    }),
+    (error) => error.message === 'secure store apply-then-throw',
+  );
+
+  assert.equal(await secureStore.getItemAsync(TOKEN_KEY), 'new-token');
+  assert.equal(isNotificationScopeSuspended(oldScope), true);
 });
 
 test('setConfig failure with full rollback reactivates old scope after successful purge', async () => {
@@ -356,6 +512,8 @@ test('server setConfig source reactivates old scope only after verified rollback
   assert.match(serverSource, /rollbackPersistedServerIdentity\(/);
   assert.match(serverSource, /shouldReactivateOldScopeAfterSetConfigFailure\(/);
   assert.match(serverSource, /activateNotificationScope\(oldScope,\s*getProfileGeneration\(\)\)/);
+  assert.match(serverSource, /tokenWriteMayHaveOccurred/);
   assert.match(serverSource, /hasPersistedSuspensionEvidence/);
+  assert.doesNotMatch(serverSource, /purgeCompleted/);
   assert.doesNotMatch(serverSource, /activateNotificationScope\([\s\S]*financeServerScope\(storedUrl/);
 });

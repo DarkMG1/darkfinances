@@ -91,15 +91,15 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
       const identityChanged = nextUrl !== serverUrl || nextToken !== token || nextDemo !== demo;
       const oldScope = financeServerScope(serverUrl, token, demo);
       const oldOperationScope = financeOperationProfileScope(serverUrl, token, demo);
-      let purgeCompleted = false;
+      let tokenWriteMayHaveOccurred = false;
       let reactCommitted = false;
 
       try {
         if (identityChanged) {
           await purgeFinanceProfile(oldScope, oldOperationScope);
-          purgeCompleted = true;
         }
         if (next.token !== undefined) {
+          tokenWriteMayHaveOccurred = true;
           if (nextToken) {
             await SecureStore.setItemAsync(TOKEN_KEY, nextToken, {
               keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
@@ -139,14 +139,13 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
             faceId,
             demo,
           },
-          tokenTouched: next.token !== undefined,
+          tokenWriteMayHaveOccurred,
           secureStoreOptions: {
             keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
           },
         }).catch(() => false);
         if (shouldReactivateOldScopeAfterSetConfigFailure({
           identityChanged,
-          purgeCompleted,
           rollbackOk,
           reactCommitted,
           oldScope,
