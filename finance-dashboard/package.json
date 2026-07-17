@@ -5,9 +5,11 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check dataModule.js && node --check demoData.js && node --check server.js && node --check scripts/actual-clone-smoke.js && for file in lib/*.js lib/domain/*.js; do node --check \"$file\"; done",
+    "check": "node --check dataModule.js && node --check demoData.js && node --check server.js && node --check scripts/actual-clone-smoke.js && node --check scripts/chart-js-vendor.js && node --check scripts/verify-chart-js-asset.js && node --check scripts/pin-chart-js-asset.js && node --check scripts/check-dashboard-install-contract.js && for file in lib/*.js lib/domain/*.js; do node --check \"$file\"; done",
     "lint": "eslint .",
-    "test": "npm run check && node --test test/*.test.js"
+    "vendor:chart-js:verify": "node scripts/verify-chart-js-asset.js",
+    "vendor:chart-js:pin": "node scripts/pin-chart-js-asset.js",
+    "test": "npm run vendor:chart-js:verify && node scripts/check-dashboard-install-contract.js && npm run check && node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",
@@ -25,6 +27,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "chart.js": "4.4.0",
     "eslint": "^9.39.4",
     "globals": "^14.0.0"
   }

@@ -1,0 +1,13 @@
+{
+  "package": "chart.js",
+  "version": "4.4.0",
+  "license": "MIT",
+  "lockfilePath": "package-lock.json",
+  "lockfilePackage": "node_modules/chart.js",
+  "npmResolved": "https://registry.npmjs.org/chart.js/-/chart.js-4.4.0.tgz",
+  "npmIntegrity": "sha512-vQEj6d+z0dcsKLlQvbKIMYFHd3t8W/7L2vfJIbYcfyPcRx92CsHqECpueN8qVGNlKyDcr5wBrYAYKnfu/9Q1hQ==",
+  "sourcePath": "node_modules/chart.js/dist/chart.umd.js",
+  "assetPath": "public/vendor/chart.umd.js",
+  "sha256": "321e3a3fa98da4aaa957d10be57cbb514de0989eed8f9d726b5d05902cd01904",
+  "size": 204948
+}

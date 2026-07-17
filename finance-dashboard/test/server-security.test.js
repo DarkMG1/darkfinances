@@ -108,6 +108,10 @@ test('server security boundaries fail closed', async (t) => {
   result = await request(base, '/demo', { redirect: 'manual' });
   assert.equal(result.response.status, 200);
   assert.match(String(result.body), /demoOnlyPage/);
+  const csp = result.response.headers.get('content-security-policy') || '';
+  assert.match(csp, /script-src 'self' 'unsafe-inline'/);
+  assert.doesNotMatch(csp, /cdn\.jsdelivr\.net/);
+  assert.doesNotMatch(csp, /unsafe-eval/);
   result = await request(base, '/API/V1/Transactions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Demo-Mode': '1' },
