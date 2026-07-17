@@ -643,7 +643,7 @@ async function finalizeBulkMutation(operation, mutate, { kind } = {}) {
   if (operation?.key && operation?.journalBinding?.fingerprint) {
     data.assertBulkOperationJournalAdmission({
       operationKey: operation.key,
-      journalBinding: operation.journalBinding,
+      journalBinding: { ...operation.journalBinding, kind },
       kind,
     });
   }
@@ -843,12 +843,12 @@ async function applyRulesH(_req, operation) {
   }), { kind: 'rules_apply' });
 }
 async function syncSharesH(_req, operation) {
-  const result = await applyLocal(operation, () => data.syncSplitwiseShareExpenses({ sync: false }));
-  // Account/category creation is structural Actual work not represented by the
-  // transaction counters, so every successful local pass must be synchronized.
-  await syncAfterLocal(operation);
-  cache.flushAll();
-  return result;
+  await data.preflightSplitwiseMirrorShareSync();
+  return finalizeBulkMutation(operation, () => data.syncSplitwiseShareExpenses({
+    sync: false,
+    operationKey: operation.key,
+    journalBinding: { ...operation.journalBinding, kind: 'splitwise_mirror' },
+  }), { kind: 'splitwise_mirror' });
 }
 async function eventsH() {
   return cached('events', () => data.getEvents(), 60);

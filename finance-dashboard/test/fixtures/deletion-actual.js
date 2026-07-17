@@ -10,11 +10,13 @@ let state = {
     is_income: false,
     categories: [{ id: 'category', name: 'Dining' }],
   }],
-  counts: { delete: 0, add: 0, update: 0, sync: 0 },
+  counts: { delete: 0, add: 0, update: 0, sync: 0, createAccount: 0, createCategory: 0 },
   sequence: 0,
+  faults: {},
 };
 
 function configure(next = {}) {
+  const preserveCounts = Boolean(next.preserveCounts);
   state = {
     rows: structuredClone(next.rows || []),
     accounts: structuredClone(next.accounts || [
@@ -27,13 +29,37 @@ function configure(next = {}) {
       is_income: false,
       categories: [{ id: 'category', name: 'Dining' }],
     }]),
-    counts: { delete: 0, add: 0, update: 0, sync: 0 },
-    sequence: 0,
+    counts: preserveCounts
+      ? { ...state.counts }
+      : { delete: 0, add: 0, update: 0, sync: 0, createAccount: 0, createCategory: 0 },
+    sequence: preserveCounts ? state.sequence : 0,
+    faults: structuredClone(next.faults || {}),
   };
 }
 
+function setFault(name, handler) {
+  state.faults[name] = handler;
+}
+
+function clearFaults() {
+  state.faults = {};
+}
+
+async function invoke(name, fallback) {
+  const handler = state.faults[name];
+  if (typeof handler === 'function') return handler();
+  return fallback();
+}
+
 function inspect() {
-  return structuredClone(state);
+  return structuredClone({
+    rows: state.rows,
+    accounts: state.accounts,
+    payees: state.payees,
+    categoryGroups: state.categoryGroups,
+    counts: state.counts,
+    sequence: state.sequence,
+  });
 }
 
 async function init() {}
@@ -41,9 +67,9 @@ async function downloadBudget() {}
 async function shutdown() {}
 
 async function getTransactions(accountId, start, end) {
-  return state.rows
+  return invoke('getTransactions', () => state.rows
     .filter((row) => row.account === accountId && row.date >= start && row.date <= end)
-    .map((row) => structuredClone(row));
+    .map((row) => structuredClone(row)));
 }
 
 async function deleteTransaction(id) {
@@ -80,7 +106,7 @@ async function sync() {
 }
 
 async function getAccounts() {
-  return structuredClone(state.accounts);
+  return invoke('getAccounts', () => structuredClone(state.accounts));
 }
 
 async function getPayees() {
@@ -88,16 +114,18 @@ async function getPayees() {
 }
 
 async function getCategoryGroups() {
-  return structuredClone(state.categoryGroups);
+  return invoke('getCategoryGroups', () => structuredClone(state.categoryGroups));
 }
 
 async function createAccount({ name, offbudget }) {
+  state.counts.createAccount += 1;
   const id = `account-${state.accounts.length + 1}`;
   state.accounts.push({ id, name, offbudget: Boolean(offbudget), closed: false });
   return id;
 }
 
 async function createCategory({ name, group_id: groupId }) {
+  state.counts.createCategory += 1;
   const group = state.categoryGroups.find((candidate) => candidate.id === groupId);
   const id = `category-${group?.categories?.length || 0}`;
   if (group) group.categories.push({ id, name });
@@ -106,6 +134,7 @@ async function createCategory({ name, group_id: groupId }) {
 
 module.exports = {
   addTransactions,
+  clearFaults,
   configure,
   createAccount,
   createCategory,
@@ -117,6 +146,7 @@ module.exports = {
   getTransactions,
   init,
   inspect,
+  setFault,
   shutdown,
   sync,
   updateTransaction,

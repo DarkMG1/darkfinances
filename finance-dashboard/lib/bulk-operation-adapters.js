@@ -2,6 +2,20 @@
 
 const { locateExactTransactionIdInAccounts } = require('./repayment-transaction-locator');
 const { categoryIdentityFingerprint, canonicalRulesFingerprint } = require('./bulk-operation-fingerprint');
+const {
+  assertMirrorStructuralAdmission,
+  assertNoMirrorAmbiguity,
+  bootstrapAccountResourceKey,
+  bootstrapCategoryResourceKey,
+  indexMirrorRowsBySourceId,
+  keeperRowForSource,
+  mirrorIdentityFingerprint,
+  mirrorIntentFromItem,
+  mirrorIntentMatches,
+  myShareExpenseCents,
+  resolutionIndex,
+  snapshotBinding,
+} = require('./splitwise-mirror');
 
 const ACCOUNT_RANGE_START = '1900-01-01';
 const ACCOUNT_RANGE_END = '9999-12-31';
@@ -408,6 +422,214 @@ function foreignAccountIds(rowsByAccount, item) {
   return foreign;
 }
 
+function mirrorNeedsUpdate(existing, intent, accountId) {
+  return !mirrorIntentMatches(existing, intent, accountId);
+}
+
+async function planSplitwiseMirror(api, {
+  truth,
+  resolutions,
+  today,
+  swAccountName,
+  swCategoryName,
+  pickSplitwiseCategory,
+  buildCatInfo,
+}) {
+  const binding = snapshotBinding(truth);
+  const resolutionBySource = resolutionIndex(resolutions);
+  const items = [];
+  const assignIndex = nextGlobalIndex(items);
+
+  let accounts;
+  try {
+    accounts = await api.getAccounts();
+  } catch (error) {
+    throw new Error(`unable to enumerate Actual accounts during splitwise mirror planning: ${error.message}`);
+  }
+  if (!Array.isArray(accounts)) {
+    throw new Error('Actual account enumeration was invalid during splitwise mirror planning');
+  }
+
+  let groups;
+  try {
+    groups = await api.getCategoryGroups();
+  } catch (error) {
+    throw new Error(`unable to enumerate category groups during splitwise mirror planning: ${error.message}`);
+  }
+  const structural = assertMirrorStructuralAdmission(accounts, groups, {
+    accountName: swAccountName,
+    categoryName: swCategoryName,
+  });
+  const foundAccount = structural.account;
+  const accountOpenAtPlan = foundAccount ? !foundAccount.closed : true;
+  const accountId = foundAccount ? String(foundAccount.id) : null;
+  const catInfo = buildCatInfo(groups || []);
+  const spendCats = [];
+  for (const group of groups || []) {
+    for (const category of group.categories || []) {
+      if (catInfo[category.id] && catInfo[category.id].kind === 'spend') {
+        spendCats.push({ id: category.id, name: category.name });
+      }
+    }
+  }
+  let fallbackCat = structural.category ? structural.category.id : null;
+
+  let existingRows = [];
+  if (accountId) {
+    try {
+      existingRows = await api.getTransactions(accountId, ACCOUNT_RANGE_START, ACCOUNT_RANGE_END);
+    } catch (error) {
+      throw new Error(`unable to query splitwise account during mirror planning: ${error.message}`);
+    }
+  }
+  const bySource = indexMirrorRowsBySourceId(existingRows);
+  assertNoMirrorAmbiguity(bySource, resolutions);
+
+  items.push(assignIndex({
+    itemType: 'splitwise_bootstrap_account',
+    stageId: 'bootstrap_account',
+    accountId: null,
+    txnId: null,
+    sourceId: null,
+    bootstrapResourceKey: bootstrapAccountResourceKey(swAccountName),
+    date: today,
+    identityFingerprint: null,
+    accountOpenAtPlan: true,
+    intent: { accountName: swAccountName },
+  }));
+
+  items.push(assignIndex({
+    itemType: 'splitwise_bootstrap_category',
+    stageId: 'bootstrap_category',
+    accountId: null,
+    txnId: null,
+    sourceId: null,
+    bootstrapResourceKey: bootstrapCategoryResourceKey(swCategoryName),
+    date: today,
+    identityFingerprint: null,
+    accountOpenAtPlan: true,
+    intent: { categoryName: swCategoryName },
+  }));
+
+  const wanted = new Map();
+  for (const item of truth.othersPaidItems || []) {
+    const sourceId = String(item.id);
+    const cents = myShareExpenseCents(item);
+    if (!(cents < 0)) continue;
+    const picked = pickSplitwiseCategory(item.category, spendCats);
+    const catId = picked || fallbackCat || null;
+    const useRuntimeCategoryFallback = !picked && !fallbackCat;
+    wanted.set(sourceId, mirrorIntentFromItem(
+      { ...item, date: item.date || today },
+      accountId,
+      catId,
+      {
+        useRuntimeCategoryFallback,
+        accountPending: !accountId,
+      },
+    ));
+  }
+
+  for (const [sourceId, rows] of bySource.entries()) {
+    const resolution = resolutionBySource.get(sourceId);
+    if (!resolution || rows.length < 2) continue;
+    for (const dropId of resolution.dropTxnIds) {
+      const row = rows.find((entry) => String(entry.id) === String(dropId));
+      if (!row) continue;
+      items.push(assignIndex({
+        itemType: 'splitwise_duplicate_drop',
+        stageId: 'duplicate_drop',
+        accountId: accountId || 'pending',
+        txnId: String(row.id),
+        sourceId,
+        date: String(row.date),
+        identityFingerprint: mirrorIdentityFingerprint(row, sourceId),
+        accountOpenAtPlan,
+        intent: {
+          sourceId,
+          resolutionReviewedAt: resolution.reviewedAt,
+        },
+      }));
+    }
+  }
+
+  for (const [sourceId, rows] of bySource.entries()) {
+    if (wanted.has(sourceId)) continue;
+    const resolution = resolutionBySource.get(sourceId);
+    const survivors = rows.filter((row) => !resolution?.dropTxnIds?.includes(String(row.id)));
+    for (const row of survivors) {
+      items.push(assignIndex({
+        itemType: 'splitwise_delete',
+        stageId: 'delete',
+        accountId: accountId || 'pending',
+        txnId: String(row.id),
+        sourceId,
+        date: String(row.date),
+        identityFingerprint: mirrorIdentityFingerprint(row, sourceId),
+        accountOpenAtPlan,
+        intent: { sourceId, reason: 'removed-from-snapshot' },
+      }));
+    }
+  }
+
+  for (const [sourceId, intent] of wanted.entries()) {
+    const rows = bySource.get(sourceId) || [];
+    const resolution = resolutionBySource.get(sourceId);
+    const keeper = keeperRowForSource(rows, resolution);
+    if (!keeper) {
+      items.push(assignIndex({
+        itemType: 'splitwise_create',
+        stageId: 'create',
+        accountId: accountId || 'pending',
+        txnId: null,
+        sourceId,
+        date: intent.date,
+        identityFingerprint: null,
+        accountOpenAtPlan,
+        intent,
+      }));
+      continue;
+    }
+    if (mirrorNeedsUpdate(keeper, intent, accountId)) {
+      items.push(assignIndex({
+        itemType: 'splitwise_update',
+        stageId: 'update',
+        accountId: accountId || 'pending',
+        txnId: String(keeper.id),
+        sourceId,
+        date: String(keeper.date),
+        identityFingerprint: mirrorIdentityFingerprint(keeper, sourceId),
+        accountOpenAtPlan,
+        intent,
+      }));
+    }
+  }
+
+  const stageIndexes = (stageId) => items
+    .filter((item) => item.stageId === stageId)
+    .map((item) => item.globalIndex);
+
+  return {
+    stages: [
+      { stageId: 'bootstrap_account', itemIndexes: stageIndexes('bootstrap_account') },
+      { stageId: 'bootstrap_category', itemIndexes: stageIndexes('bootstrap_category') },
+      { stageId: 'duplicate_drop', itemIndexes: stageIndexes('duplicate_drop') },
+      { stageId: 'delete', itemIndexes: stageIndexes('delete') },
+      { stageId: 'create', itemIndexes: stageIndexes('create') },
+      { stageId: 'update', itemIndexes: stageIndexes('update') },
+    ],
+    items,
+    params: {
+      snapshotBinding: binding,
+      snapshotItemCount: truth.othersPaidItems?.length || 0,
+      accountName: swAccountName,
+      categoryName: swCategoryName,
+      resolutions,
+      today,
+    },
+  };
+}
+
 module.exports = {
   ACCOUNT_RANGE_END,
   ACCOUNT_RANGE_START,
@@ -417,4 +639,5 @@ module.exports = {
   planPhantomCleanup,
   planRulesApply,
   planRulesSave,
+  planSplitwiseMirror,
 };

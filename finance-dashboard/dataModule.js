@@ -68,6 +68,8 @@ const {
   TransactionNotFoundError,
 } = require('./lib/errors');
 const { statePath } = require('./lib/state-registry');
+const { myShareExpenseCents, loadSplitwiseMirrorResolutions, owesSnapshotMaxAgeMs, preflightSplitwiseMirrorAdmission, SplitwiseMirrorSnapshotError } = require('./lib/splitwise-mirror');
+const { BulkOperationOutcomeUnknownError } = require('./lib/bulk-operation-saga');
 const ACTUAL_API_PATH = process.env.ACTUAL_API_PATH || '@actual-app/api';
 const api = require(ACTUAL_API_PATH);
 
@@ -137,6 +139,7 @@ const TRANSACTION_SAGAS_PATH = statePath('transactionSagas');
 const TRANSACTION_DELETION_SAGAS_PATH = statePath('transactionDeletionSagas');
 const REPAYMENT_CONFIRMATION_SAGAS_PATH = statePath('repaymentConfirmationSagas');
 const BULK_OPERATION_SAGAS_PATH = statePath('bulkOperationSagas');
+const SPLITWISE_MIRROR_RESOLUTIONS_PATH = statePath('splitwiseMirrorResolutions');
 const readJsonSafe = (p, fallback, validate) => readJsonFile(p, fallback, validate);
 const writeJsonSafe = (p, obj) => writeJsonFile(p, obj);
 
@@ -159,26 +162,44 @@ const apiHealth = {
   lastError: null,
 };
 
-async function initApi() {
-  if (apiReady) return;
-  if (initPromise) return initPromise;
-  initPromise = (async () => {
+let sagaRecoverCompleted = false;
+
+async function recoverOperationalSagas() {
+  if (sagaRecoverCompleted) return;
+  await recoverTransactionSagas(api);
+  await recoverTransactionDeletionSagas(api);
+  await recoverRepaymentConfirmationSagas(api);
+  await recoverBulkOperationSagas(api);
+  sagaRecoverCompleted = true;
+}
+
+async function initApi({ skipRecover = false } = {}) {
+  if (!apiReady) {
+    if (!initPromise) {
+      initPromise = (async () => {
+        try {
+          await loadBudgetResilient();
+          apiReady = true;
+          apiHealth.initializedAt = new Date().toISOString();
+          apiHealth.lastError = null;
+        } catch (error) {
+          apiHealth.lastErrorAt = new Date().toISOString();
+          apiHealth.lastError = String(error?.message || error);
+          throw error;
+        }
+      })();
+    }
+    await initPromise;
+  }
+  if (!skipRecover) {
     try {
-      await loadBudgetResilient();
-      apiReady = true;
-      await recoverTransactionSagas(api);
-      await recoverTransactionDeletionSagas(api);
-      await recoverRepaymentConfirmationSagas(api);
-      await recoverBulkOperationSagas(api);
-      apiHealth.initializedAt = new Date().toISOString();
-      apiHealth.lastError = null;
+      await recoverOperationalSagas();
     } catch (error) {
       apiHealth.lastErrorAt = new Date().toISOString();
       apiHealth.lastError = String(error?.message || error);
       throw error;
     }
-  })();
-  return initPromise;
+  }
 }
 
 function isRecoverableActualCacheError(error) {
@@ -1156,7 +1177,7 @@ function loadOwesConfig() {
 // Only a complete, fresh schema-v2 pairwise snapshot can contribute current
 // Splitwise debt. A structurally valid stale snapshot is returned separately as
 // last-known context and is never substituted into current totals.
-function classifyOwesTruth(t, { now = Date.now(), maxAgeMs = Number(process.env.OWES_SNAPSHOT_MAX_AGE_MS) || 6 * 60 * 60 * 1000 } = {}) {
+function classifyOwesTruth(t, { now = Date.now(), maxAgeMs = owesSnapshotMaxAgeMs() } = {}) {
   if (!t || typeof t !== 'object' || !t.bySlug || typeof t.bySlug !== 'object') {
     return { current: null, lastKnown: null, warning: 'splitwise-snapshot-missing' };
   }
@@ -3276,6 +3297,11 @@ function getRepaymentConfirmationSagaManager() {
   return repaymentConfirmationSagaManager;
 }
 
+function readSplitwiseMirrorResolutions() {
+  const raw = readJsonSafe(SPLITWISE_MIRROR_RESOLUTIONS_PATH, null);
+  return loadSplitwiseMirrorResolutions(raw);
+}
+
 function getBulkOperationSagaManager() {
   if (!bulkOperationSagaManager) {
     bulkOperationSagaManager = createBulkOperationSaga({
@@ -3292,6 +3318,14 @@ function getBulkOperationSagaManager() {
       writePhantomSeen: (store) => writeJsonSafe(PHANTOM_SEEN_PATH, store),
       readPhantomLog,
       writePhantomLog: (store) => writeJsonSafe(PHANTOM_LOG_PATH, store),
+      readSplitwiseMirrorResolutions,
+      readSplitwiseTruth: () => readJsonSafe(OWES_TRUTH_PATH, null),
+      validateSplitwiseMirrorSnapshot,
+      ensureSplitwiseAccount,
+      ensureSplitwiseCategory,
+      pickSplitwiseCategory,
+      swAccountName: SW_ACCOUNT_NAME,
+      swCategoryName: SW_CATEGORY_NAME,
       deleteTransaction,
       inspectDeletionState: () => getTransactionDeletionSagaManager().inspectState(),
       recoverDeletionSagas: recoverTransactionDeletionSagas,
@@ -3305,9 +3339,11 @@ function getBulkOperationSagaManager() {
       moneyMovementGroup: MONEY_MOVEMENT_GROUP,
       todayYMD,
       addDays,
-      assertExternalAvailable: ({ accountId, ids }) => {
+      assertExternalAvailable: ({ accountId, ids, bulkDelegation }) => {
         getTransactionSagaManager().assertAvailable({ accountId, ids });
-        getTransactionDeletionSagaManager().assertAvailable({ accountId, ids });
+        if (!bulkDelegation) {
+          getTransactionDeletionSagaManager().assertAvailable({ accountId, ids });
+        }
         getRepaymentConfirmationSagaManager().assertAvailable({ accountId, ids });
       },
     });
@@ -4434,7 +4470,8 @@ async function ensureSplitwiseAccount(api) {
   if (found) return found.id;
   return api.createAccount({ name: SW_ACCOUNT_NAME, offbudget: false }, 0);
 }
-async function ensureSplitwiseCategory(api, groups) {
+async function ensureSplitwiseCategory(api) {
+  const groups = await api.getCategoryGroups();
   for (const g of groups) for (const c of g.categories || []) if ((c.name || '').toLowerCase() === SW_CATEGORY_NAME.toLowerCase()) return c.id;
   const spendGroup = groups.find((g) => !g.is_income && !MONEY_MOVEMENT_GROUP.test(g.name || '') && !INCOME_GROUP.test(g.name || '') && (g.categories || []).length);
   if (!spendGroup) return null;
@@ -4447,7 +4484,14 @@ function pickSplitwiseCategory(swCatName, spendCats) {
   }
   return null;
 }
-function validateSplitwiseMirrorSnapshot(truth, { now = Date.now(), maxAgeMs = 6 * 60 * 60 * 1000 } = {}) {
+function validateSplitwiseMirrorSnapshot(truth, { now = Date.now(), maxAgeMs = owesSnapshotMaxAgeMs() } = {}) {
+  try {
+    return validateSplitwiseMirrorSnapshotRaw(truth, { now, maxAgeMs });
+  } catch (error) {
+    throw new SplitwiseMirrorSnapshotError(String(error?.message || error || 'Splitwise snapshot validation failed'));
+  }
+}
+function validateSplitwiseMirrorSnapshotRaw(truth, { now = Date.now(), maxAgeMs = owesSnapshotMaxAgeMs() } = {}) {
   if (!truth || typeof truth !== 'object') throw new Error('Splitwise snapshot is missing');
   const manifest = truth.manifest;
   if (
@@ -4475,8 +4519,10 @@ function validateSplitwiseMirrorSnapshot(truth, { now = Date.now(), maxAgeMs = 6
     if (!/^\d+$/.test(id)) throw new Error('Splitwise snapshot contains an invalid expense id');
     if (seen.has(id)) throw new Error(`Splitwise snapshot contains duplicate expense ${id}`);
     seen.add(id);
-    if (!Number.isFinite(Number(item.myShare)) || Number(item.myShare) <= 0) {
-      throw new Error(`Splitwise snapshot contains an invalid share for expense ${id}`);
+    try {
+      myShareExpenseCents(item);
+    } catch (error) {
+      throw new Error(String(error.message || error));
     }
     if (item.currency && item.currency !== expectedCurrency) {
       throw new Error(`Splitwise expense ${id} has unexpected currency ${item.currency}`);
@@ -4484,54 +4530,43 @@ function validateSplitwiseMirrorSnapshot(truth, { now = Date.now(), maxAgeMs = 6
   }
   return truth.othersPaidItems;
 }
-async function syncSplitwiseShareExpenses({ sync = true } = {}) {
-  return withApi(async (api) => {
-    const truth = readJsonSafe(OWES_TRUTH_PATH, null);
-    const items = validateSplitwiseMirrorSnapshot(truth);
-    const acctId = await ensureSplitwiseAccount(api);
-    let groups = await api.getCategoryGroups();
-    const fallbackCat = await ensureSplitwiseCategory(api, groups);
-    if (fallbackCat) groups = await api.getCategoryGroups(); // refresh if we just made it
-    const catInfo = buildCatInfo(groups);
-    const spendCats = [];
-    for (const g of groups) for (const c of g.categories || []) if (catInfo[c.id] && catInfo[c.id].kind === 'spend') spendCats.push({ id: c.id, name: c.name });
-
-    const existing = await api.getTransactions(acctId, '2000-01-01', todayYMD());
-    const byTag = {};
-    for (const t of existing) { const m = /#sw-(\d+)/.exec(t.notes || ''); if (m) byTag[m[1]] = t; }
-
-    const wanted = new Set();
-    let created = 0, updated = 0, pruned = 0;
-    for (const it of items) {
-      const id = String(it.id);
-      const amtCents = -Math.round(Number(it.myShare) * 100);
-      if (!(amtCents < 0)) continue;
-      wanted.add(id);
-      const catId = pickSplitwiseCategory(it.category, spendCats) || fallbackCat || undefined;
-      const notes = `${it.desc || 'Splitwise expense'}${it.payer ? ` (paid by ${it.payer})` : ''} #sw-${id}`;
-      const ex = byTag[id];
-      if (!ex) {
-        await api.addTransactions(acctId, [{ date: (it.date || todayYMD()).slice(0, 10), amount: amtCents, category: catId, notes, cleared: true }], { learnCategories: false, runTransfers: false });
-        created++;
-      } else if (ex.amount !== amtCents || (catId && ex.category !== catId)) {
-        assertTransactionMutationAvailable({ accountId: acctId, ids: [ex.id] });
-        await api.updateTransaction(ex.id, { amount: amtCents, category: catId || ex.category || null });
-        updated++;
-      }
-    }
-    for (const [id, t] of Object.entries(byTag)) {
-      if (wanted.has(id)) continue;
-      await deleteTransaction({
-        id: t.id,
-        accountId: acctId,
-        date: t.date,
-        allowImported: true,
-      });
-      pruned++;
-    }
-    if (sync) await syncNow();
-    return { ok: true, account: SW_ACCOUNT_NAME, items: items.length, created, updated, pruned };
+async function preflightSplitwiseMirrorShareSync() {
+  await initApi({ skipRecover: true });
+  return preflightSplitwiseMirrorAdmission({
+    api,
+    readTruth: () => readJsonSafe(OWES_TRUTH_PATH, null),
+    validateSnapshot: validateSplitwiseMirrorSnapshot,
+    readResolutions: readSplitwiseMirrorResolutions,
+    accountName: SW_ACCOUNT_NAME,
+    categoryName: SW_CATEGORY_NAME,
+    accountRangeStart: '1900-01-01',
+    accountRangeEnd: '9999-12-31',
   });
+}
+async function syncSplitwiseShareExpenses({
+  sync = true,
+  operationKey = null,
+  journalBinding = null,
+  faultInjector = null,
+} = {}) {
+  const result = await withApi((api) => getBulkOperationSagaManager().run(api, {
+    kind: 'splitwise_mirror',
+    operationKey,
+    journalBinding,
+    params: {},
+    faultInjector,
+    deferSync: !sync,
+  }));
+  if (result.status === 'unresolved') {
+    throw new BulkOperationOutcomeUnknownError('Splitwise mirror outcome unresolved');
+  }
+  if (result.needsSync && result.status === 'in_progress') {
+    return result;
+  }
+  if (operationKey) {
+    return getBulkOperationResult(operationKey) || result;
+  }
+  return result;
 }
 
 // Built-in merchant catalog — the "Rocket Money auto-categorize". Each entry maps
@@ -4992,6 +5027,7 @@ module.exports = {
   applyRules,
   refileSettleUps,
   validateSplitwiseMirrorSnapshot,
+  preflightSplitwiseMirrorShareSync,
   syncSplitwiseShareExpenses,
   getRecurring,
   setRecurringOverride,

@@ -61,8 +61,16 @@ test('server composes structural sync and strict bank uncertainty', async (t) =>
       getHealth: () => ({ ready: true }),
       syncSplitwiseShareExpenses: async (options) => {
         mark('splitwise:' + JSON.stringify(options));
-        return { ok: true, created: 0, updated: 0, pruned: 0 };
+        return { ok: true, created: 0, updated: 0, pruned: 0, needsSync: true, status: 'in_progress' };
       },
+      getBulkOperationResult: () => ({
+        ok: true,
+        created: 0,
+        updated: 0,
+        pruned: 0,
+        needsSync: false,
+        status: 'completed',
+      }),
       syncNow: async () => { mark('sync'); },
       bankSync: async (options) => {
         mark('bank:' + JSON.stringify(options));
@@ -121,10 +129,9 @@ test('server composes structural sync and strict bank uncertainty', async (t) =>
     body: {},
   });
   assert.equal(result.response.status, 200);
-  assert.deepEqual(
-    fs.readFileSync(marker, 'utf8').trim().split('\n'),
-    ['splitwise:{"sync":false}', 'sync'],
-  );
+  const effects = fs.readFileSync(marker, 'utf8').trim().split('\n');
+  assert.match(effects[0], /^splitwise:\{"sync":false,"operationKey":"splitwise-structural"/);
+  assert.equal(effects[1], 'sync');
 
   result = await apiRequest(base, `/api/v1/operations/${splitwiseKey}`);
   assert.equal(result.body.data.phase, 'completed');

@@ -26,7 +26,7 @@ const MUTATION_ROUTES = Object.freeze([
   route('POST', '/rules', C.MULTIPLE_INTERNAL_WRITES, 'first bulk item pending checkpoint, or rules sidecar write when no match', 'after_local_if_changed'),
   route('POST', '/rules/apply', C.MULTIPLE_INTERNAL_WRITES, 'first bulk item pending checkpoint across rule/catalog/settle-up stages', 'after_local_if_changed'),
   route('DELETE', '/rules/:id', C.SIDECAR_LOCAL, 'atomic rules JSON write'),
-  route('POST', '/splitwise/sync-shares', C.MULTIPLE_INTERNAL_WRITES, 'Actual account/category creation or first transaction add/update/delete', 'after_local'),
+  route('POST', '/splitwise/sync-shares', C.MULTIPLE_INTERNAL_WRITES, 'first bulk splitwise mirror item pending checkpoint or prepared deletion-saga write', 'after_local'),
   route('POST', '/events', C.SIDECAR_LOCAL, 'atomic events JSON write'),
   route('DELETE', '/events/:slug', C.SIDECAR_LOCAL, 'atomic events JSON write'),
   route('POST', '/accounts/:id/override', C.SIDECAR_LOCAL, 'atomic account-overrides JSON write'),

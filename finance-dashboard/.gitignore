@@ -42,6 +42,7 @@ review-state.json
 transaction-deletion-sagas.json
 repayment-confirmation-sagas.json
 bulk-operation-sagas.json
+splitwise-mirror-resolutions.json
 transaction-sagas.json
 release-manifest.json
 receipts/

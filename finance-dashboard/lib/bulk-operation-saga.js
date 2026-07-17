@@ -16,7 +16,36 @@ const {
   planPhantomCleanup,
   planRulesApply,
   planRulesSave,
+  planSplitwiseMirror,
 } = require('./bulk-operation-adapters');
+const {
+  assertLiveMirrorLedgerConsistent,
+  assertMirrorStructuralAdmission,
+  assertNoMirrorAmbiguity,
+  SplitwiseMirrorAmbiguousError,
+  SplitwiseMirrorAdmissionError,
+  bootstrapAccountResourceKey,
+  bootstrapCategoryResourceKey,
+  completedDropTxnIdsBySource,
+  completedMirrorDeletionMatchesItem,
+  effectiveMirrorIntent,
+  findMirrorAccounts,
+  findMirrorCategories,
+  importedIdConflict,
+  indexMirrorRowsBySourceId,
+  isPendingMirrorAccountId,
+  loadSplitwiseMirrorResolutions,
+  locateCreatedMirrorRow,
+  mirrorIdentityFingerprint,
+  mirrorIntentMatches,
+  parseMirrorSourceId,
+  plannedMirrorSourceIds,
+  preflightSplitwiseMirrorAdmission,
+  resolveMirrorAccountId,
+  snapshotBinding,
+  snapshotManifestFingerprint,
+  verifyCreateMirrorIdentity,
+} = require('./splitwise-mirror');
 
 const RECORD_VERSION = 1;
 const TERMINAL_LIMIT = 100;
@@ -124,6 +153,34 @@ function phantomResourceReleased(saga) {
   return isTerminalSaga(saga) || saga.phase === 'sync_pending';
 }
 
+function sagaOwnedSourceIds(saga) {
+  const ids = new Set();
+  if (saga?.kind === 'splitwise_mirror') {
+    if (isTerminalSaga(saga)) return ids;
+    for (const item of saga?.plan?.items || []) {
+      if (item.sourceId) ids.add(String(item.sourceId));
+    }
+    return ids;
+  }
+  for (const item of saga?.plan?.items || []) {
+    if (!item.sourceId) continue;
+    const outcome = saga.itemOutcomes?.[String(item.globalIndex)];
+    if (outcome?.status === 'completed' || outcome?.status === 'failed') continue;
+    ids.add(String(item.sourceId));
+  }
+  return ids;
+}
+
+function sagaOwnedBootstrapResources(saga) {
+  const keys = new Set();
+  if (saga?.kind !== 'splitwise_mirror' || isTerminalSaga(saga)) return keys;
+  const accountName = saga.plan?.params?.accountName || null;
+  const categoryName = saga.plan?.params?.categoryName || null;
+  if (accountName) keys.add(bootstrapAccountResourceKey(accountName));
+  if (categoryName) keys.add(bootstrapCategoryResourceKey(categoryName));
+  return keys;
+}
+
 function sagaOwnedIds(saga) {
   const ids = new Set();
   for (const item of saga?.plan?.items || []) {
@@ -161,6 +218,7 @@ function summarizeAuditOutcome(saga) {
   if (saga.phase === 'unresolved') status = 'unresolved';
   else if (!isTerminalSaga(saga)) status = 'in_progress';
   else if (itemsSettled < totalItems) status = 'in_progress';
+  else if (saga.phase === 'completed' && failed > 0) status = 'in_progress';
   return {
     status,
     applied,
@@ -168,6 +226,35 @@ function summarizeAuditOutcome(saga) {
     skipped: 0,
     failedItems: outcomes.filter((entry) => entry.status === 'failed'),
   };
+}
+
+function sagaResultCorrupted(saga, auditOutcome) {
+  if (saga.phase !== 'completed') return false;
+  const totalItems = saga.plan?.items?.length || 0;
+  return auditOutcome.status !== 'completed'
+    || auditOutcome.failed > 0
+    || auditOutcome.applied + auditOutcome.failed < totalItems;
+}
+
+function isHealthyCompletedMirrorSaga(saga) {
+  if (saga.phase !== 'completed') return false;
+  const auditOutcome = summarizeAuditOutcome(saga);
+  return !sagaResultCorrupted(saga, auditOutcome);
+}
+
+function activeNullKeyMirrorSagas(state) {
+  return Object.values(state.sagas || {}).filter(
+    (entry) => !entry.operationKey && entry.kind === 'splitwise_mirror' && !isTerminalSaga(entry),
+  );
+}
+
+function nullKeyMirrorSiblings(state, fingerprint) {
+  if (!fingerprint) return [];
+  return Object.values(state.sagas || {}).filter(
+    (entry) => !entry.operationKey
+      && entry.kind === 'splitwise_mirror'
+      && entry.params?.snapshotBinding?.fingerprint === fingerprint,
+  );
 }
 
 function createBulkOperationSaga({
@@ -178,6 +265,14 @@ function createBulkOperationSaga({
   writePhantomSeen,
   readPhantomLog,
   writePhantomLog,
+  readSplitwiseMirrorResolutions,
+  readSplitwiseTruth,
+  validateSplitwiseMirrorSnapshot,
+  ensureSplitwiseAccount,
+  ensureSplitwiseCategory,
+  pickSplitwiseCategory,
+  swAccountName,
+  swCategoryName,
   deleteTransaction,
   inspectDeletionState,
   recoverDeletionSagas,
@@ -246,11 +341,61 @@ function createBulkOperationSaga({
 
   function assertJournalAdmission({ operationKey, journalBinding, kind }) {
     if (!operationKey) return;
-    const normalized = normalizeJournalBinding(journalBinding);
-    if (!normalized) return;
     const existing = findByOperationKey(operationKey);
     if (!existing) return;
+    if (kind && existing.kind && existing.kind !== kind) {
+      throw idempotencyKeyReuseError();
+    }
+    const normalized = normalizeJournalBinding(journalBinding);
+    if (!normalized) return;
     assertJournalBinding(existing, normalized, kind);
+  }
+
+  function readValidatedMirrorBinding() {
+    const truth = readSplitwiseTruth();
+    validateSplitwiseMirrorSnapshot(truth);
+    return snapshotBinding(truth);
+  }
+
+  function resolveNewSplitwiseMirrorParams(existingParams = {}) {
+    const binding = readValidatedMirrorBinding();
+    const siblings = nullKeyMirrorSiblings(loadState(), binding.fingerprint);
+    const completed = siblings.filter(isHealthyCompletedMirrorSaga);
+    if (completed.length > 1) {
+      throw new BulkOperationStateError('multiple completed null-key splitwise mirror sagas share snapshot binding');
+    }
+    if (completed.length === 1) {
+      return { replay: completed[0], params: null };
+    }
+    const mirrorAttempt = siblings.length === 0
+      ? 0
+      : Math.max(...siblings.map((entry) => entry.params?.mirrorAttempt ?? 0)) + 1;
+    return {
+      replay: null,
+      params: {
+        ...existingParams,
+        snapshotBinding: binding,
+        mirrorAttempt,
+      },
+    };
+  }
+
+  function bindKeyedSplitwiseMirrorParams(existingParams = {}) {
+    const binding = readValidatedMirrorBinding();
+    return {
+      ...existingParams,
+      snapshotBinding: binding,
+    };
+  }
+
+  function findCompletedMirrorDeletionDelegation(item) {
+    const state = inspectDeletionState();
+    const matches = Object.values(state.sagas || {}).filter(
+      (entry) => completedMirrorDeletionMatchesItem(entry, item),
+    );
+    return matches.sort(
+      (left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)),
+    )[0] || null;
   }
 
   function proveTerminalJournalCompletion(operationKey, journalOperation) {
@@ -278,20 +423,33 @@ function createBulkOperationSaga({
     return result;
   }
 
-  function assertAvailable({ accountId, ids, exceptSagaId, allowDeletionDelegation } = {}) {
+  function assertAvailable({
+    accountId,
+    ids,
+    sourceIds,
+    bootstrapResources,
+    exceptSagaId,
+    allowDeletionDelegation,
+  } = {}) {
     const candidates = candidateIds({ ids });
+    const sourceCandidates = candidateIds({ ids: sourceIds });
+    const bootstrapCandidates = candidateIds({ ids: bootstrapResources });
     if (allowDeletionDelegation) {
       const delegating = loadState().sagas[allowDeletionDelegation.sagaId];
       if (isValidDeletionDelegation(delegating, allowDeletionDelegation)) {
         candidates.delete(String(allowDeletionDelegation.txnId));
       }
     }
-    if (!candidates.size) return;
+    if (!candidates.size && !sourceCandidates.size && !bootstrapCandidates.size) return;
 
     for (const saga of Object.values(loadState().sagas)) {
       if (saga.id === exceptSagaId || isTerminalSaga(saga)) continue;
       const owned = sagaOwnedIds(saga);
-      if ([...candidates].some((id) => owned.has(id))) {
+      const ownedSources = sagaOwnedSourceIds(saga);
+      const ownedBootstrap = sagaOwnedBootstrapResources(saga);
+      if ([...candidates].some((id) => owned.has(id))
+        || [...sourceCandidates].some((id) => ownedSources.has(id))
+        || [...bootstrapCandidates].some((id) => ownedBootstrap.has(id))) {
         throw new BulkOperationInProgressError();
       }
     }
@@ -307,11 +465,204 @@ function createBulkOperationSaga({
 
   function assertPlanAdmission(saga, plan) {
     const ids = [...new Set((plan?.items || []).map((item) => item.txnId).filter(Boolean).map(String))];
-    assertAvailable({ ids, exceptSagaId: saga.id });
+    const sourceIds = [...new Set((plan?.items || []).map((item) => item.sourceId).filter(Boolean).map(String))];
+    const bootstrapResources = [...new Set((plan?.items || [])
+      .map((item) => item.bootstrapResourceKey)
+      .filter(Boolean)
+      .map(String))];
+    if (saga.kind === 'splitwise_mirror') {
+      bootstrapResources.push(
+        ...[...sagaOwnedBootstrapResources({ ...saga, plan })],
+      );
+    }
+    assertAvailable({
+      ids,
+      sourceIds,
+      bootstrapResources: [...new Set(bootstrapResources)],
+      exceptSagaId: saga.id,
+    });
     if (assertExternalAvailable) {
       for (const item of plan.items || []) {
         if (!item.txnId) continue;
         assertExternalAvailable({ accountId: item.accountId, ids: [item.txnId] });
+      }
+    }
+  }
+
+  function isDeletionDelegatedItem(item) {
+    return ['phantom_delete', 'splitwise_delete', 'splitwise_duplicate_drop'].includes(item?.itemType);
+  }
+
+  function isDestructiveSplitwiseItem(item) {
+    return ['splitwise_duplicate_drop', 'splitwise_delete', 'splitwise_create', 'splitwise_update']
+      .includes(item?.itemType);
+  }
+
+  async function verifySplitwiseSnapshotBinding(saga, faultInjector) {
+    if (saga.kind !== 'splitwise_mirror') return;
+    const expected = saga.plan?.params?.snapshotBinding;
+    if (!expected?.fingerprint) {
+      await unresolved(saga, 'splitwise mirror snapshot binding is missing from plan checkpoint', faultInjector);
+    }
+    let truth;
+    try {
+      truth = readSplitwiseTruth();
+    } catch (error) {
+      await unresolved(saga, 'splitwise mirror snapshot became unreadable during recovery', faultInjector);
+      return;
+    }
+    try {
+      validateSplitwiseMirrorSnapshot(truth);
+    } catch (error) {
+      await unresolved(saga, 'splitwise mirror snapshot failed validation during recovery', faultInjector);
+      return;
+    }
+    const currentFingerprint = snapshotManifestFingerprint(truth);
+    if (currentFingerprint !== expected.fingerprint
+      || truth.generatedAt !== expected.generatedAt
+      || JSON.stringify(truth.manifest) !== JSON.stringify(expected.manifest)) {
+      await unresolved(saga, 'splitwise mirror snapshot changed after plan checkpoint', faultInjector);
+    }
+  }
+
+  async function assertSplitwiseMirrorPreAdmission(api) {
+    await preflightSplitwiseMirrorAdmission({
+      api,
+      readTruth: readSplitwiseTruth,
+      validateSnapshot: validateSplitwiseMirrorSnapshot,
+      readResolutions: readSplitwiseMirrorResolutions,
+      accountName: swAccountName,
+      categoryName: swCategoryName,
+      accountRangeStart: ACCOUNT_RANGE_START,
+      accountRangeEnd: ACCOUNT_RANGE_END,
+    });
+  }
+
+  async function verifyBootstrapAccountAfterEffect(api, saga, accountId, faultInjector) {
+    let accounts;
+    let groups;
+    try {
+      accounts = await api.getAccounts();
+      groups = await api.getCategoryGroups();
+    } catch (error) {
+      throw outcomeUnknown('unable to revalidate splitwise mirror account bootstrap after effect', error);
+    }
+    try {
+      assertMirrorStructuralAdmission(accounts, groups, {
+        accountName: swAccountName,
+        categoryName: swCategoryName,
+      });
+    } catch (error) {
+      if (error instanceof SplitwiseMirrorAdmissionError) {
+        await unresolved(saga, error.message, faultInjector);
+      }
+      throw error;
+    }
+    const matches = findMirrorAccounts(accounts, swAccountName);
+    if (matches.length !== 1 || matches[0].closed) {
+      await unresolved(saga, 'splitwise mirror bootstrap account post-effect verification failed', faultInjector);
+    }
+    if (String(matches[0].id) !== String(accountId)) {
+      await unresolved(
+        saga,
+        `splitwise mirror bootstrap account id mismatch after effect (${accountId} vs ${matches[0].id})`,
+        faultInjector,
+      );
+    }
+    return String(matches[0].id);
+  }
+
+  async function verifyBootstrapCategoryAfterEffect(api, saga, categoryId, faultInjector) {
+    let accounts;
+    let groups;
+    try {
+      accounts = await api.getAccounts();
+      groups = await api.getCategoryGroups();
+    } catch (error) {
+      throw outcomeUnknown('unable to revalidate splitwise mirror category bootstrap after effect', error);
+    }
+    try {
+      assertMirrorStructuralAdmission(accounts, groups, {
+        accountName: swAccountName,
+        categoryName: swCategoryName,
+      });
+    } catch (error) {
+      if (error instanceof SplitwiseMirrorAdmissionError) {
+        await unresolved(saga, error.message, faultInjector);
+      }
+      throw error;
+    }
+    const matches = findMirrorCategories(groups, swCategoryName);
+    if (matches.length !== 1) {
+      await unresolved(saga, 'splitwise mirror bootstrap category post-effect verification failed', faultInjector);
+    }
+    if (String(matches[0].id) !== String(categoryId)) {
+      await unresolved(
+        saga,
+        `splitwise mirror bootstrap category id mismatch after effect (${categoryId} vs ${matches[0].id})`,
+        faultInjector,
+      );
+    }
+    return String(matches[0].id);
+  }
+
+  async function assertMirrorBootstrapStructuralAdmission(api) {
+    let accounts;
+    let groups;
+    try {
+      accounts = await api.getAccounts();
+      groups = await api.getCategoryGroups();
+    } catch (error) {
+      throw outcomeUnknown('unable to revalidate splitwise mirror structural admission before bootstrap', error);
+    }
+    assertMirrorStructuralAdmission(accounts, groups, {
+      accountName: swAccountName,
+      categoryName: swCategoryName,
+    });
+  }
+
+  async function verifyLiveMirrorLedgerBeforeEffect(api, saga, item, faultInjector) {
+    if (saga.kind !== 'splitwise_mirror') return;
+    const accountId = mirrorAccountId(saga) || effectiveMirrorAccountId(saga, item);
+    if (!accountId) {
+      await unresolved(saga, 'splitwise mirror live ledger check missing account checkpoint', faultInjector);
+    }
+    let rows;
+    try {
+      rows = await api.getTransactions(accountId, ACCOUNT_RANGE_START, ACCOUNT_RANGE_END);
+    } catch (error) {
+      throw outcomeUnknown(`unable to query splitwise account ${accountId} before mirror effect`, error);
+    }
+    try {
+      assertLiveMirrorLedgerConsistent(rows, {
+        resolutions: saga.plan?.params?.resolutions || [],
+        completedDropTxnIdsBySource: completedDropTxnIdsBySource(saga),
+        plannedSourceIds: plannedMirrorSourceIds(saga),
+      });
+    } catch (error) {
+      if (error instanceof SplitwiseMirrorAmbiguousError) {
+        await unresolved(
+          saga,
+          `splitwise mirror live ledger ambiguity for source ${(error.sourceIds || []).join(',')}`,
+          faultInjector,
+        );
+      }
+      throw error;
+    }
+    if (item.itemType === 'splitwise_create') {
+      const checkpointedTxnId = saga.itemOutcomes?.[String(item.globalIndex)]?.txnId || null;
+      const rowsByAccount = await loadAccountRows(api);
+      const intent = effectiveMirrorIntent(saga, item, accountId);
+      const verification = verifyCreateMirrorIdentity(rows, intent, accountId, {
+        checkpointedTxnId,
+        rowsByAccount,
+      });
+      if (!verification.ok) {
+        await unresolved(
+          saga,
+          `splitwise mirror create identity check failed for source ${item.sourceId}: ${verification.reason}`,
+          faultInjector,
+        );
       }
     }
   }
@@ -398,7 +749,7 @@ function createBulkOperationSaga({
     if (activeDeletionSagaForTxn(txnId)) return false;
     const active = saga.activeDelegation;
     const item = (saga.plan?.items || []).find(
-      (entry) => entry.globalIndex === delegation.itemIndex && entry.itemType === 'phantom_delete',
+      (entry) => entry.globalIndex === delegation.itemIndex && isDeletionDelegatedItem(entry),
     );
     if (!item) return false;
     return saga.id === delegation.sagaId
@@ -415,7 +766,16 @@ function createBulkOperationSaga({
     for (const item of saga.plan?.items || []) {
       const outcome = saga.itemOutcomes?.[String(item.globalIndex)];
       if (outcome?.status !== 'completed') continue;
-      if (item.itemType === 'category_update' || item.itemType === 'phantom_delete') return true;
+      if (item.itemType === 'category_update'
+        || item.itemType === 'phantom_delete'
+        || item.itemType === 'splitwise_bootstrap_account'
+        || item.itemType === 'splitwise_bootstrap_category'
+        || item.itemType === 'splitwise_duplicate_drop'
+        || item.itemType === 'splitwise_delete'
+        || item.itemType === 'splitwise_create'
+        || item.itemType === 'splitwise_update') {
+        return true;
+      }
     }
     return false;
   }
@@ -459,6 +819,19 @@ function createBulkOperationSaga({
   function recordedDeletionSagaId(saga, txnId) {
     const recorded = saga.delegatedDeletionSagaIds?.[txnId];
     return isRecordedDeletionSagaId(recorded) ? recorded : null;
+  }
+
+  function mirrorDeletionBulkDelegation(saga, item, accountId) {
+    const txnId = String(item.txnId);
+    if (!recordedDeletionSagaId(saga, txnId) && saga.activeDelegation?.txnId !== txnId) return null;
+    const active = saga.activeDelegation;
+    return {
+      sagaId: saga.id,
+      itemIndex: active?.itemIndex ?? item.globalIndex,
+      token: active?.token || 'resume',
+      txnId,
+      accountId: String(active?.accountId || accountId),
+    };
   }
 
   async function verifyCategoryItem(api, saga, item, rowsByAccount, faultInjector) {
@@ -613,7 +986,31 @@ function createBulkOperationSaga({
         readPhantomSeen,
       });
     }
+    if (saga.kind === 'splitwise_mirror') {
+      const truth = readSplitwiseTruth();
+      validateSplitwiseMirrorSnapshot(truth);
+      const resolutionStore = readSplitwiseMirrorResolutions();
+      return planSplitwiseMirror(api, {
+        truth,
+        resolutions: resolutionStore.resolutions || [],
+        today: todayYMD(),
+        swAccountName,
+        swCategoryName,
+        pickSplitwiseCategory,
+        buildCatInfo,
+      });
+    }
     throw new Error(`unsupported bulk operation kind: ${saga.kind}`);
+  }
+
+  function identityMatchesDeletionItem(item, transaction) {
+    if (item.itemType === 'phantom_delete') {
+      return categoryIdentityMatches(transaction, item.identityFingerprint);
+    }
+    if (item.sourceId) {
+      return mirrorIdentityFingerprint(transaction, item.sourceId) === item.identityFingerprint;
+    }
+    return categoryIdentityMatches(transaction, item.identityFingerprint);
   }
 
   async function resolveDeletionDelegation(api, saga, item, rowsByAccount, faultInjector) {
@@ -641,61 +1038,84 @@ function createBulkOperationSaga({
     if (!deletionSaga) {
       const located = locateItemTransactionEverywhere(rowsByAccount, item);
       if (!located) {
-        await unresolved(
+        const completed = findCompletedMirrorDeletionDelegation(item);
+        if (completed) {
+          deletionSaga = completed;
+          deletionSagaId = completed.id;
+          saga.delegatedDeletionSagaIds = {
+            ...(saga.delegatedDeletionSagaIds || {}),
+            [txnId]: deletionSagaId,
+          };
+          saga.activeDelegation = null;
+          await checkpoint(
+            saga,
+            {
+              delegatedDeletionSagaIds: saga.delegatedDeletionSagaIds,
+              activeDelegation: null,
+            },
+            `item-${item.globalIndex}-delegation-recorded-checkpoint`,
+            faultInjector,
+            item.globalIndex,
+          );
+        } else {
+          await unresolved(
+            saga,
+            `phantom delete target ${txnId} is absent without a recorded deletion delegation`,
+            faultInjector,
+          );
+        }
+      } else {
+        if (!identityMatchesDeletionItem(item, located.transaction)) {
+          const label = item.itemType === 'phantom_delete' ? 'phantom delete' : 'splitwise mirror delete';
+          await unresolved(saga, `${label} target ${txnId} identity changed incompatibly`, faultInjector);
+        }
+        const token = crypto.randomUUID();
+        saga.activeDelegation = {
+          itemIndex: item.globalIndex,
+          txnId,
+          token,
+          accountId: String(item.accountId),
+        };
+        await checkpoint(
           saga,
-          `phantom delete target ${txnId} is absent without a recorded deletion delegation`,
+          { activeDelegation: saga.activeDelegation, cursor: { itemIndex: item.globalIndex } },
+          `item-${item.globalIndex}-delegation-handoff-checkpoint`,
           faultInjector,
+          item.globalIndex,
         );
+        const bulkDelegation = {
+          sagaId: saga.id,
+          itemIndex: item.globalIndex,
+          token,
+          txnId,
+          accountId: String(item.accountId),
+        };
+        await deleteTransaction({
+          id: item.txnId,
+          accountId: item.accountId,
+          date: item.date,
+          allowImported: true,
+          bulkDelegation,
+          faultInjector,
+        });
+        deletionSaga = activeDeletionSagaForTxn(txnId);
+        if (!deletionSaga) {
+          throw outcomeUnknown(`phantom delete delegation missing for ${txnId}`);
+        }
+        saga.delegatedDeletionSagaIds = { ...(saga.delegatedDeletionSagaIds || {}), [txnId]: deletionSaga.id };
+        saga.activeDelegation = null;
+        await checkpoint(
+          saga,
+          {
+            delegatedDeletionSagaIds: saga.delegatedDeletionSagaIds,
+            activeDelegation: null,
+          },
+          `item-${item.globalIndex}-delegation-recorded-checkpoint`,
+          faultInjector,
+          item.globalIndex,
+        );
+        deletionSagaId = deletionSaga.id;
       }
-      if (!categoryIdentityMatches(located.transaction, item.identityFingerprint)) {
-        await unresolved(saga, `phantom delete target ${txnId} identity changed incompatibly`, faultInjector);
-      }
-      const token = crypto.randomUUID();
-      saga.activeDelegation = {
-        itemIndex: item.globalIndex,
-        txnId,
-        token,
-        accountId: String(item.accountId),
-      };
-      await checkpoint(
-        saga,
-        { activeDelegation: saga.activeDelegation, cursor: { itemIndex: item.globalIndex } },
-        `item-${item.globalIndex}-delegation-handoff-checkpoint`,
-        faultInjector,
-        item.globalIndex,
-      );
-      const bulkDelegation = {
-        sagaId: saga.id,
-        itemIndex: item.globalIndex,
-        token,
-        txnId,
-        accountId: String(item.accountId),
-      };
-      await deleteTransaction({
-        id: item.txnId,
-        accountId: item.accountId,
-        date: item.date,
-        allowImported: true,
-        bulkDelegation,
-        faultInjector,
-      });
-      deletionSaga = activeDeletionSagaForTxn(txnId);
-      if (!deletionSaga) {
-        throw outcomeUnknown(`phantom delete delegation missing for ${txnId}`);
-      }
-      saga.delegatedDeletionSagaIds = { ...(saga.delegatedDeletionSagaIds || {}), [txnId]: deletionSaga.id };
-      saga.activeDelegation = null;
-      await checkpoint(
-        saga,
-        {
-          delegatedDeletionSagaIds: saga.delegatedDeletionSagaIds,
-          activeDelegation: null,
-        },
-        `item-${item.globalIndex}-delegation-recorded-checkpoint`,
-        faultInjector,
-        item.globalIndex,
-      );
-      deletionSagaId = deletionSaga.id;
     }
     if (deletionSaga.phase !== 'completed') {
       await recoverDeletionSagas(api, { deferSync: true, faultInjector });
@@ -705,6 +1125,124 @@ function createBulkOperationSaga({
       throw outcomeUnknown(`delegated deletion for ${txnId} remains nonterminal`);
     }
     return deletionSaga;
+  }
+
+  function mirrorAccountId(saga) {
+    return saga.mirrorRuntime?.accountId || null;
+  }
+
+  function mirrorCategoryId(saga) {
+    return saga.mirrorRuntime?.categoryId || null;
+  }
+
+  function effectiveMirrorAccountId(saga, item) {
+    return resolveMirrorAccountId(saga, item);
+  }
+
+  async function enumerateAccountImportedIds(api, accountId) {
+    const rows = await api.getTransactions(accountId, ACCOUNT_RANGE_START, ACCOUNT_RANGE_END);
+    return rows.filter((row) => !row.is_parent && !row.parent_id);
+  }
+
+  async function verifyMirrorUpdateItem(api, saga, item, rowsByAccount, accountId, faultInjector) {
+    await verifyPlannedAccountOpen(api, saga, { ...item, accountId }, faultInjector, 'splitwise update verify');
+    const located = locateItemTransactionEverywhere(rowsByAccount, { ...item, accountId });
+    if (!located) {
+      await unresolved(
+        saga,
+        `splitwise mirror update target ${item.txnId} is absent from Actual account enumeration`,
+        faultInjector,
+      );
+    }
+    if (String(located.accountId) !== String(accountId)) {
+      await unresolved(
+        saga,
+        `splitwise mirror update target ${item.txnId} moved outside recorded account ${accountId}`,
+        faultInjector,
+      );
+    }
+    const transaction = located.transaction;
+    const intent = effectiveMirrorIntent(saga, item, accountId);
+    if (mirrorIntentMatches(transaction, intent, accountId)) {
+      return { alreadyApplied: true, transaction };
+    }
+    if (mirrorIdentityFingerprint(transaction, item.sourceId) !== item.identityFingerprint) {
+      await unresolved(
+        saga,
+        `splitwise mirror update target ${item.txnId} identity changed incompatibly`,
+        faultInjector,
+      );
+    }
+    return { alreadyApplied: false, transaction };
+  }
+
+  async function applyMirrorCreateItem(api, saga, item, accountId, faultInjector) {
+    const intent = effectiveMirrorIntent(saga, item, accountId);
+    const rows = await enumerateAccountImportedIds(api, accountId);
+    const checkpointedTxnId = saga.itemOutcomes?.[String(item.globalIndex)]?.txnId || null;
+    const rowsByAccount = await loadAccountRows(api);
+    const verification = verifyCreateMirrorIdentity(rows, intent, accountId, {
+      checkpointedTxnId,
+      rowsByAccount,
+    });
+    if (!verification.ok) {
+      await unresolved(
+        saga,
+        `splitwise mirror create identity check failed for source ${intent.sourceId}: ${verification.reason}`,
+        faultInjector,
+      );
+    }
+    if (verification.row && mirrorIntentMatches(verification.row, intent, accountId)) {
+      return String(verification.row.id);
+    }
+    const conflict = importedIdConflict(rows, intent.sourceId);
+    if (conflict) {
+      await unresolved(
+        saga,
+        `splitwise mirror imported_id for source ${intent.sourceId} already exists on ${conflict.id}`,
+        faultInjector,
+      );
+    }
+    await invokeFault(faultInjector, `before:item-${item.globalIndex}-effect`, saga, item.globalIndex);
+    await api.addTransactions(accountId, [{
+      date: intent.date,
+      amount: intent.amount,
+      category: intent.categoryId || null,
+      notes: intent.notes,
+      imported_id: intent.importedId,
+      cleared: true,
+    }], { learnCategories: false, runTransfers: false });
+    await invokeFault(faultInjector, `after:item-${item.globalIndex}-effect`, saga, item.globalIndex);
+    const rowsAfter = await enumerateAccountImportedIds(api, accountId);
+    const post = verifyCreateMirrorIdentity(rowsAfter, intent, accountId, { rowsByAccount: await loadAccountRows(api) });
+    if (!post.ok || !post.row) {
+      await unresolved(
+        saga,
+        `splitwise mirror create for source ${intent.sourceId} did not converge`,
+        faultInjector,
+      );
+    }
+    const matches = rowsAfter.filter((row) => row.imported_id === intent.importedId);
+    if (matches.length !== 1) {
+      await unresolved(
+        saga,
+        `splitwise mirror create imported_id for source ${intent.sourceId} is ambiguous`,
+        faultInjector,
+      );
+    }
+    return String(post.row.id);
+  }
+
+  async function applyMirrorUpdateItem(api, item, faultInjector, saga, accountId) {
+    const intent = effectiveMirrorIntent(saga, item, accountId);
+    await invokeFault(faultInjector, `before:item-${item.globalIndex}-effect`, saga, item.globalIndex);
+    await api.updateTransaction(item.txnId, {
+      amount: intent.amount,
+      date: intent.date,
+      category: intent.categoryId || null,
+      notes: intent.notes,
+    });
+    await invokeFault(faultInjector, `after:item-${item.globalIndex}-effect`, saga, item.globalIndex);
   }
 
   async function driveItem(api, saga, item, rowsByAccount, faultInjector) {
@@ -756,6 +1294,268 @@ function createBulkOperationSaga({
       return;
     }
 
+    if (item.itemType === 'splitwise_bootstrap_account') {
+      await checkpoint(
+        saga,
+        { cursor: { itemIndex: index }, phase: 'items_pending' },
+        `item-${index}-pending-checkpoint`,
+        faultInjector,
+        index,
+      );
+      if (assertExternalAvailable) {
+        assertExternalAvailable({
+          bootstrapResources: [item.bootstrapResourceKey],
+          exceptSagaId: saga.id,
+        });
+      }
+      const existingId = saga.mirrorRuntime?.accountId;
+      let accountId = existingId || null;
+      if (!accountId) {
+        await invokeFault(faultInjector, `before:item-${index}-bootstrap-admission`, saga, index);
+        try {
+          await assertMirrorBootstrapStructuralAdmission(api);
+        } catch (error) {
+          if (error instanceof SplitwiseMirrorAdmissionError) {
+            await unresolved(saga, error.message, faultInjector);
+          }
+          throw error;
+        }
+        await invokeFault(faultInjector, `before:item-${index}-effect`, saga, index);
+        try {
+          await assertMirrorBootstrapStructuralAdmission(api);
+        } catch (error) {
+          if (error instanceof SplitwiseMirrorAdmissionError) {
+            await unresolved(saga, error.message, faultInjector);
+          }
+          throw error;
+        }
+        accountId = String(await ensureSplitwiseAccount(api));
+        await invokeFault(faultInjector, `after:item-${index}-effect`, saga, index);
+        accountId = await verifyBootstrapAccountAfterEffect(api, saga, accountId, faultInjector);
+      }
+      saga.mirrorRuntime = { ...(saga.mirrorRuntime || {}), accountId: String(accountId) };
+      saga.itemOutcomes = { ...saga.itemOutcomes, [String(index)]: { status: 'completed' } };
+      saga.completedIndexes = [...new Set([...(saga.completedIndexes || []), index])].sort((a, b) => a - b);
+      await checkpoint(
+        saga,
+        {
+          mirrorRuntime: saga.mirrorRuntime,
+          itemOutcomes: saga.itemOutcomes,
+          completedIndexes: saga.completedIndexes,
+        },
+        `item-${index}-applied-checkpoint`,
+        faultInjector,
+        index,
+      );
+      return;
+    }
+
+    if (item.itemType === 'splitwise_bootstrap_category') {
+      await checkpoint(
+        saga,
+        { cursor: { itemIndex: index }, phase: 'items_pending' },
+        `item-${index}-pending-checkpoint`,
+        faultInjector,
+        index,
+      );
+      if (assertExternalAvailable) {
+        assertExternalAvailable({
+          bootstrapResources: [item.bootstrapResourceKey],
+          exceptSagaId: saga.id,
+        });
+      }
+      const accountId = mirrorAccountId(saga);
+      if (!accountId) {
+        await unresolved(saga, 'splitwise mirror category bootstrap missing account checkpoint', faultInjector);
+      }
+      let categoryId = saga.mirrorRuntime?.categoryId || null;
+      if (!categoryId) {
+        await invokeFault(faultInjector, `before:item-${index}-bootstrap-admission`, saga, index);
+        try {
+          await assertMirrorBootstrapStructuralAdmission(api);
+        } catch (error) {
+          if (error instanceof SplitwiseMirrorAdmissionError) {
+            await unresolved(saga, error.message, faultInjector);
+          }
+          throw error;
+        }
+        await invokeFault(faultInjector, `before:item-${index}-effect`, saga, index);
+        try {
+          await assertMirrorBootstrapStructuralAdmission(api);
+        } catch (error) {
+          if (error instanceof SplitwiseMirrorAdmissionError) {
+            await unresolved(saga, error.message, faultInjector);
+          }
+          throw error;
+        }
+        categoryId = await ensureSplitwiseCategory(api);
+        await invokeFault(faultInjector, `after:item-${index}-effect`, saga, index);
+        if (categoryId) {
+          categoryId = String(categoryId);
+          categoryId = await verifyBootstrapCategoryAfterEffect(api, saga, categoryId, faultInjector);
+        } else {
+          const groups = await api.getCategoryGroups();
+          try {
+            await assertMirrorBootstrapStructuralAdmission(api);
+          } catch (error) {
+            if (error instanceof SplitwiseMirrorAdmissionError) {
+              await unresolved(saga, error.message, faultInjector);
+            }
+            throw error;
+          }
+        }
+      }
+      saga.mirrorRuntime = {
+        ...(saga.mirrorRuntime || {}),
+        accountId: String(accountId),
+        categoryId: categoryId ? String(categoryId) : null,
+      };
+      saga.itemOutcomes = { ...saga.itemOutcomes, [String(index)]: { status: 'completed' } };
+      saga.completedIndexes = [...new Set([...(saga.completedIndexes || []), index])].sort((a, b) => a - b);
+      await checkpoint(
+        saga,
+        {
+          mirrorRuntime: saga.mirrorRuntime,
+          itemOutcomes: saga.itemOutcomes,
+          completedIndexes: saga.completedIndexes,
+        },
+        `item-${index}-applied-checkpoint`,
+        faultInjector,
+        index,
+      );
+      return;
+    }
+
+    if (item.itemType === 'splitwise_create') {
+      await verifySplitwiseSnapshotBinding(saga, faultInjector);
+      await checkpoint(
+        saga,
+        { cursor: { itemIndex: index }, phase: 'items_pending' },
+        `item-${index}-pending-checkpoint`,
+        faultInjector,
+        index,
+      );
+      const accountId = mirrorAccountId(saga);
+      if (!accountId) {
+        await unresolved(saga, 'splitwise mirror create missing account checkpoint', faultInjector);
+      }
+      if (assertExternalAvailable) {
+        assertExternalAvailable({
+          accountId,
+          sourceIds: [item.sourceId],
+          bootstrapResources: [...sagaOwnedBootstrapResources(saga)],
+          exceptSagaId: saga.id,
+        });
+      }
+      await verifyLiveMirrorLedgerBeforeEffect(api, saga, item, faultInjector);
+      await verifyPlannedAccountOpen(api, saga, { ...item, accountId }, faultInjector, 'splitwise create verify');
+      const rows = rowsByAccount[String(accountId)] || [];
+      const intent = effectiveMirrorIntent(saga, item, accountId);
+      const existing = locateCreatedMirrorRow(rows, intent, accountId);
+      let txnId = existing ? String(existing.id) : null;
+      if (!existing || !mirrorIntentMatches(existing, intent, accountId)) {
+        if (existing && !mirrorIntentMatches(existing, intent, accountId)) {
+          await unresolved(
+            saga,
+            `splitwise mirror create source ${item.sourceId} already maps to a divergent transaction`,
+            faultInjector,
+          );
+        }
+        try {
+          txnId = await applyMirrorCreateItem(api, saga, item, accountId, faultInjector);
+        } catch (error) {
+          await rememberError(saga, error, item.stageId, faultInjector, index);
+          throw error;
+        }
+      }
+      saga.itemOutcomes = {
+        ...saga.itemOutcomes,
+        [String(index)]: { status: 'completed', txnId },
+      };
+      saga.completedIndexes = [...new Set([...(saga.completedIndexes || []), index])].sort((a, b) => a - b);
+      await checkpoint(
+        saga,
+        {
+          itemOutcomes: saga.itemOutcomes,
+          completedIndexes: saga.completedIndexes,
+          auditOutcome: summarizeAuditOutcome(saga),
+          lastError: null,
+        },
+        `item-${index}-applied-checkpoint`,
+        faultInjector,
+        index,
+      );
+      return;
+    }
+
+    if (item.itemType === 'splitwise_update') {
+      await verifySplitwiseSnapshotBinding(saga, faultInjector);
+      await checkpoint(
+        saga,
+        { cursor: { itemIndex: index }, phase: 'items_pending' },
+        `item-${index}-pending-checkpoint`,
+        faultInjector,
+        index,
+      );
+      const accountId = mirrorAccountId(saga) || effectiveMirrorAccountId(saga, item);
+      if (!accountId) {
+        await unresolved(saga, 'splitwise mirror update missing account checkpoint', faultInjector);
+      }
+      if (assertExternalAvailable) {
+        assertExternalAvailable({
+          accountId,
+          ids: [item.txnId],
+          sourceIds: [item.sourceId],
+          bootstrapResources: [...sagaOwnedBootstrapResources(saga)],
+          exceptSagaId: saga.id,
+        });
+      }
+      await verifyLiveMirrorLedgerBeforeEffect(api, saga, item, faultInjector);
+      const verification = await verifyMirrorUpdateItem(
+        api,
+        saga,
+        { ...item, accountId },
+        rowsByAccount,
+        accountId,
+        faultInjector,
+      );
+      if (!verification.alreadyApplied) {
+        try {
+          await applyMirrorUpdateItem(api, { ...item, accountId }, faultInjector, saga, accountId);
+        } catch (error) {
+          await rememberError(saga, error, item.stageId, faultInjector, index);
+          throw error;
+        }
+        const rowsAfter = await loadAccountRows(api);
+        const post = await verifyMirrorUpdateItem(
+          api,
+          saga,
+          { ...item, accountId },
+          rowsAfter,
+          accountId,
+          faultInjector,
+        );
+        if (!post.alreadyApplied) {
+          throw outcomeUnknown(`splitwise mirror update for ${item.txnId} did not converge`);
+        }
+      }
+      saga.itemOutcomes = { ...saga.itemOutcomes, [String(index)]: { status: 'completed' } };
+      saga.completedIndexes = [...new Set([...(saga.completedIndexes || []), index])].sort((a, b) => a - b);
+      await checkpoint(
+        saga,
+        {
+          itemOutcomes: saga.itemOutcomes,
+          completedIndexes: saga.completedIndexes,
+          auditOutcome: summarizeAuditOutcome(saga),
+          lastError: null,
+        },
+        `item-${index}-applied-checkpoint`,
+        faultInjector,
+        index,
+      );
+      return;
+    }
+
     if (item.itemType === 'phantom_seen') {
       await checkpoint(
         saga,
@@ -777,7 +1577,10 @@ function createBulkOperationSaga({
       return;
     }
 
-    if (item.itemType === 'phantom_delete') {
+    if (isDeletionDelegatedItem(item)) {
+      if (item.itemType !== 'phantom_delete') {
+        await verifySplitwiseSnapshotBinding(saga, faultInjector);
+      }
       await checkpoint(
         saga,
         { cursor: { itemIndex: index }, phase: 'items_pending' },
@@ -785,12 +1588,36 @@ function createBulkOperationSaga({
         faultInjector,
         index,
       );
-      await verifyPlannedAccountOpen(api, saga, item, faultInjector, 'phantom delete verify');
-      await resolveDeletionDelegation(api, saga, item, rowsByAccount, faultInjector);
+      const accountId = item.itemType === 'phantom_delete'
+        ? item.accountId
+        : (mirrorAccountId(saga) || effectiveMirrorAccountId(saga, item));
+      const resolvedItem = { ...item, accountId };
+      await verifyPlannedAccountOpen(
+        api,
+        saga,
+        resolvedItem,
+        faultInjector,
+        item.itemType === 'phantom_delete' ? 'phantom delete verify' : 'splitwise delete verify',
+      );
+      if (item.itemType !== 'phantom_delete' && assertExternalAvailable) {
+        assertExternalAvailable({
+          accountId,
+          ids: [item.txnId],
+          sourceIds: [item.sourceId],
+          bootstrapResources: [...sagaOwnedBootstrapResources(saga)],
+          exceptSagaId: saga.id,
+          bulkDelegation: mirrorDeletionBulkDelegation(saga, resolvedItem, accountId),
+        });
+      }
+      if (item.itemType !== 'phantom_delete') {
+        await verifyLiveMirrorLedgerBeforeEffect(api, saga, resolvedItem, faultInjector);
+      }
+      await resolveDeletionDelegation(api, saga, resolvedItem, rowsByAccount, faultInjector);
       const rowsAfter = await loadAccountRows(api);
       await invokeFault(faultInjector, `before:item-${index}-post-delete-verification`, saga, index);
-      if (locateItemTransactionEverywhere(rowsAfter, item)) {
-        await unresolved(saga, `phantom delete target ${item.txnId} still present after deletion saga`, faultInjector);
+      if (locateItemTransactionEverywhere(rowsAfter, resolvedItem)) {
+        const label = item.itemType === 'phantom_delete' ? 'phantom delete' : 'splitwise mirror delete';
+        await unresolved(saga, `${label} target ${item.txnId} still present after deletion saga`, faultInjector);
       }
       await invokeFault(faultInjector, `after:item-${index}-post-delete-verification`, saga, index);
       saga.itemOutcomes = { ...saga.itemOutcomes, [String(index)]: { status: 'completed' } };
@@ -897,6 +1724,10 @@ function createBulkOperationSaga({
         await driveItem(api, saga, item, rowsByAccount, faultInjector);
         rowsByAccount = await loadAccountRows(api);
       }
+      if (saga.kind === 'splitwise_mirror') {
+        await verifySplitwiseSnapshotBinding(saga, faultInjector);
+        await invokeFault(faultInjector, 'before:mirror-items-complete-checkpoint', saga);
+      }
       await checkpoint(saga, { phase: 'sidecars_pending' }, 'sidecars-pending-checkpoint', faultInjector);
       return drive(api, saga, { faultInjector });
     }
@@ -910,6 +1741,10 @@ function createBulkOperationSaga({
       }
       if (saga.kind === 'phantom_cleanup') {
         await convergePhantomSidecars(saga, faultInjector);
+      }
+      if (saga.kind === 'splitwise_mirror') {
+        await verifySplitwiseSnapshotBinding(saga, faultInjector);
+        await invokeFault(faultInjector, 'before:mirror-sync-pending-checkpoint', saga);
       }
       await checkpoint(saga, { phase: 'sync_pending' }, 'sync-pending-checkpoint', faultInjector);
       return { needsSync: true };
@@ -945,7 +1780,9 @@ function createBulkOperationSaga({
   function buildResult(saga) {
     const auditOutcome = summarizeAuditOutcome(saga);
     saga.auditOutcome = auditOutcome;
-    const ok = saga.phase === 'completed' && auditOutcome.failed === 0;
+    const ok = saga.phase === 'completed'
+      && auditOutcome.failed === 0
+      && !sagaResultCorrupted(saga, auditOutcome);
     const needsSync = saga.phase === 'sync_pending';
     const base = { ok, status: auditOutcome.status, needsSync, auditOutcome };
     if (saga.kind === 'rules_apply') {
@@ -984,6 +1821,20 @@ function createBulkOperationSaga({
         watching: Object.keys(readPhantomSeen().seen || {}).length,
       };
     }
+    if (saga.kind === 'splitwise_mirror') {
+      const completed = (type) => saga.plan.items.filter(
+        (item) => item.itemType === type
+          && saga.itemOutcomes?.[String(item.globalIndex)]?.status === 'completed',
+      ).length;
+      return {
+        ...base,
+        account: saga.plan?.params?.accountName || swAccountName,
+        items: saga.plan?.params?.snapshotItemCount || 0,
+        created: completed('splitwise_create'),
+        updated: completed('splitwise_update'),
+        pruned: completed('splitwise_delete') + completed('splitwise_duplicate_drop'),
+      };
+    }
     return base;
   }
 
@@ -992,6 +1843,10 @@ function createBulkOperationSaga({
     for (const saga of sagas) {
       if (saga.phase !== 'sync_pending') continue;
       try {
+        if (saga.kind === 'splitwise_mirror') {
+          await verifySplitwiseSnapshotBinding(saga, faultInjector);
+          await invokeFault(faultInjector, 'before:mirror-terminal-checkpoint', saga);
+        }
         const syncedAt = new Date().toISOString();
         await checkpoint(saga, {
           phase: 'completed',
@@ -999,6 +1854,9 @@ function createBulkOperationSaga({
           auditOutcome: summarizeAuditOutcome({ ...saga, phase: 'completed' }),
           lastError: null,
         }, 'saga-terminal-write', faultInjector);
+        if (saga.kind === 'splitwise_mirror') {
+          await invokeFault(faultInjector, 'after:mirror-terminal-checkpoint', saga);
+        }
       } catch (error) {
         if (!isTerminalSaga(saga)) {
           try { await rememberError(saga, error, saga.phase, faultInjector); } catch (_) {}
@@ -1012,12 +1870,45 @@ function createBulkOperationSaga({
   async function finishSync(api, sagas, faultInjector, { skipSync = false } = {}) {
     const pending = sagas.filter((saga) => saga.phase === 'sync_pending');
     if (!pending.length) return;
+    for (const saga of pending) {
+      if (saga.kind === 'splitwise_mirror') {
+        await verifySplitwiseSnapshotBinding(saga, faultInjector);
+      }
+    }
     if (!skipSync && pending.some(sagaRequiresActualSync)) {
       await invokeFault(faultInjector, 'before:sync', pending[0]);
+      for (const saga of pending) {
+        if (saga.kind === 'splitwise_mirror') {
+          await invokeFault(faultInjector, 'before:mirror-sync', saga);
+        }
+      }
       await api.sync();
+      for (const saga of pending) {
+        if (saga.kind === 'splitwise_mirror') {
+          await invokeFault(faultInjector, 'after:mirror-sync', saga);
+        }
+      }
       await invokeFault(faultInjector, 'after:sync', pending[0]);
     }
     await terminalizeOnly(api, pending, faultInjector);
+  }
+
+  async function resumeExistingSaga(api, existing, { journalBinding, kind, faultInjector, deferSync }) {
+    if (kind && existing.kind && existing.kind !== kind) {
+      throw idempotencyKeyReuseError();
+    }
+    if (journalBinding) assertJournalBinding(existing, journalBinding, kind);
+    if (isTerminalSaga(existing)) return buildResult(existing);
+    try {
+      const result = await drive(api, existing, { faultInjector });
+      if (result?.needsSync && !deferSync) {
+        await finishSync(api, [existing], faultInjector);
+      }
+      return buildResult(existing);
+    } catch (error) {
+      try { await rememberError(existing, error, existing.phase, faultInjector); } catch (_) {}
+      throw error;
+    }
   }
 
   async function run(api, {
@@ -1028,24 +1919,47 @@ function createBulkOperationSaga({
     faultInjector,
     deferSync = false,
   }) {
+    if (operationKey) {
+      const existing = findByOperationKey(operationKey);
+      if (existing) {
+        return resumeExistingSaga(api, existing, { journalBinding, kind, faultInjector, deferSync });
+      }
+    } else if (kind === 'splitwise_mirror') {
+      const state = loadState();
+      const active = activeNullKeyMirrorSagas(state);
+      if (active.length > 1) {
+        throw new BulkOperationStateError('multiple active null-key splitwise mirror sagas');
+      }
+      if (active.length === 1) {
+        return resumeExistingSaga(api, active[0], { journalBinding, kind, faultInjector, deferSync });
+      }
+    }
+
+    let resolvedParams = params;
+    if (kind === 'splitwise_mirror') {
+      if (!operationKey) {
+        const resolved = resolveNewSplitwiseMirrorParams(params);
+        if (resolved.replay) return buildResult(resolved.replay);
+        resolvedParams = resolved.params;
+      } else {
+        resolvedParams = bindKeyedSplitwiseMirrorParams(params);
+      }
+    }
+
     const paramsFingerprint = crypto.createHash('sha256')
-      .update(JSON.stringify({ kind, params }))
+      .update(JSON.stringify({ kind, params: resolvedParams }))
       .digest('hex');
     const id = bulkOperationId(operationKey, kind, paramsFingerprint);
-    const existing = findByOperationKey(operationKey) || loadState().sagas[id];
-    if (existing) {
-      assertJournalBinding(existing, journalBinding, kind);
-      if (isTerminalSaga(existing)) return buildResult(existing);
-      try {
-        const result = await drive(api, existing, { faultInjector });
-        if (result?.needsSync && !deferSync) {
-          await finishSync(api, [existing], faultInjector);
-        }
-        return buildResult(existing);
-      } catch (error) {
-        try { await rememberError(existing, error, existing.phase, faultInjector); } catch (_) {}
-        throw error;
+
+    if (!operationKey && kind !== 'splitwise_mirror') {
+      const existing = loadState().sagas[id];
+      if (existing) {
+        return resumeExistingSaga(api, existing, { journalBinding, kind, faultInjector, deferSync });
       }
+    }
+
+    if (kind === 'splitwise_mirror') {
+      await assertSplitwiseMirrorPreAdmission(api);
     }
 
     const now = new Date().toISOString();
@@ -1055,7 +1969,7 @@ function createBulkOperationSaga({
       recordVersion: RECORD_VERSION,
       kind,
       operationKey,
-      params,
+      params: resolvedParams,
       paramsFingerprint,
       operationJournalFingerprint: normalizedBinding?.fingerprint ?? null,
       operationJournalFingerprintVersion: normalizedBinding?.fingerprintVersion ?? null,
@@ -1088,6 +2002,10 @@ function createBulkOperationSaga({
   }
 
   async function recover(api, { faultInjector, deferSync = false } = {}) {
+    const nullKeyActive = activeNullKeyMirrorSagas(loadState());
+    if (nullKeyActive.length > 1) {
+      throw new BulkOperationStateError('multiple active null-key splitwise mirror sagas');
+    }
     const active = Object.values(loadState().sagas).filter((saga) => !isTerminalSaga(saga));
     const syncPending = [];
     const errors = [];
