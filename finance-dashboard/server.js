@@ -72,6 +72,10 @@ const ORIGIN = process.env.WEBAUTHN_ORIGIN || PUBLIC_ORIGIN;
 const PASSKEY_USER_NAME = process.env.PASSKEY_USER_NAME || 'owner';
 const PASSKEY_USER_DISPLAY_NAME = process.env.PASSKEY_USER_DISPLAY_NAME || PASSKEY_USER_NAME;
 const CREDS_FILE = process.env.PASSKEY_CREDENTIALS_FILE || path.join(__dirname, 'passkey-credentials.json');
+const {
+  loadPasskeyCredentials,
+  savePasskeyCredentials,
+} = require('./lib/passkey-credentials-store');
 const SESSION_DIR = process.env.SESSION_DIR || path.join(__dirname, '.sessions');
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const ENROLLMENT_TOKEN_HASH = String(process.env.PASSKEY_ENROLLMENT_TOKEN_HASH || '').toLowerCase();
@@ -90,16 +94,10 @@ if (SELFTEST && !localOrigin) {
 }
 
 function loadCreds() {
-  if (!fs.existsSync(CREDS_FILE)) return [];
-  const parsed = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8'));
-  if (!Array.isArray(parsed)) throw new Error('Passkey credential store is invalid');
-  return parsed;
+  return loadPasskeyCredentials(CREDS_FILE);
 }
 function saveCreds(creds) {
-  const tmp = `${CREDS_FILE}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
-  fs.chmodSync(tmp, 0o600);
-  fs.renameSync(tmp, CREDS_FILE);
+  savePasskeyCredentials(creds, CREDS_FILE);
 }
 function requestClaimsDemo(req) {
   return req.get('X-Demo-Mode') === '1' || req.query.demo === '1' || req.query.demo === 'true';

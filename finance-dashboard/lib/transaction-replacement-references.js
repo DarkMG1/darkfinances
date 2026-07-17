@@ -53,20 +53,33 @@ function rewriteSuggestionValue(value, nextInflowId, idMap) {
   return next;
 }
 
+function preserveRuntimeEnvelope(source, body, { defaults = {} } = {}) {
+  const next = { ...defaults, ...body };
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return next;
+  if (Number.isInteger(source.schemaVersion)) next.schemaVersion = source.schemaVersion;
+  for (const [key, value] of Object.entries(source)) {
+    if (!hasOwn(next, key)) next[key] = value;
+  }
+  return next;
+}
+
 function rewriteTransactionReplacementReferences(stores, idMap) {
   const stats = { receipts: 0, links: 0, suggestions: 0, reconciliation: 0, phantomSeen: 0 };
-  const receipts = { byTxn: {} };
+  const receiptBody = { byTxn: {} };
   for (const [oldTxnId, list] of Object.entries(stores.receipts?.byTxn || {})) {
     const nextTxnId = mappedId(idMap, oldTxnId);
-    const destination = receipts.byTxn[nextTxnId] || (receipts.byTxn[nextTxnId] = []);
+    const destination = receiptBody.byTxn[nextTxnId] || (receiptBody.byTxn[nextTxnId] = []);
     for (const receipt of list || []) {
       const next = { ...receipt, txnId: nextTxnId };
       if (next.txnId !== receipt.txnId || nextTxnId !== oldTxnId) stats.receipts += 1;
       destination.push(next);
     }
   }
+  const receipts = preserveRuntimeEnvelope(stores.receipts, receiptBody, {
+    defaults: { schemaVersion: 1 },
+  });
 
-  const links = { links: [] };
+  const links = preserveRuntimeEnvelope(stores.links, { links: [] });
   const linkPairs = new Set();
   for (const link of stores.links?.links || []) {
     const inflowId = link?.inflow?.id == null ? null : mappedId(idMap, link.inflow.id);
@@ -81,7 +94,10 @@ function rewriteTransactionReplacementReferences(stores, idMap) {
     links.links.push(next);
   }
 
-  const suggestions = { confirmed: {}, dismissed: [] };
+  const suggestions = preserveRuntimeEnvelope(stores.suggestions, {
+    confirmed: {},
+    dismissed: [],
+  });
   const suggestionPairs = new Set();
   for (const value of stores.suggestions?.dismissed || []) {
     const next = mappedId(idMap, value);
@@ -131,7 +147,10 @@ function rewriteTransactionReplacementReferences(stores, idMap) {
     suggestions.confirmed[nextKey] = nextValue;
   }
 
-  const reconciliation = { ...stores.reconciliation, months: {} };
+  const reconciliation = preserveRuntimeEnvelope(stores.reconciliation, {
+    enabled: Boolean(stores.reconciliation?.enabled),
+    months: {},
+  });
   for (const [month, value] of Object.entries(stores.reconciliation?.months || {})) {
     const items = {};
     for (const [id, timestamp] of Object.entries(value?.items || {})) {
@@ -142,7 +161,7 @@ function rewriteTransactionReplacementReferences(stores, idMap) {
     reconciliation.months[month] = { ...value, items };
   }
 
-  const phantomSeen = { seen: {} };
+  const phantomSeen = preserveRuntimeEnvelope(stores.phantomSeen, { seen: {} });
   for (const [id, value] of Object.entries(stores.phantomSeen?.seen || {})) {
     const next = mappedId(idMap, id);
     if (next !== id) stats.phantomSeen += 1;

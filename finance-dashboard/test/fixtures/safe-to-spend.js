@@ -55,7 +55,7 @@ function buildFixture({
   if (spending.dining) {
     transactions.push({
       id: 'targetless-spend',
-      account: 'cash',
+      account: 'acc-check',
       date: addDays(today, -2),
       amount: -Math.round(spending.dining * 100),
       category: 'dining',
@@ -67,7 +67,7 @@ function buildFixture({
     for (const [index, days] of [65, 35, 5].entries()) {
       transactions.push({
         id: `subscription-${index}`,
-        account: 'cash',
+        account: 'acc-check',
         date: addDays(today, -days),
         amount: -1500,
         category: 'software',
@@ -79,8 +79,8 @@ function buildFixture({
 
   return {
     accounts: [
-      { id: 'cash', name: 'Checking', closed: false, offbudget: false, balance: 500000, role: 'operating_cash' },
-      { id: 'card', name: 'Credit Card', closed: false, offbudget: false, balance: Math.round(cardBalance * 100), role: 'credit_card' },
+      { id: 'acc-check', name: 'Checking', closed: false, offbudget: false, balance: 500000, role: 'operating_cash' },
+      { id: 'acc-credit', name: 'Credit Card', closed: false, offbudget: false, balance: Math.round(cardBalance * 100), role: 'credit_card' },
     ],
     categoryGroups: [
       { id: 'income-group', name: 'Income', is_income: true, categories: [{ id: 'salary', name: 'Salary' }] },

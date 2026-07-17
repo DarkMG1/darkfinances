@@ -617,24 +617,21 @@ test('projection mutation invalidates cache when journal local_applied persisten
     const root = process.env.TEST_DASHBOARD_ROOT;
     const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');
     const journalModPath = require.resolve(path.join(root, 'lib/operation-journal.js'));
-    const { writeJsonFile } = require(path.join(root, 'lib/json-store.js'));
     const journalMod = require(journalModPath);
     const OrigJournal = journalMod.OperationJournal;
     journalMod.OperationJournal = class PatchedOperationJournal extends OrigJournal {
       constructor(file, options = {}) {
-        let writeCount = 0;
-        super(file, {
-          ...options,
-          writeState(target, state) {
-            writeCount += 1;
-            if (writeCount === 2) {
-              const error = new Error('injected local_applied journal failure');
-              error.code = 'INJECTED_WRITE_FAILURE';
-              throw error;
-            }
-            writeJsonFile(target, state);
-          },
-        });
+        super(file, options);
+        this._patchedWriteCount = 0;
+      }
+      writePruned(state) {
+        this._patchedWriteCount += 1;
+        if (this._patchedWriteCount === 2) {
+          const error = new Error('injected local_applied journal failure');
+          error.code = 'INJECTED_WRITE_FAILURE';
+          throw error;
+        }
+        return super.writePruned(state);
       }
     };
     const dataPath = require.resolve(path.join(root, 'dataModule.js'));

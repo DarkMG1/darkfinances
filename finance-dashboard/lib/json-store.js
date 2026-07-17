@@ -137,6 +137,7 @@ function writeJsonFile(file, value) {
 
 module.exports = {
   JsonStoreError,
+  quarantineCorruptFile,
   readJsonFile,
   writeJsonFile,
 };

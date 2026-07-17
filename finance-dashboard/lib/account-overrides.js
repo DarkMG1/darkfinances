@@ -1,47 +1,25 @@
 'use strict';
 
-const { readJsonFile, writeJsonFile } = require('./json-store');
+const { ACCOUNT_ROLES, migrateAccountOverrides } = require('./account-overrides-schema');
 
-const ACCOUNT_ROLES = [
-  'operating_cash',
-  'protected_savings',
-  'credit_card',
-  'loan',
-  'investment',
-  'excluded',
-  'unknown',
-];
-const ROLE_SET = new Set(ACCOUNT_ROLES);
-
-function validEntry(entry) {
-  return entry &&
-    typeof entry === 'object' &&
-    !Array.isArray(entry) &&
-    (entry.name === undefined || typeof entry.name === 'string') &&
-    (entry.hidden === undefined || typeof entry.hidden === 'boolean') &&
-    (entry.role === undefined || ROLE_SET.has(entry.role));
+function runtimeStore() {
+  return require('./runtime-state-store');
 }
 
-function migrateAccountOverrides(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  if (value.schemaVersion === 2) {
-    if (!value.accounts || typeof value.accounts !== 'object' || Array.isArray(value.accounts)) return null;
-    if (!Object.values(value.accounts).every(validEntry)) return null;
-    return { schemaVersion: 2, accounts: value.accounts };
-  }
-  if (!Object.values(value).every(validEntry)) return null;
-  return { schemaVersion: 2, accounts: value };
+function resolveAccountOverridesName(file) {
+  return runtimeStore().registryNameForPath(file) || 'accountOverrides';
 }
 
 function readAccountOverrides(file) {
-  const raw = readJsonFile(file, { schemaVersion: 2, accounts: {} }, (value) => migrateAccountOverrides(value) !== null);
-  return migrateAccountOverrides(raw) || { schemaVersion: 2, accounts: {} };
+  const { readRuntimeState } = runtimeStore();
+  return readRuntimeState(resolveAccountOverridesName(file), { file }).value;
 }
 
 function writeAccountOverrides(file, store) {
+  const { writeRuntimeState } = runtimeStore();
   const migrated = migrateAccountOverrides(store);
   if (!migrated) throw new Error('account override state is invalid');
-  writeJsonFile(file, migrated);
+  writeRuntimeState(resolveAccountOverridesName(file), migrated, { file });
 }
 
 function accountsForMetric(accounts, metric) {

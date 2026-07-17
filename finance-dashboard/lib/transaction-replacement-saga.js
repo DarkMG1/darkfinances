@@ -4,6 +4,10 @@ const crypto = require('crypto');
 const { KnownPreApplyError } = require('./errors');
 const { readJsonFile, writeJsonFile } = require('./json-store');
 
+function runtimeStateStore() {
+  return require('./runtime-state-store');
+}
+
 const RECORD_VERSION = 2;
 const TERMINAL_LIMIT = 100;
 const TERMINAL_PHASES = new Set(['completed', 'rolled_back']);
@@ -356,7 +360,7 @@ function createTransactionReplacementSaga({
   if (!sagaPath) throw new Error('transaction saga path required');
 
   function loadState() {
-    const raw = readJsonFile(sagaPath, { schemaVersion: 1, sagas: {} });
+    const raw = runtimeStateStore().readRuntimeState('transactionSagas', { file: sagaPath }).value;
     if (!raw || raw.schemaVersion !== 1 || !raw.sagas || typeof raw.sagas !== 'object' || Array.isArray(raw.sagas)) {
       throw new Error('invalid transaction saga state');
     }
@@ -386,7 +390,7 @@ function createTransactionReplacementSaga({
   }
 
   function writeState(state) {
-    writeJsonFile(sagaPath, pruneState(state));
+    runtimeStateStore().writeRuntimeState('transactionSagas', pruneState(state), { file: sagaPath });
   }
 
   function writeSaga(saga) {
