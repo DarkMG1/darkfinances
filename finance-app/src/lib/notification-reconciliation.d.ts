@@ -64,4 +64,19 @@ export function withReconciliationGuard<T>(
   fn: () => Promise<T> | T,
 ): Promise<T>;
 
+export function bindNotificationScopeSuspensionPersistence(persistence: {
+  kv: {
+    getString: (key: string) => string | null;
+    setString: (key: string, value: string | null) => void;
+  };
+  storage: {
+    getAllKeys: () => string[];
+    remove: (key: string) => void;
+  };
+}): void;
+
+export function readPersistedSuspensionGeneration(scope?: string): number | null;
+
+export function simulateNotificationScopeSuspensionModuleReset(): void;
+
 export function resetNotificationReconciliationState(): void;

@@ -66,10 +66,6 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
         storedToken = null;
       }
       setToken(storedToken);
-      activateNotificationScope(
-        financeServerScope(storedUrl, storedToken, storedDemo),
-        getProfileGeneration(),
-      );
       setReady(true);
     })();
   }, []);

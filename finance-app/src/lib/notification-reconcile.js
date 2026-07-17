@@ -138,7 +138,7 @@ function createNotificationReconciler(deps) {
     return readCommittedCategoryIds(readTrackedScheduledIds(scope), category);
   }
 
-  async function guardedHasPermission(token) {
+  async function readPermissionGranted(token) {
     assertReconciliationCurrent(token);
     const result = await notifications.getPermissionsAsync();
     assertReconciliationCurrent(token);
@@ -173,9 +173,13 @@ function createNotificationReconciler(deps) {
   async function migrateLegacyScheduledNotifications(token) {
     if (kv.getBool(NOTIF_KEYS.legacyMigration, false)) return;
     assertReconciliationCurrent(token);
-    if (!(await guardedHasPermission(token))) return;
 
-    const scheduled = await notifications.getAllScheduledNotificationsAsync();
+    let scheduled;
+    try {
+      scheduled = await notifications.getAllScheduledNotificationsAsync();
+    } catch {
+      return;
+    }
     assertReconciliationCurrent(token);
 
     const ownedIds = [];
@@ -187,7 +191,11 @@ function createNotificationReconciler(deps) {
 
     for (const id of ownedIds) {
       assertReconciliationCurrent(token);
-      await notifications.cancelScheduledNotificationAsync(id);
+      try {
+        await notifications.cancelScheduledNotificationAsync(id);
+      } catch {
+        return;
+      }
     }
 
     assertReconciliationCurrent(token);
@@ -197,7 +205,7 @@ function createNotificationReconciler(deps) {
   async function refreshNotificationStatus(token, scope) {
     assertReconciliationCurrent(token);
     const status = readNotificationStatus(scope);
-    status.permissionGranted = await guardedHasPermission(token);
+    status.permissionGranted = await readPermissionGranted(token);
     try {
       const scheduled = await notifications.getAllScheduledNotificationsAsync();
       assertReconciliationCurrent(token);
@@ -339,17 +347,18 @@ function createNotificationReconciler(deps) {
 
     await withReconciliationGuard(token, () => migrateLegacyScheduledNotifications(token));
     migrateLegacyBillSameDayKeys(scope);
-    if (!(await guardedHasPermission(token))) return;
 
-    if (settings.weekly) {
-      await withReconciliationGuard(token, () => scheduleWeeklyNotification(token, scope, settings));
-    } else {
+    const permissionGranted = await readPermissionGranted(token);
+
+    if (!settings.weekly) {
       await withReconciliationGuard(token, () => cancelTrackedCategory(token, scope, 'weekly'));
+    } else if (permissionGranted) {
+      await withReconciliationGuard(token, () => scheduleWeeklyNotification(token, scope, settings));
     }
 
     if (!settings.bills) {
       await withReconciliationGuard(token, () => cancelTrackedCategory(token, scope, 'bills'));
-    } else if (billsReady && Array.isArray(bills)) {
+    } else if (billsReady && Array.isArray(bills) && permissionGranted) {
       await withReconciliationGuard(token, () => scheduleBillNotifications(token, scope, settings, bills, financeToday));
     }
 
@@ -505,7 +514,7 @@ function createNotificationReconciler(deps) {
       repayments,
     } = input;
     assertReconciliationCurrent(token);
-    if (!(await guardedHasPermission(token))) return;
+    if (!(await readPermissionGranted(token))) return;
 
     if (settings.largeCharge && transactions) {
       await withReconciliationGuard(token, () => checkLargeCharges(token, scope, settings, transactions));

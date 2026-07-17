@@ -3,10 +3,13 @@
 const {
   activateNotificationScope,
   assertScopeReconciliationAdmitted,
+  bindNotificationScopeSuspensionPersistence,
   bindProfileGenerationReader,
   isNotificationScopeAdmissionAllowed,
   isNotificationScopeSuspended,
+  readPersistedSuspensionGeneration,
   resetNotificationScopeSuspensions,
+  simulateNotificationScopeSuspensionModuleReset,
   suspendNotificationScope,
 } = require('./notification-scope-suspension');
 
@@ -179,6 +182,7 @@ module.exports = {
   activateNotificationScope,
   assertReconciliationCurrent,
   beginReconciliation,
+  bindNotificationScopeSuspensionPersistence,
   bumpProfileGeneration,
   cancelActiveReconciliation,
   cancelAllReconciliationLanes,
@@ -194,7 +198,9 @@ module.exports = {
   isReconciliationCurrent,
   isStaleGeneration,
   purgeProfileGeneration,
+  readPersistedSuspensionGeneration,
   resetNotificationReconciliationState,
+  simulateNotificationScopeSuspensionModuleReset,
   subscribeProfileGeneration,
   suspendNotificationScope,
   withReconciliationGuard,

@@ -5,6 +5,7 @@ const {
   activateNotificationScope,
   assertReconciliationCurrent,
   beginReconciliation,
+  bindNotificationScopeSuspensionPersistence,
   bumpProfileGeneration,
   cancelReconciliation,
   cancelReconciliationLane,
@@ -15,18 +16,45 @@ const {
   isNotificationScopeSuspended,
   isReconciliationCurrent,
   purgeProfileGeneration,
+  readPersistedSuspensionGeneration,
   resetNotificationReconciliationState,
+  simulateNotificationScopeSuspensionModuleReset,
   withReconciliationGuard,
 } = require('../src/lib/notification-reconciliation');
+const { SUSPENSION_KEY_PREFIX } = require('../src/lib/notification-scope-suspension');
+
+function createSuspensionStore() {
+  const values = new Map();
+  return {
+    kv: {
+      getString: (key) => (values.has(key) ? values.get(key) : null),
+      setString: (key, value) => {
+        if (value == null) values.delete(key);
+        else values.set(key, value);
+      },
+    },
+    storage: {
+      getAllKeys: () => [...values.keys()],
+      remove: (key) => values.delete(key),
+    },
+    values,
+  };
+}
 
 test.beforeEach(() => {
   resetNotificationReconciliationState();
+  bindNotificationScopeSuspensionPersistence(createSuspensionStore());
 });
 
-test('purgeProfileGeneration suspends scope before generation bump', () => {
+test('purgeProfileGeneration persists suspension before generation bump', () => {
+  const store = createSuspensionStore();
+  bindNotificationScopeSuspensionPersistence(store);
   const scope = 'server-a';
   const scheduled = beginReconciliation('scheduled', 0, scope);
+  const priorGeneration = getProfileGeneration();
   const nextGeneration = purgeProfileGeneration(scope);
+  assert.equal(store.kv.getString(`${SUSPENSION_KEY_PREFIX}${scope}`), String(priorGeneration));
+  simulateNotificationScopeSuspensionModuleReset();
   assert.equal(isNotificationScopeSuspended(scope), true);
   assert.equal(isReconciliationCurrent(scheduled), false);
   assert.equal(getProfileGeneration(), nextGeneration);
@@ -36,14 +64,19 @@ test('purgeProfileGeneration suspends scope before generation bump', () => {
   );
 });
 
-test('activateNotificationScope clears tombstone for same-scope reconnect only at current generation', () => {
+test('activateNotificationScope clears persisted tombstone for same-scope reconnect only at current generation', () => {
+  const store = createSuspensionStore();
+  bindNotificationScopeSuspensionPersistence(store);
   const scope = 'server-a';
   purgeProfileGeneration(scope);
   const generation = getProfileGeneration();
+  simulateNotificationScopeSuspensionModuleReset();
+  assert.equal(readPersistedSuspensionGeneration(scope), 0);
   activateNotificationScope(scope, generation - 1);
   assert.equal(isNotificationScopeSuspended(scope), true);
   activateNotificationScope(scope, generation);
   assert.equal(isNotificationScopeSuspended(scope), false);
+  assert.equal(readPersistedSuspensionGeneration(scope), null);
   beginReconciliation('scheduled', generation, scope);
 });
 

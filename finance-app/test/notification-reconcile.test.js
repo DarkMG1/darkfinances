@@ -5,16 +5,20 @@ const { createNotificationReconciler, parseNotificationRoute } = require('../src
 const {
   activateNotificationScope,
   beginReconciliation,
+  bindNotificationScopeSuspensionPersistence,
   bumpProfileGeneration,
   cancelReconciliation,
   getProfileGeneration,
   isNotificationScopeSuspended,
   isReconciliationCurrent,
   purgeProfileGeneration,
+  readPersistedSuspensionGeneration,
   resetNotificationReconciliationState,
+  simulateNotificationScopeSuspensionModuleReset,
   withReconciliationGuard,
   assertReconciliationCurrent,
 } = require('../src/lib/notification-reconciliation');
+const { SUSPENSION_KEY_PREFIX } = require('../src/lib/notification-scope-suspension');
 const { createNotificationReconciliationOwnerRunner } = require('../src/lib/notification-reconciliation-owner');
 const {
   createRedactedNotificationReconciliationError,
@@ -245,8 +249,12 @@ function assertKvEvidenceCoversOsLive(reconciler, scope, category, notifications
   }
 }
 
+let suspensionStore = createStorage();
+
 test.beforeEach(() => {
   resetNotificationReconciliationState();
+  suspensionStore = createStorage();
+  bindNotificationScopeSuspensionPersistence(suspensionStore);
 });
 
 test('classifyBillReminder scopes same-day dedupe keys by profile', () => {
@@ -553,7 +561,49 @@ test('partial bill scheduling rolls back newly scheduled IDs on lane cancellatio
   assert.deepEqual(JSON.parse(store.kv.getString('notif.scheduledIds.v1.server-a')), { bills: ['tracked-bill-1'] });
 });
 
-test('permission denied exits scheduled reconcile without scheduling or migration churn', async () => {
+test('permission denied skips scheduling but still disables categories and refreshes status', async () => {
+  const store = createStorage();
+  const notificationsApi = createNotificationsApi();
+  notificationsApi.setPermissionGranted(false);
+  notificationsApi.scheduled.push(
+    { id: 'tracked-weekly', request: { content: { data: { route: '/review', category: 'weekly', scope: 'server-a' } }, trigger: {} } },
+    { id: 'tracked-bill', request: { content: { data: { route: '/bills', category: 'bills', scope: 'server-a' } }, trigger: {} } },
+    {
+      id: 'legacy-finance-1',
+      request: {
+        content: {
+          data: { route: '/bills', category: 'bills', scope: 'server-a' },
+        },
+      },
+    },
+  );
+  store.kv.setString(
+    'notif.scheduledIds.v1.server-a',
+    JSON.stringify({ weekly: ['tracked-weekly'], bills: ['tracked-bill'] }),
+  );
+  const reconciler = createReconciler(store, notificationsApi);
+  const token = beginReconciliation('scheduled', 0, 'server-a');
+
+  await reconciler.reconcileScheduledNotifications({
+    token,
+    scope: 'server-a',
+    settings: baseSettings({ weekly: false, bills: false }),
+    billsReady: false,
+  });
+
+  assert.equal(notificationsApi.scheduled.length, 0);
+  assert.deepEqual(
+    [...new Set(notificationsApi.cancelled)].sort(),
+    ['legacy-finance-1', 'tracked-bill', 'tracked-weekly'].sort(),
+  );
+  assert.deepEqual(JSON.parse(store.kv.getString('notif.scheduledIds.v1.server-a')), {});
+  assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), true);
+  const status = JSON.parse(store.kv.getString('notif.status.v2.server-a'));
+  assert.equal(status.permissionGranted, false);
+  assert.equal(status.scheduledCount, 0);
+});
+
+test('permission denied never schedules enabled categories', async () => {
   const store = createStorage();
   const notificationsApi = createNotificationsApi();
   notificationsApi.setPermissionGranted(false);
@@ -570,7 +620,82 @@ test('permission denied exits scheduled reconcile without scheduling or migratio
 
   assert.equal(notificationsApi.scheduled.length, 0);
   assert.deepEqual(notificationsApi.cancelled, []);
+  const status = JSON.parse(store.kv.getString('notif.status.v2.server-a'));
+  assert.equal(status.permissionGranted, false);
+  assert.equal(status.scheduledCount, 0);
+  assert.equal(status.lastRefresh?.weekly, undefined);
+});
+
+test('permission denied disable retains cleanup evidence when cancel is unconfirmed', async () => {
+  const store = createStorage();
+  const notificationsApi = createNotificationsApi();
+  notificationsApi.setPermissionGranted(false);
+  notificationsApi.scheduled.push({ id: 'tracked-weekly', request: { trigger: {} } });
+  notificationsApi.rejectCancelFor('tracked-weekly');
+  store.kv.setString(
+    'notif.scheduledIds.v1.server-a',
+    JSON.stringify({ weekly: ['tracked-weekly'] }),
+  );
+  const reconciler = createReconciler(store, notificationsApi);
+  const token = beginReconciliation('scheduled', 0, 'server-a');
+
+  await reconciler.reconcileScheduledNotifications({
+    token,
+    scope: 'server-a',
+    settings: baseSettings({ weekly: false }),
+    billsReady: false,
+  });
+
+  const state = reconciler.readCategoryScheduleState('server-a', 'weekly');
+  assert.deepEqual(state.cleanup, ['tracked-weekly']);
+  assert.deepEqual(state.canonical, []);
+  const status = JSON.parse(store.kv.getString('notif.status.v2.server-a'));
+  assert.equal(status.permissionGranted, false);
+});
+
+test('legacy finance-owned OS schedules migrate under denied permission', async () => {
+  const store = createStorage();
+  const notificationsApi = createNotificationsApi();
+  notificationsApi.setPermissionGranted(false);
+  notificationsApi.scheduled.push({
+    id: 'legacy-finance-1',
+    request: {
+      content: {
+        data: { route: '/review', category: 'weekly', scope: 'server-a' },
+      },
+    },
+  });
+  const reconciler = createReconciler(store, notificationsApi);
+  const token = beginReconciliation('scheduled', 0, 'server-a');
+
+  await reconciler.migrateLegacyScheduledNotifications(token);
+  assert.deepEqual(notificationsApi.cancelled, ['legacy-finance-1']);
+  assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), true);
+});
+
+test('legacy migration defers marker when cancel fails under denied permission', async () => {
+  const store = createStorage();
+  const notificationsApi = createNotificationsApi();
+  notificationsApi.setPermissionGranted(false);
+  notificationsApi.scheduled.push({
+    id: 'legacy-finance-1',
+    request: {
+      content: {
+        data: { route: '/review', category: 'weekly', scope: 'server-a' },
+      },
+    },
+  });
+  notificationsApi.rejectCancelFor('legacy-finance-1');
+  const reconciler = createReconciler(store, notificationsApi);
+  const token = beginReconciliation('scheduled', 0, 'server-a');
+
+  await reconciler.migrateLegacyScheduledNotifications(token);
   assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), false);
+
+  notificationsApi.clearCancelFaults();
+  await reconciler.migrateLegacyScheduledNotifications(token);
+  assert.deepEqual(notificationsApi.cancelled, ['legacy-finance-1']);
+  assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), true);
 });
 
 test('legacy finance-owned OS schedules migrate once then stay idempotent', async () => {
@@ -1102,12 +1227,104 @@ test('purge dismisses delivered finance notifications for the scoped profile onl
   assert.equal(notificationsApi.presented[0].request.identifier, 'del-b');
 });
 
-test('scope suspension stays profile-isolated across purge generations', () => {
+test('persisted purge suspension survives module reset and blocks old scope', () => {
+  const scope = 'server-a';
+  purgeProfileGeneration(scope);
+  assert.equal(suspensionStore.kv.getString(`${SUSPENSION_KEY_PREFIX}${scope}`), '0');
+
+  simulateNotificationScopeSuspensionModuleReset();
+  assert.equal(isNotificationScopeSuspended(scope), true);
+  assert.throws(
+    () => beginReconciliation('scheduled', getProfileGeneration(), scope),
+    (error) => error.code === 'NOTIFICATION_RECONCILIATION_STALE',
+  );
+});
+
+test('startup profile load does not clear persisted purge suspension', () => {
+  const scope = 'server-a';
+  purgeProfileGeneration(scope);
+  simulateNotificationScopeSuspensionModuleReset();
+
+  assert.equal(isNotificationScopeSuspended(scope), true);
+  assert.equal(readPersistedSuspensionGeneration(scope), 0);
+});
+
+test('explicit setConfig activation clears only matching scope at current generation', () => {
   purgeProfileGeneration('server-a');
-  assert.equal(isNotificationScopeSuspended('server-a'), true);
-  assert.equal(isNotificationScopeSuspended('server-b'), false);
-  activateNotificationScope('server-b', getProfileGeneration());
-  assert.equal(isNotificationScopeSuspended('server-b'), false);
+  purgeProfileGeneration('server-b');
+  simulateNotificationScopeSuspensionModuleReset();
+
+  activateNotificationScope('server-a', getProfileGeneration());
+  assert.equal(isNotificationScopeSuspended('server-a'), false);
+  assert.equal(isNotificationScopeSuspended('server-b'), true);
+  beginReconciliation('scheduled', getProfileGeneration(), 'server-a');
+});
+
+test('completed purge does not reactivate old scope without explicit activation', async () => {
+  const store = createStorage();
+  const notificationsApi = createNotificationsApi();
+  const reconciler = createReconciler(store, notificationsApi);
+  const scope = 'server-a';
+  store.kv.setString(
+    'notif.scheduledIds.v1.server-a',
+    JSON.stringify({ weekly: ['tracked-weekly'] }),
+  );
+  notificationsApi.scheduled.push({ id: 'tracked-weekly', request: { trigger: {} } });
+
+  purgeProfileGeneration(scope);
+  await reconciler.purgeNotificationProfileState(scope);
+  simulateNotificationScopeSuspensionModuleReset();
+
+  const runner = createNotificationReconciliationOwnerRunner({
+    generation: getProfileGeneration(),
+    reconcileScheduled: (input) => reconciler.reconcileScheduledNotifications(input),
+    reconcileEvent: () => Promise.resolve(),
+  });
+  const blocked = runner.startScheduled({
+    scope,
+    settings: baseSettings({ weekly: true }),
+    billsReady: false,
+  });
+  assert.equal(blocked.suppressed, true);
+  await blocked.run;
+  assert.equal(notificationsApi.scheduled.length, 0);
+});
+
+test('purge crash before config clear cannot repopulate schedules on restart admission block', async () => {
+  const store = createStorage();
+  const notificationsApi = createNotificationsApi();
+  const reconciler = createReconciler(store, notificationsApi);
+  const scope = 'server-a';
+  store.kv.setString(
+    'notif.scheduledIds.v1.server-a',
+    JSON.stringify({ weekly: ['tracked-weekly'] }),
+  );
+  notificationsApi.scheduled.push({ id: 'tracked-weekly', request: { trigger: {} } });
+
+  purgeProfileGeneration(scope);
+  simulateNotificationScopeSuspensionModuleReset();
+
+  const runner = createNotificationReconciliationOwnerRunner({
+    generation: getProfileGeneration(),
+    reconcileScheduled: (input) => reconciler.reconcileScheduledNotifications(input),
+    reconcileEvent: (input) => reconciler.reconcileEventNotifications(input),
+  });
+  const blocked = runner.startScheduled({
+    scope,
+    settings: baseSettings({ weekly: true }),
+    billsReady: false,
+  });
+  assert.equal(blocked.suppressed, true);
+  await blocked.run;
+
+  const blockedEvent = runner.startEvent({
+    scope,
+    settings: baseSettings({ largeCharge: true }),
+    transactions: [{ id: 'txn-1', amount: -500, payee: 'Store' }],
+  });
+  assert.equal(blockedEvent.suppressed, true);
+  await blockedEvent.run;
+  assert.equal(notificationsApi.scheduled.length, 1);
 });
 
 test('confirmed cancel retains retiring IDs when OS cancel is rejected', async () => {
