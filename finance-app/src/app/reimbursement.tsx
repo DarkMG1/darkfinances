@@ -64,13 +64,19 @@ export default function Reimbursement() {
 
   const owes = reimb.data?.owes ?? [];
   const summary = reimb.data?.summary;
-  const grandTotal = reimb.data?.totalOwed ?? 0;
+  const totalOwedMetric = reimb.data?.totalOwed;
+  const grandTotal = totalOwedMetric?.complete ? (totalOwedMetric.value ?? 0) : null;
+  const grandLowerBound = !totalOwedMetric?.complete ? totalOwedMetric?.lowerBound : null;
   const debtorCount = reimb.data?.debtorCount ?? owes.length;
-  const sugg = suggestions.data?.suggestions ?? [];
+  const sugg = suggestions.data?.complete === false ? [] : (suggestions.data?.suggestions ?? []);
   const snapshot = snapshotLabel(reimb.data?.owesSource, reimb.data?.owesGeneratedAt, reimb.data?.owesWarning);
   const windowNet = (summary?.paidBack ?? 0) - (summary?.fronted ?? 0);
-  const netValue = range === 'life' ? (summary?.outstanding ?? grandTotal) : windowNet;
-  const netGood = range === 'life' ? netValue <= 0.5 : netValue >= -0.005;
+  const netValue = range === 'life'
+    ? (summary?.outstanding ?? (totalOwedMetric?.complete ? totalOwedMetric.value : null))
+    : windowNet;
+  const netGood = range === 'life'
+    ? (netValue != null && netValue <= 0.5)
+    : netValue != null && netValue >= -0.005;
 
   // Group/trip fronts not attributed to a specific person (net < 0 = owed to you).
   const bucketList = useMemo(() => {
@@ -137,8 +143,13 @@ export default function Reimbursement() {
       ) : (
         <>
           <Card style={{ marginBottom: 16 }}>
-            <Text style={styles.total}>{fmtPos(grandTotal)}</Text>
-            <Text style={styles.totalLabel}>owed to you · {debtorCount} {debtorCount === 1 ? 'person' : 'people'} · {cutoffLabel(reimb.data?.ledgerCutoff)}</Text>
+            <Text style={styles.total}>
+              {grandTotal != null ? fmtPos(grandTotal) : grandLowerBound != null ? `${totalOwedMetric?.lowerBoundLabel || 'at least'} ${fmtPos(grandLowerBound)}` : '—'}
+            </Text>
+            <Text style={styles.totalLabel}>
+              owed to you · {debtorCount ?? '—'} {debtorCount === 1 ? 'person' : 'people'} · {cutoffLabel(reimb.data?.ledgerCutoff)}
+              {totalOwedMetric?.complete === false ? ' · partial ledger scan' : ''}
+            </Text>
             <Text style={[styles.sourceLabel, reimb.data?.owesWarning && { color: colors.yellow }]}>{snapshot}</Text>
             {reimb.data?.lastKnownSplitwise ? (
               <View style={styles.staleNotice}>
@@ -180,7 +191,9 @@ export default function Reimbursement() {
               </View>
               <View style={styles.sumChip}>
                 <Text style={[styles.sumVal, { color: netGood ? colors.green : colors.red }]}>
-                  {range === 'life' ? fmtPos(netValue) : fmtSignedMoney(netValue)}
+                  {range === 'life'
+                    ? (netValue != null ? fmtPos(netValue) : '—')
+                    : (netValue != null ? fmtSignedMoney(netValue) : '—')}
                 </Text>
                 <Text style={styles.sumLabel}>{range === 'life' ? 'still owed' : 'net cash flow'}</Text>
               </View>

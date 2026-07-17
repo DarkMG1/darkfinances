@@ -457,7 +457,27 @@ function reimbursement() {
   ];
   return {
     range: { from: ymd(daysAgo(150)), to: financeAnchor() },
-    totalOwed: 255.0, debtorCount: 2, owes, people: [], events, expected: [], buckets: {},
+    totalOwed: {
+      value: 255.0,
+      valueCents: 25500,
+      complete: true,
+      incompleteReasons: [],
+      provenance: {
+        metric: 'reimbursement.total_owed',
+        asOf: new Date().toISOString(),
+        financeDate: financeAnchor(),
+        sources: [{ type: 'demo' }],
+        method: 'demo',
+        excludes: [],
+      },
+    },
+    debtorCount: 2,
+    owes,
+    people: [],
+    events,
+    expected: [],
+    buckets: {},
+    ledgerScan: { queriedFrom: ymd(daysAgo(150)), configuredFrom: '2000-01-01', to: financeAnchor(), complete: true },
   };
 }
 

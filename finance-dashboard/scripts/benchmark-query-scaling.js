@@ -33,21 +33,30 @@ async function bench(label, fn) {
     accountsQueried: stats.accountsQueried,
     rowsScanned: stats.rowsScanned,
     rowsReturned: stats.rowsReturned,
+    peakRowsRetained: stats.peakRowsRetained,
     callBounds: fixture.state.callLog.slice(0, 3),
     totalCalls: fixture.state.callLog.length,
   }, null, 2));
 }
 
 (async () => {
-  fixture.reset({ accountCount: 4, rowsPerAccount: 30_000, anchorMonth: '2024-06' });
+  fixture.reset({ accountCount: 4, rowsPerAccount: 30_000, anchorMonth: '2024-06', yearSpan: 12 });
   await data.initApi({ skipRecover: true });
-  await bench('trends-3mo', () => data.getTrends({ months: 3, endMonth: '2024-06' }));
-  await bench('spending-april', () => data.getSpending({ start: '2024-04-01', end: '2024-04-30' }));
-  await bench('search-june-page', () => data.searchTransactions({
-    start: '2024-06-01',
-    end: '2024-06-30',
-    limit: 100,
-  }));
+  await bench('trends-3mo-bounded-window', () => data.getTrends({ months: 3, endMonth: '2024-06' }));
+  await bench('trends-60mo-bounded-window', () => data.getTrends({ months: 60, endMonth: '2024-06' }));
+  await bench('spending-april-merged-scan', () => data.getSpending({ start: '2024-04-01', end: '2024-04-30' }));
+  process.env.FINANCE_QUERY_MAX_LEDGER_ROWS = '5000';
+  process.env.FINANCE_QUERY_MAX_TXN_LIST_ROWS = '5000';
+  fixture.reset({ accountCount: 2, rowsPerAccount: 10_000, anchorMonth: '2024-06', yearSpan: 1 });
+  await data.resetApi();
+  await data.initApi({ skipRecover: true });
+  await bench('dense-window-cap-413', async () => {
+    try {
+      await data.getTransactions({ start: '2024-06-01', end: '2024-06-30' });
+    } catch (error) {
+      if (error.code !== 'QUERY_RESULT_LIMIT_EXCEEDED') throw error;
+    }
+  });
   data.resetApi();
 })().catch((error) => {
   console.error(error);

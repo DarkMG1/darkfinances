@@ -16,6 +16,7 @@ const DEFAULTS = Object.freeze({
   maxRecurringWindowMonths: 36,
   maxMerchantHistoryMonths: 60,
   maxEventsTagLookbackDays: 400,
+  ledgerChunkDays: 120,
   queryBudgetMs: 120_000,
 });
 
@@ -31,6 +32,7 @@ const INT_FIELDS = [
   'maxRecurringWindowMonths',
   'maxMerchantHistoryMonths',
   'maxEventsTagLookbackDays',
+  'ledgerChunkDays',
   'queryBudgetMs',
 ];
 
@@ -46,6 +48,7 @@ const ENV_MAP = Object.freeze({
   maxRecurringWindowMonths: 'FINANCE_QUERY_MAX_RECURRING_WINDOW_MONTHS',
   maxMerchantHistoryMonths: 'FINANCE_QUERY_MAX_MERCHANT_HISTORY_MONTHS',
   maxEventsTagLookbackDays: 'FINANCE_QUERY_MAX_EVENTS_TAG_LOOKBACK_DAYS',
+  ledgerChunkDays: 'FINANCE_QUERY_LEDGER_CHUNK_DAYS',
   queryBudgetMs: 'FINANCE_QUERY_BUDGET_MS',
 });
 

@@ -82,10 +82,10 @@ export default function Overview() {
     ? ((cur.totalSpend - prev.totalSpend) / prev.totalSpend) * 100
     : null;
 
-  const nwPoints = (trends.data?.months ?? []).map((m) => ({ value: m.netWorth, label: m.month }));
+  const nwHist = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
+  const nwPoints = nwHist.map((m) => ({ value: m.netWorth as number, label: m.month }));
   // "This month" net-worth change ≈ now vs the previous monthly snapshot. Based on
   // synced accounts only, since manual assets have no monthly history.
-  const nwHist = trends.data?.months ?? [];
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
   const nwDelta = prevNW != null ? acctAssets + acctLiab - prevNW : null;
 

@@ -4,12 +4,18 @@ Bounded ledger reads keep dashboard/API query cost proportional to requested win
 
 ## Architecture
 
-- `lib/query-scaling-config.js` — env-backed caps (`FINANCE_QUERY_MAX_LEDGER_DAYS`, row limits, search lookback).
-- `lib/bounded-ledger-access.js` — canonical date validation, sequential per-account `getTransactions` fetch, shared metadata context, cache fingerprints, search cursors, and response instrumentation headers.
-- `dataModule.js` — spending, trends, review, insights, merchant history, recurring/income, reimbursement, search/tags, and phantom cleanup now route through bounded helpers.
-- `server.js` — cache keys fingerprint every window/filter/pagination input; responses include `X-Finance-Query-*` counters without payload/principal leakage.
+- `lib/query-scaling-config.js` — env-backed caps (`FINANCE_QUERY_MAX_LEDGER_DAYS`, row limits, search lookback, `FINANCE_QUERY_LEDGER_CHUNK_DAYS`).
+- `lib/query-completeness.js` — shared `boundedLifetimeMetric` for incomplete lifetime totals with null authoritative values and optional lower bounds.
+- `lib/bounded-ledger-access.js` — canonical date validation, calendar-chunked sequential `getTransactions` fetch (Actual has no cancellable limit API; `@actual-app/api` `runQuery`/AQL is not used for transaction windows), row-budget enforcement before retention, signed keyset search cursors bound to coordinator generation, instrumentation headers.
+- `dataModule.js` — spending merged scan, incomplete reimbursement/repayment/trends net-worth semantics, merchant history cap wiring.
+- `server.js` — legacy + v1 read instrumentation via closed-over stats (no ALS cross-leak); cache fingerprints include query caps/generation/cursors.
+- `actual-tools/lib/bounded-ledger-access.js` — vendored standalone copy (regenerate with `node finance-dashboard/scripts/sync-bounded-ledger-vendor.js`).
 
-Lifetime semantics (trends net worth, reimbursement ledger cutoff) remain explicit via `scope.netWorthHistoryComplete`, `ledgerCutoff`, `ledgerScan.complete`, and validated env cutoffs rather than silent truncation.
+Lifetime semantics remain explicit: `ledgerScan.complete`, `totalOwed.complete`, `scope.netWorthHistoryComplete`, and lower-bound labels — never silent truncation or fabricated zero.
+
+## Abort limitation
+
+`getTransactions` has no cancellation hook in `@actual-app/api`. Abort signals stop subsequent account/chunk calls after the in-flight request completes; `X-Finance-Query-Aborted` marks early termination.
 
 ## Reproduction
 
@@ -17,7 +23,7 @@ Lifetime semantics (trends net worth, reimbursement ledger cutoff) remain explic
 cd finance-dashboard
 npm test -- --test-name-pattern 'bounded ledger|query scaling'
 node scripts/benchmark-query-scaling.js
-npm --prefix .. test
+cd .. && npm run check
 ```
 
 ## Env knobs
@@ -25,9 +31,11 @@ npm --prefix .. test
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `FINANCE_QUERY_MAX_LEDGER_DAYS` | 3660 | Max inclusive date span for ledger scans |
-| `FINANCE_QUERY_MAX_LEDGER_ROWS` | 100000 | Max rows scanned per read |
+| `FINANCE_QUERY_MAX_LEDGER_ROWS` | 100000 | Max rows retained per read |
+| `FINANCE_QUERY_LEDGER_CHUNK_DAYS` | 120 | Calendar chunk size for sequential fetches |
 | `FINANCE_QUERY_MAX_TXN_LIST_ROWS` | 10000 | Max formatted transaction rows returned |
 | `FINANCE_QUERY_MAX_SEARCH_RANGE_DAYS` | 1095 | Max search window |
+| `FINANCE_QUERY_CURSOR_SECRET` | ACTUAL_SYNC_ID | HMAC secret for search cursors |
 | `FINANCE_QUERY_BUDGET_MS` | 120000 | Instrumentation budget marker |
 
 Exceeded bounds return HTTP 400 (`QUERY_RANGE_EXCEEDED`) or 413 (`QUERY_RESULT_LIMIT_EXCEEDED`).

@@ -25,6 +25,7 @@ const stateFiles = {
 };
 for (const [key, file] of Object.entries(stateFiles)) process.env[key] = path.join(dir, file);
 process.env.REIMB_SUGGEST_FROM = '2026-01-01';
+process.env.REIMB_LEDGER_FROM = '2026-01-01';
 process.env.ACTUAL_API_PATH = path.join(__dirname, 'fixtures', 'repayment-actual.js');
 
 const actual = require('./fixtures/repayment-actual');

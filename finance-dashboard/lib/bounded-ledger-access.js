@@ -20,6 +20,7 @@ const DEFAULT_CLASSIFICATION_PATTERNS = Object.freeze({
   reimbursementCategory: /^reimbursement$/i,
 });
 
+const SEARCH_CURSOR_VERSION = 2;
 const instrumentationStore = new AsyncLocalStorage();
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -29,6 +30,7 @@ function createQueryStats() {
     getTransactionsCalls: 0,
     rowsScanned: 0,
     rowsReturned: 0,
+    peakRowsRetained: 0,
     elapsedMs: 0,
     budgetExhausted: false,
     aborted: false,
@@ -64,6 +66,7 @@ function attachQueryStatsHeaders(res, stats) {
   res.setHeader('X-Finance-Query-Calls', String(stats.getTransactionsCalls || 0));
   res.setHeader('X-Finance-Query-Rows-Scanned', String(stats.rowsScanned || 0));
   res.setHeader('X-Finance-Query-Rows-Returned', String(stats.rowsReturned || 0));
+  res.setHeader('X-Finance-Query-Peak-Retained', String(stats.peakRowsRetained || 0));
   res.setHeader('X-Finance-Query-Elapsed-Ms', String(stats.elapsedMs || 0));
   if (stats.budgetExhausted) res.setHeader('X-Finance-Query-Budget-Exhausted', '1');
   if (stats.aborted) res.setHeader('X-Finance-Query-Aborted', '1');
@@ -139,6 +142,47 @@ function resolveBoundedLedgerStart({
   };
 }
 
+function splitCalendarChunks(start, end, chunkDays) {
+  const chunks = [];
+  let cursor = start;
+  while (cursor <= end) {
+    const chunkEnd = addDays(cursor, chunkDays - 1);
+    chunks.push({ start: cursor, end: chunkEnd > end ? end : chunkEnd });
+    cursor = addDays(chunks[chunks.length - 1].end, 1);
+  }
+  return chunks;
+}
+
+function cursorSigningSecret() {
+  return process.env.FINANCE_QUERY_CURSOR_SECRET
+    || process.env.ACTUAL_SYNC_ID
+    || 'finance-query-cursor-dev-only';
+}
+
+function signSearchCursorPayload(payload) {
+  const body = JSON.stringify(payload);
+  const signature = crypto.createHmac('sha256', cursorSigningSecret()).update(body).digest('base64url');
+  return Buffer.from(JSON.stringify({ payload, signature }), 'utf8').toString('base64url');
+}
+
+function verifySearchCursorPayload(token) {
+  let envelope;
+  try {
+    envelope = JSON.parse(Buffer.from(String(token), 'base64url').toString('utf8'));
+  } catch (_) {
+    throw new QueryRangeExceededError('search cursor is invalid');
+  }
+  if (!envelope?.payload || !envelope.signature) {
+    throw new QueryRangeExceededError('search cursor is invalid');
+  }
+  const body = JSON.stringify(envelope.payload);
+  const expected = crypto.createHmac('sha256', cursorSigningSecret()).update(body).digest('base64url');
+  if (envelope.signature !== expected) {
+    throw new QueryRangeExceededError('search cursor signature is invalid');
+  }
+  return envelope.payload;
+}
+
 async function loadLedgerReadContext(api, {
   accountFilter,
   includeClosed = true,
@@ -206,6 +250,30 @@ function findSupersedingCleared({ pending, clearedIndex, nameOf, payeeName, amou
   return null;
 }
 
+function noteRowsRetained(stats, totalRowsRetained) {
+  if (!stats) return;
+  stats.peakRowsRetained = Math.max(stats.peakRowsRetained || 0, totalRowsRetained);
+}
+
+function discardRetainedBatches(batches) {
+  batches.length = 0;
+}
+
+function enforceRowBudgetOrThrow({
+  stats,
+  batches,
+  totalRowsRetained,
+  incomingCount,
+  rowCap,
+}) {
+  if (totalRowsRetained + incomingCount <= rowCap) return;
+  discardRetainedBatches(batches);
+  if (stats) noteRowsRetained(stats, 0);
+  throw new QueryResultLimitExceededError(
+    `Ledger read would retain ${totalRowsRetained + incomingCount} rows, exceeding the maximum of ${rowCap}`,
+  );
+}
+
 async function fetchAccountTransactionsBounded(api, {
   accounts,
   start,
@@ -217,30 +285,51 @@ async function fetchAccountTransactionsBounded(api, {
   const stats = getActiveQueryStats();
   const effectiveSignal = signal || getActiveQueryAbortSignal();
   const rowCap = maxRows ?? config.maxLedgerRowsPerRead;
+  const chunkDays = config.ledgerChunkDays;
+  const spanDays = daysBetween(start, end) + 1;
+  const chunks = spanDays <= chunkDays
+    ? [{ start, end }]
+    : splitCalendarChunks(start, end, chunkDays);
   const batches = [];
-  let totalRows = 0;
+  let totalRowsRetained = 0;
 
   for (const account of accounts) {
     if (effectiveSignal?.aborted) {
       if (stats) stats.aborted = true;
       break;
     }
-    const txns = await api.getTransactions(account.id, start, end);
-    if (stats) {
-      stats.getTransactionsCalls += 1;
-      stats.accountsQueried += 1;
-      stats.rowsScanned += txns.length;
+    const accountTxns = [];
+    for (const chunk of chunks) {
+      if (effectiveSignal?.aborted) {
+        if (stats) stats.aborted = true;
+        break;
+      }
+      const txns = await api.getTransactions(account.id, chunk.start, chunk.end);
+      if (stats) {
+        stats.getTransactionsCalls += 1;
+        stats.rowsScanned += txns.length;
+      }
+      if (effectiveSignal?.aborted) {
+        if (stats) stats.aborted = true;
+        break;
+      }
+      enforceRowBudgetOrThrow({
+        stats,
+        batches,
+        totalRowsRetained,
+        incomingCount: txns.length,
+        rowCap,
+      });
+      accountTxns.push(...txns);
+      totalRowsRetained += txns.length;
+      noteRowsRetained(stats, totalRowsRetained);
     }
-    totalRows += txns.length;
-    if (totalRows > rowCap) {
-      throw new QueryResultLimitExceededError(
-        `Ledger read scanned ${totalRows} rows, exceeding the maximum of ${rowCap}`,
-      );
-    }
-    batches.push({ account, transactions: txns });
+    if (effectiveSignal?.aborted) break;
+    batches.push({ account, transactions: accountTxns });
+    if (stats) stats.accountsQueried += 1;
   }
 
-  if (stats) stats.rowsReturned += totalRows;
+  if (stats) stats.rowsReturned = totalRowsRetained;
   return batches;
 }
 
@@ -270,34 +359,42 @@ function buildQueryCacheFingerprint(parts) {
 }
 
 function encodeSearchCursor(payload) {
-  return Buffer.from(JSON.stringify({ v: 1, ...payload }), 'utf8').toString('base64url');
+  return signSearchCursorPayload({ v: SEARCH_CURSOR_VERSION, ...payload });
 }
 
-function decodeSearchCursor(cursor, { config = loadQueryScalingConfig() } = {}) {
+function decodeSearchCursor(cursor, {
+  config = loadQueryScalingConfig(),
+  expectedGeneration = null,
+} = {}) {
   if (!cursor) return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
-  } catch (_) {
-    throw new QueryRangeExceededError('search cursor is invalid');
+  const parsed = verifySearchCursorPayload(cursor);
+  if (!parsed || parsed.v !== SEARCH_CURSOR_VERSION) {
+    throw new QueryRangeExceededError('search cursor is unsupported');
   }
-  if (!parsed || parsed.v !== 1) throw new QueryRangeExceededError('search cursor is unsupported');
   const range = validateCanonicalDateRange(parsed.start, parsed.end, {
     config,
     purpose: 'search cursor',
     maxSpanDays: config.maxSearchRangeDays,
   });
-  const offset = Number.parseInt(String(parsed.offset || 0), 10);
   const limit = Number.parseInt(String(parsed.limit || 200), 10);
-  if (!Number.isFinite(offset) || offset < 0) throw new QueryRangeExceededError('search cursor offset is invalid');
   if (!Number.isFinite(limit) || limit < 1 || limit > config.maxSearchLimit) {
     throw new QueryRangeExceededError('search cursor limit is invalid');
   }
+  if (expectedGeneration != null && Number(parsed.generation) !== Number(expectedGeneration)) {
+    throw new QueryRangeExceededError('search cursor generation is stale');
+  }
+  const anchorDate = parsed.anchorDate ? assertCanonicalDate(parsed.anchorDate, 'cursor anchorDate') : null;
+  const anchorId = parsed.anchorId != null ? String(parsed.anchorId) : null;
+  if ((anchorDate && !anchorId) || (!anchorDate && anchorId)) {
+    throw new QueryRangeExceededError('search cursor anchor is invalid');
+  }
   return {
     ...range,
-    offset,
     limit,
     q: String(parsed.q || ''),
+    anchorDate,
+    anchorId,
+    generation: parsed.generation == null ? null : Number(parsed.generation),
   };
 }
 
@@ -314,16 +411,34 @@ function resolveSearchWindow({ start, end, config = loadQueryScalingConfig() } =
   });
 }
 
+function compareSearchRowsDesc(a, b) {
+  const byDate = String(b.date).localeCompare(String(a.date));
+  if (byDate !== 0) return byDate;
+  return String(b.id).localeCompare(String(a.id));
+}
+
+function rowBeforeSearchAnchor(row, anchorDate, anchorId) {
+  if (!anchorDate || !anchorId) return true;
+  const byDate = String(row.date).localeCompare(String(anchorDate));
+  if (byDate < 0) return true;
+  if (byDate > 0) return false;
+  return String(row.id).localeCompare(String(anchorId)) < 0;
+}
+
 module.exports = {
   DEFAULT_CLASSIFICATION_PATTERNS,
   LEDGER_EPOCH,
+  SEARCH_CURSOR_VERSION,
   assertCanonicalDate,
   attachQueryStatsHeaders,
   buildClearedSupersederIndex,
   buildQueryCacheFingerprint,
+  compareSearchRowsDesc,
   createQueryStats,
   decodeSearchCursor,
+  discardRetainedBatches,
   encodeSearchCursor,
+  enforceRowBudgetOrThrow,
   fetchAccountTransactionsBounded,
   findSupersedingCleared,
   flattenAccountTransactions,
@@ -335,6 +450,8 @@ module.exports = {
   resolveBoundedLedgerStart,
   resolveNetWorthQueryStart,
   resolveSearchWindow,
+  rowBeforeSearchAnchor,
   runWithQueryInstrumentation,
+  splitCalendarChunks,
   validateCanonicalDateRange,
 };

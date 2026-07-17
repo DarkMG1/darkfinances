@@ -17,12 +17,18 @@ function mulberry32(seed) {
   };
 }
 
-function reset({ accountCount = 2, rowsPerAccount = 100, anchorMonth = '2024-06', seed = 42 } = {}) {
+function reset({
+  accountCount = 2,
+  rowsPerAccount = 100,
+  anchorMonth = '2024-06',
+  seed = 42,
+  yearSpan = 10,
+} = {}) {
   state.callLog.length = 0;
   state.accounts = [];
   state.rowsByAccount = new Map();
   const rand = mulberry32(seed);
-  const [year, month] = anchorMonth.split('-').map(Number);
+  const [anchorYear, anchorMon] = anchorMonth.split('-').map(Number);
   for (let a = 0; a < accountCount; a++) {
     const id = `acct-${a + 1}`;
     state.accounts.push({
@@ -34,7 +40,9 @@ function reset({ accountCount = 2, rowsPerAccount = 100, anchorMonth = '2024-06'
     });
     const rows = [];
     for (let i = 0; i < rowsPerAccount; i++) {
-      const day = 1 + Math.floor(rand() * 28);
+      const year = anchorYear - (i % yearSpan);
+      const month = anchorMon;
+      const day = 1 + (i % 28);
       const date = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       const amount = rand() > 0.8 ? Math.round(rand() * 50000) : -Math.round(rand() * 25000);
       rows.push({
@@ -79,6 +87,11 @@ async function getCategoryGroups() {
     name: 'Regular',
     is_income: false,
     categories: [{ id: 'cat-spend', name: 'Groceries' }],
+  }, {
+    id: 'grp-reimb',
+    name: 'Regular',
+    is_income: false,
+    categories: [{ id: 'cat-reimb', name: 'Reimbursement' }],
   }];
 }
 

@@ -48,9 +48,9 @@ const { boundedJsonMiddleware } = require('./lib/bounded-json');
 const {
   attachQueryStatsHeaders,
   buildQueryCacheFingerprint,
-  getActiveQueryStats,
   runWithQueryInstrumentation,
 } = require('./lib/bounded-ledger-access');
+const { loadQueryScalingConfig } = require('./lib/query-scaling-config');
 const {
   DEFAULT_MAX_JSON_BYTES,
   RECEIPT_MAX_JSON_BYTES,
@@ -88,6 +88,19 @@ const mutationQueue = new SerialQueue('finance-mutations', {
 });
 const operationJournal = new OperationJournal();
 const RELEASE_MANIFEST_PATH = process.env.RELEASE_MANIFEST_PATH || path.join(__dirname, 'release-manifest.json');
+
+function queryFingerprintBase() {
+  const c = loadQueryScalingConfig();
+  return {
+    maxLedgerDays: c.maxLedgerQueryDays,
+    maxLedgerRows: c.maxLedgerRowsPerRead,
+    maxTxnList: c.maxTransactionListRows,
+    maxSearchLimit: c.maxSearchLimit,
+    maxSearchRange: c.maxSearchRangeDays,
+    maxMerchantMonths: c.maxMerchantHistoryMonths,
+    ledgerChunkDays: c.ledgerChunkDays,
+  };
+}
 const runtimeHealth = {
   startedAt: new Date().toISOString(),
   fatalErrorAt: null,
@@ -640,13 +653,13 @@ function cachedActual(key, fn, ttl = 300) {
 // request to recompute the heavy 18-month aggregations from scratch.
 const WARM_TARGETS = [
   { key: 'accounts', ttl: 300, fn: () => data.getAccounts() },
-  { key: buildQueryCacheFingerprint({ kind: 'spending', month: 'current', start: '', end: '' }), ttl: 180, fn: () => data.getSpending({ month: undefined }) },
-  { key: buildQueryCacheFingerprint({ kind: 'trends', months: 12, endMonth: 'current' }), ttl: 600, fn: () => data.getTrends({ months: 12 }) },
-  { key: buildQueryCacheFingerprint({ kind: 'trends', months: 60, endMonth: 'current' }), ttl: 600, fn: () => data.getTrends({ months: 60 }) },
-  { key: buildQueryCacheFingerprint({ kind: 'recurring', window: 18 }), ttl: 600, fn: () => data.getRecurring({ window: 18 }) },
-  { key: buildQueryCacheFingerprint({ kind: 'income', window: 12 }), ttl: 600, fn: () => data.getIncome({ window: 12 }) },
-  { key: buildQueryCacheFingerprint({ kind: 'bills', days: 45 }), ttl: 600, fn: () => data.getBills({ days: 45 }) },
-  { key: buildQueryCacheFingerprint({ kind: 'reimb', from: 'd', to: 'd', openOnly: false }), ttl: 300, fn: () => data.getReimbursement({}) },
+  { key: buildQueryCacheFingerprint({ kind: 'spending', month: 'current', start: '', end: '', ...queryFingerprintBase() }), ttl: 180, fn: () => data.getSpending({ month: undefined }) },
+  { key: buildQueryCacheFingerprint({ kind: 'trends', months: 12, endMonth: 'current', ...queryFingerprintBase() }), ttl: 600, fn: () => data.getTrends({ months: 12 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'trends', months: 60, endMonth: 'current', ...queryFingerprintBase() }), ttl: 600, fn: () => data.getTrends({ months: 60 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'recurring', window: 18, ...queryFingerprintBase() }), ttl: 600, fn: () => data.getRecurring({ window: 18 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'income', window: 12, ...queryFingerprintBase() }), ttl: 600, fn: () => data.getIncome({ window: 12 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'bills', days: 45, ...queryFingerprintBase() }), ttl: 600, fn: () => data.getBills({ days: 45 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'reimb', from: 'd', to: 'd', openOnly: false, ...queryFingerprintBase() }), ttl: 300, fn: () => data.getReimbursement({}) },
   { key: 'categories', ttl: 300, fn: () => data.getCategories() },
 ];
 
@@ -697,6 +710,7 @@ const resolvers = {
       bucket: bucket || 'none',
       budgetOnly: budgetOnly ? 'budget' : 'all',
       collapse: collapse ? 'c' : 'x',
+      ...queryFingerprintBase(),
     });
     return cachedActual(key, () => data.getTransactions({ accountId, start: startDate, end: endDate, category, bucket, budgetOnly, collapse }), 120);
   },
@@ -708,7 +722,7 @@ const resolvers = {
   merchantHistory: (req) => {
     const { payee, months } = req.query;
     const span = months ? Number(months) : 12;
-    const key = buildQueryCacheFingerprint({ kind: 'mhist', payee: (payee || '').toLowerCase(), months: span });
+    const key = buildQueryCacheFingerprint({ kind: 'mhist', payee: (payee || '').toLowerCase(), months: span, ...queryFingerprintBase() });
     return cachedActual(key, () => data.getMerchantHistory({ payee, months: span }), 180);
   },
   spending: (req) => {
@@ -719,49 +733,56 @@ const resolvers = {
       month: monthOf(req) || 'current',
       start: start || '',
       end: end || '',
+      ...queryFingerprintBase(),
     });
     return cachedActual(key, () => data.getSpending({ month: monthOf(req), start, end }), 180);
   },
   trends: (req) => {
     const months = Math.min(60, Math.max(3, parseInt(req.query.months, 10) || 12));
     const endMonth = req.query.endMonth ? String(req.query.endMonth) : '';
-    const key = buildQueryCacheFingerprint({ kind: 'trends', months, endMonth: endMonth || 'current' });
+    const key = buildQueryCacheFingerprint({ kind: 'trends', months, endMonth: endMonth || 'current', ...queryFingerprintBase() });
     return cachedActual(key, () => data.getTrends({ months, endMonth: endMonth || undefined }), 600);
   },
   budgets: (req) => cachedActual(`budgets-${monthOf(req) || 'current'}`, () => data.getBudgets({ month: monthOf(req) }), 300),
   reimbursement: (req) => {
     const { from, to } = req.query;
     const openOnly = req.query.openOnly === '1' || req.query.openOnly === 'true';
-    const key = buildQueryCacheFingerprint({ kind: 'reimb', from: from || 'd', to: to || 'd', openOnly });
+    const key = buildQueryCacheFingerprint({ kind: 'reimb', from: from || 'd', to: to || 'd', openOnly, ...queryFingerprintBase() });
     return cachedActual(key, () => data.getReimbursement({ from, to, openOnly }), 300);
   },
   review: (req) => cachedActual(`review-${monthOf(req) || 'current'}`, () => data.getReview({ month: monthOf(req) }), 120),
   reimbursementLedger: (req) => cachedActual(`reimb-ledger-${monthOf(req) || 'current'}`, () => data.getReimbursementLedger({ month: monthOf(req) }), 180),
   repaymentSuggestions: (req) => {
     const { from, to } = req.query;
-    return cachedActual(`reimb-suggest-${from || 'd'}-${to || 'd'}`, () => data.suggestRepayments({ from, to }), 120);
+    const key = buildQueryCacheFingerprint({
+      kind: 'reimb-suggest',
+      from: from || 'd',
+      to: to || 'd',
+      ...queryFingerprintBase(),
+    });
+    return cachedActual(key, () => data.suggestRepayments({ from, to }), 120);
   },
   insights: (req) => cachedActual(`insights-${monthOf(req) || 'current'}`, () => data.getInsights({ month: monthOf(req) }), 300),
   categories: () => cachedActual('categories', () => data.getCategories()),
   recurring: (req) => {
     const window = Math.min(36, Math.max(6, parseInt(req.query.window, 10) || 18));
     if (req.query.debug === '1') return data.getRecurring({ window, debug: true, minDates: Math.max(1, parseInt(req.query.minDates, 10) || 3) });
-    const key = buildQueryCacheFingerprint({ kind: 'recurring', window });
+    const key = buildQueryCacheFingerprint({ kind: 'recurring', window, ...queryFingerprintBase() });
     return cachedActual(key, () => data.getRecurring({ window }), 600);
   },
   bills: (req) => {
     const days = Math.min(120, Math.max(7, parseInt(req.query.days, 10) || 45));
-    const key = buildQueryCacheFingerprint({ kind: 'bills', days });
+    const key = buildQueryCacheFingerprint({ kind: 'bills', days, ...queryFingerprintBase() });
     return cachedActual(key, () => data.getBills({ days }), 600);
   },
   forecast: (req) => {
     const days = Math.min(180, Math.max(30, parseInt(req.query.days, 10) || 90));
-    const key = buildQueryCacheFingerprint({ kind: 'forecast', days });
+    const key = buildQueryCacheFingerprint({ kind: 'forecast', days, ...queryFingerprintBase() });
     return cachedActual(key, () => data.getForecast({ days }), 300);
   },
   income: (req) => {
     const window = Math.min(24, Math.max(6, parseInt(req.query.window, 10) || 12));
-    const key = buildQueryCacheFingerprint({ kind: 'income', window });
+    const key = buildQueryCacheFingerprint({ kind: 'income', window, ...queryFingerprintBase() });
     return cachedActual(key, () => data.getIncome({ window }), 600);
   },
   search: (req) => {
@@ -775,6 +796,8 @@ const resolvers = {
       end: end || '',
       limit,
       cursor: cursor || '',
+      generation: actualCoordinator.generation,
+      ...queryFingerprintBase(),
     });
     return cachedActual(key, () => data.searchTransactions({ q, start, end, limit, cursor }), 120);
   },
@@ -782,7 +805,7 @@ const resolvers = {
   tags: (req) => {
     const start = req.query.start ? String(req.query.start) : '';
     const end = req.query.end ? String(req.query.end) : '';
-    const key = buildQueryCacheFingerprint({ kind: 'tags', start, end });
+    const key = buildQueryCacheFingerprint({ kind: 'tags', start, end, ...queryFingerprintBase() });
     return cachedActual(key, () => data.getTags({ start: start || undefined, end: end || undefined }), 120);
   },
   rules: () => cachedLocal('rules', () => Promise.resolve({ ...data.getRules(), catalog: data.getCatalogDisplay() }), 120),
@@ -1323,24 +1346,29 @@ function csvEscape(v) {
 }
 async function reportCsv(req, res) {
   try {
-    await withReadAdmission(req, actualCoordinator, async () => {
-      const rep = await data.getMonthlyReport({ month: req.query.month });
-      const net = Math.round((rep.summary.totalIncome - rep.summary.totalSpend) * 100) / 100;
-      const lines = [
-        `Monthly report,${rep.month}`,
-        `Total income,${rep.summary.totalIncome}`,
-        `Total spend,${rep.summary.totalSpend}`,
-        `Net,${net}`,
-        '',
-        'Date,Payee,Account,Category,Amount,Notes',
-      ];
-      for (const t of rep.transactions) {
-        lines.push([t.date, csvEscape(t.payee), csvEscape(t.account), csvEscape(t.category || ''), t.amount, csvEscape(t.notes || '')].join(','));
-      }
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="finance-${rep.month}.csv"`);
-      res.send(lines.join('\n'));
-    }, { admission: requestAdmission });
+    let stats;
+    await runWithQueryInstrumentation(async (activeStats) => {
+      stats = activeStats;
+      await withReadAdmission(req, actualCoordinator, async () => {
+        const rep = await data.getMonthlyReport({ month: req.query.month });
+        const net = Math.round((rep.summary.totalIncome - rep.summary.totalSpend) * 100) / 100;
+        const lines = [
+          `Monthly report,${rep.month}`,
+          `Total income,${rep.summary.totalIncome}`,
+          `Total spend,${rep.summary.totalSpend}`,
+          `Net,${net}`,
+          '',
+          'Date,Payee,Account,Category,Amount,Notes',
+        ];
+        for (const t of rep.transactions) {
+          lines.push([t.date, csvEscape(t.payee), csvEscape(t.account), csvEscape(t.category || ''), t.amount, csvEscape(t.notes || '')].join(','));
+        }
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="finance-${rep.month}.csv"`);
+        res.send(lines.join('\n'));
+      }, { admission: requestAdmission });
+    });
+    attachQueryStatsHeaders(res, stats);
   } catch (e) { sendApiError(req, res, e); }
 }
 
@@ -1355,10 +1383,18 @@ const runHandler = (req, fn, operation) => {
   }
   return withReadAdmission(req, actualCoordinator, () => fn(req), { admission: requestAdmission });
 };
+async function executeReadWithQueryStats(req, fn) {
+  let stats;
+  const payload = await runWithQueryInstrumentation(async (activeStats) => {
+    stats = activeStats;
+    return runHandler(req, fn);
+  });
+  return { payload, stats };
+}
 const raw = (fn) => async (req, res) => {
   try {
-    const payload = await runWithQueryInstrumentation(() => runHandler(req, fn));
-    attachQueryStatsHeaders(res, getActiveQueryStats());
+    const { payload, stats } = await executeReadWithQueryStats(req, fn);
+    attachQueryStatsHeaders(res, stats);
     res.json(payload);
   } catch (e) { sendApiError(req, res, e); }
 };
@@ -1435,7 +1471,12 @@ const env = (fn, mutationRoute = null) => async (req, res) => {
       );
       return res.json({ data: execution.result, operation: execution.operation });
     }
-    const result = await runHandler(req, fn);
+    let stats;
+    const result = await runWithQueryInstrumentation(async (activeStats) => {
+      stats = activeStats;
+      return runHandler(req, fn);
+    });
+    attachQueryStatsHeaders(res, stats);
     return res.json({ data: result });
   } catch (e) {
     return sendApiError(req, res, e);

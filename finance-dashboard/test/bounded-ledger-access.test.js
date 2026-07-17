@@ -6,6 +6,7 @@ const {
   buildQueryCacheFingerprint,
   decodeSearchCursor,
   encodeSearchCursor,
+  enforceRowBudgetOrThrow,
   resolveBoundedLedgerStart,
   resolveNetWorthQueryStart,
   resolveSearchWindow,
@@ -13,7 +14,9 @@ const {
 } = require('../lib/bounded-ledger-access');
 const { loadQueryScalingConfig } = require('../lib/query-scaling-config');
 const { daysBetween } = require('../lib/date-only');
-const { QueryRangeExceededError } = require('../lib/errors');
+const { QueryRangeExceededError, QueryResultLimitExceededError } = require('../lib/errors');
+
+process.env.FINANCE_QUERY_CURSOR_SECRET = 'test-cursor-secret';
 
 describe('bounded ledger access', () => {
   it('validates canonical date ranges and rejects oversized windows', () => {
@@ -43,20 +46,57 @@ describe('bounded ledger access', () => {
     assert.notEqual(a, c);
   });
 
-  it('round-trips stable search cursors', () => {
+  it('round-trips signed keyset search cursors', () => {
     const cursor = encodeSearchCursor({
       start: '2024-01-01',
       end: '2024-03-31',
-      offset: 200,
+      anchorDate: '2024-02-15',
+      anchorId: 'tx-99',
       q: 'coffee',
       limit: 100,
+      generation: 7,
     });
-    const decoded = decodeSearchCursor(cursor);
+    const decoded = decodeSearchCursor(cursor, { expectedGeneration: 7 });
     assert.equal(decoded.start, '2024-01-01');
     assert.equal(decoded.end, '2024-03-31');
-    assert.equal(decoded.offset, 200);
+    assert.equal(decoded.anchorDate, '2024-02-15');
+    assert.equal(decoded.anchorId, 'tx-99');
     assert.equal(decoded.q, 'coffee');
     assert.equal(decoded.limit, 100);
+    assert.equal(decoded.generation, 7);
+  });
+
+  it('rejects tampered search cursors', () => {
+    const cursor = encodeSearchCursor({
+      start: '2024-01-01',
+      end: '2024-03-31',
+      anchorDate: '2024-02-15',
+      anchorId: 'tx-99',
+      q: 'coffee',
+      limit: 100,
+      generation: 1,
+    });
+    const tampered = `${cursor}x`;
+    assert.throws(() => decodeSearchCursor(tampered), QueryRangeExceededError);
+  });
+
+  it('rejects stale generation and mismatched cursor query bindings', () => {
+    const cursor = encodeSearchCursor({
+      start: '2024-01-01',
+      end: '2024-03-31',
+      anchorDate: '2024-02-15',
+      anchorId: 'tx-99',
+      q: 'coffee',
+      limit: 100,
+      generation: 1,
+    });
+    assert.throws(
+      () => decodeSearchCursor(cursor, { expectedGeneration: 2 }),
+      QueryRangeExceededError,
+    );
+    const decoded = decodeSearchCursor(cursor, { expectedGeneration: 1 });
+    assert.equal(decoded.q, 'coffee');
+    assert.equal(decoded.start, '2024-01-01');
   });
 
   it('defaults search windows to configured lookback', () => {
@@ -103,5 +143,37 @@ describe('bounded ledger access', () => {
     assert.equal(partial.complete, false);
     assert.ok(partial.start > '2000-01-01');
     assert.equal(daysBetween(partial.start, partial.end) + 1, 3660);
+  });
+
+  it('isolates query stats across concurrent instrumentation contexts', async () => {
+    const { runWithQueryInstrumentation } = require('../lib/bounded-ledger-access');
+    const [a, b] = await Promise.all([
+      runWithQueryInstrumentation(async (stats) => {
+        stats.getTransactionsCalls = 3;
+        stats.rowsScanned = 100;
+        await new Promise((r) => setTimeout(r, 5));
+        return stats.getTransactionsCalls;
+      }),
+      runWithQueryInstrumentation(async (stats) => {
+        stats.getTransactionsCalls = 7;
+        return stats.getTransactionsCalls;
+      }),
+    ]);
+    assert.equal(a, 3);
+    assert.equal(b, 7);
+  });
+
+  it('discards retained batches when row budget would be exceeded', () => {
+    const batches = [{ account: { id: 'a1' }, transactions: [{ id: 1 }] }];
+    assert.throws(
+      () => enforceRowBudgetOrThrow({
+        batches,
+        totalRowsRetained: 8,
+        incomingCount: 5,
+        rowCap: 10,
+      }),
+      QueryResultLimitExceededError,
+    );
+    assert.equal(batches.length, 0);
   });
 });

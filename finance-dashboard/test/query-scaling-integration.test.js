@@ -18,13 +18,14 @@ process.env.ACTUAL_SYNC_ID = 'test-sync';
 process.env.FINANCE_TIME_ZONE = 'America/Los_Angeles';
 process.env.FINANCE_QUERY_MAX_LEDGER_ROWS = '500000';
 process.env.FINANCE_QUERY_MAX_TXN_LIST_ROWS = '500000';
+process.env.FINANCE_QUERY_CURSOR_SECRET = 'integration-cursor-secret';
 
 const data = require('../dataModule');
 const fixture = require('./fixtures/query-scaling-actual');
 
 describe('query scaling integration', () => {
   before(async () => {
-    fixture.reset({ accountCount: 2, rowsPerAccount: 120 });
+    fixture.reset({ accountCount: 2, rowsPerAccount: 120, yearSpan: 10 });
     await data.initApi({ skipRecover: true });
   });
 
@@ -33,8 +34,8 @@ describe('query scaling integration', () => {
     fixture.reset({ accountCount: 2, rowsPerAccount: 0 });
   });
 
-  it('issues one bounded getTransactions call per account with exact date bounds', async () => {
-    fixture.reset({ accountCount: 3, rowsPerAccount: 40 });
+  it('issues one bounded getTransactions call per account for merged spending windows', async () => {
+    fixture.reset({ accountCount: 3, rowsPerAccount: 40, yearSpan: 10 });
     await data.resetApi();
     await data.initApi({ skipRecover: true });
     fixture.state.callLog.length = 0;
@@ -43,32 +44,40 @@ describe('query scaling integration', () => {
       await data.getSpending({ start: '2024-04-01', end: '2024-04-30' });
       stats = getActiveQueryStats();
     });
-    assert.equal(fixture.state.callLog.length, 6);
-    const starts = new Set(fixture.state.callLog.map((call) => call.start));
-    assert.deepEqual(starts, new Set(['2024-04-01', '2024-03-02']));
+    assert.equal(fixture.state.callLog.length, 3);
+    assert.equal(stats.getTransactionsCalls, 3);
+    assert.equal(stats.accountsQueried, 3);
     for (const call of fixture.state.callLog) {
-      assert.ok(call.end === '2024-04-30' || call.end === '2024-03-31');
+      assert.equal(call.start, '2024-03-02');
+      assert.ok(call.end === '2024-04-30');
     }
-    assert.equal(stats.getTransactionsCalls, 6);
-    assert.equal(stats.accountsQueried, 6);
   });
 
   it('preserves small-ledger trends shape with complete net-worth history', async () => {
     process.env.FINANCE_QUERY_MAX_LEDGER_DAYS = '12000';
-    fixture.reset({ accountCount: 2, rowsPerAccount: 120, anchorMonth: '2024-06' });
+    fixture.reset({ accountCount: 2, rowsPerAccount: 120, anchorMonth: '2024-06', yearSpan: 10 });
     await data.resetApi();
     await data.initApi({ skipRecover: true });
-    fixture.state.callLog.length = 0;
     const bounded = await data.getTrends({ months: 6, endMonth: '2024-06' });
     assert.equal(bounded.months.length, 6);
     assert.equal(bounded.scope.netWorthHistoryComplete, true);
-    assert.equal(bounded.scope.queriedFrom, '2000-01-01');
-    assert.ok(fixture.state.callLog.every((call) => call.start === '2000-01-01'));
+    assert.ok(bounded.months.every((m) => m.netWorth != null));
     delete process.env.FINANCE_QUERY_MAX_LEDGER_DAYS;
   });
 
-  it('paginates search results without duplicates', async () => {
-    fixture.reset({ accountCount: 1, rowsPerAccount: 25, anchorMonth: '2024-06' });
+  it('nulls net worth in trends when history is incomplete', async () => {
+    process.env.FINANCE_QUERY_MAX_LEDGER_DAYS = '2000';
+    fixture.reset({ accountCount: 2, rowsPerAccount: 80, anchorMonth: '2024-06', yearSpan: 10 });
+    await data.resetApi();
+    await data.initApi({ skipRecover: true });
+    const bounded = await data.getTrends({ months: 3, endMonth: '2024-06' });
+    assert.equal(bounded.scope.netWorthHistoryComplete, false);
+    assert.ok(bounded.months.every((m) => m.netWorth == null));
+    delete process.env.FINANCE_QUERY_MAX_LEDGER_DAYS;
+  });
+
+  it('paginates search results with signed keyset cursors without duplicates', async () => {
+    fixture.reset({ accountCount: 1, rowsPerAccount: 25, anchorMonth: '2024-06', yearSpan: 1 });
     await data.resetApi();
     await data.initApi({ skipRecover: true });
     const first = await data.searchTransactions({ start: '2024-06-01', end: '2024-06-30', limit: 10 });
@@ -79,21 +88,50 @@ describe('query scaling integration', () => {
     for (const row of second.transactions) assert.ok(!ids.has(row.id));
   });
 
-  it('rejects oversized row scans with 413', async () => {
-    process.env.FINANCE_QUERY_MAX_LEDGER_ROWS = '10';
-    fixture.reset({ accountCount: 2, rowsPerAccount: 20, anchorMonth: '2024-06' });
+  it('rejects search cursor mutation between pages and query/range mismatches', async () => {
+    const { getActualCoordinator } = require('../lib/actual-coordinator');
+    fixture.reset({ accountCount: 1, rowsPerAccount: 25, anchorMonth: '2024-06', yearSpan: 1 });
     await data.resetApi();
     await data.initApi({ skipRecover: true });
+    const first = await data.searchTransactions({ start: '2024-06-01', end: '2024-06-30', limit: 10 });
+    const { QueryRangeExceededError } = require('../lib/errors');
+    getActualCoordinator().invalidateGeneration();
     await assert.rejects(
-      () => data.getTransactions({ start: '2024-01-01', end: '2024-12-31' }),
+      () => data.searchTransactions({ cursor: first.pagination.nextCursor }),
+      QueryRangeExceededError,
+    );
+    await assert.rejects(
+      () => data.searchTransactions({
+        cursor: first.pagination.nextCursor,
+        start: '2024-06-01',
+        end: '2024-06-30',
+        q: 'different',
+      }),
+      QueryRangeExceededError,
+    );
+  });
+
+  it('rejects oversized row scans with 413 and clears retained batches', async () => {
+    process.env.FINANCE_QUERY_MAX_LEDGER_ROWS = '10';
+    delete process.env.FINANCE_QUERY_MAX_LEDGER_DAYS;
+    fixture.reset({ accountCount: 2, rowsPerAccount: 20, anchorMonth: '2024-06', yearSpan: 1 });
+    await data.resetApi();
+    await data.initApi({ skipRecover: true });
+    let stats;
+    await assert.rejects(
+      async () => runWithQueryInstrumentation(async () => {
+        await data.getTransactions({ start: '2024-01-01', end: '2024-12-31' });
+        stats = getActiveQueryStats();
+      }),
       QueryResultLimitExceededError,
     );
+    assert.ok((stats?.peakRowsRetained ?? 0) <= 10);
     delete process.env.FINANCE_QUERY_MAX_LEDGER_ROWS;
   });
 
-  it('scales linearly with synthetic 100k+ ledger using operation counters', async () => {
+  it('scales linearly with synthetic 100k+ ledger and bounded windows reduce scanned rows', async () => {
     process.env.FINANCE_QUERY_MAX_LEDGER_ROWS = '500000';
-    fixture.reset({ accountCount: 4, rowsPerAccount: 30_000, anchorMonth: '2024-06' });
+    fixture.reset({ accountCount: 4, rowsPerAccount: 30_000, anchorMonth: '2024-06', yearSpan: 12 });
     await data.resetApi();
     await data.initApi({ skipRecover: true });
     fixture.state.callLog.length = 0;
@@ -103,12 +141,28 @@ describe('query scaling integration', () => {
       stats = getActiveQueryStats();
     });
     assert.equal(stats.getTransactionsCalls, 4);
-    assert.ok(stats.rowsScanned <= 130_000);
-    assert.ok(stats.rowsScanned >= 100_000);
+    assert.ok(stats.rowsScanned < 50_000);
+    assert.ok(stats.rowsScanned > 1000);
     for (const call of fixture.state.callLog) {
       assert.ok(call.start >= '2024-04-01');
       assert.ok(call.end <= '2024-06-30');
     }
+  });
+
+  it('exposes incomplete reimbursement totals without authoritative owes', async () => {
+    process.env.FINANCE_QUERY_MAX_LEDGER_DAYS = '120';
+    fixture.reset({ accountCount: 2, rowsPerAccount: 40, anchorMonth: '2024-06', yearSpan: 10 });
+    await data.resetApi();
+    await data.initApi({ skipRecover: true });
+    const reimb = await data.getReimbursement({});
+    assert.equal(reimb.totalOwed.complete, false);
+    assert.equal(reimb.totalOwed.value, null);
+    assert.ok(reimb.totalOwed.lowerBound != null);
+    assert.deepEqual(reimb.owes, []);
+    delete process.env.FINANCE_QUERY_MAX_LEDGER_DAYS;
+    const suggestions = await data.suggestRepayments({ from: '2024-01-01', to: '2024-06-30' });
+    assert.equal(suggestions.complete, false);
+    assert.deepEqual(suggestions.suggestions, []);
   });
 });
 
@@ -133,7 +187,7 @@ describe('fetchAccountTransactionsBounded', () => {
         signal: controller.signal,
       });
     }, { signal: controller.signal });
-    assert.equal(batches.length, 2);
+    assert.equal(batches.length, 1);
     assert.equal(stats.aborted, true);
     assert.equal(stats.getTransactionsCalls, 2);
   });

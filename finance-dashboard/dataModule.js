@@ -182,11 +182,14 @@ const {
   validateCanonicalDateRange,
   encodeSearchCursor,
   decodeSearchCursor,
+  compareSearchRowsDesc,
+  rowBeforeSearchAnchor,
   buildClearedSupersederIndex,
   findSupersedingCleared,
 } = require('./lib/bounded-ledger-access');
 const { loadQueryScalingConfig } = require('./lib/query-scaling-config');
-const { QueryResultLimitExceededError } = require('./lib/errors');
+const { boundedLifetimeMetric, QUERY_INCOMPLETE_REASON } = require('./lib/query-completeness');
+const { QueryResultLimitExceededError, QueryRangeExceededError } = require('./lib/errors');
 const ACTUAL_API_PATH = process.env.ACTUAL_API_PATH || '@actual-app/api';
 const api = require(ACTUAL_API_PATH);
 
@@ -1181,6 +1184,27 @@ async function onBudgetLeaves(api, start, end, catInfo) {
   return classifiedOnBudgetLeaves(api, start, end, catInfo);
 }
 
+async function onBudgetLeavesPartitioned(api, {
+  scanStart: _scanStart,
+  scanEnd: _scanEnd,
+  curStart,
+  curEnd,
+  prevStart,
+  prevEnd,
+  catInfo,
+  ctx,
+}) {
+  const [current, previous] = await classifiedOnBudgetLeavesForWindows(api, [
+    { start: curStart, end: curEnd },
+    { start: prevStart, end: prevEnd },
+  ], catInfo);
+  const context = ctx || await loadLedgerReadContext(api, {
+    accountFilter: (a) => !a.closed && !a.offbudget,
+    includeClosed: false,
+  });
+  return { current, previous, context };
+}
+
 async function getSpending({ month, start, end } = {}) {
   return withApi(async (api) => {
     const financeToday = todayYMD();
@@ -1216,10 +1240,15 @@ async function getSpending({ month, start, end } = {}) {
 
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
-    const [currentLeaves, previousLeaves] = await classifiedOnBudgetLeavesForWindows(api, [
-      { start: cur.start, end: curEnd },
-      { start: prev.start, end: prev.end },
-    ], catInfo);
+    const { current: currentLeaves, previous: previousLeaves } = await onBudgetLeavesPartitioned(api, {
+      scanStart: prev.start,
+      scanEnd: curEnd,
+      curStart: cur.start,
+      curEnd,
+      prevStart: prev.start,
+      prevEnd: prev.end,
+      catInfo,
+    });
     const current = summarize(currentLeaves);
     const previous = summarize(previousLeaves);
     return {
@@ -1319,7 +1348,7 @@ async function getTrends({ months = 12, endMonth } = {}) {
       const monthCompleteness = projectionCompletenessFromLeaves(b.transferIncompleteLeaves);
       return {
         month: b.key,
-        netWorth: d2(run),
+        netWorth: netWorthWindow.complete ? d2(run) : null,
         complete,
         spend: complete ? d2(b.expense) : null,
         income: complete ? d2(b.income) : null,
@@ -2092,6 +2121,19 @@ async function suggestRepayments({ from, to } = {}) {
 
     // Who currently owes (authoritative net from the tuned engine).
     const reimb = await getReimbursement({ from, to });
+    if (!reimb.ledgerScan?.complete) {
+      return {
+        suggestions: [],
+        count: 0,
+        complete: false,
+        incompleteReasons: [
+          QUERY_INCOMPLETE_REASON.repaymentSuggestionsUnavailable,
+          QUERY_INCOMPLETE_REASON.ledgerScanIncomplete,
+        ],
+        generatedAt: new Date().toISOString(),
+        range: { from, to },
+      };
+    }
     const owedBySlug = {};
     for (const o of reimb.owes || []) owedBySlug[o.slug] = o.owed;
 
@@ -2187,7 +2229,14 @@ async function suggestRepayments({ from, to } = {}) {
       });
     }
     suggestions.sort((a, b) => b.score - a.score || (a.inflow.date < b.inflow.date ? 1 : -1));
-    return { suggestions, count: suggestions.length, generatedAt: new Date().toISOString(), range: { from, to } };
+    return {
+      suggestions,
+      count: suggestions.length,
+      complete: true,
+      incompleteReasons: [],
+      generatedAt: new Date().toISOString(),
+      range: { from, to },
+    };
   });
 }
 
@@ -2547,19 +2596,46 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
     const frontedWin = round2(legs.filter((l) => l.amount < 0 && inWin(l.date)).reduce((s, l) => s + -l.amount, 0) / 100);
     const paidBackWin = round2(legs.filter((l) => l.amount > 0 && inWin(l.date)).reduce((s, l) => s + l.amount, 0) / 100);
     const isLifetimeWin = winFrom <= REIMB_LEDGER_FROM && winTo >= legTo;
+    const ledgerComplete = ledgerWindow.complete;
+    const financeDate = todayYMD();
+    const totalOwedMetric = boundedLifetimeMetric({
+      metric: 'reimbursement.total_owed',
+      value: ledgerComplete ? totalOwedCombined : null,
+      valueCents: ledgerComplete ? toCents(totalOwedCombined) : null,
+      complete: ledgerComplete,
+      incompleteReasons: ledgerComplete ? [] : [QUERY_INCOMPLETE_REASON.ledgerScanIncomplete],
+      lowerBound: ledgerComplete ? null : totalOwedCombined,
+      lowerBoundLabel: 'at least (partial ledger scan)',
+      financeDate,
+      method: 'reimbursement_ledger_scan',
+      sources: [{ type: 'ledger', role: 'reimbursement' }],
+    });
     const summary = {
       fronted: frontedWin,
       paidBack: paidBackWin,
-      // Over the lifetime window the meaningful "outstanding" is the real balance
-      // still owed; for a bounded window it's that window's net flow.
-      outstanding: isLifetimeWin ? totalOwedCombined : round2(frontedWin - paidBackWin),
+      outstanding: isLifetimeWin
+        ? (ledgerComplete ? totalOwedCombined : null)
+        : round2(frontedWin - paidBackWin),
+      outstandingMetric: isLifetimeWin
+        ? boundedLifetimeMetric({
+          metric: 'reimbursement.summary_outstanding',
+          value: ledgerComplete ? totalOwedCombined : null,
+          valueCents: ledgerComplete ? toCents(totalOwedCombined) : null,
+          complete: ledgerComplete,
+          incompleteReasons: ledgerComplete ? [] : [QUERY_INCOMPLETE_REASON.ledgerScanIncomplete],
+          lowerBound: ledgerComplete ? null : totalOwedCombined,
+          lowerBoundLabel: 'at least (partial ledger scan)',
+          financeDate,
+          method: 'reimbursement_ledger_scan',
+        })
+        : null,
       window: { from: winFrom, to: winTo },
       lifetime: isLifetimeWin,
     };
 
     return {
       range: { from: winFrom, to: winTo },
-      totalOwed: totalOwedCombined,
+      totalOwed: totalOwedMetric,
       summary,
       ledgerCutoff: REIMB_LEDGER_CUTOFF_ACTIVE ? REIMB_LEDGER_FROM : null,
       ledgerScan: {
@@ -2568,8 +2644,8 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
         to: legTo,
         complete: ledgerWindow.complete,
       },
-      debtorCount: owes.length,
-      owes,
+      debtorCount: ledgerComplete ? owes.length : null,
+      owes: ledgerComplete ? owes : [],
       owesSource,
       owesGeneratedAt,
       owesWarning,
@@ -3088,7 +3164,8 @@ async function getMerchantHistory({ payee, months = 12 } = {}) {
     const current = currentFinanceYearMonth();
     const year = current.year;
     const mIdx = current.monthIndex;
-    const span = Math.max(1, Math.min(60, Number(months) || 12));
+    const config = loadQueryScalingConfig();
+    const span = Math.max(1, Math.min(config.maxMerchantHistoryMonths, Number(months) || 12));
     const windowStart = monthRange(year, mIdx - (span - 1)).start;
     const end = todayYMD();
 
@@ -4042,8 +4119,8 @@ async function getForecast({ days = 90 } = {}) {
       pushEventCents(entry.date, 'Planned non-bill spending', -entry.centsCents, 'budget', 'planned');
     }
   }
-  const possibleReimbursement = reimb.totalOwed > 0.5
-    ? { date: addDays(today, 14), amount: round2(reimb.totalOwed), includedInBalance: false }
+  const possibleReimbursement = reimb.totalOwed?.complete && reimb.totalOwed.value != null && reimb.totalOwed.value > 0.5
+    ? { date: addDays(today, 14), amount: round2(reimb.totalOwed.value), includedInBalance: false }
     : null;
 
   const events = eventRows
@@ -5927,40 +6004,56 @@ function deleteGoal(id) {
 // ---------------------------------------------------------------------------
 async function searchTransactions({ q, start, end, limit = 200, cursor } = {}) {
   const config = loadQueryScalingConfig();
-  const decoded = cursor ? decodeSearchCursor(cursor, { config }) : null;
-  const range = decoded || resolveSearchWindow({ start, end, config });
+  const generation = getActualCoordinator().generation;
+  const decoded = cursor
+    ? decodeSearchCursor(cursor, { config, expectedGeneration: generation })
+    : null;
+  const range = decoded
+    ? { start: decoded.start, end: decoded.end }
+    : resolveSearchWindow({ start, end, config });
   const effectiveLimit = Math.min(config.maxSearchLimit, Math.max(1, Number(decoded?.limit ?? limit) || 200));
-  const offset = decoded?.offset || 0;
   const needle = (decoded?.q ?? q ?? '').toLowerCase().trim();
-  const all = await getTransactions({ start: range.start, end: range.end });
-  const res = needle
+  if (decoded) {
+    if (start && start !== decoded.start) throw new QueryRangeExceededError('search cursor start mismatch');
+    if (end && end !== decoded.end) throw new QueryRangeExceededError('search cursor end mismatch');
+    if (q != null && String(q).trim() !== '' && needle !== String(decoded.q || '').toLowerCase().trim()) {
+      throw new QueryRangeExceededError('search cursor query mismatch');
+    }
+  }
+  const all = await getTransactions({ start: range.start, end: range.end, collapse: true });
+  let res = needle
     ? all.filter((t) =>
         (t.payee || '').toLowerCase().includes(needle) ||
         (t.category || '').toLowerCase().includes(needle) ||
         (t.account || '').toLowerCase().includes(needle) ||
         (t.notes || '').toLowerCase().includes(needle))
     : all;
-  const page = res.slice(offset, offset + effectiveLimit);
-  const nextOffset = offset + page.length;
-  const hasMore = nextOffset < res.length;
+  if (decoded?.anchorDate && decoded?.anchorId) {
+    res = res.filter((t) => rowBeforeSearchAnchor(t, decoded.anchorDate, decoded.anchorId));
+  }
+  res.sort(compareSearchRowsDesc);
+  const page = res.slice(0, effectiveLimit);
+  const hasMore = res.length > effectiveLimit;
+  const last = page[page.length - 1];
   return {
     transactions: page,
-    total: res.length,
-    truncated: res.length > effectiveLimit || hasMore,
+    truncated: hasMore,
     range: { start: range.start, end: range.end },
     pagination: {
       limit: effectiveLimit,
-      offset,
-      nextCursor: hasMore
+      nextCursor: hasMore && last
         ? encodeSearchCursor({
           start: range.start,
           end: range.end,
-          offset: nextOffset,
           q: needle,
           limit: effectiveLimit,
+          anchorDate: last.date,
+          anchorId: last.id,
+          generation,
         })
         : null,
       complete: !hasMore,
+      consistency: { generation, semantics: 'coordinator_generation_bound' },
     },
   };
 }
