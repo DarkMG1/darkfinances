@@ -6,12 +6,7 @@ import { useAccounts, useCategories, useCreateTransaction } from '@/api/hooks/fi
 import { Card, CardTitle } from '@/components/ui';
 import { haptics } from '@/lib/haptics';
 import { colors } from '@/theme/colors';
-
-const pad = (n: number) => String(n).padStart(2, '0');
-const todayYMD = () => {
-  const n = new Date();
-  return `${n.getFullYear()}-${pad(n.getMonth() + 1)}-${pad(n.getDate())}`;
-};
+import { useEditableFinanceDate } from '@/lib/date-only';
 
 type Kind = 'expense' | 'income';
 
@@ -26,7 +21,7 @@ export default function AddTransaction() {
   const [kind, setKind] = useState<Kind>('expense');
   const [amount, setAmount] = useState('');
   const [payee, setPayee] = useState('');
-  const [date, setDate] = useState(todayYMD());
+  const { value: date, setValue: setDate } = useEditableFinanceDate();
   const [notes, setNotes] = useState('');
   const [accountId, setAccountId] = useState<string | null>(null);
   const [categoryId, setCategoryId] = useState<string | null>(null);

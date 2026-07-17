@@ -5,6 +5,7 @@ import { IncomeStream } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
 import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
+import { useFinanceToday } from '@/lib/date-only';
 import { cadenceLabel, colors, dueLabel, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
@@ -29,6 +30,7 @@ function Row({ s, muted }: { s: IncomeStream; muted?: boolean }) {
 }
 
 export default function Income() {
+  const financeToday = useFinanceToday();
   const income = useIncome();
   const data = income.data;
   const active = (data?.streams ?? []).filter((s) => s.active);
@@ -49,7 +51,7 @@ export default function Income() {
             <Text style={styles.heroValue}>{fmtMoney(data.monthlyTotal)}</Text>
             <Text style={styles.heroSub}>
               {data.nextPayday
-                ? `Next: ${cap(data.nextPaydayPayee ?? 'paycheck')} · ${dueLabel(data.nextPayday)} · ${fmtPos(data.nextPaydayAmount ?? 0)}`
+                ? `Next: ${cap(data.nextPaydayPayee ?? 'paycheck')} · ${dueLabel(data.nextPayday, financeToday)} · ${fmtPos(data.nextPaydayAmount ?? 0)}`
                 : `${data.activeCount} active stream${data.activeCount === 1 ? '' : 's'}`}
             </Text>
           </View>

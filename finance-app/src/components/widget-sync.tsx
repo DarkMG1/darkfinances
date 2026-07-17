@@ -4,11 +4,13 @@ import { useAccounts, useBills, useManualAssets, useTrends } from '@/api/hooks/f
 import { getFinanceCapabilities } from '@/lib/capabilities';
 import { clearFinanceWidget, pushFinanceWidget } from '@/lib/widgets';
 import { useServerConfig } from '@/state/server';
+import { useFinanceToday } from '@/lib/date-only';
 import { dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 // Invisible: pushes a fresh snapshot to the home-screen widget whenever the app
 // is open with current data. Mounted once inside the authenticated tab navigator.
 export function WidgetSync() {
+  const financeToday = useFinanceToday();
   const capabilities = getFinanceCapabilities();
   const { demo } = useServerConfig();
   const accounts = useAccounts({ enabled: capabilities.widgets && !demo });
@@ -49,9 +51,9 @@ export function WidgetSync() {
       changeUp,
       billPayee: nextBill ? nextBill.payee : 'All caught up',
       billAmount: nextBill ? fmtPos(nextBill.amount) : '',
-      billDue: nextBill ? dueLabel(nextBill.dueDate) : 'No bills due',
+      billDue: nextBill ? dueLabel(nextBill.dueDate, financeToday) : 'No bills due',
     });
-  }, [accounts.data, bills.data, capabilities.widgets, demo, manual.data, trends.data]);
+  }, [accounts.data, bills.data, capabilities.widgets, demo, financeToday, manual.data, trends.data]);
 
   return null;
 }

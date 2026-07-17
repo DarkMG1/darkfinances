@@ -15,6 +15,7 @@ import { ErrorBoundaryProps, Stack } from 'expo-router';
 import { focusManager, QueryClientProvider } from '@tanstack/react-query';
 import { reconcilePendingFinanceOperations } from '@/api/client/requests';
 import { ServerProvider, useServerConfig } from '@/state/server';
+import { FinanceDateProvider } from '@/state/finance-date';
 import { authenticate } from '@/lib/biometric';
 import { useAutoUpdate } from '@/lib/auto-update';
 import {
@@ -382,10 +383,12 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <QueryClientProvider client={queryClient}>
         <ServerProvider>
-          <SafeAreaProvider>
-            <StatusBar style="light" />
-            <RootNav />
-          </SafeAreaProvider>
+          <FinanceDateProvider>
+            <SafeAreaProvider>
+              <StatusBar style="light" />
+              <RootNav />
+            </SafeAreaProvider>
+          </FinanceDateProvider>
         </ServerProvider>
       </QueryClientProvider>
     </GestureHandlerRootView>

@@ -6,6 +6,7 @@ import { RecurringItem } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
 import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
+import { useFinanceToday } from '@/lib/date-only';
 import { cadenceLabel, colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const sid = (s: string) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
@@ -14,6 +15,7 @@ const sid = (s: string) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').
 // cloud). True must-pay bills (rent/utilities/phone/loan) live in the Bills
 // calendar instead, so the two views don't overlap.
 export default function Subscriptions() {
+  const financeToday = useFinanceToday();
   const router = useRouter();
   const recurring = useRecurring();
   const override = useSetRecurringOverride();
@@ -41,7 +43,7 @@ export default function Subscriptions() {
           <Text style={[styles.payee, dim && styles.dim]} numberOfLines={1}>{item.payee}</Text>
           <Text style={styles.sub} numberOfLines={1}>
             {cadenceLabel(item.cadence)}
-            {item.status === 'active' ? ` · ${dueLabel(item.nextRenewal)}` : item.status === 'cancelled' ? ' · cancelled' : ' · inactive'}
+            {item.status === 'active' ? ` · ${dueLabel(item.nextRenewal, financeToday)}` : item.status === 'cancelled' ? ' · cancelled' : ' · inactive'}
             {item.confidence ? ` · ${item.confidence}% confidence` : ''}
             {item.cancellation?.watchNextRenewal ? ' · watching renewal' : ''}
           </Text>

@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useDeleteEvent, useEvents, useSaveEvent } from '@/api/hooks/finance.hooks';
 import { Card, CardTitle } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
-import { financeToday, isDateOnly } from '@/lib/date-only';
+import { isDateOnly, useEditableFinanceDate } from '@/lib/date-only';
 import { haptics } from '@/lib/haptics';
 import { colors } from '@/theme/colors';
 
@@ -17,7 +17,7 @@ export default function Events() {
   const deleteEvent = useDeleteEvent();
 
   const [name, setName] = useState('');
-  const [start, setStart] = useState(financeToday());
+  const { value: start, setValue: setStart, resetToToday, today } = useEditableFinanceDate();
   const [members, setMembers] = useState('');
   const [group, setGroup] = useState('');
 
@@ -25,7 +25,7 @@ export default function Events() {
 
   const add = () => {
     if (!canAdd) return;
-    const startDate = start.trim() || financeToday();
+    const startDate = start.trim() || today;
     if (!isDateOnly(startDate)) {
       Alert.alert('Invalid start date', 'Use a real date in YYYY-MM-DD format.');
       return;
@@ -38,7 +38,7 @@ export default function Events() {
           setName('');
           setMembers('');
           setGroup('');
-          setStart(financeToday());
+          resetToToday();
           Alert.alert(
             'Trip created',
             `Tag any charge with #ev-${r?.event?.slug} to add it to “${r?.event?.name}”.` +

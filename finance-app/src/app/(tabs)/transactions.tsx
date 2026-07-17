@@ -12,7 +12,7 @@ import { Avatar, ErrorState, PendingPill, SplitPill } from '@/components/ui';
 import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
-import { financeToday } from '@/lib/date-only';
+import { startMonthsAgo, useFinanceToday } from '@/lib/date-only';
 import { colors, fmtMoney, fmtDay } from '@/theme/colors';
 
 type Filter = 'all' | 'expense' | 'income';
@@ -36,16 +36,15 @@ const RANGES: { label: string; m: number }[] = [
   { label: '1Y', m: 12 },
 ];
 
-function startMonthsAgo(months: number): string {
-  const n = new Date();
-  const d = new Date(n.getFullYear(), n.getMonth() - (months - 1), 1);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+function startMonthsAgoLocal(months: number, anchor: string): string {
+  return startMonthsAgo(months, anchor);
 }
 
 export default function Transactions() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { serverUrl, token, demo } = useServerConfig();
+  const financeToday = useFinanceToday();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [rangeM, setRangeM] = useState(3);
@@ -62,7 +61,7 @@ export default function Transactions() {
 
   // 2+ chars switches from the recent (month-bound) list to an all-time server search.
   const searching = search.trim().length >= 2;
-  const txns = useTransactions({ start: startMonthsAgo(rangeM), accountId: accountId ?? undefined, collapse: true });
+  const txns = useTransactions({ start: startMonthsAgoLocal(rangeM, financeToday), accountId: accountId ?? undefined, collapse: true });
   const searchRes = useSearch(search);
 
   const base = useMemo(
@@ -132,7 +131,7 @@ export default function Transactions() {
   const exportCsv = async () => {
     setExporting(true);
     try {
-      const month = financeToday().slice(0, 7);
+      const month = financeToday.slice(0, 7);
       const csv = await buildQuery<string>({ serverUrl, token, demo, endpoint: '/api/v1/report.csv', method: 'GET', params: { month } });
       if (csv && FileSystem.cacheDirectory) {
         const file = `${FileSystem.cacheDirectory}darkfinances-${month}.csv`;

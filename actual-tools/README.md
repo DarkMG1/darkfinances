@@ -104,6 +104,10 @@ Run commands from this directory unless an example includes an absolute path.
 | `reimb-report.js` | Dashboard-compatible lifetime reimbursement ledger and debt summary. |
 
 All finance date boundaries use `FINANCE_TIME_ZONE`, then `TZ`, then `America/Los_Angeles`.
+Shared date-only helpers live in `lib/date-only.js` (strict `YYYY-MM-DD` values, UTC-agnostic
+calendar math, and `todayYMD()` anchored to the finance zone rather than process UTC).
+Cross-runtime parity with `finance-dashboard/lib/date-only.js` and
+`finance-app/src/lib/finance-date-core.js` is enforced by `test/finance-date-parity.test.js`.
 
 Example:
 

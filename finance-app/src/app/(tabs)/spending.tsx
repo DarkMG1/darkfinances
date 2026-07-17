@@ -8,8 +8,8 @@ import { Screen } from '@/components/screen';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, PendingPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
-import { addDateOnlyDays, financeToday, monthEnd } from '@/lib/date-only';
-import { currentMonthKey, useSelectedMonth } from '@/lib/selectedMonth';
+import { addDateOnlyDays, monthEnd, useFinanceToday } from '@/lib/date-only';
+import { useSelectedMonth } from '@/lib/selectedMonth';
 import { categoryColors, colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
 
 type Period = 'week' | 'month' | 'quarter' | 'year';
@@ -21,9 +21,9 @@ const PERIODS: { key: Period; label: string }[] = [
   { key: 'year', label: 'Year' },
 ];
 
-function periodWindow(period: Period, month: string, currentMonth: string) {
+function periodWindow(period: Period, month: string, currentMonth: string, financeTodayAnchor: string) {
   const selectedIsCurrent = month === currentMonth;
-  const anchorYmd = selectedIsCurrent ? financeToday() : monthEnd(month);
+  const anchorYmd = selectedIsCurrent ? financeTodayAnchor : monthEnd(month);
   const [anchorYear, anchorMonth, anchorDay] = anchorYmd.split('-').map(Number);
 
   if (period === 'week') {
@@ -61,7 +61,8 @@ function totalSpendBucket(category: string, group?: string) {
 
 export default function Spending() {
   const router = useRouter();
-  const curKey = currentMonthKey();
+  const financeToday = useFinanceToday();
+  const curKey = financeToday.slice(0, 7);
   const [month, setMonth] = useSelectedMonth();
   const [period, setPeriod] = useState<Period>('month');
   const [totalExpanded, setTotalExpanded] = useState(false);
@@ -69,7 +70,7 @@ export default function Spending() {
   const [breakdownMode, setBreakdownMode] = useState<BreakdownMode>('categories');
   // Current month keeps hitting the warmed `spending-current` cache (month=undefined).
   const apiMonth = month === curKey ? undefined : month;
-  const selectedWindow = useMemo(() => periodWindow(period, month, curKey), [period, month, curKey]);
+  const selectedWindow = useMemo(() => periodWindow(period, month, curKey, financeToday), [period, month, curKey, financeToday]);
   const spendingParams = period === 'month' ? apiMonth : { start: selectedWindow.start, end: selectedWindow.end };
   const useCurrentToday = period === 'month' && apiMonth === undefined;
   const today = useToday();

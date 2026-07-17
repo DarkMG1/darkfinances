@@ -13,9 +13,9 @@
 
 const fs = require('fs');
 const path = require('path');
+const { todayYMD } = require('./lib/date-only');
 
 const EVENTS_PATH = process.env.EVENTS_PATH || path.resolve(__dirname, '..', 'finance-dashboard', 'events.json');
-const todayYMD = () => new Date().toISOString().slice(0, 10);
 const slugify = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 
 function load() {

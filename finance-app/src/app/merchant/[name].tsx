@@ -7,7 +7,7 @@ import { PushScreen } from '@/components/screen';
 import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/components/ui';
 import { MonthNavigator } from '@/components/charts';
 import { SkeletonList } from '@/components/skeleton';
-import { financeToday } from '@/lib/date-only';
+import { useFinanceToday } from '@/lib/date-only';
 import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -25,7 +25,7 @@ export default function MerchantDetail() {
   const [selected, setSelected] = useState('');
   const hist = useMerchantHistory(name, months);
 
-  const currentKey = financeToday().slice(0, 7);
+  const currentKey = useFinanceToday().slice(0, 7);
 
   const series = useMemo(
     () => (hist.data?.months ?? []).map((m) => ({ month: m.month, spend: m.total })),

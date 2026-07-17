@@ -5,23 +5,25 @@
 
 const { metricValue } = require('./lib/metric-provenance');
 const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
+const { addDays, daysBetween, daysInMonth, monthEnd, shiftMonth, todayYMD } = require('./lib/date-only');
 
 const pad2 = (n) => String(n).padStart(2, '0');
-const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-const monthKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+const anchorDate = () => (process.env.DEMO_FINANCE_NOW ? new Date(process.env.DEMO_FINANCE_NOW) : new Date());
+const financeAnchor = () => todayYMD(anchorDate());
+const dayOfFinanceMonth = (anchor = financeAnchor()) => Number(anchor.slice(8, 10));
+const ymd = (d) => {
+  if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  return todayYMD(d instanceof Date ? d : new Date(d));
+};
+const monthKey = (d) => ymd(d).slice(0, 7);
 const round2 = (n) => Math.round(n * 100) / 100;
-function daysAgo(n) { const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - n); return d; }
-function addDays(dateStr, days) { const [y, m, dd] = dateStr.split('-').map(Number); const d = new Date(y, m - 1, dd); d.setDate(d.getDate() + days); return ymd(d); }
+function daysAgo(n) { return addDays(financeAnchor(), -n); }
 function mulberry32(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 const recurKey = (p) => (p || '').toLowerCase().replace(/[#*]?\d{3,}/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-const currentMonth = () => monthKey(new Date());
+const currentMonth = () => financeAnchor().slice(0, 7);
 const categoryById = (id) => categories().find((c) => c.id === id) || null;
 const categoryByName = (name) => categories().find((c) => c.name.toLowerCase() === String(name || '').toLowerCase()) || null;
 const monthStart = (month) => `${month}-01`;
-const monthEnd = (month) => {
-  const [y, m] = String(month).split('-').map(Number);
-  return ymd(new Date(y, m, 0));
-};
 
 // ---- Accounts -------------------------------------------------------------
 const ACCOUNTS = [
@@ -95,11 +97,11 @@ function recurring() {
   };
 }
 function bills() {
-  const today = ymd(new Date());
+  const today = financeAnchor();
   const within = [];
   for (const it of activeSubs()) {
     if (!it.isBill) continue; // bills view = true bills only (rent/utilities/phone/internet)
-    const diff = (new Date(it.nextRenewal) - new Date(today)) / 86400000;
+    const diff = daysBetween(today, it.nextRenewal);
     if (diff >= 0 && diff <= 45) within.push({ id: `${it.key}|${it.nextRenewal}`, key: it.key, payee: it.payee, amount: it.amount, dueDate: it.nextRenewal, category: it.category, cadence: it.cadence, paid: false, paidDate: null, matched: null });
   }
   within.sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1));
@@ -129,14 +131,14 @@ function today() {
     complete: incompleteReasons.length === 0,
     incompleteReasons,
     asOf,
-    financeDate: ymd(new Date()),
+    financeDate: financeAnchor(),
     sources: cash.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
     method: 'demo operating cash minus upcoming bills',
     excludes: ['possible reimbursements'],
   });
   return {
     asOf,
-    financeDate: ymd(new Date()),
+    financeDate: financeAnchor(),
     revision: `demo-${currentMonth()}`,
     complete: safeToSpend.complete,
     incompleteReasons: safeToSpend.incompleteReasons,
@@ -213,54 +215,51 @@ function summarizeTxns(start, end) {
   return { spending: out, totalSpend: round2(Object.values(out).reduce((s, x) => s + x, 0)), totalIncome: round2(totalIncome) };
 }
 function spending(opts = {}) {
-  const now = new Date();
+  const anchor = financeAnchor();
   let start = opts.start;
   let end = opts.end;
   let key = opts.month || currentMonth();
   if (!start || !end) {
     key = opts.month || currentMonth();
     start = monthStart(key);
-    end = opts.month ? monthEnd(key) : ymd(now);
+    end = opts.month ? monthEnd(key) : anchor;
   }
-  const ms = Date.parse(`${start}T00:00:00`);
-  const me = Date.parse(`${end}T00:00:00`);
-  const span = Number.isFinite(ms) && Number.isFinite(me) ? Math.max(1, Math.round((me - ms) / 86400000) + 1) : 30;
-  const prevEnd = new Date(ms - 86400000);
-  const prevStart = new Date(prevEnd);
-  prevStart.setDate(prevEnd.getDate() - span + 1);
+  const span = Math.max(1, daysBetween(start, end) + 1);
+  const prevEnd = addDays(start, -1);
+  const prevStart = addDays(prevEnd, -(span - 1));
   return {
     current: summarizeTxns(start, end),
-    prev: summarizeTxns(ymd(prevStart), ymd(prevEnd)),
+    prev: summarizeTxns(prevStart, prevEnd),
     month: key || start.slice(0, 7),
   };
 }
 
 // ---- Trends (up to 36 months) ---------------------------------------------
 function trends(n = 12) {
-  const now = new Date();
   const out = [];
   let nw = 59000;
+  const anchorMonth = currentMonth();
   for (let i = 35; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const month = shiftMonth(anchorMonth, -i);
     const rnd = mulberry32(1000 + i);
     const income = 6500 + (i % 6 === 0 ? 1600 : 0) + Math.round(rnd() * 80);
     const spend = 4300 + Math.round(rnd() * 1100);
     const net = income - spend;
     nw += net * 0.22 + (rnd() * 240 - 60);
-    out.push({ month: monthKey(d), netWorth: round2(nw), spend: round2(spend), income: round2(income), net: round2(net) });
+    out.push({ month, netWorth: round2(nw), spend: round2(spend), income: round2(income), net: round2(net) });
   }
   return { months: out.slice(36 - Math.min(36, Math.max(3, n))) };
 }
 
 // ---- Budgets --------------------------------------------------------------
-function bcat(name, budgeted, spent) {
+function bcat(name, budgeted, spent, daysElapsed = dayOfFinanceMonth()) {
   const remaining = round2(budgeted - spent);
   const pct = budgeted ? Math.round((spent / budgeted) * 100) : null;
   const over = spent > budgeted;
   return {
     id: catId(name), name, budgeted, target: budgeted, spent, remaining,
     projected: round2(spent * 1.08), expectedToDate: round2(budgeted * 0.5),
-    dailyPace: round2(spent / Math.max(1, new Date().getDate())), balance: remaining, pct, over,
+    dailyPace: round2(spent / Math.max(1, daysElapsed)), balance: remaining, pct, over,
     status: over ? 'over' : pct && pct > 85 ? 'watch' : 'on_track',
     rolloverMode: 'none', rolloverAmount: 0, annualTarget: null, trueExpenseCadence: null,
     snoozedMonth: null, priority: null, linkedGoal: null,
@@ -279,6 +278,8 @@ function bgroup(name, cats) {
   };
 }
 function budgets() {
+  const month = currentMonth();
+  const elapsed = dayOfFinanceMonth();
   const groups = [
     bgroup('Housing', [bcat('Rent', 2100, 2100)]),
     bgroup('Food', [bcat('Groceries', 600, 512.34), bcat('Dining', 300, 328.9), bcat('Coffee', 60, 58.5)]),
@@ -293,12 +294,11 @@ function budgets() {
   const totalSpent = round2(groups.reduce((s, g) => s + g.spent, 0));
   const totalProjected = round2(groups.reduce((s, g) => s + g.projected, 0));
   const totalRemaining = round2(totalBudgeted - totalSpent);
-  const now = new Date();
   return {
-    month: monthKey(now), supported: true,
+    month, supported: true,
     totalBudgeted, totalTarget: totalBudgeted, totalSpent, totalRemaining, totalProjected,
-    daysInMonth: new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate(),
-    daysElapsed: now.getDate(),
+    daysInMonth: daysInMonth(month),
+    daysElapsed: elapsed,
     status: totalRemaining < 0 ? 'over' : 'on_track',
     groups,
   };
@@ -316,7 +316,7 @@ function reimbursement() {
     { event: 'ski weekend', fronted: 300, recovered: 300, net: 0, status: 'settled_venmo', n: 4, firstDate: ymd(daysAgo(82)), lastDate: ymd(daysAgo(76)), settledDate: ymd(daysAgo(64)) },
   ];
   return {
-    range: { from: ymd(daysAgo(150)), to: ymd(new Date()) },
+    range: { from: ymd(daysAgo(150)), to: financeAnchor() },
     totalOwed: 255.0, debtorCount: 2, owes, people: [], events, expected: [], buckets: {},
   };
 }
@@ -450,14 +450,14 @@ function investments() {
     byAccount[h.account] = round2((byAccount[h.account] || 0) + h.value);
   }
   const debts = [
-    { id: 'debt-student', name: 'Student Loan', balance: 8400, apr: 5.8, minPayment: 175, dueDate: addDays(ymd(new Date()), 18), strategy: 'avalanche', months: 54, totalInterest: 1320, payoffDate: addDays(ymd(new Date()), 54 * 30) },
-    { id: 'debt-auto', name: 'Auto Loan', balance: 6200, apr: 4.2, minPayment: 240, dueDate: addDays(ymd(new Date()), 9), strategy: 'snowball', months: 28, totalInterest: 410, payoffDate: addDays(ymd(new Date()), 28 * 30) },
+    { id: 'debt-student', name: 'Student Loan', balance: 8400, apr: 5.8, minPayment: 175, dueDate: addDays(financeAnchor(), 18), strategy: 'avalanche', months: 54, totalInterest: 1320, payoffDate: addDays(financeAnchor(), 54 * 30) },
+    { id: 'debt-auto', name: 'Auto Loan', balance: 6200, apr: 4.2, minPayment: 240, dueDate: addDays(financeAnchor(), 9), strategy: 'snowball', months: 28, totalInterest: 410, payoffDate: addDays(financeAnchor(), 28 * 30) },
   ];
   const debtTotals = { balance: round2(debts.reduce((s, d) => s + d.balance, 0)), minPayment: round2(debts.reduce((s, d) => s + d.minPayment, 0)), weightedApr: 5.1 };
   return { generatedAt: new Date().toISOString(), holdings, totals, allocation: { byAssetClass, byAccount }, debts, debtTotals };
 }
 function forecast(days = 90) {
-  const start = ymd(new Date());
+  const start = financeAnchor();
   const end = addDays(start, days);
   const base = accounts().filter((a) => !a.offbudget && a.balance > 0).reduce((s, a) => s + a.balance, 0);
   const events = [
@@ -507,10 +507,9 @@ function rules() { return { rules: demoState.rules.map((r) => ({ ...r })), catal
 function merchantHistory({ payee = '', months = 12 } = {}) {
   const m = Math.min(36, Math.max(1, Number(months) || 12));
   const out = [];
-  const now = new Date();
+  const anchorMonth = currentMonth();
   for (let i = m - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const key = monthKey(d);
+    const key = shiftMonth(anchorMonth, -i);
     const items = transactions().filter((t) => t.payee.toLowerCase() === String(payee).toLowerCase() && t.date.slice(0, 7) === key);
     out.push({ month: key, total: round2(items.reduce((s, t) => s + Math.abs(t.amount), 0)), count: items.length, items });
   }
@@ -537,7 +536,7 @@ function repaymentSuggestions() {
   const inflow = { id: 'tx-repay-demo', date: ymd(daysAgo(4)), payee: 'Venmo Alex', amount: 142.5 };
   const expense = { id: 'tx-expense-demo', date: ymd(daysAgo(20)), payee: 'Tahoe cabin share', amount: -112.5 };
   const suggestions = demoState.dismissedSuggestions.has('demo-sugg-alex') ? [] : [{ id: 'demo-sugg-alex', inflow, person: 'alex', owed: 142.5, allocations: [{ expense, amount: 112.5 }], matched: 112.5, remainder: 30, kind: 'over', score: 93, reason: 'Incoming Venmo looks like Alex paying back shared trip expenses.', createdAt: new Date().toISOString() }];
-  return { suggestions, count: suggestions.length, generatedAt: new Date().toISOString(), range: { from: ymd(daysAgo(60)), to: ymd(new Date()) } };
+  return { suggestions, count: suggestions.length, generatedAt: new Date().toISOString(), range: { from: ymd(daysAgo(60)), to: financeAnchor() } };
 }
 function receipts(txnId) { return { receipts: demoState.receipts.filter((r) => !txnId || r.txnId === txnId).map((r) => ({ ...r })) }; }
 function reimbLinks(id) {
@@ -560,7 +559,7 @@ function saveGoal(input = {}) {
 function deleteGoal(id) { demoState.goals = currentGoals().filter((g) => g.id !== id); return { ok: true, removed: 1 }; }
 function saveManualAsset(input = {}) {
   const id = input.id || `manual-demo-${Date.now()}`;
-  const row = { id, name: input.name || 'Demo asset', value: round2(Number(input.value) || 0), kind: input.kind === 'liability' ? 'liability' : 'asset', updated: ymd(new Date()) };
+  const row = { id, name: input.name || 'Demo asset', value: round2(Number(input.value) || 0), kind: input.kind === 'liability' ? 'liability' : 'asset', updated: financeAnchor() };
   const idx = demoState.manualAssets.findIndex((m) => m.id === id);
   if (idx >= 0) demoState.manualAssets[idx] = row; else demoState.manualAssets.push(row);
   return { ok: true, id };
@@ -568,14 +567,14 @@ function saveManualAsset(input = {}) {
 function deleteManualAsset(id) { demoState.manualAssets = demoState.manualAssets.filter((m) => m.id !== id); return { ok: true, removed: 1 }; }
 function saveRule(input = {}) {
   const id = `rule-demo-${Date.now()}`;
-  const row = { id, match: input.match || 'Demo', categoryId: input.categoryId || catId('Shopping'), categoryName: input.categoryName || categoryById(input.categoryId)?.name || 'Shopping', created: ymd(new Date()) };
+  const row = { id, match: input.match || 'Demo', categoryId: input.categoryId || catId('Shopping'), categoryName: input.categoryName || categoryById(input.categoryId)?.name || 'Shopping', created: financeAnchor() };
   demoState.rules.push(row);
   return { ok: true, id, applied: 1 };
 }
 function deleteRule(id) { demoState.rules = demoState.rules.filter((r) => r.id !== id); return { ok: true, removed: 1 }; }
 function saveEvent(input = {}) {
   const slug = input.slug || String(input.name || 'demo-event').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `event-${Date.now()}`;
-  const event = { slug, name: input.name || 'Demo Event', start: input.start || ymd(new Date()), members: String(input.members || '').split(',').map((s) => s.trim()).filter(Boolean), group: input.group || '', created: ymd(new Date()), taggedCount: 0 };
+  const event = { slug, name: input.name || 'Demo Event', start: input.start || financeAnchor(), members: String(input.members || '').split(',').map((s) => s.trim()).filter(Boolean), group: input.group || '', created: financeAnchor(), taggedCount: 0 };
   const idx = demoState.events.findIndex((e) => e.slug === slug);
   if (idx >= 0) demoState.events[idx] = event; else demoState.events.push(event);
   return { ok: true, event };
@@ -584,7 +583,7 @@ function deleteEvent(slug) { demoState.events = demoState.events.filter((e) => e
 function createTransaction(input = {}) {
   const account = accounts().find((a) => a.id === input.accountId) || accounts()[0];
   const cat = categoryById(input.categoryId);
-  const row = { id: `tx-${_nextTxn++}`, parentId: null, isLeg: false, date: input.date || ymd(new Date()), payee: input.payee || 'Manual transaction', account: account.name, accountId: account.id, cleared: true, amount: round2(Number(input.amount) || 0), category: cat?.name || null, categoryId: cat?.id || null, notes: input.notes || '', imported: false };
+  const row = { id: `tx-${_nextTxn++}`, parentId: null, isLeg: false, date: input.date || financeAnchor(), payee: input.payee || 'Manual transaction', account: account.name, accountId: account.id, cleared: true, amount: round2(Number(input.amount) || 0), category: cat?.name || null, categoryId: cat?.id || null, notes: input.notes || '', imported: false };
   transactions().unshift(row);
   return { ok: true, id: row.id };
 }

@@ -13,7 +13,7 @@
     "actual-tools"
   ],
   "scripts": {
-    "check": "npm run check:toolchain && npm run check:alignment && npm run check:contract && npm run check:fixtures && npm run check:dashboard && npm run check:app && npm run check:tools && npm run check:ops && npm run check:release",
+    "check": "npm run check:toolchain && npm run check:alignment && npm run check:contract && npm run check:fixtures && npm run check:dashboard && npm run check:app && npm run check:tools && npm run check:ops && npm run check:parity && npm run check:release",
     "check:toolchain": "node -e \"const v=process.versions.node.split('.').map(Number); if (v[0]<24) { console.error('Node 24+ required, got '+process.versions.node); process.exit(1); }\"",
     "check:alignment": "node scripts/check-version-alignment.js",
     "check:contract": "node scripts/check-contract-freshness.js",
@@ -23,6 +23,7 @@
     "check:app": "npm --prefix finance-app test && npm --prefix finance-app run lint && node finance-app/scripts/verify-release-variant.js",
     "check:tools": "npm --prefix actual-tools test",
     "check:ops": "for file in ops/bin/*.sh; do bash -n \"$file\"; done && node --test ops/test/*.test.js",
+    "check:parity": "node --test test/finance-date-parity.test.js",
     "check:release": "node scripts/release-manifest.js --stdout >/dev/null",
     "check:shell": "command -v shellcheck >/dev/null 2>&1 && shellcheck -x ops/bin/*.sh actual-tools/run.sh actual-tools/splitwise-run.sh || echo 'shellcheck: skipped (not installed)'",
     "check:systemd": "for unit in ops/systemd/*.service ops/systemd/*.timer; do systemd-analyze --user verify \"$unit\"; done",

@@ -6,12 +6,13 @@ import * as WebBrowser from 'expo-web-browser';
 import { useRecurring, useSetRecurringOverride } from '@/api/hooks/finance.hooks';
 import { AreaChart } from '@/components/charts';
 import { Card, CardTitle, ErrorState, Loading } from '@/components/ui';
-import { financeToday } from '@/lib/date-only';
+import { useFinanceToday } from '@/lib/date-only';
 import { cancelInfoFor } from '@/theme/cancelDirectory';
 import { cadenceLabel, colors, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
 export default function RecurringDetail() {
   const { key } = useLocalSearchParams<{ key: string }>();
+  const financeToday = useFinanceToday();
   const router = useRouter();
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -120,7 +121,7 @@ export default function RecurringDetail() {
             <Pressable testID="recurring-watch-renewal-button" style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, cancellation: { watchNextRenewal: !item.cancellation?.watchNextRenewal } })} disabled={override.isPending}>
               <Text style={styles.workflowText}>{item.cancellation?.watchNextRenewal ? 'Stop watching' : 'Watch renewal'}</Text>
             </Pressable>
-            <Pressable testID="recurring-confirm-cancelled-button" style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, status: 'cancelled', cancellation: { status: 'confirmed', confirmationDate: financeToday() } })} disabled={override.isPending}>
+            <Pressable testID="recurring-confirm-cancelled-button" style={styles.workflowBtn} onPress={() => override.mutate({ key: item.key, status: 'cancelled', cancellation: { status: 'confirmed', confirmationDate: financeToday } })} disabled={override.isPending}>
               <Text style={styles.workflowText}>Confirm cancelled</Text>
             </Pressable>
           </View>

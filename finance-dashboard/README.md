@@ -26,6 +26,8 @@ Important guarantees:
 - A failed rebuild attempts rollback instead of leaving half-applied state.
 - JSON sidecars use atomic replacement, last-good copies, and corruption quarantine.
 - Finance date-only calculations use `FINANCE_TIME_ZONE` (default: `America/Los_Angeles`).
+- Demo mode derives every finance month/day from the same date-only helpers (`demoData.js`); tests may freeze time with `DEMO_FINANCE_NOW`.
+- Cross-runtime parity with mobile and actual-tools is checked by `test/finance-date-parity.test.js`.
 
 ## Requirements
 

@@ -33,6 +33,7 @@ import { haptics } from '@/lib/haptics';
 import { CapturedReceipt, pickReceiptFromLibrary, scanReceiptFromCamera } from '@/lib/receipts';
 import { categoryIcon } from '@/theme/categoryIcons';
 import { cadenceLabel, colors, dueLabel, fmtDay, fmtMoney, fmtPos, monthLabel, NoteTag, parseNoteTags, tagKind, toTagToken } from '@/theme/colors';
+import { useFinanceToday } from '@/lib/date-only';
 
 const norm = (s: string) =>
   (s || '').toLowerCase().replace(/[#*]?\d{3,}/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -57,6 +58,7 @@ export default function TransactionDetail() {
     isSplit?: string; splitCount?: string; imported?: string;
   }>();
   const router = useRouter();
+  const financeTodayValue = useFinanceToday();
   const insets = useSafeAreaInsets();
 
   const categories = useCategories();
@@ -96,9 +98,9 @@ export default function TransactionDetail() {
   const [renameText, setRenameText] = useState(canonicalPayee);
   const [dating, setDating] = useState(false);
   const [txnDate, setTxnDate] = useState(canonical?.date ?? p.date ?? '');
-  const [dateText, setDateText] = useState(canonical?.date ?? p.date ?? ymd(new Date()));
+  const [dateText, setDateText] = useState(p.date ?? '');
   const [calendarMonth, setCalendarMonth] = useState(() => {
-    const d = parseYmd(p.date || ymd(new Date()));
+    const d = parseYmd(p.date || financeTodayValue);
     return new Date(d.getFullYear(), d.getMonth(), 1);
   });
   const [monthPicking, setMonthPicking] = useState(false);
@@ -143,7 +145,7 @@ export default function TransactionDetail() {
     setBaseRaws(nextParsed.tags.map((tag) => tag.raw));
     originalRawsRef.current = new Set(nextParsed.tags.map((tag) => tag.raw.toLowerCase()));
   }, [canonical]);
-  const currentDate = txnDate || canonical?.date || p.date || '';
+  const currentDate = txnDate || canonical?.date || p.date || financeTodayValue;
 
   const links = useReimbLinks(txnId);
   const addLink = useAddReimbLink();
@@ -348,11 +350,12 @@ export default function TransactionDetail() {
   // month's spending. Split legs follow their parent, so only non-legs qualify.
   const canEditDate = !isLeg && !!txnId;
   const lastMonthLastDay = () => {
-    const now = new Date();
-    return ymd(new Date(now.getFullYear(), now.getMonth(), 0));
+    const today = financeTodayValue;
+    const [y, m] = today.split('-').map(Number);
+    return ymd(new Date(y, m - 1, 0));
   };
   const openDate = () => {
-    const current = currentDate || ymd(new Date());
+    const current = currentDate || financeTodayValue;
     const d = parseYmd(current);
     setDateText(current);
     setCalendarMonth(new Date(d.getFullYear(), d.getMonth(), 1));
@@ -374,7 +377,7 @@ export default function TransactionDetail() {
           setDating(false);
           router.replace({ pathname: '/transaction/[id]', params: { id: txnId, accountId, date: next } });
         },
-        onError: (e) => { setDateText(currentDate || ymd(new Date())); Alert.alert('Could not change date', e.error || 'Please try again.'); },
+        onError: (e) => { setDateText(currentDate || financeTodayValue); Alert.alert('Could not change date', e.error || 'Please try again.'); },
       }
     );
   };
@@ -446,7 +449,7 @@ export default function TransactionDetail() {
     .slice(0, 6);
   const selectedDay = dateText && /^\d{4}-\d{2}-\d{2}$/.test(dateText) ? dateText : currentDate;
   const selectedMonthKey = ymd(calendarMonth).slice(0, 7);
-  const todayKey = ymd(new Date());
+  const todayKey = financeTodayValue;
   const calendarDays = useMemo(() => {
     const year = calendarMonth.getFullYear();
     const month = calendarMonth.getMonth();
@@ -561,7 +564,7 @@ export default function TransactionDetail() {
           <View style={styles.subBanner}>
             <Text style={styles.subText}>
               Part of a subscription · {cadenceLabel(sub.cadence)}
-              {sub.status === 'active' ? ` · next ${dueLabel(sub.nextRenewal)}` : ''}
+              {sub.status === 'active' ? ` · next ${dueLabel(sub.nextRenewal, financeTodayValue)}` : ''}
             </Text>
             <Text style={styles.subArrow}>›</Text>
           </View>

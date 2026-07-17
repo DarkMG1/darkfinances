@@ -10,12 +10,8 @@ import {
   resetNotificationBaseline,
   useNotifSettings,
 } from '@/lib/notifications';
-import { financeToday, previousMonth } from '@/lib/date-only';
+import { previousMonth, useFinanceToday } from '@/lib/date-only';
 import { useServerConfig } from '@/state/server';
-
-function startOfPrevMonth(): string {
-  return `${previousMonth(financeToday().slice(0, 7))}-01`;
-}
 
 function BillScheduler({ settings, scope }: { settings: NotifSettings; scope: string }) {
   const bills = useBills();
@@ -26,10 +22,12 @@ function BillScheduler({ settings, scope }: { settings: NotifSettings; scope: st
 }
 
 function LargeChargeWatcher({ settings, scope }: { settings: NotifSettings; scope: string }) {
-  const txns = useTransactions({ start: startOfPrevMonth() });
+  const financeToday = useFinanceToday();
+  const start = `${previousMonth(financeToday.slice(0, 7))}-01`;
+  const txns = useTransactions({ start });
   useEffect(() => {
     if (txns.data) void checkLargeCharges(txns.data, settings, scope).catch(() => {});
-  }, [scope, settings, txns.data]);
+  }, [scope, settings, start, txns.data]);
   return null;
 }
 
