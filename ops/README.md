@@ -336,8 +336,19 @@ The helper:
 - Validates generation binding for active operation-journal entries and saga stores before swap.
 - Builds a complete replacement tree in private staging; destination-only stale files are removed.
 - Refuses unknown destination files outside the documented narrow exclusions.
-- Performs same-filesystem staged rename/swap with rollback capture and a resumable restore journal.
+- Uses a fixed control directory under the destination (`.darkfinances-restore/`) with journal schema v2,
+  pre-restore snapshot manifest, and private work staging. Interrupted restores resume on the next invocation
+  without an explicit work root; symlinked destination/control paths are rejected.
+- Performs crash-convergent per-file same-filesystem rename replacement (not a single globally atomic swap),
+  with journaled rollback phases (`rollback_in_progress`, `rollback_failed`, `rolled_back`) driven by the
+  snapshot manifest rather than post-mutation live-tree enumeration.
+- Re-verifies archive SHA-256 and manifest artifact ID before treating a `complete` journal as idempotent.
+- Requires a PR-18 quiescence admission token with TTL and bindings to archive SHA-256 and destination path;
+  generation evidence is re-read immediately before the first mutation.
+- Fsyncs journals (write-temp-then-rename), staged files, and parent directories at mutation boundaries where
+  the platform supports it.
 - Refuses restore without a PR-18 quiescence admission token (this script does not stop/start services).
+- Dry-run uses temporary staging only and must not create the destination tree or persistent control paths.
 
 Afterward, verify `/api/v1/ping`, browser passkey login, the app, receipts, reimbursements, and
 reconciliation state.

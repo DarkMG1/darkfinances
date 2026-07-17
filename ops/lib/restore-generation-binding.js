@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { CONTROL_DIR_NAME } = require('./restore-control-layout');
 const crypto = require('crypto');
 const {
   isTerminalSagaForFamily,
@@ -197,11 +198,21 @@ function activeJournalEntries(journal) {
   return active;
 }
 
+function isActiveRestoreSubject(storeName, saga) {
+  if (!saga) return false;
+  if (storeName === 'transactionSagas'
+    && saga.recordVersion === 1
+    && String(saga.phase || '') === 'completed') {
+    return false;
+  }
+  return !isTerminalSagaForFamily(storeName, saga);
+}
+
 function activeSagaEntries(storeName, store) {
   const active = [];
   if (!store?.sagas) return active;
   for (const [id, saga] of Object.entries(store.sagas)) {
-    if (!saga || isTerminalSagaForFamily(storeName, saga)) continue;
+    if (!isActiveRestoreSubject(storeName, saga)) continue;
     active.push({ store: storeName, id, record: saga });
   }
   return active;
@@ -323,6 +334,7 @@ function listDestinationRuntimeFiles(destinationRoot, inventory) {
     if (!fs.existsSync(absoluteDir)) return;
     for (const name of fs.readdirSync(absoluteDir).sort()) {
       const relativePath = relativeDir ? `${relativeDir}/${name}` : name;
+      if (relativePath === CONTROL_DIR_NAME || relativePath.startsWith(`${CONTROL_DIR_NAME}/`)) continue;
       if (relativePath.startsWith('.restore-work-')) continue;
       if (isExcludedRuntimeBasename(name)) continue;
       if (name === '.env' || name.startsWith('.env.')) continue;
@@ -387,4 +399,5 @@ module.exports = {
   runtimeEntriesFromRoot,
   embedActiveGenerationBindingsForBuild,
   generationBindingArtifactId,
+  isActiveRestoreSubject,
 };
