@@ -4,17 +4,22 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { SerialQueue } = require('../lib/serial-queue');
 const { OperationJournal } = require('../lib/operation-journal');
-const { AdmissionOverloadedError, AdmissionUnavailableError } = require('../lib/errors');
-const { loadAdmissionLimitsConfig, validateConfig } = require('../lib/admission-limits-config');
+const { AdmissionOverloadedError, AdmissionUnavailableError, AppError } = require('../lib/errors');
+const {
+  loadAdmissionLimitsConfig,
+  validateConfig,
+  MAX_PRINCIPAL_ENTRIES_CAP,
+} = require('../lib/admission-limits-config');
 const {
   classifyReadRoute,
   classifyMutationRoute,
   actualCacheKeyForRead,
 } = require('../lib/admission-route-policy');
 const { deriveRequestPrincipal } = require('../lib/request-principal');
-const { RequestAdmissionController } = require('../lib/request-admission');
+const { RequestAdmissionController, TRAFFIC } = require('../lib/request-admission');
+const { runGracefulShutdown } = require('../lib/graceful-shutdown');
 const {
-  shouldBypassMutationAdmission,
+  assertIdempotencyKeyHeader,
   withMutationAdmission,
   withReadAdmission,
 } = require('../lib/request-admission-runtime');
@@ -37,9 +42,15 @@ function tinyConfig(overrides = {}) {
     readGlobalRunning: 1,
     readPrincipalPending: 2,
     readPrincipalRunning: 1,
-    maxPendingDepth: 4,
+    lightweightGlobalPending: 4,
+    lightweightGlobalRunning: 1,
+    lightweightPrincipalPending: 2,
+    lightweightPrincipalRunning: 1,
+    maxPendingDepth: 8,
     maxPrincipalEntries: 8,
     controlReserve: 1,
+    recoveryReserve: 1,
+    cheapReserve: 1,
     maxWaitMs: 5_000,
     maxPendingAgeMs: 60_000,
     defaultEndpointWeight: 1,
@@ -67,12 +78,25 @@ function mockReq(overrides = {}) {
   };
 }
 
-test('serial queue rejects work beyond maxPending without growing pending counter', async () => {
+function assertCountersZero(admission) {
+  for (const lane of Object.values(admission.getHealth().lanes)) {
+    assert.equal(lane.globalPending, 0);
+    assert.equal(lane.globalRunning, 0);
+    assert.equal(lane.waiters, 0);
+    for (const value of Object.values(lane.classPending)) assert.equal(value, 0);
+    for (const value of Object.values(lane.classRunning)) assert.equal(value, 0);
+  }
+}
+
+test('serial queue rejects work beyond maxPending with typed 429 overload', async () => {
   const queue = new SerialQueue('bounded', { maxPending: 1 });
   const gate = createDeferred();
   const first = queue.run(() => gate.promise);
   assert.equal(queue.pending, 1);
-  await assert.rejects(queue.run(async () => 'never'), /pending capacity exceeded/);
+  await assert.rejects(
+    queue.run(async () => 'never'),
+    (error) => error instanceof AdmissionOverloadedError && error.code === 'ADMISSION_OVERLOADED',
+  );
   assert.equal(queue.pending, 1);
   assert.equal(queue.rejectedOverCapacity, 1);
   gate.resolve('done');
@@ -81,7 +105,17 @@ test('serial queue rejects work beyond maxPending without growing pending counte
   assert.equal(queue.size, 0);
 });
 
-test('config validation rejects malformed and unsafe limit env values', () => {
+test('serial queue close rejects new work with typed 503 unavailable', async () => {
+  const queue = new SerialQueue('bounded', { maxPending: 2 });
+  queue.close();
+  await assert.rejects(
+    queue.run(async () => 'never'),
+    (error) => error instanceof AdmissionUnavailableError && error.code === 'ADMISSION_UNAVAILABLE',
+  );
+  assert.equal(queue.rejectedClosed, 1);
+});
+
+test('config validation rejects malformed limits and caps maxPrincipalEntries', () => {
   assert.throws(
     () => loadAdmissionLimitsConfig({ FINANCE_ADMISSION_MUTATION_GLOBAL_PENDING: '0' }),
     /positive integer/,
@@ -96,6 +130,10 @@ test('config validation rejects malformed and unsafe limit env values', () => {
   assert.throws(
     () => loadAdmissionLimitsConfig({ FINANCE_ADMISSION_ENDPOINT_WEIGHTS: 'bad' }),
     /endpoint:weight/,
+  );
+  assert.throws(
+    () => validateConfig(tinyConfig({ maxPrincipalEntries: MAX_PRINCIPAL_ENTRIES_CAP + 1 })),
+    /maxPrincipalEntries cannot exceed/,
   );
 });
 
@@ -119,11 +157,14 @@ test('principal derives from session or token rather than spoofable client metad
   );
 });
 
-test('read route policy distinguishes control, local, cacheable, and direct Actual reads', () => {
+test('read route policy classifies control, lightweight disk, cacheable, and direct reads', () => {
   assert.equal(classifyReadRoute(mockReq({ path: '/api/v1/ping' })).policy, 'control');
   assert.equal(classifyReadRoute(mockReq({ path: '/api/v1/operations/op-key-12345678' })).policy, 'control');
   assert.equal(classifyReadRoute(mockReq({ path: '/api/v1/rules' })).policy, 'local');
   assert.equal(classifyReadRoute(mockReq({ path: '/api/v1/reimb-links' })).policy, 'local-sidecar');
+  const receipt = classifyReadRoute(mockReq({ path: '/api/v1/receipts/r1/image' }));
+  assert.equal(receipt.lane, 'lightweight');
+  assert.equal(receipt.policy, 'lightweight-disk');
   const accounts = classifyReadRoute(mockReq({ path: '/api/v1/accounts' }));
   assert.equal(accounts.policy, 'actual-cached');
   assert.equal(accounts.cacheKey, 'accounts');
@@ -134,6 +175,84 @@ test('read route policy distinguishes control, local, cacheable, and direct Actu
   assert.equal(classifyReadRoute(mockReq({ path: '/api/v1/reconciliation' })).policy, 'actual-direct');
 });
 
+test('principal map evicts idle LRU only and fails closed when active buckets fill the map', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    maxPrincipalEntries: 2,
+    mutationGlobalPending: 4,
+    mutationGlobalRunning: 2,
+    recoveryReserve: 0,
+    controlReserve: 0,
+  }));
+
+  const idleA = await admission.acquire({
+    lane: 'mutation', principal: 'session:idle-a', endpoint: 'post /budgets', weight: 1,
+  });
+  idleA.release();
+  const idleB = await admission.acquire({
+    lane: 'mutation', principal: 'session:idle-b', endpoint: 'post /budgets', weight: 1,
+  });
+  idleB.release();
+
+  const active = await admission.acquire({
+    lane: 'mutation', principal: 'session:active', endpoint: 'post /budgets', weight: 1,
+  });
+  assert.equal(admission.getHealth().lanes.mutation.principalsTracked, 2);
+
+  const newcomer = await admission.acquire({
+    lane: 'mutation', principal: 'session:new', endpoint: 'post /budgets', weight: 1,
+  });
+  assert.equal(admission.getHealth().lanes.mutation.principalsTracked, 2);
+
+  await assert.rejects(
+    admission.acquire({
+      lane: 'mutation', principal: 'session:blocked', endpoint: 'post /budgets', weight: 1,
+    }),
+    AdmissionOverloadedError,
+  );
+  assert.equal(admission.getHealth().stats.principalMapRejections, 1);
+  newcomer.release();
+  active.release();
+  assertCountersZero(admission);
+});
+
+test('ticket release is idempotent and counters decrement when principal bucket is missing', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({ recoveryReserve: 0, controlReserve: 0 }));
+  const ticket = await admission.acquire({
+    lane: 'read',
+    principal: 'session:ghost',
+    endpoint: 'get /accounts',
+    weight: 1,
+  });
+  admission.lanes.read.principals.delete('session:ghost');
+  ticket.release();
+  ticket.release();
+  assert.equal(admission.getHealth().stats.idempotentReleases, 1);
+  assertCountersZero(admission);
+});
+
+test('high-cardinality principal churn never exceeds per-principal caps and returns counters to zero', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    maxPrincipalEntries: 16,
+    mutationPrincipalPending: 1,
+    mutationPrincipalRunning: 1,
+    recoveryReserve: 0,
+    controlReserve: 0,
+  }));
+
+  for (let i = 0; i < 200; i += 1) {
+    const principal = `session:churn-${i}`;
+    const ticket = await admission.acquire({
+      lane: 'mutation',
+      principal,
+      endpoint: 'post /budgets',
+      weight: 1,
+    });
+    assert.equal(admission.getHealth().lanes.mutation.principalsTracked <= 16, true);
+    ticket.release();
+  }
+  assertCountersZero(admission);
+});
+
 test('mutation admission saturates global limits with immediate overload', async () => {
   const admission = new RequestAdmissionController(tinyConfig({
     mutationGlobalPending: 1,
@@ -142,6 +261,8 @@ test('mutation admission saturates global limits with immediate overload', async
     readGlobalRunning: 1,
     mutationPrincipalPending: 4,
     controlReserve: 0,
+    recoveryReserve: 0,
+    cheapReserve: 0,
     maxPendingDepth: 1,
   }));
   const first = await admission.acquire({
@@ -163,38 +284,54 @@ test('mutation admission saturates global limits with immediate overload', async
   assert.equal(admission.getHealth().lanes.mutation.waiters, 0);
 });
 
-test('fair release rejects additional waiters once hard pending depth is reached', async () => {
+test('fair round-robin scheduling avoids starving a second principal', async () => {
   const admission = new RequestAdmissionController(tinyConfig({
-    readGlobalPending: 1,
-    readGlobalRunning: 1,
-    mutationGlobalPending: 1,
+    mutationGlobalPending: 3,
     mutationGlobalRunning: 1,
+    mutationPrincipalPending: 2,
+    recoveryReserve: 0,
     controlReserve: 0,
-    maxPendingDepth: 1,
+    maxPendingDepth: 4,
   }));
-  await admission.acquire({
-    lane: 'read',
-    principal: 'token:api',
-    endpoint: 'get /accounts',
+  const order = [];
+  const running = await admission.acquire({
+    lane: 'mutation',
+    principal: 'session:a',
+    endpoint: 'post /budgets',
     weight: 1,
   });
-  await assert.rejects(
-    admission.acquire({
-      lane: 'read',
-      principal: 'session:flood',
-      endpoint: 'get /accounts',
-      weight: 1,
-    }),
-    AdmissionOverloadedError,
-  );
+  const waitB = admission.acquire({
+    lane: 'mutation',
+    principal: 'session:b',
+    endpoint: 'post /budgets',
+    weight: 1,
+  }).then((ticket) => {
+    order.push('b');
+    ticket.release();
+  });
+  const waitA2 = admission.acquire({
+    lane: 'mutation',
+    principal: 'session:a',
+    endpoint: 'post /budgets',
+    weight: 1,
+  }).then((ticket) => {
+    order.push('a2');
+    ticket.release();
+  });
+  running.release();
+  await Promise.all([waitB, waitA2]);
+  assert.deepEqual(order, ['b', 'a2']);
 });
 
 test('abort removes queued work before start and wait timeout releases capacity', async () => {
   const admission = new RequestAdmissionController(tinyConfig({
     maxWaitMs: 15,
     mutationGlobalPending: 2,
-    readGlobalPending: 2,
+    readGlobalPending: 3,
     maxPendingDepth: 3,
+    recoveryReserve: 0,
+    cheapReserve: 0,
+    controlReserve: 0,
   }));
   const running = await admission.acquire({
     lane: 'mutation',
@@ -214,46 +351,218 @@ test('abort removes queued work before start and wait timeout releases capacity'
   await assert.rejects(aborted, AdmissionUnavailableError);
   assert.equal(admission.getHealth().stats.waitAborts, 1);
   running.release();
+  assertCountersZero(admission);
 });
 
-test('control reserve keeps ping responsive while non-control reads are saturated', async () => {
+test('control reserve keeps ping responsive while ordinary reads are saturated', async () => {
   const admission = new RequestAdmissionController(tinyConfig({
-    readGlobalPending: 2,
+    readGlobalPending: 4,
     readGlobalRunning: 1,
-    mutationGlobalPending: 2,
+    readPrincipalPending: 3,
+    mutationGlobalPending: 3,
+    mutationGlobalRunning: 1,
     controlReserve: 1,
-    maxPendingDepth: 2,
+    cheapReserve: 0,
+    recoveryReserve: 0,
+    maxPendingDepth: 8,
+    maxWaitMs: 2_000,
   }));
   const running = await admission.acquire({
     lane: 'read',
-    principal: 'session:blocker',
+    principal: 'session:blocker-a',
     endpoint: 'get /accounts',
     weight: 1,
+    trafficClass: TRAFFIC.ORDINARY,
   });
-  await admission.acquire({
+  admission.acquire({
+    lane: 'read',
+    principal: 'session:blocker-b',
+    endpoint: 'get /accounts',
+    weight: 1,
+    trafficClass: TRAFFIC.ORDINARY,
+  });
+  admission.acquire({
+    lane: 'read',
+    principal: 'session:blocker-c',
+    endpoint: 'get /accounts',
+    weight: 1,
+    trafficClass: TRAFFIC.ORDINARY,
+  });
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    const lane = admission.getHealth().lanes.read;
+    const ordinaryUsed = lane.classPending.ordinary + lane.classRunning.ordinary;
+    if (ordinaryUsed >= 3) break;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(
+    admission.getHealth().lanes.read.classPending.ordinary
+      + admission.getHealth().lanes.read.classRunning.ordinary,
+    3,
+  );
+  await assert.rejects(
+    admission.acquire({
+      lane: 'read',
+      principal: 'session:flood',
+      endpoint: 'get /accounts',
+      weight: 1,
+      trafficClass: TRAFFIC.ORDINARY,
+    }),
+    AdmissionOverloadedError,
+  );
+  const pingPromise = admission.acquire({
     lane: 'read',
     principal: 'token:api',
     endpoint: 'get /ping',
     weight: 1,
-    control: true,
+    trafficClass: TRAFFIC.CONTROL,
   });
   running.release();
+  const ping = await pingPromise;
+  ping.release();
+  assert.equal(admission.getHealth().stats.controlAdmissions, 1);
 });
 
-test('idempotency journal peek bypasses mutation admission for replay and nonterminal keys', async () => {
+test('10k control admissions remain bounded by control reserve', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    readGlobalPending: 4,
+    readGlobalRunning: 2,
+    controlReserve: 2,
+    cheapReserve: 0,
+    recoveryReserve: 0,
+    maxPendingDepth: 4,
+    maxWaitMs: 15,
+  }));
+  const tickets = [];
+  for (let i = 0; i < 2; i += 1) {
+    tickets.push(await admission.acquire({
+      lane: 'read',
+      principal: `session:control-${i}`,
+      endpoint: 'get /ping',
+      weight: 1,
+      trafficClass: TRAFFIC.CONTROL,
+    }));
+  }
+  let rejected = 0;
+  for (let i = 0; i < 10_000; i += 1) {
+    try {
+      await admission.acquire({
+        lane: 'read',
+        principal: `session:flood-${i}`,
+        endpoint: 'get /ping',
+        weight: 1,
+        trafficClass: TRAFFIC.CONTROL,
+      });
+    } catch (error) {
+      if (error instanceof AdmissionOverloadedError) rejected += 1;
+      else throw error;
+    }
+  }
+  assert.equal(rejected, 10_000);
+  for (const ticket of tickets) ticket.release();
+  assertCountersZero(admission);
+});
+
+test('recovery journal peek uses bounded recovery class and converts to ordinary for new keys', async () => {
   const journal = new OperationJournal();
   const key = 'idem-key-12345678';
   journal.start(key, { method: 'POST', path: '/budgets', body: { month: '2026-07', amount: 1 } });
-  const admission = {
-    noteIdempotencyBypass() { this.bypassed = true; },
-  };
+  const admission = new RequestAdmissionController(tinyConfig({
+    mutationGlobalPending: 2,
+    mutationGlobalRunning: 1,
+    recoveryReserve: 1,
+    controlReserve: 0,
+    maxPendingDepth: 2,
+  }));
+
+  const replay = await admission.acquireMutationWithJournalPeek({
+    principal: 'token:api',
+    endpoint: 'post /budgets',
+    weight: 1,
+    peekJournal: () => journal.get(key),
+  });
+  assert.equal(replay.mode, 'recovery');
+  assert.equal(admission.getHealth().stats.recoveryReplays, 1);
+  replay.ticket.release();
+
+  const running = await admission.acquire({
+    lane: 'mutation',
+    principal: 'session:block',
+    endpoint: 'post /budgets',
+    weight: 1,
+    trafficClass: TRAFFIC.RECOVERY,
+  });
+  await assert.rejects(
+    admission.acquireMutationWithJournalPeek({
+      principal: 'token:api',
+      endpoint: 'post /budgets',
+      weight: 1,
+      peekJournal: () => null,
+    }),
+    AdmissionOverloadedError,
+  );
+  running.release();
+  assertCountersZero(admission);
+});
+
+test('random-key recovery flood cannot exceed recovery reserve peeks', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    mutationGlobalPending: 2,
+    mutationGlobalRunning: 1,
+    recoveryReserve: 1,
+    controlReserve: 0,
+    maxPendingDepth: 2,
+    maxWaitMs: 15,
+  }));
+  const blocker = await admission.acquire({
+    lane: 'mutation',
+    principal: 'session:blocker',
+    endpoint: 'post /budgets',
+    weight: 1,
+    trafficClass: TRAFFIC.RECOVERY,
+  });
+  let rejected = 0;
+  for (let i = 0; i < 500; i += 1) {
+    try {
+      const attempt = await admission.acquireMutationWithJournalPeek({
+        principal: `session:${i}`,
+        endpoint: 'post /budgets',
+        weight: 1,
+        peekJournal: () => null,
+      });
+      attempt.ticket.release();
+    } catch (error) {
+      if (error instanceof AdmissionOverloadedError) rejected += 1;
+      else throw error;
+    }
+  }
+  blocker.release();
+  assert.ok(rejected > 0);
+  assertCountersZero(admission);
+});
+
+test('missing Idempotency-Key fails before admission or queue work', async () => {
+  const admission = new RequestAdmissionController(tinyConfig());
+  const queue = new SerialQueue('mutations', { maxPending: 1 });
   const req = mockReq({
     method: 'POST',
     path: '/api/v1/budgets',
-    headers: { 'Idempotency-Key': key },
+    headers: {},
   });
-  assert.equal(shouldBypassMutationAdmission(req, journal, admission, { isDemo: () => false }), true);
-  assert.equal(admission.bypassed, true);
+  assert.throws(
+    () => assertIdempotencyKeyHeader(req),
+    (error) => error instanceof AppError && error.code === 'IDEMPOTENCY_KEY_REQUIRED',
+  );
+  await assert.rejects(
+    () => withMutationAdmission(req, new OperationJournal(), queue, async () => 'never', {
+      isDemo: () => false,
+      isVersioned: true,
+      admission,
+    }),
+    (error) => error instanceof AppError && error.code === 'IDEMPOTENCY_KEY_REQUIRED',
+  );
+  assert.equal(queue.pending, 0);
+  assertCountersZero(admission);
 });
 
 test('overload envelope uses request id metadata and requires idempotency key reuse', () => {
@@ -267,7 +576,7 @@ test('overload envelope uses request id metadata and requires idempotency key re
 });
 
 test('closeAdmission rejects new work with 503 semantics and clears waiters', async () => {
-  const admission = new RequestAdmissionController(tinyConfig());
+  const admission = new RequestAdmissionController(tinyConfig({ recoveryReserve: 0 }));
   const running = await admission.acquire({
     lane: 'mutation',
     principal: 'token:api',
@@ -295,6 +604,30 @@ test('closeAdmission rejects new work with 503 semantics and clears waiters', as
   assert.equal(admission.getHealth().closed, true);
 });
 
+test('graceful shutdown closes admission before mutation queue close', async () => {
+  const phases = [];
+  const admission = new RequestAdmissionController(tinyConfig());
+  const mutationQueue = new SerialQueue('test-mutations');
+  const server = require('http').createServer();
+
+  const result = await runGracefulShutdown({
+    signal: 'SIGTERM',
+    httpServer: server,
+    mutationQueue,
+    requestAdmission: admission,
+    shutdownApi: async () => {},
+    totalTimeoutMs: 2_000,
+    mutationDrainTimeoutMs: 500,
+    exit: () => {},
+    log: (phase) => { phases.push(phase); },
+  });
+
+  assert.equal(result.ok, true);
+  assert.ok(phases.indexOf('request-admission-stopped') < phases.indexOf('mutation-admission-stopped'));
+  assert.equal(admission.getHealth().closed, true);
+  assert.equal(mutationQueue.closed, true);
+});
+
 test('health diagnostics are aggregate-only without principal or key data', () => {
   const admission = new RequestAdmissionController(tinyConfig());
   const health = admission.getHealth();
@@ -304,10 +637,17 @@ test('health diagnostics are aggregate-only without principal or key data', () =
   assert.equal(serialized.includes('session:'), false);
   assert.equal(serialized.includes('token:'), false);
   assert.equal(Object.prototype.hasOwnProperty.call(health, 'principals'), false);
+  assert.equal(typeof health.recoveryReserve, 'number');
+  assert.equal(typeof health.cheapReserve, 'number');
 });
 
-test('cache hit bypass avoids expensive-read capacity', async () => {
-  const admission = new RequestAdmissionController(tinyConfig());
+test('cache hit acquires bounded cheap lane instead of bypassing capacity', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    readGlobalPending: 2,
+    readGlobalRunning: 1,
+    cheapReserve: 1,
+    controlReserve: 0,
+  }));
   const coordinator = {
     readCacheEntry(key) {
       return key === 'accounts' ? [{ id: 'a1' }] : undefined;
@@ -321,22 +661,51 @@ test('cache hit bypass avoids expensive-read capacity', async () => {
   }, { admission });
   assert.deepEqual(value, [{ id: 'a1' }]);
   assert.equal(invoked, false);
-  assert.equal(admission.getHealth().stats.cacheHitBypasses, 1);
+  assert.equal(admission.getHealth().stats.cacheHitAdmissions, 1);
+  assert.equal(admission.getHealth().stats.cheapAdmissions, 1);
+  assertCountersZero(admission);
 });
 
 test('withMutationAdmission executes under admitted slot and releases after handler', async () => {
-  const admission = new RequestAdmissionController(tinyConfig());
+  const admission = new RequestAdmissionController(tinyConfig({ recoveryReserve: 1, controlReserve: 0 }));
   const journal = new OperationJournal();
+  const queue = new SerialQueue('mutations', { maxPending: 2 });
   const req = mockReq({
     method: 'POST',
     path: '/api/v1/budgets',
     headers: { 'Idempotency-Key': 'fresh-key-12345678' },
   });
   let ran = false;
-  await withMutationAdmission(req, journal, async () => {
+  await withMutationAdmission(req, journal, queue, async () => {
     ran = true;
     assert.equal(admission.getHealth().lanes.mutation.globalRunning, 1);
-  }, { isDemo: () => false, admission });
+  }, { isDemo: () => false, isVersioned: true, admission });
   assert.equal(ran, true);
   assert.equal(admission.getHealth().lanes.mutation.globalRunning, 0);
+});
+
+test('same-key completed replay storms stay admissible under recovery reserve', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    mutationGlobalPending: 2,
+    mutationGlobalRunning: 1,
+    recoveryReserve: 1,
+    controlReserve: 0,
+    maxPendingDepth: 2,
+  }));
+  const journal = new OperationJournal();
+  const key = 'replay-key-12345678';
+  journal.start(key, { method: 'POST', path: '/budgets', body: {} });
+
+  for (let i = 0; i < 20; i += 1) {
+    const replay = await admission.acquireMutationWithJournalPeek({
+      principal: 'token:api',
+      endpoint: 'post /budgets',
+      weight: 1,
+      peekJournal: () => journal.get(key),
+    });
+    assert.equal(replay.mode, 'recovery');
+    replay.ticket.release();
+  }
+  assert.equal(admission.getHealth().stats.recoveryReplays, 20);
+  assertCountersZero(admission);
 });

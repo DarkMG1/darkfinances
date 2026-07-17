@@ -110,16 +110,20 @@ function spawnServer(dir, port, extraEnv = {}) {
       TEST_DASHBOARD_ROOT: dashboardRoot,
       TEST_EFFECT_MARKER: marker,
       TEST_RELEASE_PATH: releasePath,
-      FINANCE_ADMISSION_READ_GLOBAL_PENDING: '2',
+      FINANCE_ADMISSION_READ_GLOBAL_PENDING: '4',
       FINANCE_ADMISSION_READ_GLOBAL_RUNNING: '1',
       FINANCE_ADMISSION_READ_PRINCIPAL_PENDING: '2',
       FINANCE_ADMISSION_READ_PRINCIPAL_RUNNING: '1',
-      FINANCE_ADMISSION_MUTATION_GLOBAL_PENDING: '2',
+      FINANCE_ADMISSION_MUTATION_GLOBAL_PENDING: '4',
       FINANCE_ADMISSION_MUTATION_GLOBAL_RUNNING: '1',
       FINANCE_ADMISSION_MUTATION_PRINCIPAL_PENDING: '2',
       FINANCE_ADMISSION_MUTATION_PRINCIPAL_RUNNING: '1',
+      FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_PENDING: '2',
+      FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_RUNNING: '1',
       FINANCE_ADMISSION_MAX_PENDING_DEPTH: '3',
-      FINANCE_ADMISSION_CONTROL_RESERVE: '0',
+      FINANCE_ADMISSION_CONTROL_RESERVE: '1',
+      FINANCE_ADMISSION_RECOVERY_RESERVE: '1',
+      FINANCE_ADMISSION_CHEAP_RESERVE: '1',
       FINANCE_ADMISSION_MAX_WAIT_MS: '25',
       ...extraEnv,
     },
@@ -128,6 +132,26 @@ function spawnServer(dir, port, extraEnv = {}) {
   child.stdout.on('data', (chunk) => { logs.value += chunk; });
   child.stderr.on('data', (chunk) => { logs.value += chunk; });
   return { child, logs, marker, releasePath };
+}
+
+function tightAdmissionEnv(overrides = {}) {
+  return {
+    FINANCE_ADMISSION_MUTATION_GLOBAL_PENDING: '2',
+    FINANCE_ADMISSION_MUTATION_GLOBAL_RUNNING: '1',
+    FINANCE_ADMISSION_MUTATION_PRINCIPAL_PENDING: '1',
+    FINANCE_ADMISSION_MUTATION_PRINCIPAL_RUNNING: '1',
+    FINANCE_ADMISSION_READ_GLOBAL_PENDING: '1',
+    FINANCE_ADMISSION_READ_GLOBAL_RUNNING: '1',
+    FINANCE_ADMISSION_READ_PRINCIPAL_PENDING: '1',
+    FINANCE_ADMISSION_READ_PRINCIPAL_RUNNING: '1',
+    FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_PENDING: '1',
+    FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_RUNNING: '1',
+    FINANCE_ADMISSION_MAX_PENDING_DEPTH: '1',
+    FINANCE_ADMISSION_CONTROL_RESERVE: '0',
+    FINANCE_ADMISSION_RECOVERY_RESERVE: '1',
+    FINANCE_ADMISSION_CHEAP_RESERVE: '0',
+    ...overrides,
+  };
 }
 
 async function v1Fetch(base, pathname, options = {}) {
@@ -182,15 +206,7 @@ test('overload before journal start returns stable envelope and same-key replay 
   const base = `http://127.0.0.1:${port}`;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-admission-idem-'));
   const journalPath = path.join(dir, 'operation-journal.json');
-  const { child, logs, marker, releasePath } = spawnServer(dir, port, {
-    FINANCE_ADMISSION_MUTATION_GLOBAL_PENDING: '1',
-    FINANCE_ADMISSION_MUTATION_GLOBAL_RUNNING: '1',
-    FINANCE_ADMISSION_MUTATION_PRINCIPAL_PENDING: '1',
-    FINANCE_ADMISSION_READ_GLOBAL_PENDING: '1',
-    FINANCE_ADMISSION_READ_GLOBAL_RUNNING: '1',
-    FINANCE_ADMISSION_MAX_PENDING_DEPTH: '1',
-    FINANCE_ADMISSION_CONTROL_RESERVE: '0',
-  });
+  const { child, logs, marker, releasePath } = spawnServer(dir, port, tightAdmissionEnv());
   t.after(() => {
     child.kill('SIGTERM');
     fs.rmSync(dir, { recursive: true, force: true });
@@ -247,6 +263,26 @@ test('overload before journal start returns stable envelope and same-key replay 
 
   const journal = new OperationJournal(journalPath);
   assert.equal(journal.get(key)?.phase, 'completed');
+});
+
+test('missing Idempotency-Key returns 400 before queue saturation', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-admission-no-key-'));
+  const { child, logs } = spawnServer(dir, port, tightAdmissionEnv());
+  t.after(() => {
+    child.kill('SIGTERM');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitForServer(base, child, logs);
+
+  const rejected = await v1Fetch(base, '/budgets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ month: '2026-07', categoryId: 'cat-groceries', amount: 100 }),
+  });
+  assert.equal(rejected.response.status, 400);
+  assert.equal(rejected.body.code, 'IDEMPOTENCY_KEY_REQUIRED');
 });
 
 test('malformed admission env fails startup validation', () => {

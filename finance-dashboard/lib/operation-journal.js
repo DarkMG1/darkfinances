@@ -604,6 +604,7 @@ class OperationJournal {
 
 module.exports = {
   FINGERPRINT_VERSION,
+  IDEMPOTENCY_KEY_RE: KEY_RE,
   MAX_TERMINAL_ENTRIES,
   OPERATION_RECORD_VERSION,
   OperationJournal,

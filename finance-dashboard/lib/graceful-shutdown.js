@@ -32,13 +32,14 @@ function defaultLogPhase(phase, extra) {
 }
 
 /**
- * Graceful shutdown ordering (PR-14):
+ * Graceful shutdown ordering (PR-14 / PR-30):
  * 1. Stop periodic sync timer (no new background sync).
- * 2. mutationQueue.close() — reject new mutation admission on keep-alive connections.
- * 3. httpServer.close() + await callback — drain active HTTP handlers (GET + in-flight mutations).
+ * 2. requestAdmission.closeAdmission() — reject new HTTP admission waiters/slots.
+ * 3. mutationQueue.close() — reject new serial mutation enqueue on keep-alive connections.
+ * 4. httpServer.close() + await callback — drain active HTTP handlers (GET + in-flight mutations).
  *    closeIdleConnections() runs when admission stops so idle keep-alive sockets do not block drain.
- * 4. mutationQueue.drain() — finish accepted non-HTTP queue work (e.g. in-flight periodic sync).
- * 5. shutdownApi() — coordinator shutdownHandoff (Actual saga sync + api.shutdown).
+ * 5. mutationQueue.drain() — finish accepted non-HTTP queue work (e.g. in-flight periodic sync).
+ * 6. shutdownApi() — coordinator shutdownHandoff (Actual saga sync + api.shutdown).
  *
  * On timeout or HTTP drain failure: emit redacted diagnostics, force-close remaining sockets,
  * exit nonzero, and do not call shutdownApi().

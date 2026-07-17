@@ -873,24 +873,34 @@ async function deleteReceiptH(req, operation) {
 }
 // Raw image stream (auth already enforced by the router). expo-image sends the
 // token via headers, so this just serves the file bytes with the right type.
-function receiptImageH(req, res) {
+async function receiptImageH(req, res) {
   try {
-    const f = data.getReceiptFile({ id: req.params.id });
-    if (!f) return sendApiErrorCode(req, res, 'NOT_FOUND');
-    const mime = String(f.mime || '').toLowerCase();
-    const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
-    if (!allowed.has(mime)) {
-      return sendApiError(req, res, new AppError('unsupported receipt image type', {
-        code: 'UNSUPPORTED_MEDIA_TYPE',
-        status: 415,
-        expose: true,
-      }));
-    }
-    res.type(mime);
-    res.setHeader('Content-Disposition', 'inline; filename="receipt-image"');
-    res.setHeader('Cache-Control', 'private, max-age=86400');
-    return res.sendFile(f.path);
-  } catch (e) { return sendApiError(req, res, e); }
+    await withReadAdmission(req, actualCoordinator, async () => {
+      const f = data.getReceiptFile({ id: req.params.id });
+      if (!f) {
+        sendApiErrorCode(req, res, 'NOT_FOUND');
+        return;
+      }
+      const mime = String(f.mime || '').toLowerCase();
+      const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
+      if (!allowed.has(mime)) {
+        sendApiError(req, res, new AppError('unsupported receipt image type', {
+          code: 'UNSUPPORTED_MEDIA_TYPE',
+          status: 415,
+          expose: true,
+        }));
+        return;
+      }
+      res.type(mime);
+      res.setHeader('Content-Disposition', 'inline; filename="receipt-image"');
+      res.setHeader('Cache-Control', 'private, max-age=86400');
+      await new Promise((resolve, reject) => {
+        res.sendFile(f.path, (error) => (error ? reject(error) : resolve()));
+      });
+    }, { admission: requestAdmission });
+  } catch (e) {
+    if (!res.headersSent) return sendApiError(req, res, e);
+  }
 }
 async function sweepReimbH(req, operation) {
   const { tags, from, to } = parse(schemas.reimbursementSweep, req.body, 'reimbursement sweep');
@@ -1188,7 +1198,7 @@ async function reportCsv(req, res) {
 const runHandler = (req, fn, operation) => {
   if (operation) return fn(req, operation);
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
-    return withMutationAdmission(req, operationJournal, () => mutationQueue.run(() => fn(req)), {
+    return withMutationAdmission(req, operationJournal, mutationQueue, () => fn(req), {
       isDemo,
       admission: requestAdmission,
     });
@@ -1226,10 +1236,10 @@ async function bulkTerminalProofResolver({ key, operation }) {
 }
 
 async function readOperationStatus(req, key) {
-  return withOperationStatusAdmission(req, () => mutationQueue.run(() => reconcileOperationJournalFromProof(operationJournal, key, {
+  return withOperationStatusAdmission(req, mutationQueue, () => reconcileOperationJournalFromProof(operationJournal, key, {
     proofResolver: bulkTerminalProofResolver,
     onJournalError: operationJournalError,
-  })), { admission: requestAdmission });
+  }), { admission: requestAdmission });
 }
 
 async function executeVersionedMutation(req, fn, mutationRoute) {
@@ -1265,8 +1275,9 @@ const env = (fn, mutationRoute = null) => async (req, res) => {
       const execution = await withMutationAdmission(
         req,
         operationJournal,
-        () => mutationQueue.run(() => executeVersionedMutation(req, fn, mutationRoute)),
-        { isDemo, admission: requestAdmission },
+        mutationQueue,
+        () => executeVersionedMutation(req, fn, mutationRoute),
+        { isDemo, isVersioned: true, admission: requestAdmission },
       );
       return res.json({ data: execution.result, operation: execution.operation });
     }

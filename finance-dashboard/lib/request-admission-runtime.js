@@ -1,11 +1,13 @@
 'use strict';
 
+const { AppError } = require('./errors');
 const { deriveRequestPrincipal } = require('./request-principal');
 const {
   classifyMutationRoute,
   classifyReadRoute,
 } = require('./admission-route-policy');
-const { getRequestAdmissionController } = require('./request-admission');
+const { getRequestAdmissionController, TRAFFIC } = require('./request-admission');
+const { IDEMPOTENCY_KEY_RE } = require('./operation-journal');
 
 function createClientAbortSignal(req) {
   const controller = new AbortController();
@@ -21,35 +23,48 @@ function createClientAbortSignal(req) {
   };
 }
 
-function shouldBypassMutationAdmission(req, operationJournal, admission, { isDemo }) {
-  if (isDemo(req)) return true;
+function assertIdempotencyKeyHeader(req) {
   const key = req.get('Idempotency-Key');
-  if (!key) return false;
-  const existing = operationJournal.get(key);
-  if (existing) {
-    admission.noteIdempotencyBypass();
-    return true;
+  if (!IDEMPOTENCY_KEY_RE.test(key || '')) {
+    throw new AppError('A valid Idempotency-Key header is required', {
+      code: 'IDEMPOTENCY_KEY_REQUIRED',
+      status: 400,
+      expose: true,
+    });
   }
-  return false;
+  return key;
 }
 
-async function withMutationAdmission(req, operationJournal, fn, { isDemo, admission = getRequestAdmissionController() } = {}) {
-  const bypass = shouldBypassMutationAdmission(req, operationJournal, admission, { isDemo });
+async function runMutationQueue(mutationQueue, fn) {
+  return mutationQueue.run(fn);
+}
+
+async function withVersionedMutationAdmission(req, operationJournal, mutationQueue, fn, {
+  isDemo,
+  admission = getRequestAdmissionController(),
+} = {}) {
+  if (isDemo(req)) return fn();
+
+  const key = assertIdempotencyKeyHeader(req);
   const route = classifyMutationRoute(req);
   const principal = deriveRequestPrincipal(req);
   const weight = admission.endpointWeight(route.endpoint);
   const abort = createClientAbortSignal(req);
+
   try {
-    const ticket = await admission.acquire({
-      lane: 'mutation',
+    const { ticket } = await admission.acquireMutationWithJournalPeek({
       principal,
       endpoint: route.endpoint,
       weight,
-      bypass,
+      peekJournal: () => operationJournal.get(key),
       signal: abort.signal,
     });
     try {
-      return await fn();
+      if (abort.signal.aborted) {
+        const { AdmissionUnavailableError } = require('./errors');
+        throw new AdmissionUnavailableError('Client aborted before mutation started');
+      }
+      return await runMutationQueue(mutationQueue, fn);
     } finally {
       ticket.release();
     }
@@ -58,33 +73,97 @@ async function withMutationAdmission(req, operationJournal, fn, { isDemo, admiss
   }
 }
 
+async function withLegacyMutationAdmission(req, mutationQueue, fn, {
+  isDemo,
+  admission = getRequestAdmissionController(),
+} = {}) {
+  if (isDemo(req)) return fn();
+
+  const route = classifyMutationRoute(req);
+  const principal = deriveRequestPrincipal(req);
+  const weight = admission.endpointWeight(route.endpoint);
+  const abort = createClientAbortSignal(req);
+
+  try {
+    const ticket = await admission.acquire({
+      lane: 'mutation',
+      principal,
+      endpoint: route.endpoint,
+      weight,
+      trafficClass: TRAFFIC.ORDINARY,
+      signal: abort.signal,
+    });
+    try {
+      return await runMutationQueue(mutationQueue, fn);
+    } finally {
+      ticket.release();
+    }
+  } finally {
+    abort.dispose();
+  }
+}
+
+async function withMutationAdmission(req, operationJournal, mutationQueue, fn, {
+  isDemo,
+  isVersioned = false,
+  admission = getRequestAdmissionController(),
+} = {}) {
+  if (isVersioned) {
+    return withVersionedMutationAdmission(req, operationJournal, mutationQueue, fn, { isDemo, admission });
+  }
+  return withLegacyMutationAdmission(req, mutationQueue, fn, { isDemo, admission });
+}
+
 async function withReadAdmission(req, actualCoordinator, fn, {
   admission = getRequestAdmissionController(),
   routeSpec = classifyReadRoute(req),
 } = {}) {
   if (routeSpec.lane === 'none') return fn();
 
-  let bypass = false;
-  if (routeSpec.policy === 'actual-cached' && routeSpec.cacheKey) {
-    const hit = actualCoordinator.readCacheEntry(routeSpec.cacheKey);
-    if (hit !== undefined) {
-      admission.noteCacheHitBypass();
-      return hit;
-    }
-  }
-
   const principal = deriveRequestPrincipal(req);
   const endpointWeight = admission.endpointWeight(routeSpec.endpoint);
   const totalWeight = Math.max(1, routeSpec.weight || 1) * endpointWeight;
   const abort = createClientAbortSignal(req);
+
+  let trafficClass = TRAFFIC.ORDINARY;
+  let lane = routeSpec.lane;
+  if (routeSpec.policy === 'control') trafficClass = TRAFFIC.CONTROL;
+  if (routeSpec.policy === 'lightweight-disk') {
+    lane = 'lightweight';
+    trafficClass = TRAFFIC.ORDINARY;
+  }
+
+  if (routeSpec.policy === 'actual-cached' && routeSpec.cacheKey) {
+    const hit = actualCoordinator.readCacheEntry(routeSpec.cacheKey);
+    if (hit !== undefined) {
+      admission.stats.cacheHitAdmissions += 1;
+      try {
+        const ticket = await admission.acquire({
+          lane: 'read',
+          principal,
+          endpoint: routeSpec.endpoint,
+          weight: 1,
+          trafficClass: TRAFFIC.CHEAP,
+          signal: abort.signal,
+        });
+        try {
+          return hit;
+        } finally {
+          ticket.release();
+        }
+      } finally {
+        abort.dispose();
+      }
+    }
+  }
+
   try {
     const ticket = await admission.acquire({
-      lane: routeSpec.lane === 'control' ? 'read' : routeSpec.lane,
+      lane,
       principal,
       endpoint: routeSpec.endpoint,
       weight: totalWeight,
-      control: routeSpec.policy === 'control',
-      bypass,
+      trafficClass,
       signal: abort.signal,
     });
     try {
@@ -101,7 +180,9 @@ async function withReadAdmission(req, actualCoordinator, fn, {
   }
 }
 
-async function withOperationStatusAdmission(req, fn, { admission = getRequestAdmissionController() } = {}) {
+async function withOperationStatusAdmission(req, mutationQueue, fn, {
+  admission = getRequestAdmissionController(),
+} = {}) {
   const principal = deriveRequestPrincipal(req);
   const routeSpec = classifyReadRoute(req);
   const abort = createClientAbortSignal(req);
@@ -111,11 +192,11 @@ async function withOperationStatusAdmission(req, fn, { admission = getRequestAdm
       principal,
       endpoint: routeSpec.endpoint,
       weight: 1,
-      control: true,
+      trafficClass: TRAFFIC.CONTROL,
       signal: abort.signal,
     });
     try {
-      return await fn();
+      return await runMutationQueue(mutationQueue, fn);
     } finally {
       ticket.release();
     }
@@ -125,9 +206,12 @@ async function withOperationStatusAdmission(req, fn, { admission = getRequestAdm
 }
 
 module.exports = {
+  assertIdempotencyKeyHeader,
   createClientAbortSignal,
-  shouldBypassMutationAdmission,
+  runMutationQueue,
+  withLegacyMutationAdmission,
   withMutationAdmission,
   withOperationStatusAdmission,
   withReadAdmission,
+  withVersionedMutationAdmission,
 };

@@ -39,6 +39,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/request-admission-runtime.js',
   'lib/request-admission.js',
   'lib/request-principal.js',
+  'lib/request-contract.js',
   'lib/request-envelope.js',
   'lib/request-issues.js',
   'lib/safe-to-spend.js',

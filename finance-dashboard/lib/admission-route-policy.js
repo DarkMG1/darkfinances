@@ -102,10 +102,10 @@ function classifyReadRoute(req) {
   const endpoint = endpointId(method, path);
 
   if (method === 'GET' && /^\/operations\/[^/]+$/i.test(path)) {
-    return { lane: 'control', endpoint, policy: 'control', weight: 1, cacheKey: null };
+    return { lane: 'read', endpoint, policy: 'control', weight: 1, cacheKey: null };
   }
   if (method === 'GET' && path === '/ping') {
-    return { lane: 'control', endpoint, policy: 'control', weight: 1, cacheKey: null };
+    return { lane: 'read', endpoint, policy: 'control', weight: 1, cacheKey: null };
   }
   if (method === 'GET' && (path === '/reconciliation' || path === '/reconciliation/pending')) {
     return { lane: 'read', endpoint, policy: 'actual-direct', weight: 2, cacheKey: null };
@@ -123,9 +123,11 @@ function classifyReadRoute(req) {
     path === '/phantom/log'
     || path === '/reimb-links'
     || path === '/owes-config'
-    || /^\/receipts\/[^/]+\/image$/i.test(path)
   )) {
     return { lane: 'none', endpoint, policy: 'local-sidecar', weight: 0, cacheKey: null };
+  }
+  if (method === 'GET' && /^\/receipts\/[^/]+\/image$/i.test(path)) {
+    return { lane: 'lightweight', endpoint, policy: 'lightweight-disk', weight: 1, cacheKey: null };
   }
   const cacheKey = actualCacheKeyForRead(req);
   if (cacheKey) {

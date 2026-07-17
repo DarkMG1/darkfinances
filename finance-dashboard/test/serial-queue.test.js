@@ -35,6 +35,13 @@ test('a rejected mutation does not poison later work', async () => {
   assert.equal(await recovered, 'ok');
 });
 
+test('serial queue close rejects new work with typed unavailable error', async () => {
+  const queue = new SerialQueue('writes');
+  queue.close();
+  const { AdmissionUnavailableError } = require('../lib/errors');
+  await assert.rejects(queue.run(async () => {}), AdmissionUnavailableError);
+});
+
 test('close rejects new work while drain waits for accepted work', async () => {
   const queue = new SerialQueue('writes');
   let finished = false;
@@ -43,7 +50,8 @@ test('close rejects new work while drain waits for accepted work', async () => {
     finished = true;
   });
   queue.close();
-  await assert.rejects(queue.run(async () => {}), /closed/);
+  const { AdmissionUnavailableError } = require('../lib/errors');
+  await assert.rejects(queue.run(async () => {}), AdmissionUnavailableError);
   await queue.drain(100);
   assert.equal(finished, true);
   assert.equal(queue.size, 0);

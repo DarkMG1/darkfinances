@@ -1,3 +1,5 @@
+const { AdmissionOverloadedError, AdmissionUnavailableError } = require('./errors');
+
 class SerialQueue {
   constructor(name = 'queue', { maxPending = 0 } = {}) {
     this.name = name;
@@ -6,14 +8,21 @@ class SerialQueue {
     this.tail = Promise.resolve();
     this.closed = false;
     this.rejectedOverCapacity = 0;
+    this.rejectedClosed = 0;
   }
 
   run(task) {
     if (typeof task !== 'function') throw new TypeError('SerialQueue task must be a function');
-    if (this.closed) return Promise.reject(new Error(`${this.name} is closed`));
+    if (this.closed) {
+      this.rejectedClosed += 1;
+      return Promise.reject(new AdmissionUnavailableError(`${this.name} is closed`));
+    }
     if (this.maxPending > 0 && this.pending >= this.maxPending) {
       this.rejectedOverCapacity += 1;
-      return Promise.reject(new Error(`${this.name} pending capacity exceeded (${this.maxPending})`));
+      return Promise.reject(new AdmissionOverloadedError(
+        `${this.name} pending capacity exceeded; retry with the same Idempotency-Key for mutations`,
+        { retryAfterSeconds: 1 },
+      ));
     }
     this.pending += 1;
     const execute = () => Promise.resolve().then(task);
@@ -40,7 +49,10 @@ class SerialQueue {
       await Promise.race([
         this.tail,
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${this.name} did not drain within ${timeoutMs}ms`)), timeoutMs);
+          timer = setTimeout(
+            () => reject(new AdmissionUnavailableError(`${this.name} did not drain within ${timeoutMs}ms`)),
+            timeoutMs,
+          );
         }),
       ]);
     } finally {
