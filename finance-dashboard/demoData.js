@@ -5,7 +5,13 @@
 
 const { metricValue } = require('./lib/metric-provenance');
 const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
-const { addDays, daysBetween, daysInMonth, monthEnd, shiftMonth, todayYMD } = require('./lib/date-only');
+const { addDays, addMonths, daysBetween, daysInMonth, monthEnd, shiftMonth, todayYMD } = require('./lib/date-only');
+const {
+  inferRecurrenceSchedule,
+  monthlyEquivalentAmount,
+  nextOccurrenceAfter,
+  renewalWindow,
+} = require('./lib/recurrence');
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const anchorDate = () => (process.env.DEMO_FINANCE_NOW ? new Date(process.env.DEMO_FINANCE_NOW) : new Date());
@@ -54,13 +60,20 @@ const categories = () => CATS.map(([name, group]) => ({ id: catId(name), name, g
 function buildSub(payee, category, amount, daysSinceLast, occ, priceFrom) {
   const last = ymd(daysAgo(daysSinceLast));
   const history = [];
-  for (let k = occ - 1; k >= 0; k--) history.push({ date: addDays(last, -k * 30), amount: priceFrom && k >= 2 ? priceFrom : amount });
+  for (let k = occ - 1; k >= 0; k--) history.push({ date: addMonths(last, -k), amount: priceFrom && k >= 2 ? priceFrom : amount });
+  const schedule = inferRecurrenceSchedule({
+    cadence: 'monthly',
+    dates: history.map((entry) => entry.date),
+    forced: true,
+  });
+  const nextRenewal = nextOccurrenceAfter(last, schedule);
   const priceChange = priceFrom && priceFrom !== amount
     ? { from: round2(priceFrom), to: round2(amount), pct: Math.round(((amount - priceFrom) / priceFrom) * 100) } : null;
   return {
     key: recurKey(payee), payee, category, cadence: 'monthly', amount: round2(amount), monthlyEquivalent: round2(amount),
     isBill: /rent|mortgage|phone|internet|cable|utilit|electric|water|\bgas\b|sewer|trash|insuranc|\bloan/i.test(category),
-    occurrences: occ, firstCharged: history[0].date, lastCharged: last, nextRenewal: addDays(last, 30),
+    occurrences: occ, firstCharged: history[0].date, lastCharged: last, nextRenewal,
+    renewalWindow: renewalWindow(nextRenewal),
     priceChange, status: 'active', hidden: false, history,
   };
 }

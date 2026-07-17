@@ -404,8 +404,9 @@ export interface RecurringItem {
   occurrences: number;
   firstCharged: string;
   lastCharged: string;
-  nextRenewal: string;
-  renewalWindow: { start: string; end: string };
+  nextRenewal: string | null;
+  renewalWindow: { start: string; end: string } | null;
+  projectionUncertain?: boolean;
   priceChange: { from: number; to: number; pct: number } | null;
   confidence: number;
   firstSeen: string;

@@ -922,7 +922,9 @@
         const k = String(it.key || '');
         const hike = it.priceChange
           ? `<div class="hike ${it.priceChange.pct > 0 ? 'up' : 'down'}">${it.priceChange.pct > 0 ? '▲' : '▼'} ${Math.abs(it.priceChange.pct)}%</div>` : '';
-        const status = it.status === 'active' ? `estimated ${dueLabel(it.nextRenewal)}` : (it.status === 'cancelled' ? 'cancelled' : 'inactive');
+        const status = it.status === 'active'
+          ? (it.nextRenewal ? `estimated ${dueLabel(it.nextRenewal)}` : 'estimated date uncertain')
+          : (it.status === 'cancelled' ? 'cancelled' : 'inactive');
         const toggle = it.status === 'cancelled'
           ? `<button class="sub-action" data-sub-key="${html(k)}" data-sub-status="active">reactivate</button>`
           : `<button class="sub-action" data-sub-key="${html(k)}" data-sub-status="cancelled">cancel</button>`;

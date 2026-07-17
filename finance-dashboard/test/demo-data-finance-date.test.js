@@ -44,5 +44,5 @@ test('demo recurring lastCharged is relative to finance anchor, not device today
   const demo = loadDemoData('2026-07-09T17:01:00-07:00');
   const netflix = demo.recurring().items.find((item) => item.payee === 'Netflix');
   assert.equal(netflix.lastCharged, '2026-07-01');
-  assert.equal(netflix.nextRenewal, '2026-07-31');
+  assert.equal(netflix.nextRenewal, '2026-08-01');
 });
