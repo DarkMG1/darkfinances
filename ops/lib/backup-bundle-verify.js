@@ -32,6 +32,10 @@ const {
   validateReceiptReferences,
   sha256File,
 } = require('./backup-verify');
+const {
+  listTarMemberNames,
+  listTarVerboseEntries,
+} = require('./backup-bundle-tar-listing');
 
 function sha256Buffer(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
@@ -48,6 +52,9 @@ function parseJson(label, text) {
 function assertSafeRelativePath(relativePath, label = 'path') {
   if (typeof relativePath !== 'string' || !relativePath) {
     throw new Error(`${label} must be a non-empty string`);
+  }
+  if (/[\x00-\x1f\x7f]/.test(relativePath)) {
+    throw new Error(`unsafe ${label}: control characters are forbidden`);
   }
   if (path.isAbsolute(relativePath)) {
     throw new Error(`unsafe ${label}: absolute paths are forbidden`);
@@ -119,6 +126,16 @@ function inventoryFromBundle(bundleRoot) {
   return loadBackupStateInventory({ inventoryPath });
 }
 
+function assertArchiveChecksum(archivePath) {
+  const checksumPath = `${archivePath}.sha256`;
+  if (!fs.existsSync(checksumPath)) {
+    throw new Error(`missing archive checksum sidecar: ${checksumPath}`);
+  }
+  const expected = fs.readFileSync(checksumPath, 'utf8').trim().split(/\s+/)[0];
+  const actual = sha256File(archivePath);
+  if (expected !== actual) throw new Error('archive checksum mismatch');
+}
+
 function readManifestFromArchive(archivePath) {
   const sidecarPath = `${archivePath}.manifest.json`;
   if (!fs.existsSync(sidecarPath)) {
@@ -128,9 +145,9 @@ function readManifestFromArchive(archivePath) {
   if (manifest.kind !== BUNDLE_KIND) throw new Error('manifest kind mismatch');
   assertSupportedBundleSchemaVersion(manifest.schemaVersion);
 
-  const listing = spawnSync('tar', ['-tzf', archivePath], { encoding: 'utf8' });
-  if (listing.status !== 0) throw new Error(listing.stderr || 'tar listing failed');
-  const members = listing.stdout.trim().split('\n').filter(Boolean);
+  assertArchiveChecksum(archivePath);
+
+  const members = listTarMemberNames(archivePath);
   if (!members.includes(EMBEDDED_MANIFEST)) {
     throw new Error(`archive is missing embedded ${EMBEDDED_MANIFEST}`);
   }
@@ -141,14 +158,6 @@ function readManifestFromArchive(archivePath) {
   if (JSON.stringify(embeddedManifest) !== JSON.stringify(manifest)) {
     throw new Error('embedded manifest does not match sidecar manifest');
   }
-
-  const checksumPath = `${archivePath}.sha256`;
-  if (!fs.existsSync(checksumPath)) {
-    throw new Error(`missing archive checksum sidecar: ${checksumPath}`);
-  }
-  const expected = fs.readFileSync(checksumPath, 'utf8').trim().split(/\s+/)[0];
-  const actual = sha256File(archivePath);
-  if (expected !== actual) throw new Error('archive checksum mismatch');
 
   return manifest;
 }
@@ -204,9 +213,7 @@ function validateManifestFiles(manifest) {
 }
 
 function listTarMembers(archivePath) {
-  const listing = spawnSync('tar', ['-tzf', archivePath], { encoding: 'utf8' });
-  if (listing.status !== 0) throw new Error(listing.stderr || 'tar listing failed');
-  return listing.stdout.trim().split('\n').filter(Boolean);
+  return listTarMemberNames(archivePath);
 }
 
 function assertTarMembersSafe(members) {
@@ -235,25 +242,23 @@ function assertArchivePreflightBounds(manifest) {
   }
 }
 
-function parseTarVerboseListing(archivePath) {
-  const listing = spawnSync('tar', ['-tvf', archivePath], { encoding: 'utf8' });
-  if (listing.status !== 0) throw new Error(listing.stderr || 'tar verbose listing failed');
-  const entries = [];
-  for (const line of listing.stdout.split('\n')) {
-    if (!line.trim()) continue;
-    const match = line.match(/^([\-ldbcps])([rwx-]{9})\s+\d+\s+\S+\s+\S+\s+(\d+)\s+.+\s+(.+)$/);
-    if (!match) throw new Error(`unable to parse tar listing line: ${line}`);
-    entries.push({
-      type: match[1],
-      size: Number(match[3]),
-      path: match[4],
-    });
-  }
-  return entries;
-}
-
 function assertTarEntryTypesSafe(archivePath) {
-  const entries = parseTarVerboseListing(archivePath);
+  const memberNames = listTarMemberNames(archivePath);
+  const entries = listTarVerboseEntries(archivePath);
+
+  if (entries.length !== memberNames.length) {
+    throw new Error(
+      `tar verbose listing count mismatch: ${entries.length} lines vs ${memberNames.length} members`,
+    );
+  }
+
+  const verbosePaths = entries.map((entry) => entry.path);
+  const sortedMembers = [...memberNames].sort();
+  const sortedVerbose = [...verbosePaths].sort();
+  if (sortedMembers.join('\0') !== sortedVerbose.join('\0')) {
+    throw new Error('tar verbose listing paths do not match nonverbose member names');
+  }
+
   let uncompressedBytes = 0;
   for (const entry of entries) {
     assertSafeRelativePath(entry.path, 'archive member');
@@ -518,6 +523,7 @@ module.exports = {
   verifyExtractedTree,
   stageRuntimeFromBundle,
   readManifestFromArchive,
+  assertArchiveChecksum,
   inventoryFromBundle,
   assertArchivePreflightBounds,
   assertTarEntryTypesSafe,

@@ -8,6 +8,7 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const OPS_TOOLING_FILES = Object.freeze([
   'ops/lib/backup-bundle-schema.js',
   'ops/lib/backup-bundle-inventory.js',
+  'ops/lib/backup-bundle-tar-listing.js',
   'ops/lib/backup-bundle-verify.js',
   'ops/lib/backup-bundle-manifest.js',
   'ops/lib/backup-state-inventory.json',

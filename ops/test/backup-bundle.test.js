@@ -31,6 +31,7 @@ const {
   verifyExtractedTree,
   inventoryFromBundle,
   assertArchivePreflightBounds,
+  readManifestFromArchive,
 } = require('../lib/backup-bundle-verify');
 const { writeProductionDashboard } = require('./fixtures/backup-bundle-dashboard-fixtures');
 
@@ -173,6 +174,11 @@ test('shell verify rejects appended archive bytes and checksum tamper', (t) => {
   fs.appendFileSync(corrupt, 'truncated');
 
   assert.throws(
+    () => readManifestFromArchive(corrupt),
+    /archive checksum mismatch/,
+  );
+
+  assert.throws(
     () => verifyBackupBundleArchive({ archivePath: corrupt }),
     /archive checksum mismatch/,
   );
@@ -180,6 +186,7 @@ test('shell verify rejects appended archive bytes and checksum tamper', (t) => {
   const shell = runShellVerify(corrupt, denyRepoEnv(root));
   assert.notEqual(shell.status, 0);
   assert.match(shell.stderr + shell.stdout, /archive checksum mismatch/);
+  assert.doesNotMatch(shell.stderr + shell.stdout, /trailing garbage|gzip|invalid header/i);
 });
 
 test('shell verify rejects sidecar and embedded manifest drift', (t) => {
@@ -317,7 +324,7 @@ test('verify rejects future bundle schema, unsafe tar paths, and unexpected memb
   fs.writeFileSync(`${unsafeArchive}.sha256`, `${require('../lib/backup-verify').sha256File(unsafeArchive)}  unsafe.tgz\n`);
   assert.throws(
     () => verifyBackupBundleArchive({ archivePath: unsafeArchive }),
-    /unsafe|symbolic links are forbidden|unexpected archive member|duplicate/,
+    /unsafe|symbolic links are forbidden|unexpected archive member|duplicate|verbose listing paths do not match/,
   );
 });
 
