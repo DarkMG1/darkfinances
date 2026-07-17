@@ -27,6 +27,7 @@ const {
   assertAdmissionBindings,
   issueSignedAdmissionToken,
   consumeAdmissionToken,
+  revokeAdmissionToken,
 } = require('./restore-quiescence-admission');
 const { coordinatedLayoutForRoot } = require('./coordinated-operation-layout');
 const {
@@ -602,17 +603,17 @@ function runStagedRestore(options = {}) {
   const restoreId = restoreIdForDestination(canonicalDestination);
 
   if (dryRun) {
+    const coordinatorRoot = options.coordinatorRoot || env.DARKFINANCES_BACKUP_DIR || null;
     requireQuiescenceAdmission({
       ...options,
       env,
+      coordinatorRoot,
       requireBindings: true,
       bindingContext: {
         archiveSha256,
         destinationRoot: canonicalDestination,
       },
-      layout: options.layout || (options.coordinatorRoot
-        ? coordinatedLayoutForRoot(options.coordinatorRoot)
-        : null),
+      layout: options.layout || (coordinatorRoot ? coordinatedLayoutForRoot(coordinatorRoot) : null),
       verifyLiveWriters: false,
     });
   }
@@ -620,6 +621,9 @@ function runStagedRestore(options = {}) {
   let journal = null;
   let resumeFromJournal = false;
   let restoreLock = null;
+  let admission = null;
+  let admissionConsumed = false;
+  let coordinatorLayout = null;
   const sidecarManifest = readManifestFromArchive(archivePath);
 
   if (persist) {
@@ -813,8 +817,9 @@ function runStagedRestore(options = {}) {
       return { dryRun: true, resumed: false, phase: PHASE.PREFLIGHT_PASSED, report };
     }
 
-    let admission;
-    const coordinatorLayout = options.layout
+    admission = null;
+    admissionConsumed = false;
+    coordinatorLayout = options.layout
       || (options.coordinatorRoot ? coordinatedLayoutForRoot(options.coordinatorRoot) : null);
     const writerInventory = loadWriterInventory();
     const writers = enumerateWriters(writerInventory, env);
@@ -861,11 +866,13 @@ function runStagedRestore(options = {}) {
           destinationRoot: canonicalDestination,
           manifestArtifactId: manifest.artifact.id,
           releaseManifestDigest: bindingResult.expectedBinding.releaseManifestDigest,
-          coordinatedManifestDigest: options.coordinatedManifestDigest || bindingResult.expectedBinding.releaseManifestDigest,
+          coordinatedManifestDigest: options.coordinatedManifestDigest
+            || bindingResult.expectedBinding.dashboardStateId,
           writerInventoryDigest: session.writerInventoryDigest,
           actualDataGeneration: bindingResult.expectedBinding.actualDataGeneration,
         },
       });
+      session.onAdmissionIssued?.(admission);
       const tokenPath = path.join(session.layout.workRoot, `restore-admission-${session.runId}.json`);
       writeFileAtomic(tokenPath, `${JSON.stringify(admission, null, 2)}\n`, 0o600);
       env.RESTORE_QUIESCENCE_ADMISSION_PATH = tokenPath;
@@ -992,6 +999,8 @@ function runStagedRestore(options = {}) {
     fsyncPath(layout.controlRoot, true);
     if (admission && coordinatorLayout && options.skipAdmissionConsumption !== true) {
       consumeAdmissionToken(coordinatorLayout, admission);
+      admissionConsumed = true;
+      options.coordinatedSession?.onAdmissionConsumed?.();
     }
 
     return {
@@ -1001,6 +1010,9 @@ function runStagedRestore(options = {}) {
       report,
     };
   } catch (error) {
+    if (admission && !admissionConsumed && coordinatorLayout) {
+      revokeAdmissionToken(coordinatorLayout, admission, 'staged_restore_failed');
+    }
     if (persist && journal && journal.phase !== PHASE.COMPLETE) {
       updateJournal(journal, { phase: PHASE.FAILED, error: redactPath(error.message) });
       writeJournal(layout.journalPath, journal, true);
@@ -1016,6 +1028,9 @@ function runStagedRestore(options = {}) {
             persist: true,
           });
         } catch (rollbackError) {
+          if (admission && !admissionConsumed && coordinatorLayout) {
+            revokeAdmissionToken(coordinatorLayout, admission, 'rollback_failed');
+          }
           throw safeError(new Error(`${error.message}; rollback failed: ${rollbackError.message}`));
         }
       }

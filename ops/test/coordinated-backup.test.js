@@ -1186,11 +1186,144 @@ test('signed admission token rejects forgery and wrong verification key', (t) =>
   );
 });
 
+test('BACKUP_PRE_QUIESCED=1 happy path verifies quiescence without stop commands', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-pre-quiesced-happy-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard, { BACKUP_PRE_QUIESCED: '1' });
+  const runners = createMockRunners({
+    units: {
+      'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+      'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+      'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+    },
+  });
+  const result = await runCoordinatedBackup({
+    ...backupOptions(env, runners),
+    preQuiesced: true,
+    dashboardDir: dashboard,
+    destination: env.DARKFINANCES_BACKUP_DIR,
+  });
+  assert.ok(result.bundleArchive);
+  assert.equal(result.coordinatedManifest && fs.existsSync(result.coordinatedManifest), true);
+  assert.ok(!runners.commands.some((cmd) => cmd[0] === 'systemctl' && cmd.includes('stop')));
+  const manifest = JSON.parse(fs.readFileSync(result.coordinatedManifest, 'utf8'));
+  assert.equal(manifest.provenanceOnly, true);
+});
+
+test('writer reappearance fails at named snapshot hooks', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-hook-reappear-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard);
+  const inventory = loadWriterInventory();
+  for (const label of [
+    'pre-dashboard-bundle',
+    'pre-publish-dashboard-bundle',
+    'pre-actual-hash',
+    'pre-publish-actual-archive',
+    'pre-release-manifest',
+  ]) {
+    const runners = createMockRunners({
+      units: {
+        'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+        'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+        'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+      },
+      reappearingWriters: ['finance-dashboard.service'],
+    });
+    const { snapshots } = discoverWriters({ inventory, env, runners, dashboardDir: dashboard });
+    const snapshotsById = new Map(snapshots.map((entry) => [entry.id, entry]));
+    const context = {
+      inventory,
+      env,
+      runners,
+      dashboardDir: dashboard,
+      stopDeadlineMs: 500,
+      pollMs: 50,
+    };
+    await assert.rejects(
+      () => require('../lib/writer-quiescence').verifySnapshotBoundary(context, snapshotsById, label),
+      new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    );
+  }
+});
+
+test('coordinated manifest digest binds restore admission coordinatedManifestDigest field', (t) => {
+  const root = mkRoot(t, 'df-coordinated-manifest-bind-');
+  const dashboard = path.join(root, 'dashboard');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const layout = coordinatedLayoutForRoot(path.join(root, 'backups'));
+  const inventory = loadWriterInventory();
+  const journal = createRunJournal({
+    runId: 'manifest-bind',
+    operation: 'backup',
+    layout,
+    writerInventory: inventory,
+    preRunWriters: [],
+    options: { includeActualData: false, preQuiesced: false, dashboardDir: dashboard },
+  });
+  journal.artifacts = {
+    bundleArchive: 'bundle.tgz',
+    bundleManifest: 'bundle.tgz.manifest.json',
+    releaseManifest: 'release.json',
+  };
+  const bundleManifest = { artifact: { id: 'a'.repeat(64) }, runtimeState: { inventoryDigest: 'b'.repeat(64) } };
+  const releasePath = path.join(root, 'release.json');
+  fs.writeFileSync(releasePath, RELEASE_MANIFEST_BODY, { mode: 0o600 });
+  const bundleManifestPath = path.join(root, 'bundle.tgz.manifest.json');
+  fs.writeFileSync(bundleManifestPath, `${JSON.stringify(bundleManifest, null, 2)}\n`, { mode: 0o600 });
+  const coordinatedManifest = buildCoordinatedManifest({
+    journal,
+    bundleManifest,
+    bundleManifestPath,
+    releaseManifestPath: releasePath,
+  });
+  const coordinatedManifestPath = path.join(root, 'coordinated.json');
+  fs.writeFileSync(coordinatedManifestPath, `${JSON.stringify(coordinatedManifest, null, 2)}\n`, { mode: 0o600 });
+  const digest = require('../lib/backup-verify').sha256File(coordinatedManifestPath);
+  const keys = installTestCoordinatorKeys(root);
+  const { token } = buildTestAdmissionToken({
+    keyPair: keys.pair,
+    bindings: {
+      coordinatedManifestDigest: digest,
+      releaseManifestDigest: coordinatedManifest.generation.releaseManifestDigest,
+    },
+  });
+  assert.equal(token.bindings.coordinatedManifestDigest, digest);
+  assert.equal(token.bindings.releaseManifestDigest, coordinatedManifest.generation.releaseManifestDigest);
+});
+
 test('tooling closure includes coordinated restore and build-backup dependencies', () => {
   const sources = bundleToolingSourcePaths();
   assert.ok(sources.includes('ops/lib/build-backup-bundle.js'));
   assert.ok(sources.includes('ops/lib/coordinated-admission-crypto.js'));
   assert.ok(sources.includes('ops/lib/coordinated-restore.js'));
+  assert.ok(sources.includes('scripts/release-manifest.js'));
 });
 
 test('shell wrapper dry-run exits 2 without mutating destination', (t) => {

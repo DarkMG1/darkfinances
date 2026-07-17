@@ -46,6 +46,7 @@ function admissionEnv(root, destination, archivePath, extra = {}) {
   const coordinatorRoot = path.join(root, 'backups');
   const layout = coordinatedLayoutForRoot(coordinatorRoot);
   fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(layout.workRoot, { recursive: true, mode: 0o700 });
   const archiveSha256 = sha256File(archivePath);
   const { readManifestFromArchive } = require('../lib/backup-bundle-verify');
   const { loadWriterInventory, writerInventoryDigest } = require('../lib/writer-inventory');
@@ -68,7 +69,8 @@ function admissionEnv(root, destination, archivePath, extra = {}) {
     },
   });
   registerTestAdmission(layout, token);
-  const tokenPath = path.join(root, 'quiescence-admission.json');
+  fs.mkdirSync(layout.workRoot, { recursive: true, mode: 0o700 });
+  const tokenPath = path.join(layout.workRoot, 'quiescence-admission.json');
   fs.writeFileSync(tokenPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
   const fakeBin = installFakeSystemctl(root, {
     'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
@@ -759,6 +761,10 @@ test('expired admission token is rejected', (t) => {
   const destination = path.join(root, 'destination');
   writeTerminalSagaDashboard(dashboard);
   const archive = buildBundle(root, dashboard);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(layout.workRoot, { recursive: true, mode: 0o700 });
   const keys = installTestCoordinatorKeys(root);
   const { token } = buildTestAdmissionToken({
     keyPair: keys.pair,
@@ -768,7 +774,8 @@ test('expired admission token is rejected', (t) => {
       destinationRoot: path.resolve(destination),
     },
   });
-  const tokenPath = path.join(root, 'expired.json');
+  registerTestAdmission(layout, token);
+  const tokenPath = path.join(layout.workRoot, 'expired.json');
   fs.writeFileSync(tokenPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
   const fakeBin = installFakeSystemctl(root);
   assert.throws(
@@ -781,9 +788,10 @@ test('expired admission token is rejected', (t) => {
         PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
         RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
         COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+        DARKFINANCES_BACKUP_DIR: coordinatorRoot,
       },
     }),
-    /expired/,
+    /expired|expiresAt must be after issuedAt/,
   );
 });
 
@@ -793,6 +801,10 @@ test('wrong admission archive binding is rejected before mutation', (t) => {
   const destination = path.join(root, 'destination');
   writeTerminalSagaDashboard(dashboard);
   const archive = buildBundle(root, dashboard);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(layout.workRoot, { recursive: true, mode: 0o700 });
   const keys = installTestCoordinatorKeys(root);
   const { token } = buildTestAdmissionToken({
     keyPair: keys.pair,
@@ -801,7 +813,8 @@ test('wrong admission archive binding is rejected before mutation', (t) => {
       destinationRoot: path.resolve(destination),
     },
   });
-  const tokenPath = path.join(root, 'wrong-archive.json');
+  registerTestAdmission(layout, token);
+  const tokenPath = path.join(layout.workRoot, 'wrong-archive.json');
   fs.writeFileSync(tokenPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   const fakeBin = installFakeSystemctl(root);
@@ -816,6 +829,7 @@ test('wrong admission archive binding is rejected before mutation', (t) => {
         PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
         RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
         COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+        DARKFINANCES_BACKUP_DIR: coordinatorRoot,
       },
     }),
     /archive binding mismatch/,

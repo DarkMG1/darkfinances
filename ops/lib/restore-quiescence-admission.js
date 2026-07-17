@@ -12,8 +12,9 @@ const {
   assertAdmissionConsumable,
   consumeAdmission,
   registerAdmission,
+  revokeAdmission,
 } = require('./coordinated-admission-registry');
-const { coordinatedLayoutForRoot } = require('./coordinated-operation-layout');
+const { coordinatedLayoutForRoot, assertNotSymlink } = require('./coordinated-operation-layout');
 const { assertAllWritersQuiescentForAdmission, writerStatesForAdmission } = require('./writer-quiescence');
 
 const ADMISSION_KIND = 'darkfinances-restore-quiescence-admission';
@@ -98,15 +99,68 @@ function parseAdmissionToken(text, label = 'quiescence admission token', options
   return parsed;
 }
 
+function trustedCoordinatorRoots(options = {}) {
+  const roots = [];
+  if (options.layout) {
+    roots.push(options.layout.controlRoot, options.layout.workRoot, options.layout.canonicalRoot);
+  }
+  if (options.coordinatorRoot) {
+    const layout = coordinatedLayoutForRoot(options.coordinatorRoot);
+    roots.push(layout.controlRoot, layout.workRoot, layout.canonicalRoot);
+  }
+  for (const root of options.trustedRoots || []) {
+    if (root) roots.push(root);
+  }
+  return [...new Set(roots.map((entry) => path.resolve(entry)))];
+}
+
+function assertTrustedAdmissionTokenPath(tokenPath, options = {}, label = 'admission token path') {
+  const resolved = path.resolve(tokenPath);
+  const stat = fs.lstatSync(resolved);
+  assertNotSymlink(stat, label);
+  if (!stat.isFile()) throw new Error(`${label} must be a regular file`);
+  if (process.platform !== 'win32' && typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+    throw new Error(`${label} ownership mismatch`);
+  }
+  if ((stat.mode & 0o777) !== 0o600) {
+    throw new Error(`${label} mode must be 0600`);
+  }
+  if (stat.nlink > 1) {
+    throw new Error(`${label} must not be hard-linked`);
+  }
+  const canonical = fs.realpathSync(resolved);
+  const allowedRoots = trustedCoordinatorRoots(options);
+  if (allowedRoots.length === 0) {
+    throw new Error(`${label} requires trusted coordinator roots`);
+  }
+  const allowed = allowedRoots.map((root) => (
+    fs.existsSync(root) ? fs.realpathSync(root) : root
+  ));
+  if (!allowed.some((root) => canonical === root || canonical.startsWith(`${root}${path.sep}`))) {
+    throw new Error(`${label} is outside trusted coordinator roots`);
+  }
+  return canonical;
+}
+
+function readAdmissionTokenFile(tokenPath, options = {}, label = 'quiescence admission token') {
+  const canonical = assertTrustedAdmissionTokenPath(tokenPath, options, label);
+  return parseAdmissionToken(fs.readFileSync(canonical, 'utf8'), label, { env: options.env, ...options });
+}
+
 function admissionTokenFromEnv(env = process.env, options = {}) {
+  const resolvedOptions = {
+    env,
+    ...options,
+    coordinatorRoot: options.coordinatorRoot || env.DARKFINANCES_BACKUP_DIR || null,
+  };
   const inline = env.RESTORE_QUIESCENCE_ADMISSION_TOKEN;
-  if (inline) return parseAdmissionToken(inline, 'RESTORE_QUIESCENCE_ADMISSION_TOKEN', { env, ...options });
+  if (inline) return parseAdmissionToken(inline, 'RESTORE_QUIESCENCE_ADMISSION_TOKEN', resolvedOptions);
   const tokenPath = env.RESTORE_QUIESCENCE_ADMISSION_PATH;
   if (tokenPath) {
     if (!fs.existsSync(tokenPath)) {
       throw new Error(`quiescence admission token file not found: ${tokenPath}`);
     }
-    return parseAdmissionToken(fs.readFileSync(tokenPath, 'utf8'), tokenPath, { env, ...options });
+    return readAdmissionTokenFile(tokenPath, resolvedOptions);
   }
   return null;
 }
@@ -229,6 +283,11 @@ function consumeAdmissionToken(layout, token) {
   consumeAdmission(layout, token.nonce);
 }
 
+function revokeAdmissionToken(layout, token, reasonCode = 'revoked') {
+  if (!token?.nonce) return null;
+  return revokeAdmission(layout, token.nonce, reasonCode);
+}
+
 module.exports = {
   ADMISSION_KIND,
   ADMISSION_SCHEMA_VERSION,
@@ -240,6 +299,10 @@ module.exports = {
   parseAdmissionToken,
   issueSignedAdmissionToken,
   consumeAdmissionToken,
+  revokeAdmissionToken,
+  readAdmissionTokenFile,
+  assertTrustedAdmissionTokenPath,
+  trustedCoordinatorRoots,
   assertAdmissionFresh,
   assertAdmissionBindings,
   assertAdmissionRegistryState,

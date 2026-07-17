@@ -22,12 +22,14 @@ const { createDefaultRunners } = require('./ops-command-runners');
 const {
   discoverWriters,
   ensureQuiescentForSnapshot,
+  previewQuiescenceForRestore,
   restartWritersByPhase,
   auditDeploymentDiscovery,
 } = require('./writer-quiescence');
 const { runPostRestartHealthChecks } = require('./coordinated-backup-health');
 const { loadWriterInventory } = require('./writer-inventory');
 const { runStagedRestore } = require('./staged-restore');
+const { revokeAdmissionToken } = require('./restore-quiescence-admission');
 
 function createRunId() {
   return crypto.randomUUID();
@@ -58,9 +60,21 @@ async function runCoordinatedRestore(options = {}) {
   let primaryError = null;
   let interrupted = false;
   let boundReleaseGeneration = options.releaseManifestDigest || null;
+  let outstandingAdmission = null;
+  let admissionConsumed = false;
+
+  const revokeOutstandingAdmission = (reasonCode) => {
+    if (admissionConsumed || !outstandingAdmission) return;
+    try {
+      revokeAdmissionToken(layout, outstandingAdmission, reasonCode);
+    } catch {
+      // idempotent best-effort
+    }
+  };
 
   const onSignal = (signal) => {
     interrupted = true;
+    revokeOutstandingAdmission(`signal_${signal.toLowerCase()}`);
     if (journal && !dryRun) {
       journal.phase = PHASE.RECOVERY_REQUIRED;
       appendJournalError(journal, `interrupted by ${signal}`);
@@ -100,6 +114,25 @@ async function runCoordinatedRestore(options = {}) {
       shouldInterrupt: options.shouldInterrupt || (() => interrupted),
     };
 
+    if (dryRun) {
+      const preview = await previewQuiescenceForRestore(context, snapshotsById, {
+        label: 'restore dry-run boundary',
+        failOnActive: env.RESTORE_DRY_RUN_STRICT === '1',
+      });
+      return {
+        ok: preview.quiescent,
+        dryRun: true,
+        plan: {
+          archivePath,
+          archiveSha256: sha256File(archivePath),
+          dashboardDir,
+          writers: preview.writers,
+          warnings: preview.warnings,
+          quiescent: preview.quiescent,
+        },
+      };
+    }
+
     if (!journal) {
       journal = createRunJournal({
         runId,
@@ -110,7 +143,7 @@ async function runCoordinatedRestore(options = {}) {
         options: { includeActualData: false, preQuiesced: false, dashboardDir },
       });
       journal.phase = PHASE.WRITERS_CAPTURED;
-      if (!dryRun) writeRunJournal(layout.journalPath, journal);
+      writeRunJournal(layout.journalPath, journal);
     } else {
       assertJournalBinding(journal, { layout, inventory, options: { dashboardDir, includeActualData: false } });
       runId = journal.runId;
@@ -124,24 +157,6 @@ async function runCoordinatedRestore(options = {}) {
         }
       }
       journal.preRunWriters = [...snapshotsById.values()];
-    }
-
-    if (dryRun) {
-      await ensureQuiescentForSnapshot(context, snapshotsById, {
-        stopIfNeeded: true,
-        label: 'restore dry-run boundary',
-      });
-      return {
-        ok: true,
-        dryRun: true,
-        plan: {
-          archivePath,
-          archiveSha256: sha256File(archivePath),
-          dashboardDir,
-          writers: [...snapshotsById.values()],
-        },
-        journal,
-      };
     }
 
     await ensureQuiescentForSnapshot(context, snapshotsById, {
@@ -175,12 +190,21 @@ async function runCoordinatedRestore(options = {}) {
         context,
         privateKey: options.privateKey,
         writerInventoryDigest: journal.inventory.writerInventoryDigest,
+        onAdmissionIssued: (token) => {
+          outstandingAdmission = token;
+        },
+        onAdmissionConsumed: () => {
+          admissionConsumed = true;
+          outstandingAdmission = null;
+        },
       },
     });
 
-    journal.phase = PHASE.BACKUP_COMPLETE;
+    journal.phase = PHASE.RESTORE_STAGED;
     journal.restoreResult = restoreResult;
     writeRunJournal(layout.journalPath, journal);
+    admissionConsumed = true;
+    outstandingAdmission = null;
 
     return {
       ok: true,
@@ -190,6 +214,7 @@ async function runCoordinatedRestore(options = {}) {
     };
   } catch (error) {
     primaryError = error;
+    revokeOutstandingAdmission('restore_failed');
     if (journal && !dryRun) {
       appendJournalError(journal, error.message);
       journal.phase = interrupted ? PHASE.RECOVERY_REQUIRED : PHASE.FAILED;
@@ -197,6 +222,7 @@ async function runCoordinatedRestore(options = {}) {
     }
   } finally {
     if (!dryRun && context && snapshotsById.size > 0) {
+      revokeOutstandingAdmission('restart_without_consume');
       const restartResults = await restartAll(context, snapshotsById);
       if (journal) {
         journal.restartResults = restartResults;

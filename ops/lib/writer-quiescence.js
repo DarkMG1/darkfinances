@@ -404,6 +404,25 @@ async function ensureQuiescentForSnapshot(context, snapshotsById, {
   return verifySnapshotBoundary(context, snapshotsById, label);
 }
 
+async function previewQuiescenceForRestore(context, snapshotsById, {
+  label = 'restore preview',
+  failOnActive = false,
+} = {}) {
+  const verify = await verifyAllQuiescent(context, snapshotsById);
+  const warnings = (verify.failures || []).map((entry) => (
+    `${label}: writer ${entry.id} not quiescent (${entry.reason})`
+  ));
+  if (failOnActive && !verify.ok) {
+    throw new Error(`${label} quiescence preview failed: ${warnings.join('; ')}`);
+  }
+  return {
+    quiescent: verify.ok,
+    warnings,
+    failures: verify.failures,
+    writers: [...snapshotsById.values()],
+  };
+}
+
 function auditDeploymentDiscovery(context) {
   const inventory = context.inventory || loadWriterInventory();
   const { runners, env } = context;
@@ -494,6 +513,7 @@ module.exports = {
   assertAllWritersQuiescentForAdmission,
   verifySnapshotBoundary,
   ensureQuiescentForSnapshot,
+  previewQuiescenceForRestore,
   auditDeploymentDiscovery,
   assertActualGenerationStable,
   computeActualDataGeneration,

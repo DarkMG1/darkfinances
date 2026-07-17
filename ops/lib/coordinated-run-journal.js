@@ -15,6 +15,7 @@ const PHASE = Object.freeze({
   WRITERS_CAPTURED: 'writers_captured',
   QUIESCENCE_VERIFIED: 'quiescence_verified',
   BACKUP_COMPLETE: 'backup_complete',
+  RESTORE_STAGED: 'restore_staged',
   RESTART_COMPLETE: 'restart_complete',
   HEALTH_VERIFIED: 'health_verified',
   COMPLETE: 'complete',

@@ -1,7 +1,6 @@
 'use strict';
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { fsyncPath } = require('./restore-durable-io');
 const { assertNotSymlink } = require('./coordinated-operation-layout');
@@ -94,23 +93,10 @@ function acquireCoordinatedLock({
   env = process.env,
 }) {
   if (dryRun) {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-coordinated-lock-dry-'));
-    const tempLock = path.join(tempDir, path.basename(layout.lockPath));
-    createCoordinatedLockFile(tempLock, createCoordinatedLockPayload({
-      operation,
-      canonicalRoot: layout.canonicalRoot,
-    }));
     return {
-      lockPath: tempLock,
+      lockPath: null,
       temporary: true,
-      release() {
-        try {
-          if (fs.existsSync(tempLock)) fs.unlinkSync(tempLock);
-          if (fs.existsSync(tempDir)) fs.rmdirSync(tempDir);
-        } catch {
-          // best-effort dry-run cleanup
-        }
-      },
+      release() {},
     };
   }
 

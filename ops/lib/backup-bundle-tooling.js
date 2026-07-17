@@ -43,6 +43,13 @@ const OPS_TOOLING_FILES = Object.freeze([
   'ops/lib/coordinated-restore-cli.js',
 ]);
 
+const SCRIPT_TOOLING_SEEDS = Object.freeze([
+  'scripts/release-manifest.js',
+  'scripts/contract-fingerprint.js',
+  'scripts/version-alignment.js',
+  'scripts/release-profile.js',
+]);
+
 const DASHBOARD_TOOLING_SEED = 'finance-dashboard/lib/runtime-state-store.js';
 
 function resolveRequireTarget(baseFile, request) {
@@ -72,6 +79,14 @@ function collectLibClosure(seedAbsPaths) {
   return [...seen].sort();
 }
 
+function scriptsToolingFiles() {
+  const seeds = SCRIPT_TOOLING_SEEDS.map((rel) => path.join(REPO_ROOT, rel));
+  return collectLibClosure(seeds).filter((rel) => (
+    rel.startsWith('scripts/')
+    || rel.startsWith('finance-dashboard/lib/')
+  ));
+}
+
 function dashboardToolingFiles() {
   const seed = path.join(REPO_ROOT, DASHBOARD_TOOLING_SEED);
   return collectLibClosure([seed]).filter((rel) => rel.startsWith('finance-dashboard/lib/'));
@@ -84,7 +99,12 @@ function bundleToolingSourcePaths() {
     || rel.startsWith('ops/bin/')
     || OPS_TOOLING_FILES.includes(rel)
   ));
-  return [...new Set([...OPS_TOOLING_FILES, ...opsClosure, ...dashboardToolingFiles()])].sort();
+  return [...new Set([
+    ...OPS_TOOLING_FILES,
+    ...opsClosure,
+    ...dashboardToolingFiles(),
+    ...scriptsToolingFiles(),
+  ])].sort();
 }
 
 function bundleDestinationRelative(sourceRelative) {
@@ -99,6 +119,9 @@ function bundleDestinationRelative(sourceRelative) {
   }
   if (sourceRelative === 'ops/lib/coordinated-backup-cli.js') {
     return 'tooling/ops/bin/backup-coordinated.js';
+  }
+  if (sourceRelative.startsWith('scripts/')) {
+    return path.posix.join('tooling', sourceRelative);
   }
   return path.posix.join('tooling', sourceRelative);
 }
@@ -119,8 +142,10 @@ function copyBundleTooling({ sourceRoot = REPO_ROOT, destinationRoot }) {
 
 module.exports = {
   OPS_TOOLING_FILES,
+  SCRIPT_TOOLING_SEEDS,
   DASHBOARD_TOOLING_SEED,
   dashboardToolingFiles,
+  scriptsToolingFiles,
   bundleToolingSourcePaths,
   bundleDestinationRelative,
   copyBundleTooling,

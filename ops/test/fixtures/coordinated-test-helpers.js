@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const assert = require('node:assert/strict');
 const { exportPublicKeyPem, exportPrivateKeyPem } = require('../../lib/coordinated-admission-crypto');
 const { buildTestAdmissionToken, registerTestAdmission } = require('./admission-token-fixtures');
 const { coordinatedLayoutForRoot } = require('../../lib/coordinated-operation-layout');
@@ -23,6 +24,27 @@ case " \$* " in
 esac
 `, { mode: 0o755 });
   return fakeBin;
+}
+
+function writeTrustedAdmissionToken(layout, token, filename = 'quiescence-admission.json') {
+  fs.mkdirSync(layout.workRoot, { recursive: true, mode: 0o700 });
+  const tokenPath = path.join(layout.workRoot, filename);
+  fs.writeFileSync(tokenPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
+  return tokenPath;
+}
+
+function isMutatingCommand(cmd) {
+  const [bin, ...rest] = cmd;
+  if (bin === 'systemctl' && rest.some((arg) => arg === 'stop' || arg === 'start')) return true;
+  if (bin === 'docker' && (rest[0] === 'compose' || rest[0] === 'update')) return true;
+  if (bin === 'tar') return true;
+  return false;
+}
+
+function assertPreviewOnlyCommands(commands, message = 'preview must not run mutating commands') {
+  for (const cmd of commands) {
+    assert.equal(isMutatingCommand(cmd), false, `${message}: ${cmd.join(' ')}`);
+  }
 }
 
 function installTestCoordinatorKeys(root, keyPair = null) {
@@ -62,8 +84,7 @@ function signedAdmissionEnv(root, {
     writers,
   });
   registerTestAdmission(layout, token);
-  const tokenPath = path.join(root, 'quiescence-admission.json');
-  fs.writeFileSync(tokenPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
+  const tokenPath = writeTrustedAdmissionToken(layout, token);
   const fakeBin = installFakeSystemctl(root, {
     'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
     'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
@@ -88,4 +109,7 @@ module.exports = {
   installFakeSystemctl,
   installTestCoordinatorKeys,
   signedAdmissionEnv,
+  writeTrustedAdmissionToken,
+  isMutatingCommand,
+  assertPreviewOnlyCommands,
 };

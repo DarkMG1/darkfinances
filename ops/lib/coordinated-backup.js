@@ -235,6 +235,20 @@ async function prepareWriterContext({
   return { context, snapshotsById, discoverySnapshots, runId };
 }
 
+function resolveReleaseManifestInvocation(options, env, repoRoot) {
+  const candidates = [
+    { script: path.join(repoRoot, 'scripts/release-manifest.js'), cwd: repoRoot },
+    { script: path.join(__dirname, '..', '..', 'scripts', 'release-manifest.js'), cwd: path.join(__dirname, '..', '..') },
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate.script)) return candidate;
+  }
+  if (typeof options.writeReleaseManifest === 'function') {
+    return null;
+  }
+  throw new Error('release manifest tooling unavailable in relocated bundle; cannot stop writers for backup publish');
+}
+
 async function runCoordinatedBackup(options = {}) {
   const env = options.env || process.env;
   const dryRun = options.dryRun === true;
@@ -342,6 +356,7 @@ async function runCoordinatedBackup(options = {}) {
 
     const publishNeeded = needsBackupPublish(journal);
     if (publishNeeded) {
+      resolveReleaseManifestInvocation(options, env, repoRoot);
       await ensureQuiescentForSnapshot(context, snapshotsById, {
         stopIfNeeded: !preQuiesced,
         label: 'initial snapshot boundary',
@@ -419,8 +434,9 @@ async function runCoordinatedBackup(options = {}) {
           additionalBackupArgs,
         });
       } else {
+        const releaseManifest = resolveReleaseManifestInvocation(options, env, repoRoot);
         const release = runners.nodeScript(
-          path.join(repoRoot, 'scripts/release-manifest.js'),
+          releaseManifest.script,
           [
             '--mode=backup',
             `--backup-manifest=${bundleManifestFinal}`,
@@ -428,7 +444,7 @@ async function runCoordinatedBackup(options = {}) {
             ...additionalBackupArgs,
             releaseManifestFinal,
           ],
-          { cwd: repoRoot },
+          { cwd: releaseManifest.cwd },
         );
         if (release.status !== 0) throw new Error(release.stderr || release.stdout || 'release manifest failed');
       }
