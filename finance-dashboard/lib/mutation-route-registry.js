@@ -38,7 +38,7 @@ const MUTATION_ROUTES = Object.freeze([
   route('POST', '/owes-config', C.SIDECAR_LOCAL, 'atomic owes-config JSON write'),
   route('POST', '/reimb-links', C.SIDECAR_LOCAL, 'atomic reimbursement-links JSON write'),
   route('DELETE', '/reimb-links', C.SIDECAR_LOCAL, 'atomic reimbursement-links JSON write when a link exists'),
-  route('POST', '/repayments/:id/confirm', C.MULTIPLE_INTERNAL_WRITES, 'api.updateTransaction before reimbursement-link and suggestion sidecar writes', 'after_local'),
+  route('POST', '/repayments/:id/confirm', C.MULTIPLE_INTERNAL_WRITES, 'prepared repayment-confirmation saga write before category update, reimbursement-link writes, and suggestion audit', 'after_local'),
   route('POST', '/repayments/:id/dismiss', C.SIDECAR_LOCAL, 'atomic reimbursement-suggestions JSON write'),
   route('POST', '/reconciliation/item', C.SIDECAR_LOCAL, 'atomic reconciliation JSON write'),
   route('POST', '/reconciliation/month', C.SIDECAR_LOCAL, 'atomic reconciliation JSON write'),

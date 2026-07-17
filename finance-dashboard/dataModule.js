@@ -34,6 +34,14 @@ const {
   createTransactionDeletionSaga,
 } = require('./lib/transaction-deletion-saga');
 const {
+  createRepaymentConfirmationSaga,
+} = require('./lib/repayment-confirmation-saga');
+const {
+  buildAdmissionPayload,
+  RepaymentSuggestionInvalidError,
+  resolveRepaymentEndpoints,
+} = require('./lib/repayment-confirmation-admission');
+const {
   rewriteTransactionReplacementReferences,
 } = require('./lib/transaction-replacement-references');
 const {
@@ -123,6 +131,7 @@ const RECON_PATH = statePath('reconciliation');
 const REVIEW_STATE_PATH = statePath('reviewState');
 const TRANSACTION_SAGAS_PATH = statePath('transactionSagas');
 const TRANSACTION_DELETION_SAGAS_PATH = statePath('transactionDeletionSagas');
+const REPAYMENT_CONFIRMATION_SAGAS_PATH = statePath('repaymentConfirmationSagas');
 const readJsonSafe = (p, fallback, validate) => readJsonFile(p, fallback, validate);
 const writeJsonSafe = (p, obj) => writeJsonFile(p, obj);
 
@@ -154,6 +163,7 @@ async function initApi() {
       apiReady = true;
       await recoverTransactionSagas(api);
       await recoverTransactionDeletionSagas(api);
+      await recoverRepaymentConfirmationSagas(api);
       apiHealth.initializedAt = new Date().toISOString();
       apiHealth.lastError = null;
     } catch (error) {
@@ -1349,11 +1359,17 @@ function deleteReimbLink({ inflowId, expenseId } = {}) {
 // amount-allocated links. Trip/Splitwise debts stay owned by the snapshot engine.
 // ---------------------------------------------------------------------------
 function readReimbSuggest() {
-  const s = readJsonSafe(REIMB_SUGGEST_PATH, { confirmed: {}, dismissed: [] });
-  return {
-    confirmed: s && s.confirmed && typeof s.confirmed === 'object' ? s.confirmed : {},
-    dismissed: Array.isArray(s && s.dismissed) ? s.dismissed : [],
-  };
+  const store = readJsonSafe(REIMB_SUGGEST_PATH, { confirmed: {}, dismissed: [] });
+  if (!store || typeof store !== 'object' || Array.isArray(store)) {
+    return { confirmed: {}, dismissed: [] };
+  }
+  if (!store.confirmed || typeof store.confirmed !== 'object' || Array.isArray(store.confirmed)) {
+    store.confirmed = {};
+  }
+  if (!Array.isArray(store.dismissed)) {
+    store.dismissed = [];
+  }
+  return store;
 }
 function writeReimbSuggest(s) { writeJsonSafe(REIMB_SUGGEST_PATH, s); }
 
@@ -1529,22 +1545,51 @@ async function suggestRepayments({ from, to } = {}) {
 // Confirm a suggestion: file the inflow under Reimbursement (so it nets against what
 // the person owes — the "zero out" flow) and write amount-allocated provenance links.
 // Re-derives the suggestion so a stale client can't act on a vanished match.
-async function confirmRepayment({ id, from, to } = {}) {
+async function prepareRepaymentConfirmationAdmission({ id, from, to } = {}) {
   if (!id) throw new Error('suggestion id required');
   const requestedInflowId = id.startsWith('sg_') ? id.slice(3) : null;
   assertTransactionMutationAvailable({ ids: [requestedInflowId] });
   const { suggestions } = await suggestRepayments({ from, to });
   const sg = suggestions.find((s) => s.id === id);
-  if (!sg) throw new Error('suggestion no longer valid (already linked or changed) — refresh and retry');
+  if (!sg) throw new RepaymentSuggestionInvalidError();
   assertTransactionMutationAvailable({
     ids: [sg.inflow.id, ...sg.allocations.map((allocation) => allocation.expense?.id)],
   });
-  await setTransactionCategory({ id: sg.inflow.id, categoryId: reimbCategoryId(await withApi((api) => api.getCategoryGroups())) });
-  for (const a of sg.allocations) addReimbLink({ inflow: sg.inflow, expense: a.expense, amount: a.amount, person: sg.person });
-  const store = readReimbSuggest();
-  store.confirmed[id] = { at: new Date().toISOString(), inflowId: sg.inflow.id, allocations: sg.allocations.length };
-  writeReimbSuggest(store);
-  return { ok: true, categorized: true, linked: sg.allocations.length, inflowId: sg.inflow.id };
+  return withApi(async (api) => {
+    const groups = await api.getCategoryGroups();
+    const reimbId = reimbCategoryId(groups);
+    const payees = await api.getPayees();
+    const pn = Object.fromEntries(payees.map((p) => [p.id, p.name || '']));
+    const resolved = await resolveRepaymentEndpoints(api, sg, pn);
+    const { links } = readReimbLinks();
+    return buildAdmissionPayload({
+      suggestionId: id,
+      suggestion: sg,
+      reimbCategoryId: reimbId,
+      resolved,
+      existingLinks: links,
+    });
+  });
+}
+
+async function validateRepaymentConfirmationAdmission(options) {
+  return prepareRepaymentConfirmationAdmission(options);
+}
+
+async function confirmRepayment({
+  id,
+  from,
+  to,
+  operationIdentity,
+  faultInjector,
+  admission,
+} = {}) {
+  const prepared = admission || await prepareRepaymentConfirmationAdmission({ id, from, to });
+  return withApi(async (api) => getRepaymentConfirmationSagaManager().confirm(api, {
+    ...prepared,
+    operationIdentity,
+    faultInjector,
+  }));
 }
 function reimbCategoryId(groups) {
   for (const g of groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) return c.id;
@@ -3151,6 +3196,7 @@ async function resolvePayeeId(api, name) {
 
 let transactionSagaManager = null;
 let transactionDeletionSagaManager = null;
+let repaymentConfirmationSagaManager = null;
 const replacementSagaResults = new WeakMap();
 
 function getTransactionSagaManager() {
@@ -3164,6 +3210,10 @@ function getTransactionSagaManager() {
       referenceSteps: TRANSACTION_REFERENCE_STEPS,
       assertExternalAvailable: ({ accountId, original }) => {
         getTransactionDeletionSagaManager().assertAvailable({ accountId, transaction: original });
+        getRepaymentConfirmationSagaManager().assertAvailable({
+          accountId,
+          ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
+        });
       },
     });
   }
@@ -3180,12 +3230,33 @@ function getTransactionDeletionSagaManager() {
       referenceSteps: TRANSACTION_DELETION_REFERENCE_STEPS,
       receiptFileState: transactionDeletionReceiptFileState,
       unlinkReceiptFile: unlinkTransactionDeletionReceiptFile,
-      assertExternalAvailable: ({ accountId, transaction }) => {
-        getTransactionSagaManager().assertAvailable({ accountId, original: transaction });
+      assertExternalAvailable: ({ accountId, original }) => {
+        getTransactionSagaManager().assertAvailable({ accountId, original });
+        getRepaymentConfirmationSagaManager().assertAvailable({
+          accountId,
+          ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
+        });
       },
     });
   }
   return transactionDeletionSagaManager;
+}
+
+function getRepaymentConfirmationSagaManager() {
+  if (!repaymentConfirmationSagaManager) {
+    repaymentConfirmationSagaManager = createRepaymentConfirmationSaga({
+      sagaPath: REPAYMENT_CONFIRMATION_SAGAS_PATH,
+      readLinks: readReimbLinks,
+      writeLinks: (store) => writeJsonSafe(REIMB_LINKS_PATH, store),
+      readSuggestions: readReimbSuggest,
+      writeSuggestions: writeReimbSuggest,
+      assertExternalAvailable: ({ accountId, ids }) => {
+        getTransactionSagaManager().assertAvailable({ accountId, ids });
+        getTransactionDeletionSagaManager().assertAvailable({ accountId, ids });
+      },
+    });
+  }
+  return repaymentConfirmationSagaManager;
 }
 
 async function recoverTransactionSagas(actualApi, options) {
@@ -3196,9 +3267,17 @@ async function recoverTransactionDeletionSagas(actualApi, options) {
   return getTransactionDeletionSagaManager().recover(actualApi, options);
 }
 
+async function recoverRepaymentConfirmationSagas(actualApi, options) {
+  return getRepaymentConfirmationSagaManager().recover(actualApi, options);
+}
+
 async function markTransactionSagasSynced(actualApi) {
   let firstError = null;
-  for (const manager of [getTransactionSagaManager(), getTransactionDeletionSagaManager()]) {
+  for (const manager of [
+    getTransactionSagaManager(),
+    getTransactionDeletionSagaManager(),
+    getRepaymentConfirmationSagaManager(),
+  ]) {
     try {
       await manager.markSynced(actualApi);
     } catch (error) {
@@ -3211,7 +3290,11 @@ async function markTransactionSagasSynced(actualApi) {
 async function driveTransactionSagasForSync(actualApi) {
   let needsSync = false;
   const errors = [];
-  for (const manager of [getTransactionSagaManager(), getTransactionDeletionSagaManager()]) {
+  for (const manager of [
+    getTransactionSagaManager(),
+    getTransactionDeletionSagaManager(),
+    getRepaymentConfirmationSagaManager(),
+  ]) {
     try {
       const result = await manager.recover(actualApi, { deferSync: true });
       needsSync ||= Boolean(result?.needsSync);
@@ -3241,6 +3324,7 @@ async function syncTransactionSagas(actualApi) {
 function assertTransactionMutationAvailable({ accountId, ids, transaction } = {}) {
   getTransactionSagaManager().assertAvailable({ accountId, ids, original: transaction });
   getTransactionDeletionSagaManager().assertAvailable({ accountId, ids, transaction });
+  getRepaymentConfirmationSagaManager().assertAvailable({ accountId, ids });
 }
 
 function assertTransactionReplacementAvailable(options) {
@@ -4719,6 +4803,8 @@ module.exports = {
   setReviewDisposition,
   suggestRepayments,
   confirmRepayment,
+  validateRepaymentConfirmationAdmission,
+  prepareRepaymentConfirmationAdmission,
   dismissRepayment,
   undismissRepayment,
   getInsights,
@@ -4750,6 +4836,7 @@ module.exports = {
   transactionReplacementMap,
   replaceActualTransaction,
   recoverTransactionDeletionSagas,
+  recoverRepaymentConfirmationSagas,
   recoverTransactionSagas,
   getMerchantHistory,
   deleteTransaction,

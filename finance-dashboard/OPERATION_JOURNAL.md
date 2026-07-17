@@ -50,7 +50,7 @@ Records without `fingerprintVersion` are compared with the old method/path/`JSON
 
 `lib/mutation-route-registry.js` is the authoritative inventory of every versioned mutation, its lifecycle class, synchronization requirement, and first-effect boundary. Versioned writes can only be registered through `registerV1Mutation`; coverage tests reject a direct `v1.post`, `v1.put`, `v1.patch`, or `v1.delete` registration and reject registry/registration drift.
 
-Functions that already hide replacement, deletion, repayment, receipt, or bulk writes remain conservatively non-atomic. This journal prevents duplicate execution and preserves uncertainty; it does not implement saga convergence or bulk checkpoints.
+Functions that already hide replacement, deletion, repayment, receipt, or bulk writes remain conservatively non-atomic at the journal layer. This journal prevents duplicate execution and preserves uncertainty; repayment confirmation additionally uses `repayment-confirmation-sagas.json` for saga convergence (see `REPAYMENT_CONFIRMATION.md`).
 
 ## Pruning
 

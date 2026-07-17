@@ -17,6 +17,10 @@ test('runtime backup includes sidecars and receipts without secrets', (t) => {
     '{"schemaVersion":1,"sagas":{}}\n',
   );
   fs.writeFileSync(
+    path.join(dashboard, 'repayment-confirmation-sagas.json'),
+    '{"schemaVersion":1,"sagas":{}}\n',
+  );
+  fs.writeFileSync(
     path.join(dashboard, 'transaction-sagas.json'),
     '{"schemaVersion":1,"sagas":{}}\n',
   );
@@ -44,11 +48,13 @@ test('runtime backup includes sidecars and receipts without secrets', (t) => {
   const listing = spawnSync('tar', ['-tzf', archive], { encoding: 'utf8' });
   assert.match(listing.stdout, /goals\.json/);
   assert.match(listing.stdout, /transaction-deletion-sagas\.json/);
+  assert.match(listing.stdout, /repayment-confirmation-sagas\.json/);
   assert.match(listing.stdout, /receipts\/one\.jpg/);
   assert.match(listing.stdout, /\.backup-manifest\.json/);
   assert.equal(fs.existsSync(`${archive}.manifest.json`), true);
   const manifest = JSON.parse(fs.readFileSync(`${archive}.manifest.json`, 'utf8'));
   assert.ok(manifest.sidecars.includes('transaction-deletion-sagas.json'));
+  assert.ok(manifest.sidecars.includes('repayment-confirmation-sagas.json'));
   assert.ok(manifest.sidecars.includes('transaction-sagas.json'));
   assert.ok(manifest.sidecars.includes('operation-journal.json'));
   assert.ok(manifest.sidecars.includes('review-state.json'));
