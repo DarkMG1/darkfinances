@@ -1,5 +1,17 @@
 'use strict';
 
+class HttpDrainTimeoutError extends Error {
+  constructor(message, { reason = 'timeout' } = {}) {
+    super(message);
+    this.name = 'HttpDrainTimeoutError';
+    this.reason = reason;
+  }
+}
+
+function canDrainImmediately(server) {
+  return !server || typeof server.close !== 'function' || !server.listening;
+}
+
 function getRedactedHttpDiagnostics(server) {
   return {
     listening: Boolean(server?.listening),
@@ -48,9 +60,41 @@ function closeHttpServer(server) {
   });
 }
 
+function rejectHttpDrainTimeout(server, error, onDiagnostic) {
+  if (typeof onDiagnostic === 'function') {
+    onDiagnostic({
+      phase: 'http-drain-timeout',
+      reason: error.reason,
+      message: String(error.message),
+      ...getRedactedHttpDiagnostics(server),
+    });
+  }
+  forceCloseHttpConnections(server);
+  throw error;
+}
+
 async function closeHttpServerWithTimeout(server, timeoutMs, { onDiagnostic } = {}) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return closeHttpServer(server);
+  if (!Number.isFinite(timeoutMs)) {
+    rejectHttpDrainTimeout(
+      server,
+      new HttpDrainTimeoutError(`HTTP server drain timeout is invalid (${timeoutMs})`, {
+        reason: 'invalid-timeout',
+      }),
+      onDiagnostic,
+    );
+  }
+
+  if (timeoutMs <= 0) {
+    if (canDrainImmediately(server)) {
+      return closeHttpServer(server);
+    }
+    rejectHttpDrainTimeout(
+      server,
+      new HttpDrainTimeoutError(`HTTP server drain budget exhausted (${timeoutMs}ms remaining)`, {
+        reason: 'budget-exhausted',
+      }),
+      onDiagnostic,
+    );
   }
 
   let timer;
@@ -59,26 +103,24 @@ async function closeHttpServerWithTimeout(server, timeoutMs, { onDiagnostic } = 
       closeHttpServer(server),
       new Promise((_, reject) => {
         timer = setTimeout(() => {
-          reject(new Error(`HTTP server did not drain within ${timeoutMs}ms`));
+          reject(new HttpDrainTimeoutError(`HTTP server did not drain within ${timeoutMs}ms`, {
+            reason: 'timeout',
+          }));
         }, timeoutMs);
       }),
     ]);
-  } catch (error) {
-    if (typeof onDiagnostic === 'function') {
-      onDiagnostic({
-        phase: 'http-drain-timeout',
-        message: String(error?.message || error),
-        ...getRedactedHttpDiagnostics(server),
-      });
-    }
-    forceCloseHttpConnections(server);
-    throw error;
+  } catch (caught) {
+    const error = caught instanceof HttpDrainTimeoutError
+      ? caught
+      : new HttpDrainTimeoutError(String(caught?.message || caught), { reason: 'timeout' });
+    rejectHttpDrainTimeout(server, error, onDiagnostic);
   } finally {
     if (timer) clearTimeout(timer);
   }
 }
 
 module.exports = {
+  HttpDrainTimeoutError,
   closeHttpServer,
   closeHttpServerWithTimeout,
   closeIdleKeepAlive,

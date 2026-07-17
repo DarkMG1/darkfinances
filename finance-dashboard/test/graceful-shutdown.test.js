@@ -9,8 +9,41 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { SerialQueue } = require('../lib/serial-queue');
-const { closeHttpServer, closeIdleKeepAlive } = require('../lib/http-server-drain');
-const { runGracefulShutdown } = require('../lib/graceful-shutdown');
+const {
+  closeHttpServer,
+  closeHttpServerWithTimeout,
+  closeIdleKeepAlive,
+  HttpDrainTimeoutError,
+} = require('../lib/http-server-drain');
+const { bindGracefulShutdownSignals, runGracefulShutdown } = require('../lib/graceful-shutdown');
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function createHungHttpServer() {
+  let requestReady;
+  const requestSeen = new Promise((resolve) => {
+    requestReady = resolve;
+  });
+  const server = http.createServer((_req, res) => {
+    requestReady();
+    res.writeHead(200);
+    // Never finish — blocks close callback until force-close/timeout.
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const clientReq = http.get(`http://127.0.0.1:${port}/`);
+  clientReq.on('error', () => {});
+  await requestSeen;
+  return { server, clientReq };
+}
 
 async function unusedPort() {
   return new Promise((resolve, reject) => {
@@ -147,25 +180,90 @@ test('closeHttpServer resolves immediately when server is not listening', async 
   assert.deepEqual(result, { wasListening: false, alreadyClosed: true });
 });
 
-test('runGracefulShutdown skips Actual shutdown after HTTP drain timeout', async (t) => {
-  const phases = [];
-  let shutdownCalls = 0;
-  const server = http.createServer((_req, res) => {
-    res.writeHead(200);
-    // Never finish — blocks close callback until force-close/timeout.
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const port = server.address().port;
-
-  const clientReq = http.get(`http://127.0.0.1:${port}/`);
-  clientReq.on('error', () => {});
-  await new Promise((resolve) => setImmediate(resolve));
-
+test('closeHttpServerWithTimeout rejects immediately when budget is zero on a hung server', async (t) => {
+  const { server, clientReq } = await createHungHttpServer();
   t.after(async () => {
     clientReq.destroy();
     await new Promise((resolve) => server.close(resolve));
   });
 
+  const started = Date.now();
+  await assert.rejects(
+    () => closeHttpServerWithTimeout(server, 0),
+    (error) => {
+      assert.ok(error instanceof HttpDrainTimeoutError);
+      assert.equal(error.reason, 'budget-exhausted');
+      return true;
+    },
+  );
+  assert.ok(Date.now() - started < 200, 'zero budget must fail immediately, not hang');
+});
+
+test('closeHttpServerWithTimeout rejects immediately when budget is exhausted on a hung server', async (t) => {
+  const { server, clientReq } = await createHungHttpServer();
+  t.after(async () => {
+    clientReq.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const started = Date.now();
+  await assert.rejects(
+    () => closeHttpServerWithTimeout(server, -1),
+    (error) => {
+      assert.ok(error instanceof HttpDrainTimeoutError);
+      assert.equal(error.reason, 'budget-exhausted');
+      return true;
+    },
+  );
+  assert.ok(Date.now() - started < 200, 'exhausted budget must fail immediately, not hang');
+});
+
+test('closeHttpServerWithTimeout resolves immediately when budget is zero and server is not listening', async () => {
+  const server = http.createServer();
+  const result = await closeHttpServerWithTimeout(server, 0);
+  assert.deepEqual(result, { wasListening: false, alreadyClosed: true });
+});
+
+test('runGracefulShutdown skips Actual shutdown when HTTP budget is exhausted on a hung server', async (t) => {
+  const { server, clientReq } = await createHungHttpServer();
+  t.after(async () => {
+    clientReq.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const phases = [];
+  let shutdownCalls = 0;
+  const exitCodes = [];
+  const started = Date.now();
+  const result = await runGracefulShutdown({
+    signal: 'SIGTERM',
+    httpServer: server,
+    mutationQueue: new SerialQueue('test-mutations'),
+    shutdownApi: async () => { shutdownCalls += 1; },
+    totalTimeoutMs: 0,
+    mutationDrainTimeoutMs: 50,
+    exit: (code) => { exitCodes.push(code); },
+    log: (phase, extra) => { phases.push({ phase, extra }); },
+  });
+
+  assert.ok(Date.now() - started < 500, 'shutdown must complete promptly on exhausted budget');
+  assert.equal(result.ok, false);
+  assert.equal(result.phase, 'http-drain-timeout');
+  assert.equal(shutdownCalls, 0);
+  assert.deepEqual(exitCodes, [1]);
+  assert.ok(phases.some((entry) => entry.phase === 'shutdown-timeout' && entry.extra?.reason === 'budget-exhausted'));
+  assert.ok(phases.every((entry) => entry.phase !== 'http-drained'));
+});
+
+test('runGracefulShutdown skips Actual shutdown after HTTP drain timeout', async (t) => {
+  const { server, clientReq } = await createHungHttpServer();
+  t.after(async () => {
+    clientReq.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const phases = [];
+  let shutdownCalls = 0;
   const exitCodes = [];
   const result = await runGracefulShutdown({
     signal: 'SIGTERM',
@@ -385,4 +483,102 @@ test('closeIdleKeepAlive allows close callback when only idle sockets remain', a
   assert.equal(result.wasListening, true);
   assert.equal(result.drained, true);
   agent.destroy();
+});
+
+test('in-flight non-HTTP mutation queue task completes before Actual shutdown', async () => {
+  const release = createDeferred();
+  const markers = [];
+  const mutationQueue = new SerialQueue('finance-mutations');
+  const server = http.createServer();
+  let shutdownCalls = 0;
+  const exitCodes = [];
+  const phases = [];
+
+  const taskStarted = mutationQueue.run(async () => {
+    markers.push('periodic-sync:start');
+    await release.promise;
+    markers.push('periodic-sync:end');
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(mutationQueue.size, 1);
+
+  const shutdownPromise = runGracefulShutdown({
+    signal: 'SIGTERM',
+    httpServer: server,
+    mutationQueue,
+    shutdownApi: async () => {
+      shutdownCalls += 1;
+      markers.push('shutdown');
+    },
+    totalTimeoutMs: 5_000,
+    mutationDrainTimeoutMs: 5_000,
+    exit: (code) => { exitCodes.push(code); },
+    log: (phase) => { phases.push(phase); },
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(phases.includes('mutation-admission-stopped'));
+  assert.ok(phases.includes('http-admission-stopped'));
+  assert.ok(markers.includes('periodic-sync:start'));
+  assert.equal(markers.includes('periodic-sync:end'), false);
+  assert.equal(shutdownCalls, 0);
+
+  release.resolve();
+  await taskStarted;
+  const result = await shutdownPromise;
+
+  assert.equal(result.ok, true);
+  assert.equal(shutdownCalls, 1);
+  assert.deepEqual(exitCodes, [0]);
+  assert.deepEqual(markers, ['periodic-sync:start', 'periodic-sync:end', 'shutdown']);
+  assert.ok(phases.indexOf('http-drained') < phases.indexOf('mutation-queue-drained'));
+  assert.ok(phases.indexOf('mutation-queue-drained') < phases.indexOf('actual-shutdown-complete'));
+});
+
+test('hard cap exits once when shutdown phase never settles', async (t) => {
+  const previousTimeout = process.env.FINANCE_SHUTDOWN_TIMEOUT_MS;
+  const sigtermListeners = process.listeners('SIGTERM');
+  const sigintListeners = process.listeners('SIGINT');
+  process.env.FINANCE_SHUTDOWN_TIMEOUT_MS = '80';
+  t.after(() => {
+    if (previousTimeout === undefined) delete process.env.FINANCE_SHUTDOWN_TIMEOUT_MS;
+    else process.env.FINANCE_SHUTDOWN_TIMEOUT_MS = previousTimeout;
+    process.removeAllListeners('SIGTERM');
+    process.removeAllListeners('SIGINT');
+    for (const listener of sigtermListeners) process.on('SIGTERM', listener);
+    for (const listener of sigintListeners) process.on('SIGINT', listener);
+  });
+
+  const timeoutLogs = [];
+  const exitCodes = [];
+  let shutdownCalls = 0;
+  const { startShutdown } = bindGracefulShutdownSignals({
+    httpServer: http.createServer(),
+    mutationQueue: {
+      close: () => {},
+      drain: () => new Promise(() => {}),
+    },
+    shutdownApi: async () => { shutdownCalls += 1; },
+    totalTimeoutMs: 80,
+    exit: (code) => { exitCodes.push(code); },
+    log: (phase, extra) => {
+      if (phase === 'shutdown-timeout') timeoutLogs.push(extra);
+    },
+  });
+
+  const started = Date.now();
+  void startShutdown('SIGTERM');
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.ok(Date.now() - started < 500, 'hard cap must fire promptly');
+  assert.deepEqual(exitCodes, [1]);
+  assert.equal(shutdownCalls, 0);
+  assert.equal(timeoutLogs.length, 1);
+  assert.equal(timeoutLogs[0].step, 'hard-cap');
+  assert.deepEqual(Object.keys(timeoutLogs[0]).sort(), [
+    'canCloseIdle',
+    'canForceClose',
+    'listening',
+    'step',
+  ]);
 });

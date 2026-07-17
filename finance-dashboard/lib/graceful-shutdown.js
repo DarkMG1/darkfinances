@@ -75,6 +75,7 @@ async function runGracefulShutdown({
   } catch (error) {
     log('shutdown-timeout', {
       step: 'http-drain',
+      reason: error?.reason,
       message: String(error?.message || error),
       ...getRedactedHttpDiagnostics(httpServer),
     });
