@@ -4,7 +4,7 @@ import { getServerBaseUrl, normalizeServerUrl } from '@/api/client/server-url';
 import { HttpMethod } from '@/api/generated/endpoints';
 import { financeOperationMachine, financeOperationProfileScope } from '@/lib/finance-operations';
 import { FINANCE_QUERY_SCOPE_META_KEY } from '@/lib/foreground-operation-reconciliation';
-import { haptics } from '@/lib/haptics';
+import { mutationOutcomeHaptics } from '@/lib/haptics';
 import { registerFinanceRequest } from '@/lib/request-lifecycle';
 import {
   classifyDirectMutationError,
@@ -179,13 +179,31 @@ export function useFinanceQuery<R, V = Record<string, unknown>>({
 type FinanceMutationProps<R, V> = UseMutationOptions<R | undefined, FinanceError, V> & {
   endpoint: string | ((variables: V) => string);
   method: HttpMethod;
+  /** When true, success/warning outcome haptics are suppressed (background/non-user writes). */
+  suppressOutcomeHaptic?: boolean;
 };
+
+function deriveMutationRequestDigest(
+  scopeDigest: string | null,
+  endpoint: string,
+  method: HttpMethod,
+  variables: unknown,
+): string | null {
+  if (!scopeDigest) return null;
+  return financeOperationMachine.deriveRequestDigest({
+    scopeDigest,
+    method,
+    endpoint,
+    body: variables,
+  });
+}
 
 export function useFinanceMutation<R = void, V = void>({
   endpoint,
   method,
   onSuccess,
   onError,
+  suppressOutcomeHaptic = false,
   ...options
 }: FinanceMutationProps<R, V>) {
   const { serverUrl, token, demo } = useServerConfig();
@@ -196,6 +214,24 @@ export function useFinanceMutation<R = void, V = void>({
       const scopeDigest = financeOperationProfileScope(serverUrl, token, demo);
       if (!demo && !scopeDigest) {
         throw createError('Finance server profile is not configured', 400, 'PROFILE_NOT_CONFIGURED');
+      }
+      const requestDigest = demo
+        ? null
+        : deriveMutationRequestDigest(scopeDigest, resolvedEndpoint, method, variables);
+      const preparedOperation = !demo && scopeDigest
+        ? financeOperationMachine.prepare({
+            scopeDigest,
+            endpoint: resolvedEndpoint,
+            method,
+            body: variables,
+          })
+        : null;
+      if (!suppressOutcomeHaptic && preparedOperation) {
+        mutationOutcomeHaptics.beginUserMutation(requestDigest, {
+          userInitiated: true,
+          operationKey: preparedOperation.idempotencyKey,
+          scopeDigest,
+        });
       }
       return executeMutationWithIdempotency<R | undefined>({
         demo,
@@ -234,15 +270,40 @@ export function useFinanceMutation<R = void, V = void>({
       });
     },
     retry: REACT_QUERY_MUTATION_RETRY,
-    // Centralized haptic feedback so every write (link, note, category, goal, add
-    // expense, …) confirms itself without each call site wiring it up. Args are
-    // forwarded verbatim so we stay agnostic to react-query's callback arity.
+    // Centralized mutation outcome haptics (L5): one success or error haptic per
+    // logical user mutation. Callers must not duplicate these in onSuccess/onError.
     onSuccess: (...args: Parameters<NonNullable<typeof onSuccess>>) => {
-      haptics.success();
+      const [, variables] = args;
+      const resolvedEndpoint = typeof endpoint === 'function' ? endpoint(variables as V) : endpoint;
+      const scopeDigest = financeOperationProfileScope(serverUrl, token, demo);
+      if (demo) {
+        if (!suppressOutcomeHaptic) mutationOutcomeHaptics.emitDemoSuccess();
+      } else {
+        const requestDigest = deriveMutationRequestDigest(
+          scopeDigest,
+          resolvedEndpoint,
+          method,
+          variables,
+        );
+        if (!suppressOutcomeHaptic) mutationOutcomeHaptics.emitSuccess(requestDigest);
+      }
       return onSuccess?.(...args);
     },
     onError: (...args: Parameters<NonNullable<typeof onError>>) => {
-      haptics.warning();
+      const [error, variables] = args;
+      const resolvedEndpoint = typeof endpoint === 'function' ? endpoint(variables as V) : endpoint;
+      const scopeDigest = financeOperationProfileScope(serverUrl, token, demo);
+      if (demo) {
+        if (!suppressOutcomeHaptic) mutationOutcomeHaptics.emitDemoError(error);
+      } else {
+        const requestDigest = deriveMutationRequestDigest(
+          scopeDigest,
+          resolvedEndpoint,
+          method,
+          variables,
+        );
+        if (!suppressOutcomeHaptic) mutationOutcomeHaptics.emitError(requestDigest, error);
+      }
       return onError?.(...args);
     },
   });

@@ -85,9 +85,7 @@ export default function ReviewScreen() {
   };
 
   const markReviewed = (id: string) => {
-    setDisposition.mutate({ id, disposition: 'acknowledge' }, {
-      onSuccess: () => haptics.success(),
-    });
+    setDisposition.mutate({ id, disposition: 'acknowledge' });
   };
 
   const renderActions = (task: ReviewTask) => (

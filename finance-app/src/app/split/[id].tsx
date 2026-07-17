@@ -144,7 +144,6 @@ export default function SplitEditor() {
       { id: d.id, accountId: d.accountId, date: d.date, legs: payload },
       {
         onSuccess: (result) => {
-          haptics.success();
           router.replace({
             pathname: '/transaction/[id]',
             params: { id: result?.id || d.id, accountId: d.accountId, date: d.date },
@@ -167,7 +166,6 @@ export default function SplitEditor() {
             { id: d.id, accountId: d.accountId, date: d.date, categoryId: legs[0]?.catId ?? null },
             {
               onSuccess: (result) => {
-                haptics.success();
                 router.replace({
                   pathname: '/transaction/[id]',
                   params: { id: result?.id || d.id, accountId: d.accountId, date: d.date },

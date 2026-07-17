@@ -137,6 +137,44 @@ profile. A profile change may discard `prepared` records because they were durab
 network dispatch. This safety-over-convenience tradeoff can temporarily prevent disconnecting when the
 server cannot be reached; replacement/abandonment recovery is deliberately outside this mechanism.
 
+## Mutation outcome haptics (L5)
+
+Generic write confirmation haptics are owned exclusively by `useFinanceMutation` in
+`src/api/client/requests.ts`. **Logical haptic identity is the idempotency operation key**
+(the durable `Idempotency-Key` header value). The request digest derived from profile,
+method, endpoint, and body is **callback lookup only** — it resolves the operation key in
+mutation `onSuccess` / `onError` handlers. Each operation key emits at most one success
+**or** one error haptic:
+
+- Terminal success → one `success` haptic, then the session closes.
+- Terminal failure (4xx with a stable code) → one `warning` haptic, then the session closes.
+- Non-terminal transport/outcome-unknown states (`OUTCOME_UNKNOWN`, timeout while the operation journal
+  retains the key) → **no** haptic until a terminal outcome is known; the session stays open.
+- A later distinct user action with the same payload receives a **new** idempotency key and may
+  haptic again after the prior operation reached a terminal outcome.
+- Idempotency status polling, in-flight replay/coalescing, foreground reconciliation, and cache
+  refetches after recovered completions → **no** haptics.
+- Pass `suppressOutcomeHaptic: true` on a mutation hook for non-user/background writes.
+
+The in-memory session map is capped (128 by default). Expired and least-recent abandoned unknown
+sessions are evicted before new tracking is installed. When every slot holds a genuinely active
+retry, excess operations are not tracked and emit no outcome haptic rather than evicting an active
+operation.
+
+Screens may keep `haptics.tap()` for navigation and selection. Documented semantic exceptions that do
+**not** duplicate mutation outcome ownership:
+
+- Destructive-action confirmation (`haptics.warning()` before a delete dialog).
+- Non-mutation failures such as CSV export (`buildQuery` GET).
+
+Screens must **not** call `haptics.success()` or `haptics.warning()` inside mutation `onSuccess` /
+`onError` callbacks. Client-side validation rejected before a request may use
+`hapticClientValidationRejected()` when the UX already promises tactile feedback. Capability/platform
+haptic errors are swallowed and never change mutation results.
+
+Inventory and behavioral tests live in `test/haptic-call-site-inventory.js` and
+`test/mutation-outcome-haptics.test.js`.
+
 ## Demo mode
 
 Tap **Use demo data** during onboarding. Demo mode uses the dashboard's isolated synthetic fixtures,

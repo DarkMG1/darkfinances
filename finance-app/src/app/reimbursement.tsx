@@ -85,7 +85,7 @@ export default function Reimbursement() {
     setActing(s.id);
     haptics.tap();
     confirm.mutate({ id: s.id }, {
-      onSuccess: () => { haptics.success(); setActing(null); },
+      onSuccess: () => { setActing(null); },
       onError: (e) => { setActing(null); Alert.alert('Could not confirm', e.error || 'Refresh and try again.'); },
     });
   };

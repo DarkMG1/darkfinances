@@ -260,7 +260,7 @@ export default function TransactionDetail() {
             del.mutate(
               { id: txnId, accountId, date: currentDate },
               {
-                onSuccess: () => { haptics.success(); router.back(); },
+                onSuccess: () => { router.back(); },
                 onError: (e) => Alert.alert('Could not delete', e.error || 'Please try again.'),
               }
             ),
@@ -283,7 +283,7 @@ export default function TransactionDetail() {
     addReceipt.mutate(
       { txnId, accountId, transactionDate: currentDate, imageBase64: cap.base64, mime: cap.mime, ocrText: cap.ocrText, ocrLines: cap.ocrLines, amount: cap.amount, date: cap.date, source: cap.source ?? 'camera' },
       {
-        onSuccess: () => { setScanning(false); haptics.success(); },
+        onSuccess: () => { setScanning(false); },
         onError: (e) => { setScanning(false); Alert.alert('Upload failed', e.error || 'Please try again.'); },
       }
     );
@@ -312,7 +312,7 @@ export default function TransactionDetail() {
   const removeReceipt = (id: string) => {
     Alert.alert('Delete receipt', 'Remove this receipt image?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => delReceipt.mutate({ id }, { onSuccess: () => { setViewerId(null); haptics.success(); } }) },
+      { text: 'Delete', style: 'destructive', onPress: () => delReceipt.mutate({ id }, { onSuccess: () => { setViewerId(null); } }) },
     ]);
   };
 
@@ -371,7 +371,6 @@ export default function TransactionDetail() {
       { id: txnId, date: next, isLeg },
       {
         onSuccess: () => {
-          haptics.success();
           setTxnDate(next);
           setDateText(next);
           setDating(false);
