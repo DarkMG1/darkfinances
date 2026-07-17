@@ -19,6 +19,7 @@ const ENVELOPE_KEYS = Object.freeze({
   phantomSeen: new Set(['seen', 'schemaVersion']),
   receipts: new Set(['schemaVersion', 'byTxn']),
   reimbursementLinks: new Set(['links', 'schemaVersion']),
+  reimbursementLinkSagas: new Set(['sagas', 'schemaVersion']),
   reimbursementSuggestions: new Set(['confirmed', 'dismissed', 'schemaVersion']),
   reconciliation: new Set(['enabled', 'months', 'schemaVersion']),
   reviewState: new Set(['schemaVersion', 'dispositions']),
@@ -141,8 +142,13 @@ const LEGACY_MIGRATION_SHAPES = Object.freeze({
   }],
   reimbursementLinks: [{
     legacyShape: 'schemaVersion 1 envelope with optional undeclared metadata',
-    consumed: 'none beyond declared envelope keys',
+    consumed: 'schemaVersion only (bumped to 2); legacy null amount links preserved without allocationCents',
     preservedAs: 'links, schemaVersion, and undeclared top-level metadata',
+  }],
+  reimbursementLinkSagas: [{
+    legacyShape: 'schemaVersion 1 saga envelope (normalize only)',
+    consumed: 'none beyond declared envelope keys',
+    preservedAs: 'schemaVersion, sagas',
   }],
   reimbursementSuggestions: [{
     legacyShape: 'schemaVersion 1 envelope with optional undeclared metadata',

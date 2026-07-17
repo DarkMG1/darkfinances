@@ -1091,12 +1091,12 @@ async function setBudget(req, operation) {
   return result;
 }
 
-const reimbLinks = (req) => Promise.resolve(data.getReimbLinks({ id: req.query.id }));
+const reimbLinks = (req) => data.getReimbLinks({ id: req.query.id });
 async function addLink(req, operation) {
   const link = parse(schemas.reimbLink, req.body, 'reimbursement link');
   data.assertTransactionMutationAvailable({ ids: [link.inflow?.id, link.expense?.id] });
   return runActualProjectionMutation(
-    () => applyLocal(operation, () => data.addReimbLink(link)),
+    () => applyLocal(operation, () => data.addReimbLink({ ...link, operationIdentity: operation?.key })),
   );
 }
 async function confirmRepaymentH(req, operation) {

@@ -139,8 +139,10 @@ function configureRemovedLegEvidence(parent) {
     Buffer.from([0x52, 0x45, 0x43, 0x45, 0x49, 0x50, 0x54]),
   );
   writeJson(process.env.REIMB_LINKS_PATH, {
+    schemaVersion: 2,
     links: [{
       id: 'link-evidence',
+      linkKey: 'old-leg-1:old-leg-2',
       inflow: {
         id: 'old-leg-1',
         date: parent.date,
@@ -153,7 +155,9 @@ function configureRemovedLegEvidence(parent) {
         payee: 'Expense snapshot',
         amount: -6,
       },
+      allocationCents: 400,
       amount: 4,
+      version: 1,
       person: 'sanitized-person',
     }],
   });
@@ -345,6 +349,7 @@ test('removed-leg replacement preserves every reference and receipt byte', async
   const links = JSON.parse(fs.readFileSync(process.env.REIMB_LINKS_PATH, 'utf8')).links;
   assert.deepEqual(links, [{
     id: 'link-evidence',
+    linkKey: `${rebuilt.id}:${retainedId}`,
     inflow: {
       id: rebuilt.id,
       date: parent.date,
@@ -357,7 +362,9 @@ test('removed-leg replacement preserves every reference and receipt byte', async
       payee: 'Expense snapshot',
       amount: -6,
     },
+    allocationCents: 400,
     amount: 4,
+    version: 1,
     person: 'sanitized-person',
   }]);
 

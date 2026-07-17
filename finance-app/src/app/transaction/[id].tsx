@@ -122,6 +122,8 @@ export default function TransactionDetail() {
   const [picking, setPicking] = useState(false);
   const [linking, setLinking] = useState(false);
   const [linkQuery, setLinkQuery] = useState('');
+  const [linkTarget, setLinkTarget] = useState<Transaction | null>(null);
+  const [allocationText, setAllocationText] = useState('');
   const loadedIdentity = useRef<string | null>(null);
   useEffect(() => {
     if (!canonical) return;
@@ -163,6 +165,66 @@ export default function TransactionDetail() {
   };
   // For an inflow we show the expenses it repays; for an expense, the inflows that repaid it.
   const linked = (income ? links.data?.asInflow : links.data?.asExpense) ?? [];
+  const capacity = links.data?.capacity;
+  const suggestedAllocationCents = useMemo(() => {
+    if (!linkTarget) return null;
+    const thisRemaining = capacity?.remainingTrustedCents ?? Math.round(Math.abs(amount) * 100);
+    const otherRemaining = Math.round(Math.abs(linkTarget.amount) * 100);
+    return Math.max(0, Math.min(thisRemaining, otherRemaining));
+  }, [linkTarget, capacity, amount]);
+
+  const openAllocationFor = (t: Transaction) => {
+    setLinkTarget(t);
+    const thisRemaining = capacity?.remainingTrustedCents ?? Math.round(Math.abs(amount) * 100);
+    const otherRemaining = Math.round(Math.abs(t.amount) * 100);
+    const suggested = Math.max(0, Math.min(thisRemaining, otherRemaining));
+    setAllocationText(suggested > 0 ? (suggested / 100).toFixed(2) : '');
+  };
+
+  const submitLink = () => {
+    if (!linkTarget) return;
+    const cents = Math.round(Number(allocationText) * 100);
+    if (!Number.isFinite(cents) || cents <= 0) {
+      Alert.alert('Invalid amount', 'Enter a positive dollar amount with at most two decimal places.');
+      return;
+    }
+    const max = suggestedAllocationCents ?? cents;
+    if (cents > max) {
+      Alert.alert('Too much', `This link can allocate at most ${fmtPos(max / 100)} based on remaining capacity.`);
+      return;
+    }
+    const ref: ReimbTxnRef = {
+      id: linkTarget.id,
+      date: linkTarget.date,
+      payee: linkTarget.payee,
+      amount: linkTarget.amount,
+      accountId: linkTarget.accountId,
+      account: linkTarget.account,
+      imported: linkTarget.imported,
+    };
+    const vars = income
+      ? { inflow: thisRef, expense: ref, allocationCents: cents }
+      : { inflow: ref, expense: thisRef, allocationCents: cents };
+    haptics.tap();
+    addLink.mutate(vars, {
+      onSuccess: () => {
+        haptics.success();
+        setLinking(false);
+        setLinkTarget(null);
+        setLinkQuery('');
+        setAllocationText('');
+        links.refetch();
+      },
+      onError: (e) => {
+        if (e.status === 409) {
+          links.refetch();
+          Alert.alert('Could not link', e.error || 'This transaction changed. Refresh and try again.');
+          return;
+        }
+        Alert.alert('Could not link', e.error || 'Please try again.');
+      },
+    });
+  };
   // The picker lists the opposite sign: an inflow links to expenses, vice versa.
   const candidates = (search.data?.transactions ?? []).filter((t) => t.id !== txnId && (income ? t.amount < 0 : t.amount > 0));
 
@@ -172,19 +234,7 @@ export default function TransactionDetail() {
       params: { id: t.id, date: t.date ?? '', accountId: t.accountId ?? '' },
     });
 
-  const createLink = (t: Transaction) => {
-    const ref: ReimbTxnRef = {
-      id: t.id,
-      date: t.date,
-      payee: t.payee,
-      amount: t.amount,
-      accountId: t.accountId,
-      account: t.account,
-      imported: t.imported,
-    };
-    const vars = income ? { inflow: thisRef, expense: ref } : { inflow: ref, expense: thisRef };
-    addLink.mutate(vars, { onSuccess: () => { setLinking(false); setLinkQuery(''); } });
-  };
+  const createLink = (t: Transaction) => openAllocationFor(t);
   const removeLink = (other: ReimbTxnRef) =>
     delLink.mutate(income ? { inflowId: txnId, expenseId: other.id } : { inflowId: other.id, expenseId: txnId });
 
@@ -629,12 +679,25 @@ export default function TransactionDetail() {
 
       <CardTitle style={styles.sectionTitle}>{income ? 'Repayment for' : 'Repaid by'}</CardTitle>
       <Card style={styles.list}>
+        {capacity ? (
+          <Text style={styles.linkEmpty} testID="transaction-link-capacity">
+            Remaining link capacity: {fmtPos(capacity.remainingTrustedCents / 100)}
+            {capacity.completeness === 'ambiguous' ? ' · legacy links need review' : ''}
+          </Text>
+        ) : null}
         {linked.length ? (
           linked.map((t) => (
             <View key={t.id} testID={`transaction-linked-row-${t.id}`} style={styles.linkRow}>
               <Pressable testID={`transaction-linked-open-${t.id}`} style={({ pressed }) => [styles.linkMain, pressed && { opacity: 0.6 }]} onPress={() => openTxn(t)}>
                 <Text style={styles.linkPayee} numberOfLines={1}>{t.payee || '(no payee)'}</Text>
-                <Text style={styles.linkSub}>{t.date ? fmtDay(t.date) : ''} · {fmtPos(Math.abs(t.amount))}</Text>
+                <Text style={styles.linkSub}>
+                  {t.date ? fmtDay(t.date) : ''}
+                  {t.allocationAmbiguous
+                    ? ' · allocation needs review'
+                    : t.allocatedCents != null
+                      ? ` · linked ${fmtPos(t.allocatedCents / 100)}`
+                      : ''}
+                </Text>
               </Pressable>
               <Pressable testID={`transaction-linked-unlink-${t.id}`} hitSlop={10} onPress={() => removeLink(t)} disabled={delLink.isPending} style={({ pressed }) => pressed && { opacity: 0.5 }}>
                 <Text style={styles.unlink}>Unlink</Text>
@@ -829,10 +892,35 @@ export default function TransactionDetail() {
         </Pressable>
       </Modal>
 
-      <Modal visible={linking} animationType="slide" transparent onRequestClose={() => setLinking(false)}>
+      <Modal visible={linking} animationType="slide" transparent onRequestClose={() => { setLinking(false); setLinkTarget(null); }}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-          <Pressable style={styles.modalBg} onPress={() => setLinking(false)}>
+          <Pressable style={styles.modalBg} onPress={() => { setLinking(false); setLinkTarget(null); }}>
             <Pressable testID="transaction-link-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
+              {linkTarget ? (
+                <>
+                  <Text style={styles.sheetTitle}>How much of this link?</Text>
+                  <Text style={styles.linkEmpty}>
+                    Suggested max {fmtPos((suggestedAllocationCents ?? 0) / 100)} based on remaining capacity on both sides.
+                  </Text>
+                  <TextInput
+                    testID="transaction-link-allocation-input"
+                    style={styles.searchInput}
+                    value={allocationText}
+                    onChangeText={setAllocationText}
+                    placeholder="Amount in dollars"
+                    placeholderTextColor={colors.muted}
+                    keyboardType="decimal-pad"
+                    autoFocus
+                  />
+                  <Pressable testID="transaction-link-confirm-button" style={styles.renameSave} onPress={submitLink} disabled={addLink.isPending}>
+                    <Text style={styles.renameSaveText}>{addLink.isPending ? 'Linking…' : 'Link'}</Text>
+                  </Pressable>
+                  <Pressable testID="transaction-link-back-button" style={styles.linkBtn} onPress={() => setLinkTarget(null)}>
+                    <Text style={styles.linkBtnText}>Back to search</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <>
               <Text style={styles.sheetTitle}>{income ? 'Pick the expense this repays' : 'Pick the repayment'}</Text>
               <TextInput
                 testID="transaction-link-search-input"
@@ -863,6 +951,8 @@ export default function TransactionDetail() {
                   </Pressable>
                 )}
               />
+                </>
+              )}
           </Pressable>
         </Pressable>
       </KeyboardAvoidingView>

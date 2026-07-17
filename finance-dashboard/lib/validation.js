@@ -278,13 +278,19 @@ const schemas = {
   reimbLink: z.object({
     inflow: transactionRef,
     expense: transactionRef,
+    allocationCents: nonNegativeCentAmount.refine((value) => value > 0, 'allocationCents must be greater than zero').optional(),
     amount: money.refine((value) => value > 0, 'amount must be greater than zero').optional(),
     person: z.string().max(100).optional().nullable(),
-  }).strict(),
+    expectedVersion: z.number().int().min(0).optional(),
+  }).strict().refine(
+    (value) => value.allocationCents != null || value.amount != null,
+    'allocationCents or amount is required',
+  ),
 
   deleteReimbLink: z.object({
     inflowId: identifier,
     expenseId: identifier,
+    expectedVersion: z.number().int().min(0).optional(),
   }).strict(),
 
   reimbursementSweep: z.object({

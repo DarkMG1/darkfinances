@@ -56,6 +56,23 @@ const {
   createRepaymentConfirmationSaga,
 } = require('./lib/repayment-confirmation-saga');
 const {
+  createReimbursementLinkSaga,
+} = require('./lib/reimbursement-link-saga');
+const {
+  buildManualLinkAdmission,
+  locateTransactionLive,
+  resolveManualLinkEndpoints,
+} = require('./lib/reimbursement-link-admission');
+const {
+  buildLegacyMigrationReport,
+  classifyStoredLink,
+  enrichEndpointForRead,
+  summarizeEndpointCapacity,
+  sumTrustedAllocationsForExpense,
+  sumTrustedAllocationsForInflow,
+  trustedLinkedCents,
+} = require('./lib/reimbursement-allocation');
+const {
   BulkOperationInProgressError,
   createBulkOperationSaga,
 } = require('./lib/bulk-operation-saga');
@@ -167,6 +184,7 @@ const REVIEW_STATE_PATH = statePath('reviewState');
 const TRANSACTION_SAGAS_PATH = statePath('transactionSagas');
 const TRANSACTION_DELETION_SAGAS_PATH = statePath('transactionDeletionSagas');
 const REPAYMENT_CONFIRMATION_SAGAS_PATH = statePath('repaymentConfirmationSagas');
+const REIMBURSEMENT_LINK_SAGAS_PATH = statePath('reimbursementLinkSagas');
 const BULK_OPERATION_SAGAS_PATH = statePath('bulkOperationSagas');
 const SPLITWISE_MIRROR_RESOLUTIONS_PATH = statePath('splitwiseMirrorResolutions');
 const readJsonSafe = (p, fallback, validate) => {
@@ -215,6 +233,7 @@ async function recoverOperationalSagas() {
   await recoverTransactionSagas(api);
   await recoverTransactionDeletionSagas(api);
   await recoverRepaymentConfirmationSagas(api);
+  await recoverReimbursementLinkSagas(api);
   await recoverBulkOperationSagas(api);
   sagaRecoverCompleted = true;
 }
@@ -1384,8 +1403,12 @@ function setOwesConfig(next) {
 // Reimbursement links — connect a repayment inflow to the expense(s) it repays
 // ---------------------------------------------------------------------------
 function readReimbLinks() {
-  const store = readJsonSafe(REIMB_LINKS_PATH, { links: [] });
-  return store && Array.isArray(store.links) ? store : { links: [] };
+  const store = readJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, links: [] });
+  if (!store || !Array.isArray(store.links)) return { schemaVersion: 2, links: [] };
+  return store;
+}
+function writeReimbLinks(store) {
+  writeJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, ...store });
 }
 function txnRef(t) {
   if (!t || t.id == null) throw new Error('transaction id required');
@@ -1399,47 +1422,93 @@ function txnRef(t) {
     imported: !!t.imported,
   };
 }
-// Given a transaction id, return both directions: the expenses an inflow repays
-// (asInflow) and the inflows that repaid an expense (asExpense). Each returned ref
-// carries `allocated` — the dollars of the repayment applied to that expense (for
-// amount-allocated / partial links; falls back to the full amount for legacy links).
-function getReimbLinks({ id } = {}) {
+async function prepareReimbLinkAdmission(request) {
+  return withApi(async (api) => {
+    const groups = await api.getCategoryGroups();
+    const reimbId = reimbCategoryId(groups);
+    const payees = await api.getPayees();
+    const pn = Object.fromEntries(payees.map((p) => [p.id, p.name || '']));
+    const resolved = await resolveManualLinkEndpoints(api, {
+      inflow: request.inflow,
+      expense: request.expense,
+      payeeNames: pn,
+    });
+    const { links } = readReimbLinks();
+    return buildManualLinkAdmission({
+      request,
+      resolved,
+      existingLinks: links,
+      reimbCategoryId: reimbId,
+    });
+  }, { mode: 'write' });
+}
+async function getReimbLinks({ id } = {}) {
   const { links } = readReimbLinks();
-  if (!id) return { links };
-  const withAlloc = (ref, l) => ({ ...ref, allocated: l.amount != null ? l.amount : Math.abs(ref.amount) });
-  return {
-    asInflow: links.filter((l) => l.inflow && l.inflow.id === id).map((l) => withAlloc(l.expense, l)),
-    asExpense: links.filter((l) => l.expense && l.expense.id === id).map((l) => withAlloc(l.inflow, l)),
-  };
+  const legacyReport = buildLegacyMigrationReport(links);
+  if (!id) return { links, legacyReport };
+  return withApi(async (api) => {
+    const payees = await api.getPayees();
+    const pn = Object.fromEntries(payees.map((p) => [p.id, p.name || '']));
+    const txnLive = await locateTransactionLive(api, id, {}, pn);
+    const withAlloc = (ref, link, role) => enrichEndpointForRead(ref, link, role);
+    const asInflow = links
+      .filter((l) => l.inflow && l.inflow.id === id)
+      .map((l) => withAlloc(l.expense, l, 'expense'));
+    const asExpense = links
+      .filter((l) => l.expense && l.expense.id === id)
+      .map((l) => withAlloc(l.inflow, l, 'inflow'));
+    let capacity = null;
+    if (txnLive?.amountCents > 0) {
+      capacity = summarizeEndpointCapacity({
+        txnId: id,
+        txnAmountCents: txnLive.amountCents,
+        links,
+        role: 'inflow',
+      });
+    } else if (txnLive?.amountCents < 0) {
+      capacity = summarizeEndpointCapacity({
+        txnId: id,
+        txnAmountCents: txnLive.amountCents,
+        links,
+        role: 'expense',
+      });
+    }
+    return {
+      asInflow,
+      asExpense,
+      capacity,
+      legacyReport,
+    };
+  });
 }
-// Link a repayment inflow to an expense, optionally allocating a specific dollar
-// amount (partial repayments) and tagging the person. Re-linking the same pair
-// updates the allocation rather than duplicating.
-function addReimbLink({ inflow, expense, amount, person } = {}) {
-  const inf = txnRef(inflow);
-  const exp = txnRef(expense);
-  if (inf.id === exp.id) throw new Error('cannot link a transaction to itself');
-  assertTransactionMutationAvailable({ ids: [inf.id, exp.id] });
-  const alloc = amount == null ? null : fromCents(Math.abs(toCents(amount)));
-  const store = readReimbLinks();
-  const existing = store.links.find((l) => l.inflow.id === inf.id && l.expense.id === exp.id);
-  if (existing) {
-    if (alloc != null) existing.amount = alloc;
-    if (person) existing.person = person;
-  } else {
-    store.links.push({ inflow: inf, expense: exp, amount: alloc, person: person || null, createdAt: new Date().toISOString() });
-  }
-  writeJsonSafe(REIMB_LINKS_PATH, store);
-  return { ok: true, inflowId: inf.id, expenseId: exp.id, amount: alloc };
+async function addReimbLink(request = {}) {
+  const { inflow, expense, person, operationIdentity, faultInjector, admission } = request;
+  if (!inflow?.id || !expense?.id) throw new Error('inflow and expense ids required');
+  assertTransactionMutationAvailable({ ids: [inflow.id, expense.id] });
+  const prepared = admission || await prepareReimbLinkAdmission({ ...request, person });
+  return withApi(async (api) => getReimbursementLinkSagaManager().link(api, prepared, {
+    operationIdentity,
+    faultInjector,
+  }), { mode: 'write' });
 }
-function deleteReimbLink({ inflowId, expenseId } = {}) {
+async function deleteReimbLink({ inflowId, expenseId, expectedVersion, operationIdentity, faultInjector } = {}) {
   if (!inflowId || !expenseId) throw new Error('inflowId and expenseId required');
   assertTransactionMutationAvailable({ ids: [inflowId, expenseId] });
-  const store = readReimbLinks();
-  const before = store.links.length;
-  store.links = store.links.filter((l) => !(l.inflow.id === inflowId && l.expense.id === expenseId));
-  if (store.links.length !== before) writeJsonSafe(REIMB_LINKS_PATH, store);
-  return { ok: true, removed: before - store.links.length };
+  const existing = readReimbLinks().links.find(
+    (link) => String(link?.inflow?.id) === String(inflowId)
+      && String(link?.expense?.id) === String(expenseId),
+  );
+  return withApi(async (api) => getReimbursementLinkSagaManager().unlink(api, {
+    inflowId,
+    expenseId,
+    accountId: existing?.inflow?.accountId || null,
+    expectedVersion,
+    operationIdentity,
+    faultInjector,
+  }), { mode: 'write' });
+}
+function exportReimbursementLegacyReport() {
+  return buildLegacyMigrationReport(readReimbLinks().links);
 }
 
 // ---------------------------------------------------------------------------
@@ -1591,7 +1660,12 @@ async function suggestRepayments({ from, to } = {}) {
     const linkedInflow = new Set();
     for (const l of links) {
       if (l.inflow) linkedInflow.add(l.inflow.id);
-      if (l.expense) allocByExp[l.expense.id] = round2((allocByExp[l.expense.id] || 0) + (l.amount != null ? l.amount : Math.abs(l.expense.amount || 0)));
+      if (l.expense) {
+        const trusted = trustedLinkedCents(l);
+        if (trusted > 0) {
+          allocByExp[l.expense.id] = round2((allocByExp[l.expense.id] || 0) + fromCents(trusted));
+        }
+      }
     }
     for (const slug of Object.keys(expByPerson))
       for (const e of expByPerson[slug]) e.remaining = round2(Math.max(0, -e.amount - (allocByExp[e.id] || 0)));
@@ -2062,9 +2136,17 @@ async function getReimbursementLedger({ month } = {}) {
     for (const l of links) {
       if (!l.expense) continue;
       const eid = l.expense.id;
-      const amt = l.amount != null ? round2(l.amount) : round2(Math.abs((l.expense && l.expense.amount) || 0));
+      const trusted = trustedLinkedCents(l);
+      if (trusted <= 0) continue;
+      const amt = fromCents(trusted);
       allocByExp[eid] = round2((allocByExp[eid] || 0) + amt);
-      if (l.inflow) (paymentsByExp[eid] = paymentsByExp[eid] || []).push({ id: String(l.inflow.id), date: l.inflow.date || null, payee: l.inflow.payee || 'Payment', amount: amt });
+      if (l.inflow) (paymentsByExp[eid] = paymentsByExp[eid] || []).push({
+        id: String(l.inflow.id),
+        date: l.inflow.date || null,
+        payee: l.inflow.payee || 'Payment',
+        amount: amt,
+        allocationTrusted: true,
+      });
     }
 
     const chargeStatus = (fronted, allocated, remaining) =>
@@ -3321,6 +3403,7 @@ async function resolvePayeeId(api, name) {
 let transactionSagaManager = null;
 let transactionDeletionSagaManager = null;
 let repaymentConfirmationSagaManager = null;
+let reimbursementLinkSagaManager = null;
 let bulkOperationSagaManager = null;
 const replacementSagaResults = new WeakMap();
 
@@ -3381,17 +3464,35 @@ function getRepaymentConfirmationSagaManager() {
     repaymentConfirmationSagaManager = createRepaymentConfirmationSaga({
       sagaPath: REPAYMENT_CONFIRMATION_SAGAS_PATH,
       readLinks: readReimbLinks,
-      writeLinks: (store) => writeJsonSafe(REIMB_LINKS_PATH, store),
+      writeLinks: writeReimbLinks,
       readSuggestions: readReimbSuggest,
       writeSuggestions: writeReimbSuggest,
       assertExternalAvailable: ({ accountId, ids }) => {
         getTransactionSagaManager().assertAvailable({ accountId, ids });
         getTransactionDeletionSagaManager().assertAvailable({ accountId, ids });
         getBulkOperationSagaManager().assertAvailable({ accountId, ids });
+        getReimbursementLinkSagaManager().assertAvailable({ accountId, ids });
       },
     });
   }
   return repaymentConfirmationSagaManager;
+}
+
+function getReimbursementLinkSagaManager() {
+  if (!reimbursementLinkSagaManager) {
+    reimbursementLinkSagaManager = createReimbursementLinkSaga({
+      sagaPath: REIMBURSEMENT_LINK_SAGAS_PATH,
+      readLinks: readReimbLinks,
+      writeLinks: writeReimbLinks,
+      assertExternalAvailable: ({ accountId, ids }) => {
+        getTransactionSagaManager().assertAvailable({ accountId, ids });
+        getTransactionDeletionSagaManager().assertAvailable({ accountId, ids });
+        getRepaymentConfirmationSagaManager().assertAvailable({ accountId, ids });
+        getBulkOperationSagaManager().assertAvailable({ accountId, ids });
+      },
+    });
+  }
+  return reimbursementLinkSagaManager;
 }
 
 function readSplitwiseMirrorResolutions() {
@@ -3479,12 +3580,17 @@ async function recoverRepaymentConfirmationSagas(actualApi, options) {
   return getRepaymentConfirmationSagaManager().recover(actualApi, options);
 }
 
+async function recoverReimbursementLinkSagas(actualApi, options) {
+  return getReimbursementLinkSagaManager().recover(actualApi, options);
+}
+
 async function markTransactionSagasSynced(actualApi) {
   let firstError = null;
   for (const manager of [
     getTransactionSagaManager(),
     getTransactionDeletionSagaManager(),
     getRepaymentConfirmationSagaManager(),
+    getReimbursementLinkSagaManager(),
     getBulkOperationSagaManager(),
   ]) {
     try {
@@ -3503,6 +3609,7 @@ async function driveTransactionSagasForSync(actualApi) {
     getTransactionSagaManager(),
     getTransactionDeletionSagaManager(),
     getRepaymentConfirmationSagaManager(),
+    getReimbursementLinkSagaManager(),
     getBulkOperationSagaManager(),
   ]) {
     try {
@@ -3535,6 +3642,7 @@ function assertTransactionMutationAvailable({ accountId, ids, transaction, bulkD
   getTransactionSagaManager().assertAvailable({ accountId, ids, original: transaction });
   getTransactionDeletionSagaManager().assertAvailable({ accountId, ids, transaction });
   getRepaymentConfirmationSagaManager().assertAvailable({ accountId, ids });
+  getReimbursementLinkSagaManager().assertAvailable({ accountId, ids });
   getBulkOperationSagaManager().assertAvailable({
     accountId,
     ids,
@@ -4226,7 +4334,8 @@ function applyTransactionDeletionReferenceStep(step, targetIds, _plan) {
   };
   if (!destinations[step]) throw new Error(`unknown transaction deletion reference step: ${step}`);
   if (JSON.stringify(current[step]) !== JSON.stringify(next)) {
-    writeJsonSafe(destinations[step], next);
+    if (step === 'links') writeReimbLinks(next);
+    else writeJsonSafe(destinations[step], next);
   }
 }
 
@@ -4290,7 +4399,8 @@ function applyTransactionReferenceStep(step, idMap, _plan) {
   };
   if (!destinations[step]) throw new Error(`unknown transaction reference step: ${step}`);
   if (JSON.stringify(current[step]) !== JSON.stringify(next)) {
-    writeJsonSafe(destinations[step], next);
+    if (step === 'links') writeReimbLinks(next);
+    else writeJsonSafe(destinations[step], next);
   }
 }
 
@@ -5070,6 +5180,8 @@ module.exports = {
   getReimbLinks,
   addReimbLink,
   deleteReimbLink,
+  prepareReimbLinkAdmission,
+  exportReimbursementLegacyReport,
   getReview,
   setReviewDisposition,
   suggestRepayments,
@@ -5112,6 +5224,7 @@ module.exports = {
   replaceActualTransaction,
   recoverTransactionDeletionSagas,
   recoverRepaymentConfirmationSagas,
+  recoverReimbursementLinkSagas,
   recoverBulkOperationSagas,
   recoverTransactionSagas,
   getMerchantHistory,

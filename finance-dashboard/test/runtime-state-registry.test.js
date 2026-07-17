@@ -193,10 +193,16 @@ const FIXTURES = {
     future: { schemaVersion: 9, byTxn: {} },
   },
   reimbursementLinks: {
-    current: { links: [{ id: 'l1', inflowId: 'i1', expenseIds: ['e1'] }] },
-    legacy: { links: [{ id: 'l1', inflowId: 'i1', expenseIds: ['e1'] }] },
+    current: { schemaVersion: 2, links: [{ linkKey: 'i1:e1', inflow: { id: 'i1' }, expense: { id: 'e1' }, allocationCents: 1000 }] },
+    legacy: { links: [{ inflow: { id: 'i1' }, expense: { id: 'e1' }, amount: null }] },
     malformed: 42,
     future: { schemaVersion: 9, links: [] },
+  },
+  reimbursementLinkSagas: {
+    current: { schemaVersion: 1, sagas: {} },
+    legacy: { schemaVersion: 1, sagas: {} },
+    malformed: 42,
+    future: { schemaVersion: 9, sagas: {} },
   },
   reimbursementSuggestions: {
     current: { confirmed: {}, dismissed: ['s1'] },
@@ -649,7 +655,7 @@ for (const [name, validator] of Object.entries(CALLER_INVARIANTS)) {
       assert.equal(validator({ schemaVersion: 1, byTxn: { bad: 'x' } }), false);
     }
     if (name === 'reimbursementLinks') {
-      assert.equal(validator({ links: 'bad' }), false);
+      assert.equal(validator({ schemaVersion: 2, links: 'bad' }), false);
     }
     if (name === 'reimbursementSuggestions') {
       assert.equal(validator({ confirmed: {}, dismissed: 'bad' }), false);

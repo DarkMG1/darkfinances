@@ -767,6 +767,9 @@ export function useReimbLinks(id?: string) {
 export interface AddReimbLinkVars {
   inflow: ReimbTxnRef;
   expense: ReimbTxnRef;
+  allocationCents?: number;
+  amount?: number;
+  expectedVersion?: number;
 }
 export function useAddReimbLink() {
   const qc = useQueryClient();

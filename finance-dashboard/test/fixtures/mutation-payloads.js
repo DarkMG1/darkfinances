@@ -238,6 +238,7 @@ const MUTATION_PAYLOAD_FIXTURES = [
     body: {
       inflow: { id: 'inflow-1', amount: 50, accountId: 'acct-checking', date: '2026-07-01' },
       expense: { id: 'expense-1', amount: -25, accountId: 'acct-checking', date: '2026-07-02' },
+      allocationCents: 2500,
     },
   },
   {

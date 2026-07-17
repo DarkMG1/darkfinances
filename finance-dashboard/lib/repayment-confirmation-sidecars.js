@@ -58,9 +58,8 @@ function sameTransactionId(left, right) {
 
 function linkedAmountCents(link, expenseId) {
   if (!sameTransactionId(link?.expense?.id, expenseId)) return 0;
-  if (link.amount != null) return Math.abs(toCents(link.amount));
-  if (link.expense?.amount != null) return Math.abs(toCents(Math.abs(link.expense.amount)));
-  return 0;
+  const { trustedLinkedCents } = require('./reimbursement-allocation');
+  return trustedLinkedCents(link);
 }
 
 function validateAllocationPlan({
@@ -146,8 +145,11 @@ function applyAllocationLink(store, {
   store.links.push({
     inflow: inf,
     expense: exp,
+    allocationCents: allocCents,
     amount: alloc,
     person: person || null,
+    version: 1,
+    linkKey: `${inf.id}:${exp.id}`,
     createdAt: new Date().toISOString(),
   });
   return true;
@@ -168,9 +170,9 @@ function linksConverged(plan, store, {
     );
     if (!link) return false;
     const expected = allocationAmountCents(allocation);
-    const actual = link.amount != null
-      ? Math.abs(toCents(link.amount))
-      : Math.abs(toCents(Math.abs(link.expense?.amount || 0)));
+    const actual = link.allocationCents != null
+      ? Math.abs(link.allocationCents)
+      : (link.amount != null ? Math.abs(toCents(link.amount)) : 0);
     if (actual !== expected) return false;
     if (person && link.person && link.person !== person) return false;
   }

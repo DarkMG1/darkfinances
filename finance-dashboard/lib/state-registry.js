@@ -23,7 +23,7 @@ const STATE_REGISTRY = Object.freeze({
   receipts: entry('RECEIPTS_PATH', 'receipts.json', 1, true, 'transaction ids and receipt files', {
     unknownFieldPolicy: 'preserve-top-level',
   }),
-  reimbursementLinks: entry('REIMB_LINKS_PATH', 'reimb-links.json', 1, true, 'transaction ids', {
+  reimbursementLinks: entry('REIMB_LINKS_PATH', 'reimb-links.json', 2, true, 'transaction ids', {
     unknownFieldPolicy: 'preserve-top-level',
   }),
   reimbursementSuggestions: entry('REIMB_SUGGEST_PATH', 'reimb-suggest.json', 1, true, 'transaction ids', {
@@ -39,6 +39,7 @@ const STATE_REGISTRY = Object.freeze({
     unknownFieldPolicy: 'preserve-top-level',
   }),
   repaymentConfirmationSagas: entry('REPAYMENT_CONFIRMATION_SAGAS_PATH', 'repayment-confirmation-sagas.json', 1, true, 'repayment confirmation inflow and expense transaction ids', { sagaSemantics: true }),
+  reimbursementLinkSagas: entry('REIMBURSEMENT_LINK_SAGAS_PATH', 'reimbursement-link-sagas.json', 1, true, 'reimbursement link inflow and expense transaction ids', { sagaSemantics: true }),
   transactionSagas: entry('TRANSACTION_SAGAS_PATH', 'transaction-sagas.json', 1, true, 'Actual and sidecar transaction ids', { sagaSemantics: true }),
   venmoTruth: entry('VENMO_TRUTH_PATH', 'venmo-truth.json', 2, true, 'Venmo transaction ids', {
     optionalMissing: true,

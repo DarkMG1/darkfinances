@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedFrom": "finance-dashboard/lib/state-registry.js",
-  "storeCount": 28,
+  "storeCount": 29,
   "stores": [
     {
       "name": "accountOverrides",
@@ -215,13 +215,24 @@
     {
       "name": "reimbursementLinks",
       "filename": "reimb-links.json",
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "durability": "atomic-json-last-good",
       "optionalMissing": false,
       "unknownFieldPolicy": "preserve-top-level",
       "lastGoodPolicy": "allow-on-primary-invalid",
       "sagaSemantics": false,
       "references": "transaction ids"
+    },
+    {
+      "name": "reimbursementLinkSagas",
+      "filename": "reimbursement-link-sagas.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": true,
+      "references": "reimbursement link inflow and expense transaction ids"
     },
     {
       "name": "reimbursementSuggestions",

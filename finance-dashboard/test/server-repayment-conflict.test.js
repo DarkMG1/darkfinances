@@ -135,6 +135,7 @@ test('repayment confirmation ownership conflicts are terminal before operation e
       body: {
         inflow: { id: 'repay-owned', amount: 10 },
         expense: { id: 'expense', amount: -10 },
+        allocationCents: 1000,
       },
     },
   ];

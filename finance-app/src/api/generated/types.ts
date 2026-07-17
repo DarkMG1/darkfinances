@@ -548,9 +548,36 @@ export interface ReimbTxnRef {
   account?: string;
   imported?: boolean;
 }
+export interface ReimbLinkEndpoint extends ReimbTxnRef {
+  allocated?: number | null;
+  allocatedCents?: number | null;
+  allocationTrusted?: boolean;
+  allocationAmbiguous?: boolean;
+  allocationReason?: string;
+  linkVersion?: number;
+  linkKey?: string;
+}
+export interface ReimbLinkCapacity {
+  role: 'inflow' | 'expense';
+  absCapCents: number;
+  allocatedTrustedCents: number;
+  remainingTrustedCents: number;
+  ambiguousLinkCount: number;
+  completeness: 'complete' | 'ambiguous' | 'overallocated';
+  completenessReason?: string | null;
+}
+export interface ReimbLegacyReportRow {
+  linkKey: string;
+  inflowId: string | null;
+  expenseId: string | null;
+  reason: string;
+}
 export interface ReimbLinks {
-  asInflow: (ReimbTxnRef & { allocated?: number })[]; // expenses this inflow repays
-  asExpense: (ReimbTxnRef & { allocated?: number })[]; // inflows that repaid this expense
+  links?: ReimbLinkEndpoint[];
+  asInflow: ReimbLinkEndpoint[];
+  asExpense: ReimbLinkEndpoint[];
+  capacity?: ReimbLinkCapacity | null;
+  legacyReport?: { ambiguousCount: number; rows: ReimbLegacyReportRow[] };
 }
 
 // Repayment auto-matcher: a suggested match of an incoming payment to what a

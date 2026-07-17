@@ -2,6 +2,7 @@
 
 const { migrateAccountOverrides } = require('./account-overrides-schema');
 const { validatePasskeyCredentials } = require('./passkey-credentials-schema');
+const { migrateLinkToSchemaV2 } = require('./reimbursement-allocation');
 
 class SchemaMigrationError extends Error {
   constructor(message, code) {
@@ -653,23 +654,46 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
   }),
 
   reimbursementLinks: defineStore('reimbursementLinks', {
-    currentVersion: 1,
+    currentVersion: 2,
     unknownFieldPolicy: 'preserve-top-level',
-    missingValue: () => ({ links: [] }),
+    missingValue: () => ({ schemaVersion: 2, links: [] }),
     migrate(raw) {
-      return migrateEnvelope('reimbursementLinks', raw, 1, (source) => {
+      return migrateEnvelope('reimbursementLinks', raw, 2, (source) => {
         if (Object.prototype.hasOwnProperty.call(source, 'links') && !Array.isArray(source.links)) {
           throw new SchemaMigrationError('reimbursementLinks links must be an array', 'RUNTIME_STATE_INVALID_SHAPE');
         }
+        const links = (Array.isArray(source?.links) ? source.links : []).map(migrateLinkToSchemaV2);
         const store = {
-          links: Array.isArray(source?.links) ? cloneJson(source.links) : [],
+          schemaVersion: 2,
+          links,
         };
-        return preserveUnknownTopLevel(source, new Set(['links']), store);
-      });
+        return preserveUnknownTopLevel(source, new Set(['links', 'schemaVersion']), store);
+      }, [
+        (source) => {
+          if (schemaVersionOf(source) !== 1) return null;
+          const store = {
+            schemaVersion: 2,
+            links: (Array.isArray(source.links) ? source.links : []).map(migrateLinkToSchemaV2),
+          };
+          return preserveUnknownTopLevel(source, new Set(['links', 'schemaVersion']), store);
+        },
+      ]);
     },
     validate(value) {
-      return isPlainObject(value) && Array.isArray(value.links);
+      return isPlainObject(value)
+        && value.schemaVersion === 2
+        && Array.isArray(value.links);
     },
+  }),
+
+  reimbursementLinkSagas: defineStore('reimbursementLinkSagas', {
+    currentVersion: 1,
+    sagaSemantics: true,
+    missingValue: () => ({ schemaVersion: 1, sagas: {} }),
+    migrate(raw) {
+      return migrateSagaStore('reimbursementLinkSagas', raw, 1);
+    },
+    validate: validateSagaEnvelope,
   }),
 
   reimbursementSuggestions: defineStore('reimbursementSuggestions', {
@@ -886,7 +910,10 @@ const CALLER_INVARIANTS = Object.freeze({
   receipts: (value) => isPlainObject(value)
     && isPlainObject(value.byTxn)
     && Object.values(value.byTxn).every(Array.isArray),
-  reimbursementLinks: (value) => isPlainObject(value) && Array.isArray(value.links),
+  reimbursementLinks: (value) => isPlainObject(value)
+    && value.schemaVersion === 2
+    && Array.isArray(value.links),
+  reimbursementLinkSagas: validateSagaEnvelope,
   reimbursementSuggestions: (value) => isPlainObject(value)
     && isPlainObject(value.confirmed)
     && Array.isArray(value.dismissed),

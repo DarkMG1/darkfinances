@@ -91,6 +91,7 @@ const moneyFields = [
     build: (amount) => ({
       inflow: reimbRef('inflow', amount),
       expense: reimbRef('expense', -7.34),
+      allocationCents: 734,
     }),
     valid: [-100_000_000, -7.34, -0.01, 0, 0.01, 7.34, 100_000_000],
     policyInvalid: [],
@@ -101,9 +102,21 @@ const moneyFields = [
     build: (amount) => ({
       inflow: reimbRef('inflow', 7.34),
       expense: reimbRef('expense', amount),
+      allocationCents: 734,
     }),
     valid: [-100_000_000, -7.34, -0.01, 0, 0.01, 7.34, 100_000_000],
     policyInvalid: [],
+  },
+  {
+    name: 'reimbLink.allocationCents',
+    schema: schemas.reimbLink,
+    build: (amount) => ({
+      inflow: reimbRef('inflow', 7.34),
+      expense: reimbRef('expense', -7.34),
+      allocationCents: amount,
+    }),
+    valid: [1, 734, 10_000_000_000],
+    policyInvalid: [-1, 0],
   },
   {
     name: 'reimbLink.amount',
@@ -116,6 +129,7 @@ const moneyFields = [
     omit: () => ({
       inflow: reimbRef('inflow', 7.34),
       expense: reimbRef('expense', -7.34),
+      allocationCents: 734,
     }),
     valid: [0.01, 7.34, 100_000_000],
     policyInvalid: [-100_000_000, -0.01, 0],
@@ -234,6 +248,7 @@ test('existing native numeric money payloads remain compatible', () => {
     [schemas.reimbLink, {
       inflow: reimbRef('inflow', 112.5),
       expense: reimbRef('expense', -112.5),
+      allocationCents: 5000,
     }],
   ];
   for (const [schema, payload] of payloads) {

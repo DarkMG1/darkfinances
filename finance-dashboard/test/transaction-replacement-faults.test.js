@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { migrateLinkToSchemaV2 } = require('../lib/reimbursement-allocation');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-replacement-faults-'));
 for (const [key, name] of Object.entries({
@@ -82,10 +83,14 @@ function resetStores(referenceId = original.id) {
   });
   fs.writeFileSync(path.join(process.env.RECEIPTS_DIR, 'receipt.jpg'), 'sanitized receipt fixture');
   writeJson(process.env.REIMB_LINKS_PATH, {
+    schemaVersion: 2,
     links: [{
+      linkKey: `${referenceId}:${unrelated.id}`,
       inflow: { id: referenceId, date: original.date, payee: 'Refund', amount: 10 },
       expense: { id: unrelated.id, date: original.date, payee: 'Expense', amount: -25 },
+      allocationCents: 1000,
       amount: 10,
+      version: 1,
     }],
   });
   writeJson(process.env.REIMB_SUGGEST_PATH, {
@@ -254,7 +259,9 @@ function referenceEvidence(stores) {
       .map(({ txnId: _txnId, ...receipt }) => receipt)
       .sort((left, right) => String(left.id).localeCompare(String(right.id))),
     links: (stores.links.links || []).map((link) => ({
-      ...link,
+      amount: link.amount ?? null,
+      allocationCents: link.allocationCents ?? null,
+      person: link.person ?? null,
       inflow: referenceSnapshotWithoutId(link.inflow),
       expense: referenceSnapshotWithoutId(link.expense),
     })),
@@ -330,7 +337,7 @@ function writeCollapsedReferenceStores(source, { links = [], suggestions = { dis
     byTxn: { [source.subtransactions[0].id]: [receipt] },
   });
   fs.writeFileSync(path.join(process.env.RECEIPTS_DIR, receipt.file), 'preserved receipt bytes');
-  writeJson(process.env.REIMB_LINKS_PATH, { links });
+  writeJson(process.env.REIMB_LINKS_PATH, { schemaVersion: 2, links: links.map(migrateLinkToSchemaV2) });
   writeJson(process.env.REIMB_SUGGEST_PATH, suggestions);
   writeJson(process.env.RECON_PATH, {
     enabled: true,
