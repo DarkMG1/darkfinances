@@ -544,9 +544,26 @@ test('inventory documents request-layer ownership', () => {
   assert.ok(REMOVED_CALLER_OUTCOME_HAPTICS.length >= 5);
 });
 
-test('call-site inventory: no duplicate outcome haptics in mutation callbacks', () => {
-  const appRoot = path.join(__dirname, '..');
+function mutationCallbackRegion(lines, index) {
+  const line = lines[index];
+  if (!/\bon(Success|Error)\s*:/.test(line)) return line;
+  if (!/=>\s*\{/.test(line)) return line;
+  let depth = 0;
+  const parts = [];
+  for (let i = index; i < lines.length; i += 1) {
+    parts.push(lines[i]);
+    for (const ch of lines[i]) {
+      if (ch === '{') depth += 1;
+      if (ch === '}') depth -= 1;
+    }
+    if (depth === 0) break;
+  }
+  return parts.join('\n');
+}
+
+function findDuplicateOutcomeHapticViolations(appRoot) {
   const violations = [];
+  const outcomeHapticPattern = /haptics\.(success|warning)/;
 
   for (const root of MUTATION_CALLBACK_SCAN_ROOTS) {
     const dir = path.join(appRoot, root);
@@ -555,16 +572,46 @@ test('call-site inventory: no duplicate outcome haptics in mutation callbacks', 
       const rel = path.relative(appRoot, file);
       if (rel.includes('api/client/requests.ts')) continue;
       const lines = fs.readFileSync(file, 'utf8').split('\n');
-      for (let i = 0; i < lines.length; i++) {
+      for (let i = 0; i < lines.length; i += 1) {
         if (!/\bon(Success|Error)\s*:/.test(lines[i])) continue;
-        const window = lines.slice(i + 1, i + 5).join('\n');
-        if (/haptics\.(success|warning)/.test(window)) {
+        const region = mutationCallbackRegion(lines, i);
+        if (outcomeHapticPattern.test(region)) {
           violations.push(`${rel}:${i + 1}: ${lines[i].trim()}`);
         }
       }
     }
   }
 
+  return violations;
+}
+
+test('mutation callback region stays within onSuccess block', () => {
+  const lines = [
+    '    markRec.mutate(',
+    '      { payee: payeeName },',
+    '      {',
+    "        onSuccess: () => Alert.alert('ok'),",
+    "        onError: (e) => Alert.alert('fail'),",
+    '      }',
+    '    );',
+    '  };',
+    '  const doDelete = () => {',
+    '    haptics.warning();',
+  ];
+  const region = mutationCallbackRegion(lines, 3);
+  assert.doesNotMatch(region, /haptics\.warning/);
+});
+
+test('mutation callback region catches same-line duplicate haptic', () => {
+  const lines = [
+    "    mutate(x, { onSuccess: () => haptics.success() });",
+  ];
+  assert.match(mutationCallbackRegion(lines, 0), /haptics\.success/);
+});
+
+test('call-site inventory: no duplicate outcome haptics in mutation callbacks', () => {
+  const appRoot = path.join(__dirname, '..');
+  const violations = findDuplicateOutcomeHapticViolations(appRoot);
   assert.deepEqual(violations, [], `Duplicate caller outcome haptics:\n${violations.join('\n')}`);
 });
 
