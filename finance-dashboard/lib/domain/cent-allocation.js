@@ -1,8 +1,9 @@
 'use strict';
 
-const { sumCents, toCents } = require('./money');
+const { fromCents, sumCents, toCents } = require('./money');
 
 const ALLOCATION_METHOD = 'quotient_remainder_earliest';
+const GENERIC_BUDGET_SKIP_WARNING = 'Generic budget forecast skipped because category amounts are not safe integer cents.';
 
 function allocationProvenance(totalCents, dayCount, extra = {}) {
   return {
@@ -71,10 +72,22 @@ function pastAndRemainingCents(allocationsCents, positionIndex) {
   return { pastCents, remainingCents, totalCents: sumCents(allocationsCents) };
 }
 
+function readCategoryMoneyCents(value) {
+  if (value == null) return 0;
+  if (typeof value !== 'number') {
+    throw new TypeError('category money field must be a number');
+  }
+  if (!Number.isFinite(value)) {
+    throw new TypeError('category money field must be finite');
+  }
+  return toCents(value);
+}
+
 function trySumCategoryFieldCents(categories, field) {
   try {
+    const cents = sumCents((categories || []).map((category) => readCategoryMoneyCents(category[field])));
     return {
-      cents: sumCents((categories || []).map((category) => toCents(Number(category[field]) || 0))),
+      cents,
       complete: true,
       incompleteReasons: [],
     };
@@ -85,6 +98,31 @@ function trySumCategoryFieldCents(categories, field) {
       incompleteReasons: ['money_input_invalid'],
     };
   }
+}
+
+function buildForecastGenericBudgetContext(categories) {
+  const targetSum = trySumCategoryFieldCents(categories, 'target');
+  const remainingSum = trySumCategoryFieldCents(categories, 'remaining');
+  const complete = targetSum.complete && remainingSum.complete;
+  const incompleteReasons = complete
+    ? []
+    : [...new Set([
+      ...(targetSum.complete ? [] : targetSum.incompleteReasons),
+      ...(remainingSum.complete ? [] : remainingSum.incompleteReasons),
+    ])];
+  return {
+    targetSum,
+    remainingSum,
+    complete,
+    incompleteReasons,
+    assumptions: {
+      target: complete ? fromCents(targetSum.cents) : null,
+      remaining: complete ? fromCents(remainingSum.cents) : null,
+      complete,
+      incompleteReasons,
+    },
+    warnings: complete ? [] : [GENERIC_BUDGET_SKIP_WARNING],
+  };
 }
 
 function buildForecastBudgetDailyCents({
@@ -150,8 +188,11 @@ function buildForecastBudgetDailyCents({
 
 module.exports = {
   ALLOCATION_METHOD,
+  GENERIC_BUDGET_SKIP_WARNING,
   allocateCentsOverDays,
   pastAndRemainingCents,
+  readCategoryMoneyCents,
   trySumCategoryFieldCents,
+  buildForecastGenericBudgetContext,
   buildForecastBudgetDailyCents,
 };

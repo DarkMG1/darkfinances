@@ -488,7 +488,12 @@ export interface Forecast {
   events: ForecastEvent[];
   assumptions?: {
     liquidAccounts: { id: string; name: string }[];
-    genericBudgetTarget: number;
+    genericBudget: {
+      target: number | null;
+      remaining: number | null;
+      complete: boolean;
+      incompleteReasons: string[];
+    };
     billsExcludedFromGenericBudget: boolean;
     reimbursementsIncluded: boolean;
   };

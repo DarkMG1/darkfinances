@@ -10,10 +10,28 @@ const {
   allocateCentsOverDays,
   pastAndRemainingCents,
   buildForecastBudgetDailyCents,
+  buildForecastGenericBudgetContext,
+  readCategoryMoneyCents,
   trySumCategoryFieldCents,
 } = require('../lib/domain/cent-allocation');
 
 const round2 = (n) => Math.round(n * 100) / 100;
+
+function oracleQuotientRemainderCents(totalCents, dayCount) {
+  if (!Number.isSafeInteger(totalCents) || !Number.isInteger(dayCount) || dayCount <= 0) {
+    throw new RangeError('oracle inputs must be safe integers');
+  }
+  if (totalCents === 0) return Array(dayCount).fill(0);
+  const sign = totalCents < 0 ? -1 : 1;
+  const absTotal = Math.abs(totalCents);
+  const quotient = Math.floor(absTotal / dayCount);
+  const remainder = absTotal % dayCount;
+  const out = [];
+  for (let i = 0; i < dayCount; i++) {
+    out.push(sign * (quotient + (i < remainder ? 1 : 0)));
+  }
+  return out;
+}
 
 function legacyDailyDollarDrift(totalDollars, dayCount) {
   const daily = totalDollars / dayCount;
@@ -26,6 +44,16 @@ test('reproduction: rounded daily dollars drift for $1 and signed month lengths'
   assert.notEqual(legacyDailyDollarDrift(1, 31), 0);
   assert.notEqual(legacyDailyDollarDrift(-100, 31), 0);
   assert.notEqual(legacyDailyDollarDrift(100.01, 3), 0);
+});
+
+test('allocateCentsOverDays matches independent quotient-remainder oracle', () => {
+  const dayCounts = [3, 28, 29, 30, 31];
+  for (const dayCount of dayCounts) {
+    for (let totalCents = -4096; totalCents <= 4096; totalCents += 113) {
+      const { allocationsCents } = allocateCentsOverDays(totalCents, dayCount);
+      assert.deepEqual(allocationsCents, oracleQuotientRemainderCents(totalCents, dayCount));
+    }
+  }
 });
 
 test('allocateCentsOverDays conserves exact cents for explicit ±$1 and sub-dollar amounts', () => {
@@ -171,14 +199,55 @@ test('unsafe and non-integer allocation inputs throw instead of rounding', () =>
   assert.throws(() => allocateCentsOverDays(100, Number.MAX_SAFE_INTEGER), /allocation span|safe integer/);
 });
 
-test('trySumCategoryFieldCents rejects fractional category dollars', () => {
-  const valid = trySumCategoryFieldCents([{ target: 12.34 }, { target: 0.01 }], 'target');
+test('readCategoryMoneyCents treats null and missing as semantic zero', () => {
+  assert.equal(readCategoryMoneyCents(null), 0);
+  assert.equal(readCategoryMoneyCents(undefined), 0);
+  assert.equal(readCategoryMoneyCents(0), 0);
+  assert.equal(readCategoryMoneyCents(12.34), toCents(12.34));
+});
+
+test('trySumCategoryFieldCents rejects garbage and accepts explicit semantic zero', () => {
+  const valid = trySumCategoryFieldCents([{ target: 12.34 }, { target: 0.01 }, { target: 0 }], 'target');
   assert.equal(valid.complete, true);
   assert.equal(valid.cents, toCents(12.34) + toCents(0.01));
 
-  const invalid = trySumCategoryFieldCents([{ target: 1.005 }], 'target');
-  assert.equal(invalid.complete, false);
-  assert.deepEqual(invalid.incompleteReasons, ['money_input_invalid']);
+  const missing = trySumCategoryFieldCents([{ name: 'Groceries' }, { target: 5 }], 'target');
+  assert.equal(missing.complete, true);
+  assert.equal(missing.cents, toCents(5));
+
+  for (const bad of [
+    [{ target: 'foo' }],
+    [{ target: Number.NaN }],
+    [{ target: Number.POSITIVE_INFINITY }],
+    [{ target: '12.34' }],
+    [{ target: 1.005 }],
+    [{ target: Number.MAX_VALUE }],
+  ]) {
+    const invalid = trySumCategoryFieldCents(bad, 'target');
+    assert.equal(invalid.complete, false, JSON.stringify(bad));
+    assert.equal(invalid.cents, null);
+    assert.deepEqual(invalid.incompleteReasons, ['money_input_invalid']);
+  }
+});
+
+test('buildForecastGenericBudgetContext exposes truthful nullable assumptions', () => {
+  const complete = buildForecastGenericBudgetContext([
+    { target: 100, remaining: 75 },
+    { target: 50, remaining: 25 },
+  ]);
+  assert.equal(complete.complete, true);
+  assert.equal(complete.assumptions.target, 150);
+  assert.equal(complete.assumptions.remaining, 100);
+  assert.deepEqual(complete.assumptions.incompleteReasons, []);
+  assert.deepEqual(complete.warnings, []);
+
+  const incomplete = buildForecastGenericBudgetContext([{ target: 100, remaining: 'bad' }]);
+  assert.equal(incomplete.complete, false);
+  assert.equal(incomplete.assumptions.target, null);
+  assert.equal(incomplete.assumptions.remaining, null);
+  assert.equal(incomplete.assumptions.complete, false);
+  assert.deepEqual(incomplete.assumptions.incompleteReasons, ['money_input_invalid']);
+  assert.equal(incomplete.warnings.length, 1);
 });
 
 test('display conversion happens only at dollar boundary', () => {
