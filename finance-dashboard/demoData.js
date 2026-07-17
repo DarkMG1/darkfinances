@@ -8,7 +8,6 @@ const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
 const { addDays, addMonths, daysBetween, daysInMonth, monthEnd, shiftMonth, todayYMD } = require('./lib/date-only');
 const {
   inferRecurrenceSchedule,
-  monthlyEquivalentAmount,
   nextOccurrenceAfter,
   renewalWindow,
 } = require('./lib/recurrence');
