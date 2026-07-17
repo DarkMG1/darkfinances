@@ -7,12 +7,13 @@ const { metricValue } = require('./lib/metric-provenance');
 const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
 const {
   buildCategoryInfo,
+  buildTransferIndex,
   classifyTransactionLeaves,
   hasActualTransferIdentity,
   leafCountsAsRealSpend,
-  summarizeClassifiedLeaves,
   transactionLeaves,
 } = require('./lib/domain/classification');
+const { spendSummaryFromClassifiedLeaves, mergeProjectionCompleteness } = require('./lib/domain/projection-completeness');
 const { addDays, addMonths, daysBetween, daysInMonth, monthEnd, shiftMonth, todayYMD } = require('./lib/date-only');
 const {
   inferRecurrenceSchedule,
@@ -160,6 +161,7 @@ function today() {
     budgets: { supported: false },
     recurring: recurring(),
     goals: goals(),
+    spendingCompleteness: currentSpending.current?.completeness,
   });
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',
@@ -177,8 +179,11 @@ function today() {
     asOf,
     financeDate: financeAnchor(),
     revision: `demo-${currentMonth()}`,
-    complete: safeToSpend.complete,
-    incompleteReasons: safeToSpend.incompleteReasons,
+    complete: safeToSpend.complete && currentSpending.current?.completeness?.complete !== false,
+    incompleteReasons: [...new Set([
+      ...safeToSpend.incompleteReasons,
+      ...(currentSpending.current?.completeness?.complete === false ? currentSpending.current.completeness.incompleteReasons : []),
+    ])],
     health: { ready: true, initializedAt: asOf, lastSyncAt: asOf, lastErrorAt: null, lastError: null },
     accounts: allAccounts,
     spending: currentSpending,
@@ -242,16 +247,15 @@ function goals() {
 // ---- Spending (this month + prev) -----------------------------------------
 function summarizeTxns(start, end) {
   const catInfo = demoCategoryInfo();
-  const rows = transactions()
+  const allRows = transactions().map((t) => actualRowFromDemoTransaction(t));
+  const transferIndex = buildTransferIndex(allRows);
+  const classified = transactions()
     .filter((t) => (!start || t.date >= start) && (!end || t.date <= end))
-    .map((t) => actualRowFromDemoTransaction(t));
-  const classified = rows.flatMap((row) => classifyTransactionLeaves(row.transaction, catInfo, { accountId: row.accountId }));
-  const result = summarizeClassifiedLeaves(classified);
-  return {
-    spending: Object.fromEntries(Object.entries(result.spendingCents).map(([name, cents]) => [name, Math.round(cents) / 100])),
-    totalSpend: Math.round(result.totalSpendCents) / 100,
-    totalIncome: Math.round(result.totalIncomeCents) / 100,
-  };
+    .flatMap((t) => {
+      const row = actualRowFromDemoTransaction(t);
+      return classifyTransactionLeaves(row.transaction, catInfo, { accountId: row.accountId, transferIndex });
+    });
+  return spendSummaryFromClassifiedLeaves(classified);
 }
 
 function actualRowFromDemoTransaction(t) {
@@ -291,10 +295,13 @@ function spending(opts = {}) {
   const span = Math.max(1, daysBetween(start, end) + 1);
   const prevEnd = addDays(start, -1);
   const prevStart = addDays(prevEnd, -(span - 1));
+  const current = summarizeTxns(start, end);
+  const previous = summarizeTxns(prevStart, prevEnd);
   return {
-    current: summarizeTxns(start, end),
-    prev: summarizeTxns(prevStart, prevEnd),
+    current,
+    prev: previous,
     month: key || start.slice(0, 7),
+    completeness: mergeProjectionCompleteness([current.completeness, previous.completeness]),
   };
 }
 

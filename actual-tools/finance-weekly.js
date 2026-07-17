@@ -10,7 +10,7 @@
  */
 const api = require('@actual-app/api');
 const { addDays, todayYMD } = require('./lib/date-only');
-const { buildToolCategoryInfo, classifiedLeavesForAccountTransactions } = require('./lib/transfer-classification');
+const { buildToolCategoryInfo, classifiedLeavesForAccounts, incompleteTransferLeaves } = require('./lib/transfer-classification');
 
 const c2 = (cents) => (Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (cents) => (cents < 0 ? '-$' : '$') + c2(cents);
@@ -33,21 +33,19 @@ const REIMB_CAT = /^reimbursement$/i;
   const payees = await api.getPayees();
   const pn = {}; for (const p of payees) pn[p.id] = p.name || '';
   const accounts = await api.getAccounts();
-
-  const leaves = [];
+  const transactionsByAccountId = new Map();
   for (const a of accounts) {
-    const tx = await api.getTransactions(a.id, lastStart, today);
-    for (const lf of classifiedLeavesForAccountTransactions(tx, catInfo, a, (t) => pn[t.payee] || '')) {
-      leaves.push({
-        date: lf.date,
-        payee: lf.payee,
-        amount: lf.amount,
-        catName: lf.kind === 'transfer' ? 'Transfer' : lf.catId ? nameOf(lf.catId) : '(uncategorized)',
-        kind: lf.kind,
-        onbudget: lf.onbudget,
-      });
-    }
+    transactionsByAccountId.set(a.id, await api.getTransactions(a.id, lastStart, today));
   }
+  const classified = classifiedLeavesForAccounts(accounts, transactionsByAccountId, catInfo, (t) => pn[t.payee] || '');
+  const leaves = classified.map((lf) => ({
+    date: lf.date,
+    payee: lf.payee,
+    amount: lf.amount,
+    catName: lf.kind === 'transfer' ? 'Transfer' : lf.catId ? nameOf(lf.catId) : '(uncategorized)',
+    kind: lf.kind,
+    onbudget: lf.onbudget,
+  }));
 
   const inRange = (d, a, b) => d >= a && d <= b;
   const isReal = (e) => e.onbudget && (e.kind === 'spend' || (e.kind === 'uncat' && e.amount < 0));
@@ -89,7 +87,14 @@ const REIMB_CAT = /^reimbursement$/i;
   out.push(`[OFF-TREND] biggest category changes (this vs last)`);
   const trend = catRows.map((r) => ({ n: r.n, d: r.t - r.l })).filter((r) => Math.abs(r.d) >= 1).sort((a, b) => Math.abs(b.d) - Math.abs(a.d)).slice(0, 4);
   if (trend.length) for (const r of trend) out.push(`- ${r.n} | ${signed(r.d)}`); else out.push('- none');
+  const incomplete = incompleteTransferLeaves(classified);
+  if (incomplete.length) {
+    out.push('');
+    const reasons = [...new Set(incomplete.map((leaf) => leaf.transferReason || leaf.reason).filter(Boolean))].sort();
+    out.push(`[INCOMPLETE TRANSFER IDENTITY] count=${incomplete.length} reasons=${reasons.join(',')}`);
+  }
 
   console.log(out.join('\n'));
   await api.shutdown();
+  if (process.env.DIGEST_STRICT === '1' && incomplete.length) process.exit(2);
 })().catch((e) => { console.error('WEEKLY_ERR', (e && e.stack) || e); process.exit(1); });

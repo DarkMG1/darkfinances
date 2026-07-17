@@ -200,10 +200,18 @@ test('spending screen preserves PR-19 finance-date hooks for period windows', ()
   assert.doesNotMatch(spendingSource, /new Date\(\)\.toISOString\(\)/);
 });
 
+test('spending screen gates authoritative totals on projection completeness', () => {
+  assert.match(spendingSource, /spendingComplete = cur\?\.completeness\?\.complete !== false/);
+  assert.match(spendingSource, /totalSpend = spendingComplete && cur\?\.totalSpend != null \? cur\.totalSpend : null/);
+  assert.match(spendingSource, /'Unavailable'/);
+  assert.doesNotMatch(spendingSource, /cur\?\.totalSpend \?\? 0/);
+  assert.doesNotMatch(spendingSource, /cur\?\.totalIncome \?\? 0/);
+});
+
 /**
  * Residual Spending fallbacks audit (post-remediation):
- * - Income/Total Spend/Net: cur?.total* ?? 0 — gated behind spendingLoading/spendingIsError; zero only when cur exists.
- * - Chart net/netWorth: hard-coded 0 in synthetic month bucket when trends empty (no $ labels).
+ * - Income/Total Spend/Net: null + Unavailable when projection completeness is incomplete.
+ * - Chart net/netWorth: null buckets when trends month incomplete.
  * - Breakdown %: totalSpend > 0 guard — genuine computed.
  * - Refunds: refundEntries sum after spending gate — genuine computed; NaN guarded via computedMoneyMetric.
  * - Reimbursements: /api/v1/reimbursement summary.fronted for selectedWindow — independent query states.

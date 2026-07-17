@@ -19,6 +19,7 @@ const KIND_ICON: Record<ReviewTask['kind'], { symbol: SymbolViewProps['name']; c
   repayment: { symbol: 'arrow.left.arrow.right.circle.fill', color: colors.green },
   price_change: { symbol: 'repeat', color: colors.accentLight },
   reconciliation: { symbol: 'checklist', color: colors.yellow },
+  transfer_identity: { symbol: 'arrow.left.arrow.right.circle.fill', color: colors.yellow },
 };
 
 const kindLabel: Record<ReviewTask['kind'], string> = {
@@ -29,6 +30,7 @@ const kindLabel: Record<ReviewTask['kind'], string> = {
   repayment: 'Repayment',
   price_change: 'Price change',
   reconciliation: 'Month close',
+  transfer_identity: 'Transfer identity',
 };
 
 const titleFor = (task: ReviewTask) => {

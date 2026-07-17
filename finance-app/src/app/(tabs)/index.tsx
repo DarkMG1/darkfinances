@@ -74,8 +74,13 @@ export default function Overview() {
   const curMonth = financeToday.slice(0, 7);
   const cur = today.data?.spending.current;
   const prev = today.data?.spending.prev;
-  const net = cur ? cur.totalIncome - cur.totalSpend : 0;
-  const spendDelta = cur && prev && prev.totalSpend > 0 ? ((cur.totalSpend - prev.totalSpend) / prev.totalSpend) * 100 : null;
+  const spendingComplete = cur?.completeness?.complete !== false;
+  const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
+  const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
+  const net = totalSpend != null && totalIncome != null ? totalIncome - totalSpend : null;
+  const spendDelta = spendingComplete && cur && prev && prev.totalSpend != null && prev.totalSpend > 0 && cur.totalSpend != null
+    ? ((cur.totalSpend - prev.totalSpend) / prev.totalSpend) * 100
+    : null;
 
   const nwPoints = (trends.data?.months ?? []).map((m) => ({ value: m.netWorth, label: m.month }));
   // "This month" net-worth change ≈ now vs the previous monthly snapshot. Based on
@@ -208,18 +213,18 @@ export default function Overview() {
             <StatCard
               testID="home-stat-spent"
               label="Spent"
-              value={cur ? fmtPos(cur.totalSpend) : '—'}
+              value={totalSpend != null ? fmtPos(totalSpend) : 'Unavailable'}
               sub={spendDelta != null ? `${spendDelta > 0 ? '▲' : '▼'} ${Math.abs(spendDelta).toFixed(0)}% vs prev` : undefined}
               subColor={spendDelta != null ? (spendDelta > 0 ? colors.red : colors.green) : undefined}
             />
             <StatCard
               testID="home-stat-income"
               label="Income"
-              value={cur ? fmtPos(cur.totalIncome) : '—'}
+              value={totalIncome != null ? fmtPos(totalIncome) : 'Unavailable'}
               sub="sources ›"
               onPress={() => router.push(`/category/${encodeURIComponent('Income')}?month=${curMonth}` as never)}
             />
-            <StatCard testID="home-stat-net" label="Net" value={cur ? fmtMoney(net) : '—'} valueColor={net >= 0 ? colors.green : colors.red} />
+            <StatCard testID="home-stat-net" label="Net" value={net != null ? fmtMoney(net) : 'Unavailable'} valueColor={net != null && net >= 0 ? colors.green : colors.red} />
           </View>
           </> : null}
 

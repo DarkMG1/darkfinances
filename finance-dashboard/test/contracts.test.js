@@ -38,6 +38,36 @@ test('generated contract keeps legacy genericBudgetTarget alias and nested gener
   assert.match(types, /genericBudget: \{/);
 });
 
+test('generated contract includes transfer identity completeness types', () => {
+  const types = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
+  assert.match(types, /export interface ProjectionCompleteness/);
+  assert.match(types, /transferIdentityUnresolvedCount: number/);
+  assert.match(types, /'transfer_identity'/);
+  assert.match(types, /transferReason\?: string/);
+  assert.match(types, /knownSpendSubtotal\?: number/);
+  assert.match(types, /totalSpend: number \| null/);
+});
+
+test('app and web gate spending and trends on projection completeness', () => {
+  const types = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
+  assert.match(types, /completeness: ProjectionCompleteness/);
+
+  assert.match(browser, /current\?\.completeness\?\.complete !== false/);
+  assert.match(browser, /monthTrendComplete/);
+  assert.doesNotMatch(browser, /m\.income \?\? 0/);
+
+  const spending = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'spending.tsx'), 'utf8');
+  const home = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'index.tsx'), 'utf8');
+  const cashflow = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'cashflow.tsx'), 'utf8');
+  const review = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'review.tsx'), 'utf8');
+
+  assert.match(spending, /spendingComplete = cur\?\.completeness\?\.complete !== false/);
+  assert.match(spending, /'Unavailable'/);
+  assert.match(home, /spendingComplete = cur\?\.completeness\?\.complete !== false/);
+  assert.match(cashflow, /monthComplete\(m\)/);
+  assert.match(review, /transfer_identity/);
+});
+
 test('app and web render incomplete Safe-to-Spend as unavailable, never zero', () => {
   assert.match(browser, /Safe to Spend/);
   assert.match(browser, /metric\?\.complete === true && Number\.isFinite\(metric\.value\)/);

@@ -42,16 +42,16 @@ export default function Budgets() {
   // Bars/navigation span exactly as far back as there's data.
   const availMonths = useMemo(() => {
     let i = 0;
-    while (i < allMonths.length && allMonths[i].spend === 0 && allMonths[i].income === 0) i++;
-    const trimmed = allMonths.slice(i).map((m) => ({ month: m.month, spend: m.spend }));
+    while (i < allMonths.length && (allMonths[i].spend == null || allMonths[i].spend === 0) && (allMonths[i].income == null || allMonths[i].income === 0)) i++;
+    const trimmed = allMonths.slice(i).map((m) => ({ month: m.month, spend: m.spend ?? 0 }));
     return trimmed.length ? trimmed : [{ month: curKey, spend: 0 }];
   }, [allMonths, curKey]);
 
   // Income vs spending chart keeps the most recent 12 months.
   const chart = allMonths.slice(-12);
   const labels = chart.map((m) => m.month.slice(5));
-  const income = chart.map((m) => m.income);
-  const spend = chart.map((m) => m.spend);
+  const income = chart.map((m) => m.income ?? 0);
+  const spend = chart.map((m) => m.spend ?? 0);
 
   const b = budgets.data;
   const hasTargets = (b?.totalTarget ?? b?.totalBudgeted ?? 0) > 0;

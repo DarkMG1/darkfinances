@@ -109,6 +109,11 @@ const {
   transactionLeaves,
   TRANSFER_REASON,
 } = require('./lib/domain/classification');
+const {
+  mergeProjectionCompleteness,
+  projectionCompletenessFromLeaves,
+  spendSummaryFromClassifiedLeaves,
+} = require('./lib/domain/projection-completeness');
 const { fromCents, sumCents, toCents } = require('./lib/domain/money');
 const {
   buildForecastBudgetDailyCents,
@@ -675,8 +680,8 @@ function leavesOf(t) {
   return transactionLeaves(t);
 }
 
-function classifyLeavesForRows(rows, catInfo) {
-  const transferIndex = buildTransferIndex(rows);
+function classifyLeavesForRows(rows, catInfo, { transferIndex: providedIndex } = {}) {
+  const transferIndex = providedIndex ?? buildTransferIndex(rows);
   const out = [];
   for (const row of rows) {
     for (const leaf of transactionLeaves(row.transaction)) {
@@ -690,7 +695,23 @@ function classifyLeavesForRows(rows, catInfo) {
   return out;
 }
 
-async function classifiedOnBudgetLeaves(api, start, end, catInfo, { accountFilter } = {}) {
+function classifyLeavesInDateRange(rows, catInfo, start, end, transferIndex) {
+  const out = [];
+  for (const row of rows) {
+    const date = row.transaction.date;
+    if (date < start || date > end) continue;
+    for (const leaf of transactionLeaves(row.transaction)) {
+      out.push(classifyLeaf(leaf, catInfo, {
+        transactionId: leaf.id,
+        accountId: row.accountId,
+        transferIndex,
+      }));
+    }
+  }
+  return out;
+}
+
+async function fetchOnBudgetRows(api, start, end, { accountFilter } = {}) {
   const accounts = (await api.getAccounts()).filter((a) => !a.closed && !a.offbudget);
   const rows = [];
   for (const acct of accounts) {
@@ -698,7 +719,22 @@ async function classifiedOnBudgetLeaves(api, start, end, catInfo, { accountFilte
     const txns = await api.getTransactions(acct.id, start, end);
     for (const t of txns) rows.push({ transaction: t, accountId: acct.id });
   }
-  return classifyLeavesForRows(rows, catInfo);
+  return rows;
+}
+
+async function classifiedOnBudgetLeavesForWindows(api, windows, catInfo, { accountFilter } = {}) {
+  const start = windows.reduce((min, window) => (window.start < min ? window.start : min), windows[0].start);
+  const end = windows.reduce((max, window) => (window.end > max ? window.end : max), windows[0].end);
+  const rows = await fetchOnBudgetRows(api, start, end, { accountFilter });
+  const transferIndex = buildTransferIndex(rows);
+  return windows.map(({ start: windowStart, end: windowEnd }) => (
+    classifyLeavesInDateRange(rows, catInfo, windowStart, windowEnd, transferIndex)
+  ));
+}
+
+async function classifiedOnBudgetLeaves(api, start, end, catInfo, { accountFilter } = {}) {
+  const [leaves] = await classifiedOnBudgetLeavesForWindows(api, [{ start, end }], catInfo, { accountFilter });
+  return leaves;
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,12 +1053,7 @@ async function createTransaction({ accountId, amount, payee, date, categoryId, n
 }
 
 function summarize(classifiedLeaves) {
-  const result = summarizeClassifiedLeaves(classifiedLeaves);
-  return {
-    spending: Object.fromEntries(Object.entries(result.spendingCents).map(([name, cents]) => [name, fromCents(cents)])),
-    totalSpend: fromCents(result.totalSpendCents),
-    totalIncome: fromCents(result.totalIncomeCents),
-  };
+  return spendSummaryFromClassifiedLeaves(classifiedLeaves);
 }
 
 async function onBudgetLeaves(api, start, end, catInfo) {
@@ -1064,14 +1095,17 @@ async function getSpending({ month, start, end } = {}) {
 
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
-    const [current, previous] = await Promise.all([
-      onBudgetLeaves(api, cur.start, curEnd, catInfo),
-      onBudgetLeaves(api, prev.start, prev.end, catInfo),
-    ]);
+    const [currentLeaves, previousLeaves] = await classifiedOnBudgetLeavesForWindows(api, [
+      { start: cur.start, end: curEnd },
+      { start: prev.start, end: prev.end },
+    ], catInfo);
+    const current = summarize(currentLeaves);
+    const previous = summarize(previousLeaves);
     return {
-      current: summarize(current),
-      prev: summarize(previous),
+      current,
+      prev: previous,
       month: monthKey,
+      completeness: mergeProjectionCompleteness([current.completeness, previous.completeness]),
     };
   });
 }
@@ -1090,7 +1124,7 @@ async function getTrends({ months = 12, endMonth } = {}) {
     const buckets = [];
     for (let i = months - 1; i >= 0; i--) {
       const r = monthRange(financeYear, financeMonth - 1 - i);
-      buckets.push({ ...r, income: 0, expense: 0 });
+      buckets.push({ ...r, income: 0, expense: 0, knownIncome: 0, knownExpense: 0, transferIncompleteCount: 0 });
     }
     const byKey = Object.fromEntries(buckets.map((b) => [b.key, b]));
     const lastEnd = buckets[buckets.length - 1].end;
@@ -1119,8 +1153,17 @@ async function getTrends({ months = 12, endMonth } = {}) {
           accountId: a.id,
           transferIndex: trendTransferIndex,
         })) {
-          if (lf.countsAsIncome) b.income += lf.amount;
-          else if (lf.countsAsSpending) b.expense += -lf.amount;
+          if (lf.kind === 'incomplete' && lf.provenance === PROVENANCE.TRANSFER_IDENTITY) {
+            b.transferIncompleteCount += 1;
+            continue;
+          }
+          if (lf.countsAsIncome) {
+            b.income += lf.amount;
+            b.knownIncome += lf.amount;
+          } else if (lf.countsAsSpending) {
+            b.expense += -lf.amount;
+            b.knownExpense += -lf.amount;
+          }
         }
       }
     }
@@ -1133,16 +1176,27 @@ async function getTrends({ months = 12, endMonth } = {}) {
         run += contributions[idx].amount;
         idx++;
       }
+      const complete = b.transferIncompleteCount === 0;
       return {
         month: b.key,
         netWorth: d2(run),
-        spend: d2(b.expense),
-        income: d2(b.income),
-        net: d2(b.income - b.expense),
+        complete,
+        spend: complete ? d2(b.expense) : null,
+        income: complete ? d2(b.income) : null,
+        knownSpendSubtotal: complete ? undefined : d2(b.knownExpense),
+        knownIncomeSubtotal: complete ? undefined : d2(b.knownIncome),
+        net: complete ? d2(b.income - b.expense) : null,
+        completeness: {
+          complete,
+          incompleteReasons: complete ? [] : ['transfer_identity_unresolved'],
+          transferIdentityUnresolvedCount: b.transferIncompleteCount,
+          transferIdentityReasons: complete ? [] : ['transfer_identity_unresolved'],
+        },
       };
     });
     return {
       months: series,
+      completeness: mergeProjectionCompleteness(series.map((entry) => entry.completeness)),
       scope: {
         includesClosedAccountHistory: true,
         includesManualAssets: false,
@@ -2416,28 +2470,65 @@ async function reconItemsFor(api, month) {
   const pn = {};
   for (const p of payees) pn[p.id] = p.name || '';
   const accts = (await api.getAccounts()).filter((a) => !a.offbudget);
-  const items = [];
+  const rows = [];
   for (const a of accts) {
     const tx = await api.getTransactions(a.id, start, to);
-    for (const t of tx) {
-      const isSplit = t.subtransactions && t.subtransactions.length;
-      if (isSplit) {
-        const classified = classifyTransactionLeaves(t, catInfo, { accountId: a.id });
-        const reviewable = classified.some((lf) => lf.countsAsSpending || (lf.kind === 'uncat' && lf.amount < 0) || (lf.kind === 'income' && lf.amount > 0));
-        if (!reviewable) continue;
-      } else {
-        const [classified] = classifyTransactionLeaves(t, catInfo, { accountId: a.id });
-        if (!classified || classified.spendingExcluded) {
-          if (!(classified && classified.kind === 'income' && classified.amount > 0)) continue;
-        }
-        if (classified.kind === 'transfer' || classified.kind === 'incomplete') continue;
-        if (classified.kind === 'mm' || classified.kind === 'reimb') continue;
+    for (const t of tx) rows.push({ transaction: t, accountId: a.id, account: a });
+  }
+  const transferIndex = buildTransferIndex(rows);
+  const items = [];
+  for (const row of rows) {
+    const { transaction: t, accountId, account: a } = row;
+    const isSplit = t.subtransactions && t.subtransactions.length;
+    const classified = classifyTransactionLeaves(t, catInfo, { accountId, transferIndex });
+    if (isSplit) {
+      const incomplete = classified.filter((lf) => lf.kind === 'incomplete' && lf.provenance === PROVENANCE.TRANSFER_IDENTITY);
+      if (incomplete.length) {
+        const payee = displayPayeeName(pn[t.payee] || t.imported_payee, t.notes, 'Transaction');
+        items.push({
+          id: String(t.id),
+          date: t.date,
+          payee: payee.slice(0, 80),
+          amount: d2(t.amount),
+          category: 'Transfer (review)',
+          account: a.name || '',
+          accountId: a.id,
+          transferIdentity: true,
+          transferReason: incomplete[0].reason || TRANSFER_REASON.IDENTITY_MALFORMED,
+          completeness: projectionCompletenessFromLeaves(incomplete),
+        });
+        continue;
       }
-      const payee = displayPayeeName(pn[t.payee] || t.imported_payee, t.notes, 'Transaction');
-      const info = t.category ? catInfo[t.category] : null;
-      const cat = isSplit ? 'Split' : info ? info.name : t.amount > 0 ? 'Deposit' : 'Uncategorized';
-      items.push({ id: String(t.id), date: t.date, payee: payee.slice(0, 80), amount: d2(t.amount), category: cat, account: a.name || '', accountId: a.id });
+      const reviewable = classified.some((lf) => lf.countsAsSpending || (lf.kind === 'uncat' && lf.amount < 0) || (lf.kind === 'income' && lf.amount > 0));
+      if (!reviewable) continue;
+    } else {
+      const [leaf] = classified;
+      if (leaf && leaf.kind === 'incomplete' && leaf.provenance === PROVENANCE.TRANSFER_IDENTITY) {
+        const payee = displayPayeeName(pn[t.payee] || t.imported_payee, t.notes, 'Transaction');
+        items.push({
+          id: String(t.id),
+          date: t.date,
+          payee: payee.slice(0, 80),
+          amount: d2(t.amount),
+          category: 'Transfer (review)',
+          account: a.name || '',
+          accountId: a.id,
+          transferIdentity: true,
+          transferReason: leaf.reason || TRANSFER_REASON.IDENTITY_MALFORMED,
+          completeness: projectionCompletenessFromLeaves([leaf]),
+        });
+        continue;
+      }
+      if (!leaf || leaf.spendingExcluded) {
+        if (!(leaf && leaf.kind === 'income' && leaf.amount > 0)) continue;
+      }
+      if (leaf.kind === 'transfer' || leaf.kind === 'incomplete') continue;
+      if (leaf.kind === 'mm' || leaf.kind === 'reimb') continue;
     }
+    const payee = displayPayeeName(pn[t.payee] || t.imported_payee, t.notes, 'Transaction');
+    const info = t.category ? catInfo[t.category] : null;
+    const cat = isSplit ? 'Split' : info ? info.name : t.amount > 0 ? 'Deposit' : 'Uncategorized';
+    items.push({ id: String(t.id), date: t.date, payee: payee.slice(0, 80), amount: d2(t.amount), category: cat, account: a.name || '', accountId: a.id });
   }
   items.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   return items;
@@ -2668,7 +2759,20 @@ async function getInsights({ month } = {}) {
       .sort((a, b) => b.current - a.current)
       .slice(0, 6);
 
-    return { month: target.key, largestCharges, topMerchants, uncategorized, recurring, anomalies };
+    const targetMonthLeaves = leaves.filter((e) => inMonth(e));
+    const completeness = projectionCompletenessFromLeaves(
+      targetMonthLeaves.filter((e) => e.kind === 'incomplete' && e.provenance === PROVENANCE.TRANSFER_IDENTITY),
+    );
+
+    return {
+      month: target.key,
+      largestCharges,
+      topMerchants,
+      uncategorized,
+      recurring,
+      anomalies,
+      completeness,
+    };
   });
 }
 
@@ -2829,11 +2933,19 @@ function setReviewDisposition({ id, disposition, until, note } = {}) {
   return { ok: true, id, disposition };
 }
 
-async function getReview({ month } = {}) {
+async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) {
+  // When `classifiedLeaves` is supplied (e.g. from getToday spending), skip a second
+  // on-budget leaf fetch/classification pass for the same month window.
   const m = month || todayYMD().slice(0, 7);
   const start = `${m}-01`;
   const [year, monthNum] = m.split('-').map(Number);
   const end = m === todayYMD().slice(0, 7) ? todayYMD() : monthRange(year, monthNum - 1).end;
+  const classifiedLeavesPromise = preclassifiedLeaves
+    ? Promise.resolve(preclassifiedLeaves)
+    : withApi(async (api) => {
+      const groups = await api.getCategoryGroups();
+      return classifiedOnBudgetLeaves(api, start, end, buildCatInfo(groups));
+    });
   const [txns, insights, recurring, repayments, recon, receipts, classifiedLeaves] = await Promise.all([
     getTransactions({ start, end, collapse: true }),
     getInsights({ month: m }),
@@ -2841,10 +2953,7 @@ async function getReview({ month } = {}) {
     suggestRepayments({}),
     getReconcilePending(),
     Promise.resolve(getReceipts()),
-    withApi(async (api) => {
-      const groups = await api.getCategoryGroups();
-      return classifiedOnBudgetLeaves(api, start, end, buildCatInfo(groups));
-    }),
+    classifiedLeavesPromise,
   ]);
 
   const tasks = [];
@@ -3550,14 +3659,38 @@ async function getToday() {
   const month = financeDate.slice(0, 7);
   const monthEndDate = monthRange(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1).end;
   const asOf = new Date().toISOString();
-  const [accounts, spending, budgets, recurring, goals, income, review, recent] = await Promise.all([
+  const spendingBundle = await withApi(async (api) => {
+    const financeToday = todayYMD();
+    const [financeYear, financeMonth] = financeToday.slice(0, 7).split('-').map(Number);
+    const cur = monthRange(financeYear, financeMonth - 1);
+    const prev = monthRange(financeYear, financeMonth - 2);
+    const curEnd = financeToday;
+    const groups = await api.getCategoryGroups();
+    const catInfo = buildCatInfo(groups);
+    const [currentLeaves, previousLeaves] = await classifiedOnBudgetLeavesForWindows(api, [
+      { start: cur.start, end: curEnd },
+      { start: prev.start, end: prev.end },
+    ], catInfo);
+    const current = summarize(currentLeaves);
+    const previous = summarize(previousLeaves);
+    return {
+      spending: {
+        current,
+        prev: previous,
+        month,
+        completeness: mergeProjectionCompleteness([current.completeness, previous.completeness]),
+      },
+      classifiedLeaves: currentLeaves,
+    };
+  });
+  const spending = spendingBundle.spending;
+  const [accounts, budgets, recurring, goals, income, review, recent] = await Promise.all([
     getAccounts(),
-    getSpending({ month }),
     getBudgets({ month }),
     getRecurring({}),
     getGoals(),
     getIncome({}),
-    getReview({ month }),
+    getReview({ month, classifiedLeaves: spendingBundle.classifiedLeaves }),
     getTransactions({ start: addDays(financeDate, -14), end: financeDate, collapse: true }),
   ]);
   const bills = await getBills({ days: 45, recurring });
@@ -3582,6 +3715,7 @@ async function getToday() {
     budgets,
     recurring,
     goals,
+    spendingCompleteness: spending.current?.completeness,
   });
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',
@@ -3604,8 +3738,8 @@ async function getToday() {
     asOf,
     financeDate,
     revision,
-    complete: safeToSpend.complete,
-    incompleteReasons: safeToSpend.incompleteReasons,
+    complete: safeToSpend.complete && spending.current?.completeness?.complete !== false,
+    incompleteReasons: [...new Set([...safeToSpend.incompleteReasons, ...(spending.current?.completeness?.complete === false ? spending.current.completeness.incompleteReasons : [])])],
     health: getHealth(),
     accounts,
     spending,
@@ -5357,6 +5491,7 @@ async function getMonthlyReport({ month } = {}) {
 }
 
 function buildReportsPayload({ month, monthly, trends, insights, tags, generatedAt = new Date().toISOString() }) {
+  const summaryComplete = monthly.summary?.completeness?.complete !== false;
   const merchants = {};
   for (const t of monthly.transactions || []) {
     if (t.amount >= 0) continue;
@@ -5367,25 +5502,36 @@ function buildReportsPayload({ month, monthly, trends, insights, tags, generated
     merchants[key] = cur;
   }
   const topMerchants = Object.values(merchants).sort((a, b) => b.spend - a.spend).slice(0, 12);
+  const totalSpend = summaryComplete ? (monthly.summary?.totalSpend ?? 0) : null;
   const categories = Object.entries(monthly.summary?.spending || {})
     .map(([name, spend]) => ({
       name,
       spend: round2(Number(spend) || 0),
-      pct: monthly.summary.totalSpend > 0 ? round2(((Number(spend) || 0) / monthly.summary.totalSpend) * 100) : 0,
+      pct: summaryComplete && totalSpend > 0 ? round2(((Number(spend) || 0) / totalSpend) * 100) : null,
     }))
     .sort((a, b) => b.spend - a.spend);
   return {
     generatedAt,
     month,
+    completeness: mergeProjectionCompleteness([
+      monthly.summary?.completeness,
+      trends?.completeness,
+      insights?.completeness,
+    ]),
     saved: [
       { id: 'monthly-review', title: 'Monthly review', subtitle: 'Income, spend, top categories, and review tasks' },
       { id: 'merchant-trends', title: 'Merchant trends', subtitle: 'Top merchants for the selected month' },
       { id: 'tag-events', title: 'Tags and events', subtitle: 'Spend grouped by note tags and trips' },
     ],
     monthlyReview: {
-      income: monthly.summary?.totalIncome || 0,
-      spend: monthly.summary?.totalSpend || 0,
-      net: round2((monthly.summary?.totalIncome || 0) - (monthly.summary?.totalSpend || 0)),
+      income: summaryComplete ? (monthly.summary?.totalIncome || 0) : null,
+      spend: summaryComplete ? (monthly.summary?.totalSpend || 0) : null,
+      knownSpendSubtotal: summaryComplete ? undefined : monthly.summary?.knownSpendSubtotal,
+      knownIncomeSubtotal: summaryComplete ? undefined : monthly.summary?.knownIncomeSubtotal,
+      net: summaryComplete
+        ? round2((monthly.summary?.totalIncome || 0) - (monthly.summary?.totalSpend || 0))
+        : null,
+      completeness: monthly.summary?.completeness,
       transactionCount: monthly.transactions.length,
       largest: insights.largestCharges || [],
       uncategorized: insights.uncategorized || [],

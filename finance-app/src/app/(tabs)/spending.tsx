@@ -89,16 +89,22 @@ export default function Spending() {
   const spendingLoading = useCurrentToday ? today.isLoading : spending.isLoading;
   const spendingError = useCurrentToday ? today.error : spending.error;
   const spendingIsError = useCurrentToday ? today.isError : spending.isError;
+  const spendingComplete = cur?.completeness?.complete !== false;
+  const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
+  const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
+  const netIncome = totalSpend != null && totalIncome != null ? totalIncome - totalSpend : null;
 
   // Bars/navigation span exactly as far back as there's data: trim leading
   // buckets with no spend and no income from the (ascending) trends series.
   const availMonths = useMemo(() => {
     const ms = trends.data?.months ?? [];
     let i = 0;
-    while (i < ms.length && ms[i].spend === 0 && ms[i].income === 0) i++;
+    while (i < ms.length && (ms[i].spend == null || ms[i].spend === 0) && (ms[i].income == null || ms[i].income === 0)) i++;
     const trimmed = ms.slice(i);
-    return trimmed.length ? trimmed : [{ month: curKey, spend: cur?.totalSpend ?? 0, income: cur?.totalIncome ?? 0, net: 0, netWorth: 0 }];
-  }, [trends.data, curKey, cur]);
+    const fallbackSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
+    const fallbackIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
+    return trimmed.length ? trimmed : [{ month: curKey, spend: fallbackSpend, income: fallbackIncome, net: fallbackSpend != null && fallbackIncome != null ? fallbackIncome - fallbackSpend : null, netWorth: 0 }];
+  }, [trends.data, curKey, cur, spendingComplete]);
   const chartMonths = useMemo(() => availMonths.slice(-6), [availMonths]);
 
   const entries = useMemo(
@@ -136,9 +142,7 @@ export default function Spending() {
       { key: 'subscriptions', label: 'Subscriptions', amount: subscriptions, target: 'Subscriptions' },
     ].filter((row) => row.amount > 0.005);
   }, [groupByCategory, spendEntries]);
-  const totalSpend = cur?.totalSpend ?? 0;
-  const totalIncome = cur?.totalIncome ?? 0;
-  const netIncome = totalIncome - totalSpend;
+
   const refundTotal = refundEntries.reduce((sum, [, amt]) => sum + Math.abs(amt), 0);
   const nonSpending = useMemo(
     () => buildNonSpendingMetrics({
@@ -204,8 +208,8 @@ export default function Spending() {
       ) : (
         <>
           <SummaryCard>
-            <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={fmtPos(totalIncome)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Income') })} />
-            <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={fmtPos(totalSpend)} expanded={totalExpanded} onPress={() => { haptics.tap(); setTotalExpanded((v) => !v); }} />
+            <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={totalIncome != null ? fmtPos(totalIncome) : 'Unavailable'} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Income') })} />
+            <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={totalSpend != null ? fmtPos(totalSpend) : 'Unavailable'} expanded={totalExpanded} onPress={() => { haptics.tap(); setTotalExpanded((v) => !v); }} />
             {totalExpanded ? totalSpendRows.map((row, i) => (
               <SummaryRow
                 key={row.key}
@@ -218,7 +222,7 @@ export default function Spending() {
                 onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(row.target, row.key) })}
               />
             )) : null}
-            <SummaryRow icon="minus.circle" label="Net Income" value={`${netIncome < 0 ? '-' : ''}${fmtPos(Math.abs(netIncome))}`} muted last />
+            <SummaryRow icon="minus.circle" label="Net Income" value={netIncome != null ? `${netIncome < 0 ? '-' : ''}${fmtPos(Math.abs(netIncome))}` : 'Unavailable'} muted last />
           </SummaryCard>
 
           <SectionTitle>Your Budget</SectionTitle>
@@ -290,7 +294,7 @@ export default function Spending() {
                     key={cat}
                     category={cat}
                     amount={amt}
-                    pct={totalSpend > 0 ? amt / totalSpend : 0}
+                    pct={totalSpend != null && totalSpend > 0 ? amt / totalSpend : 0}
                     color={categoryColors[i % categoryColors.length]}
                     onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(cat) })}
                   />
@@ -429,8 +433,8 @@ function PeriodChips({ value, onChange }: { value: Period; onChange: (p: Period)
   );
 }
 
-function DualMonthBars({ months, selected, onSelect }: { months: { month: string; spend: number; income: number }[]; selected: string; onSelect: (m: string) => void }) {
-  const max = Math.max(1, ...months.map((m) => Math.max(m.spend, m.income)));
+function DualMonthBars({ months, selected, onSelect }: { months: { month: string; spend: number | null; income: number | null }[]; selected: string; onSelect: (m: string) => void }) {
+  const max = Math.max(1, ...months.map((m) => Math.max(m.spend ?? 0, m.income ?? 0)));
   const barMax = 48;
   return (
     <View style={styles.monthWrap}>
@@ -440,8 +444,8 @@ function DualMonthBars({ months, selected, onSelect }: { months: { month: string
           return (
             <Pressable key={m.month} onPress={() => { haptics.tap(); onSelect(m.month); }} style={[styles.monthCell, on && styles.monthCellOn]}>
               <View style={styles.barStage}>
-                <View style={[styles.incomeBar, { height: Math.max(2, (m.income / max) * barMax) }]} />
-                <View style={[styles.spendBar, { height: Math.max(2, (m.spend / max) * barMax) }]} />
+                <View style={[styles.incomeBar, { height: Math.max(2, ((m.income ?? 0) / max) * barMax) }]} />
+                <View style={[styles.spendBar, { height: Math.max(2, ((m.spend ?? 0) / max) * barMax) }]} />
               </View>
               <Text style={[styles.monthText, on && styles.monthTextOn]}>{monthLabel(m.month).split(' ')[0]}</Text>
             </Pressable>
@@ -483,12 +487,12 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <CardTitle style={styles.section}>{children}</CardTitle>;
 }
 
-function BreakdownCircle({ entries, total }: { entries: [string, number][]; total: number }) {
+function BreakdownCircle({ entries, total }: { entries: [string, number][]; total: number | null }) {
   const size = 118;
   const stroke = 14;
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
-  const pcts = entries.map(([, amount]) => (total > 0 ? Math.max(0.025, amount / total) : 0));
+  const pcts = entries.map(([, amount]) => (total != null && total > 0 ? Math.max(0.025, amount / total) : 0));
   const segments = entries.map(([cat], i) => ({
     cat,
     pct: pcts[i],
@@ -523,7 +527,7 @@ function BreakdownCircle({ entries, total }: { entries: [string, number][]; tota
         </Svg>
         <View style={styles.breakdownRingCenter}>
           <Text style={styles.breakdownCenterLabel}>Spend</Text>
-          <Text style={styles.breakdownCenterValue}>{fmtPos(total).replace('.00', '')}</Text>
+          <Text style={styles.breakdownCenterValue}>{total != null ? fmtPos(total).replace('.00', '') : 'Unavailable'}</Text>
         </View>
       </View>
       <View style={styles.breakdownLegend}>

@@ -158,26 +158,42 @@ export interface MerchantHistory {
   months: MerchantHistoryMonth[];
 }
 
+export interface ProjectionCompleteness {
+  complete: boolean;
+  incompleteReasons: string[];
+  transferIdentityUnresolvedCount: number;
+  transferIdentityReasons: string[];
+}
+
 export interface SpendSummary {
   spending: Record<string, number>;
-  totalSpend: number;
-  totalIncome: number;
+  totalSpend: number | null;
+  totalIncome: number | null;
+  knownSpendSubtotal?: number;
+  knownIncomeSubtotal?: number;
+  completeness: ProjectionCompleteness;
 }
 export interface Spending {
   current: SpendSummary;
   prev: SpendSummary;
   month: string;
+  completeness?: ProjectionCompleteness;
 }
 
 export interface TrendMonth {
   month: string;
   netWorth: number;
-  spend: number;
-  income: number;
-  net: number;
+  spend: number | null;
+  income: number | null;
+  net: number | null;
+  complete?: boolean;
+  knownSpendSubtotal?: number;
+  knownIncomeSubtotal?: number;
+  completeness?: ProjectionCompleteness;
 }
 export interface Trends {
   months: TrendMonth[];
+  completeness?: ProjectionCompleteness;
   scope?: {
     includesClosedAccountHistory: boolean;
     includesManualAssets: boolean;
@@ -318,7 +334,8 @@ export type ReviewTaskKind =
   | 'pending'
   | 'repayment'
   | 'price_change'
-  | 'reconciliation';
+  | 'reconciliation'
+  | 'transfer_identity';
 export type ReviewTaskAction =
   | 'open_transaction'
   | 'categorize'
@@ -353,6 +370,7 @@ export interface ReviewTask {
   person?: string;
   key?: string;
   month?: string;
+  transferReason?: string;
 }
 export interface ReviewInbox {
   generatedAt: string;
@@ -388,6 +406,7 @@ export interface Insights {
   uncategorized: { date: string; payee: string; amount: number }[];
   recurring: { payee: string; category: string; monthsSeen: number; estimated: number }[];
   anomalies: { category: string; current: number; avg: number; deltaPct: number | null }[];
+  completeness?: ProjectionCompleteness;
 }
 
 export type Cadence = 'weekly' | 'biweekly' | 'semimonthly' | 'monthly' | 'bimonthly' | 'quarterly' | 'semiannual' | 'annual';

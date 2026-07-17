@@ -19,10 +19,11 @@
  * Output: clean, labeled, filter-safe lines with EXACT dollar amounts.
  */
 const api = require('@actual-app/api');
-const { addDays, todayYMD } = require('./lib/date-only');
+const { addDays, FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const {
   buildToolCategoryInfo,
-  classifiedLeavesForAccountTransactions,
+  classifiedLeavesForAccounts,
+  incompleteTransferLeaves,
 } = require('./lib/transfer-classification');
 
 const c2 = (cents) => (Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -48,32 +49,25 @@ const REIMB_CAT = /^reimbursement$/i;
   const accounts = await api.getAccounts();
 
   const balances = [];
-  const yLeaves = [];
-  const mLeaves = [];
-
+  const transactionsByAccountId = new Map();
   for (const a of accounts) {
-    const tx = await api.getTransactions(a.id, '2000-01-01', today);
+    transactionsByAccountId.set(a.id, await api.getTransactions(a.id, '2000-01-01', today));
+  }
+  const payeeNameFor = (t) => pn[t.payee] || '';
+  const allLeaves = classifiedLeavesForAccounts(accounts, transactionsByAccountId, catInfo, payeeNameFor);
+  const yLeaves = allLeaves.filter((entry) => entry.date === yesterday);
+  const mLeaves = allLeaves.filter((entry) => entry.date >= monthStart && entry.date <= today);
+  for (const a of accounts) {
+    const tx = transactionsByAccountId.get(a.id) || [];
     let bal = 0;
     for (const t of tx) bal += t.amount;
-    for (const lf of classifiedLeavesForAccountTransactions(tx, catInfo, a, (t) => pn[t.payee] || '')) {
-      const entry = {
-        date: lf.date,
-        payee: lf.payee,
-        acct: a.name,
-        amount: lf.amount,
-        onbudget: lf.onbudget,
-        catName: lf.kind === 'transfer' ? 'Transfer' : lf.catId ? nameOf(lf.catId) : '(uncategorized)',
-        kind: lf.kind,
-      };
-      if (entry.date === yesterday) yLeaves.push(entry);
-      if (entry.date >= monthStart && entry.date <= today) mLeaves.push(entry);
-    }
     balances.push({ name: a.name, offbudget: !!a.offbudget, bal });
   }
 
   const isReal = (e) => e.onbudget && (e.kind === 'spend' || (e.kind === 'uncat' && e.amount < 0));
-  const catKey = (e) => (e.kind === 'uncat' ? 'Uncategorized' : e.catName);
+  const catKey = (e) => (e.kind === 'uncat' ? 'Uncategorized' : (e.kind === 'transfer' ? 'Transfer' : (e.catId ? nameOf(e.catId) : '(uncategorized)')));
 
+  const yShow = yLeaves.filter((e) => e.onbudget);
   const yReal = yLeaves.filter(isReal);
   const yRealCents = -yReal.reduce((s, e) => s + e.amount, 0);
 
@@ -85,21 +79,23 @@ const REIMB_CAT = /^reimbursement$/i;
 
   const mmByName = {};
   for (const e of mLeaves.filter((e) => e.kind === 'mm' || e.kind === 'reimb' || e.kind === 'transfer')) {
-    const k = mmByName[e.catName] || (mmByName[e.catName] = { out: 0, inn: 0, net: 0 });
+    const catName = e.kind === 'transfer' ? 'Transfer' : (e.catId ? nameOf(e.catId) : '(uncategorized)');
+    const k = mmByName[catName] || (mmByName[catName] = { out: 0, inn: 0, net: 0 });
     k.net += e.amount; if (e.amount < 0) k.out += -e.amount; else k.inn += e.amount;
   }
 
   const uncats = mLeaves.filter((e) => e.onbudget && e.kind === 'uncat');
   const largest = [...mReal].filter((e) => e.amount < 0).sort((a, b) => a.amount - b.amount).slice(0, 3);
+  const incomplete = incompleteTransferLeaves(mLeaves);
 
   const out = [];
   out.push(`FINANCE DIGEST (deterministic; numbers are EXACT - format verbatim, do not recompute)`);
-  out.push(`generated=${today} tz=${TZ} yesterday=${yesterday} mtd=${monthStart}..${today}`);
+  out.push(`generated=${today} tz=${FINANCE_TIME_ZONE} yesterday=${yesterday} mtd=${monthStart}..${today}`);
   out.push('');
-  const yShow = yLeaves.filter((e) => e.onbudget);
   out.push(`[YESTERDAY ${yesterday}] real_spend=${money(yRealCents)} txns=${yShow.length}`);
   for (const e of yShow.sort((a, b) => a.amount - b.amount)) {
-    out.push(`- ${e.payee || '(no payee)'} | ${e.acct} | ${money(e.amount)} | ${e.catName}${e.kind !== 'spend' && e.kind !== 'uncat' ? ' [' + e.kind + ']' : ''}`);
+    const catName = catKey(e);
+    out.push(`- ${e.payee || '(no payee)'} | ${accounts.find((a) => a.id === e.accountId)?.name || ''} | ${money(e.amount)} | ${catName}${e.kind !== 'spend' && e.kind !== 'uncat' ? ' [' + e.kind + ']' : ''}`);
   }
   out.push('');
   out.push(`[BALANCES]`);
@@ -117,12 +113,18 @@ const REIMB_CAT = /^reimbursement$/i;
   out.push('');
   out.push(`[UNCATEGORIZED MTD] count=${uncats.length}`);
   for (const e of uncats.sort((a, b) => a.amount - b.amount)) {
-    out.push(`- ${e.date} | ${e.payee || '(no payee)'} | ${e.acct} | ${money(e.amount)}`);
+    out.push(`- ${e.date} | ${e.payee || '(no payee)'} | ${accounts.find((a) => a.id === e.accountId)?.name || ''} | ${money(e.amount)}`);
   }
   out.push('');
   out.push(`[FLAGS] largest real-spend charges MTD`);
-  if (largest.length) for (const e of largest) out.push(`- ${e.date} | ${e.payee || '(no payee)'} | ${money(e.amount)} | ${e.catName}`);
-  else out.push('- none');
+  if (largest.length) {
+    for (const e of largest) out.push(`- ${e.date} | ${e.payee || '(no payee)'} | ${money(e.amount)} | ${catKey(e)}`);
+  } else out.push('- none');
+  if (incomplete.length) {
+    out.push('');
+    const reasons = [...new Set(incomplete.map((leaf) => leaf.transferReason || leaf.reason).filter(Boolean))].sort();
+    out.push(`[INCOMPLETE TRANSFER IDENTITY] count=${incomplete.length} reasons=${reasons.join(',')}`);
+  }
 
   if (process.env.DIGEST_DEBUG) {
     out.push('');
@@ -134,4 +136,5 @@ const REIMB_CAT = /^reimbursement$/i;
 
   console.log(out.join('\n'));
   await api.shutdown();
+  if (process.env.DIGEST_STRICT === '1' && incomplete.length) process.exit(2);
 })().catch((e) => { console.error('DIGEST_ERR', (e && e.stack) || e); process.exit(1); });

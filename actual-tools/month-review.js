@@ -4,7 +4,7 @@
    are summarized (net) rather than line-listed. */
 const api = require('@actual-app/api');
 const { todayYMD } = require('./lib/date-only');
-const { buildToolCategoryInfo, classifiedLeavesForAccountTransactions } = require('./lib/transfer-classification');
+const { buildToolCategoryInfo, classifiedLeavesForAccounts, incompleteTransferLeaves } = require('./lib/transfer-classification');
 const c2 = (c) => (Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (c) => (c < 0 ? '-$' : '$') + c2(c);
 
@@ -26,24 +26,24 @@ const REIMB_CAT = /^reimbursement$/i;
   const pn = {}; for (const p of payees) pn[p.id] = p.name || '';
   const accounts = await api.getAccounts();
   const an = {}; for (const a of accounts) an[a.id] = a.name;
-
-  const rows = [];
+  const transactionsByAccountId = new Map();
   for (const a of accounts) {
-    const tx = await api.getTransactions(a.id, monthStart, today);
-    for (const lf of classifiedLeavesForAccountTransactions(tx, catInfo, a, (t) => pn[t.payee] || '')) {
-      rows.push({
-        date: lf.date,
-        payee: lf.payee || '(no payee)',
-        acct: (an[a.id] || '').replace(/\s*\(.*$/, '').slice(0, 18),
-        amount: lf.amount,
-        catName: lf.kind === 'transfer' ? 'Transfer' : lf.catId ? nameOf(lf.catId) : '(uncategorized)',
-        kind: lf.kind,
-        notes: (lf.notes || '').replace(/\s+/g, ' ').slice(0, 44),
-        onbudget: lf.onbudget,
-        split: !!lf.isLeg,
-      });
-    }
+    transactionsByAccountId.set(a.id, await api.getTransactions(a.id, monthStart, today));
   }
+  const classified = classifiedLeavesForAccounts(accounts, transactionsByAccountId, catInfo, (t) => pn[t.payee] || '');
+  const rows = classified.map((lf) => ({
+    date: lf.date,
+    payee: lf.payee || '(no payee)',
+    acct: (an[lf.accountId] || '').replace(/\s*\(.*$/, '').slice(0, 18),
+    amount: lf.amount,
+    catName: lf.kind === 'transfer' ? 'Transfer' : lf.catId ? nameOf(lf.catId) : '(uncategorized)',
+    kind: lf.kind,
+    notes: (lf.notes || '').replace(/\s+/g, ' ').slice(0, 44),
+    onbudget: lf.onbudget,
+    split: !!lf.isLeg,
+    transferReason: lf.transferReason || lf.reason,
+  }));
+  const incomplete = incompleteTransferLeaves(classified);
 
   const byCat = {};
   for (const r of rows) {
@@ -93,7 +93,16 @@ const REIMB_CAT = /^reimbursement$/i;
       out.push(`  ${cat}: net ${money(net)}  (${byCat[k].length} txn)`);
     }
   }
+  if (incomplete.length) {
+    out.push('');
+    const reasons = [...new Set(incomplete.map((leaf) => leaf.transferReason || leaf.reason).filter(Boolean))].sort();
+    out.push(`### [INCOMPLETE TRANSFER IDENTITY] count=${incomplete.length} reasons=${reasons.join(',')}`);
+    for (const leaf of incomplete.sort((a, b) => String(a.date).localeCompare(String(b.date)))) {
+      out.push(`  ${leaf.date} | ${money(leaf.amount).padStart(11)} | ${leaf.payee || '(no payee)'} | ${an[leaf.accountId] || ''} | ${leaf.transferReason || leaf.reason}`);
+    }
+  }
 
   console.log(out.join('\n'));
   await api.shutdown();
+  if (process.env.DIGEST_STRICT === '1' && incomplete.length) process.exit(2);
 })().catch((e) => { console.error('REVIEW_ERR', (e && e.stack) || e); process.exit(1); });

@@ -17,8 +17,9 @@ export default function CashFlow() {
   const cur = months[months.length - 1];
 
   const labels = months.map((m) => m.month.slice(5));
-  const income = months.map((m) => m.income);
-  const spend = months.map((m) => m.spend);
+  const monthComplete = (m: typeof months[number]) => m.complete !== false && m.income != null && m.spend != null && m.net != null;
+  const income = months.map((m) => (monthComplete(m) && m.income != null ? m.income : 0));
+  const spend = months.map((m) => (monthComplete(m) && m.spend != null ? m.spend : 0));
 
   return (
     <PushScreen testID="cashflow-screen" onRefresh={trends.refetch}>
@@ -31,9 +32,9 @@ export default function CashFlow() {
       ) : (
         <>
           <View style={styles.statsRow}>
-            <StatCard testID="cashflow-money-in" label="Money In" value={cur ? fmtPos(cur.income) : '—'} valueColor={colors.green} />
-            <StatCard testID="cashflow-money-out" label="Money Out" value={cur ? fmtPos(cur.spend) : '—'} valueColor={colors.red} />
-            <StatCard testID="cashflow-net" label="Net" value={cur ? fmtMoney(cur.net) : '—'} valueColor={cur && cur.net >= 0 ? colors.green : colors.red} />
+            <StatCard testID="cashflow-money-in" label="Money In" value={cur && monthComplete(cur) ? fmtPos(cur.income!) : 'Unavailable'} valueColor={colors.green} />
+            <StatCard testID="cashflow-money-out" label="Money Out" value={cur && monthComplete(cur) ? fmtPos(cur.spend!) : 'Unavailable'} valueColor={colors.red} />
+            <StatCard testID="cashflow-net" label="Net" value={cur && monthComplete(cur) ? fmtMoney(cur.net!) : 'Unavailable'} valueColor={cur && monthComplete(cur) && cur.net! >= 0 ? colors.green : colors.red} />
           </View>
 
           <Pressable testID="cashflow-forecast-link" onPress={() => { haptics.tap(); router.push('/forecast' as never); }} style={({ pressed }) => [styles.forecastCard, pressed && { opacity: 0.65 }]}>
@@ -63,9 +64,9 @@ export default function CashFlow() {
             {[...months].reverse().map((m) => (
               <View key={m.month} testID={`cashflow-month-row-${m.month}`} style={styles.row}>
                 <Text style={styles.month}>{monthLabel(m.month)}</Text>
-                <Text style={styles.rowIn}>+{fmtPos(m.income)}</Text>
-                <Text style={styles.rowOut}>-{fmtPos(m.spend)}</Text>
-                <Text style={[styles.rowNet, { color: m.net >= 0 ? colors.green : colors.red }]}>{fmtMoney(m.net)}</Text>
+                <Text style={styles.rowIn}>{monthComplete(m) ? `+${fmtPos(m.income!)}` : 'Unavailable'}</Text>
+                <Text style={styles.rowOut}>{monthComplete(m) ? `-${fmtPos(m.spend!)}` : 'Unavailable'}</Text>
+                <Text style={[styles.rowNet, { color: monthComplete(m) && m.net! >= 0 ? colors.green : colors.red }]}>{monthComplete(m) ? fmtMoney(m.net!) : 'Unavailable'}</Text>
               </View>
             ))}
           </Card>

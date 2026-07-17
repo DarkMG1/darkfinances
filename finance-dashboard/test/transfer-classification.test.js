@@ -44,15 +44,20 @@ function classifyRows(rows) {
 function reconWouldInclude(transaction, accountId, rows) {
   const index = buildTransferIndex(rows);
   const isSplit = transaction.subtransactions && transaction.subtransactions.length;
+  const classified = classifyTransactionLeaves(transaction, catInfo, { accountId, transferIndex: index });
   if (isSplit) {
-    const classified = classifyTransactionLeaves(transaction, catInfo, { accountId, transferIndex: index });
+    const incomplete = classified.filter((lf) => lf.kind === 'incomplete' && lf.provenance === PROVENANCE.TRANSFER_IDENTITY);
+    if (incomplete.length) return 'incomplete';
     return classified.some((lf) => lf.countsAsSpending || (lf.kind === 'uncat' && lf.amount < 0) || (lf.kind === 'income' && lf.amount > 0));
   }
-  const [classified] = classifyTransactionLeaves(transaction, catInfo, { accountId, transferIndex: index });
-  if (!classified) return false;
-  if (classified.kind === 'transfer' || classified.kind === 'incomplete') return false;
-  if (classified.kind === 'mm' || classified.kind === 'reimb') return false;
-  return classified.kind === 'income' ? classified.amount > 0 : true;
+  const [leaf] = classified;
+  if (leaf && leaf.kind === 'incomplete' && leaf.provenance === PROVENANCE.TRANSFER_IDENTITY) return 'incomplete';
+  if (!leaf || leaf.spendingExcluded) {
+    if (!(leaf && leaf.kind === 'income' && leaf.amount > 0)) return false;
+  }
+  if (leaf.kind === 'transfer' || leaf.kind === 'incomplete') return false;
+  if (leaf.kind === 'mm' || leaf.kind === 'reimb') return false;
+  return leaf.kind === 'income' ? leaf.amount > 0 : true;
 }
 
 test('reproduction: category Transfer and transfer payee names do not prove transfer without identity', () => {
@@ -151,15 +156,36 @@ test('split mixed expense and transferred_id-only transfer leg counts spending o
   assert.equal(reconWouldInclude(split, 'checking', rows), true);
 });
 
-test('transfer-only split parent is excluded from recon integration filter', () => {
-  const split = {
+test('malformed transfer pair makes spending summary incomplete', () => {
+  const rows = [
+    { transaction: { id: 'a', amount: -50000, transfer_id: 'b', category: 'food' }, accountId: 'checking' },
+    { transaction: { id: 'b', amount: 25000, transfer_id: 'a' }, accountId: 'savings' },
+  ];
+  const { spendSummaryFromClassifiedLeaves } = require('../lib/domain/projection-completeness');
+  const summary = spendSummaryFromClassifiedLeaves(classifyRows(rows));
+  assert.equal(summary.completeness.complete, false);
+  assert.equal(summary.totalSpend, null);
+});
+
+test('recon surfaces malformed transfer identity and excludes valid transfer-only splits', () => {
+  const malformed = {
+    id: 'bad-a',
+    amount: -50000,
+    transfer_id: 'bad-b',
+    category: 'food',
+  };
+  const xferOnly = {
     id: 'xfer-only-parent',
     is_parent: true,
     amount: -8000,
     subtransactions: [{ id: 'xfer-leg', amount: -8000, transfer_id: 'remote-xfer' }],
   };
-  const rows = [{ transaction: split, accountId: 'checking' }];
-  assert.equal(reconWouldInclude(split, 'checking', rows), false);
+  const rows = [
+    { transaction: malformed, accountId: 'checking' },
+    { transaction: { id: 'bad-b', amount: 25000, transfer_id: 'bad-a' }, accountId: 'savings' },
+  ];
+  assert.equal(reconWouldInclude(malformed, 'checking', rows), 'incomplete');
+  assert.equal(reconWouldInclude(xferOnly, 'checking', [{ transaction: xferOnly, accountId: 'checking' }]), false);
 });
 
 test('malformed self-reference fails closed with stable review fingerprint', () => {
@@ -205,6 +231,8 @@ test('dataModule spending path uses classifier rather than payee heuristics', ()
   const source = fs.readFileSync(path.resolve(__dirname, '../dataModule.js'), 'utf8');
   assert.match(source, /classifyTransactionLeaves/);
   assert.match(source, /transfer_identity/);
+  assert.match(source, /transferReason/);
+  assert.match(source, /getReview\(\{ month, classifiedLeaves: spendingBundle\.classifiedLeaves \}\)/);
   assert.doesNotMatch(source, /TRANSFER_PAYEE\.test\(payeeName\)/);
   assert.doesNotMatch(source, /accountRoleFor/);
 });
