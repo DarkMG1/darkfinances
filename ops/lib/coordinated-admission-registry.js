@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { fsyncPath } = require('./restore-durable-io');
 const { assertNotSymlink } = require('./coordinated-operation-layout');
 
@@ -68,12 +69,29 @@ function readRegistryJson(filePath, label = 'admission registry entry') {
   return parsed;
 }
 
-function writeMarkerAtomic(filePath, payload) {
+function readTerminalMarkerWithRetry(registryRoot, nonce, attempts = 25) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return readTerminalMarker(registryRoot, nonce);
+    } catch (error) {
+      if (!/not valid JSON|invalid terminal state/.test(error.message) || attempt + 1 >= attempts) {
+        throw error;
+      }
+      const until = Date.now() + 2;
+      while (Date.now() < until) {
+        // brief spin while a concurrent claim finishes publishing
+      }
+    }
+  }
+  return null;
+}
+
+function writeCompleteFile(filePath, payload, { exclusive = true } = {}) {
   const text = `${JSON.stringify(payload, null, 2)}\n`;
   if (Buffer.byteLength(text, 'utf8') > REGISTRY_MAX_BYTES) {
     throw new Error('admission registry marker exceeds size limit');
   }
-  const fd = fs.openSync(filePath, 'wx', 0o600);
+  const fd = fs.openSync(filePath, exclusive ? 'wx' : 'w', 0o600);
   try {
     fs.writeFileSync(fd, text, { encoding: 'utf8' });
     fs.fsyncSync(fd);
@@ -81,6 +99,10 @@ function writeMarkerAtomic(filePath, payload) {
     fs.closeSync(fd);
   }
   fsyncPath(path.dirname(filePath), true);
+}
+
+function writeMarkerAtomic(filePath, payload) {
+  writeCompleteFile(filePath, payload, { exclusive: true });
 }
 
 function normalizeTerminalMarker(parsed, label = 'admission terminal marker') {
@@ -158,15 +180,30 @@ function claimTerminal(registryRoot, nonce, terminal, { reasonCode = null } = {}
       ? { reasonCode: String(reasonCode || 'revoked').slice(0, 64) }
       : {}),
   };
+  const partPath = path.join(
+    registryRoot,
+    'terminal',
+    `.${nonce}.${process.pid}.${crypto.randomUUID()}.part`,
+  );
+  writeCompleteFile(partPath, payload, { exclusive: true });
   try {
-    writeMarkerAtomic(filePath, payload);
-    return { created: true, marker: normalizeTerminalMarker(payload) };
+    fs.linkSync(partPath, filePath);
   } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    const existing = readTerminalMarker(registryRoot, nonce);
-    if (!existing) throw new Error('admission terminal marker conflict without readable state');
-    return { created: false, marker: existing };
+    try {
+      fs.unlinkSync(partPath);
+    } catch {
+      // best-effort cleanup
+    }
+    if (error.code === 'EEXIST') {
+      const existing = readTerminalMarkerWithRetry(registryRoot, nonce);
+      if (!existing) throw new Error('admission terminal marker conflict without readable state');
+      return { created: false, marker: existing };
+    }
+    throw error;
   }
+  fs.unlinkSync(partPath);
+  fsyncPath(path.dirname(filePath), true);
+  return { created: true, marker: normalizeTerminalMarker(payload) };
 }
 
 function registerAdmission(layout, { nonce, runId, journalId, issuedAt, expiresAt }) {
