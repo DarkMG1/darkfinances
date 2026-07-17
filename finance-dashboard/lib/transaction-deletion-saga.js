@@ -4,6 +4,10 @@ const crypto = require('crypto');
 const { KnownPreApplyError } = require('./errors');
 const { readJsonFile, writeJsonFile } = require('./json-store');
 
+function runtimeStateStore() {
+  return require('./runtime-state-store');
+}
+
 const RECORD_VERSION = 1;
 const TERMINAL_LIMIT = 100;
 const TERMINAL_PHASES = new Set(['completed']);
@@ -177,7 +181,7 @@ function createTransactionDeletionSaga({
   }
 
   function loadState() {
-    const state = readJsonFile(sagaPath, { schemaVersion: 1, sagas: {} });
+    const state = runtimeStateStore().readRuntimeState('transactionDeletionSagas', { file: sagaPath }).value;
     if (!state
       || state.schemaVersion !== 1
       || !state.sagas
@@ -204,7 +208,7 @@ function createTransactionDeletionSaga({
   }
 
   function writeState(state) {
-    writeJsonFile(sagaPath, pruneState(state));
+    runtimeStateStore().writeRuntimeState('transactionDeletionSagas', pruneState(state), { file: sagaPath });
   }
 
   function writeSaga(saga) {

@@ -3,6 +3,10 @@
 const crypto = require('crypto');
 const { AppError, KnownPreApplyError } = require('./errors');
 const { readJsonFile, writeJsonFile } = require('./json-store');
+
+function runtimeStateStore() {
+  return require('./runtime-state-store');
+}
 const {
   categoryIdentityMatches,
   categoryIntentMatches,
@@ -292,7 +296,7 @@ function createBulkOperationSaga({
   if (!sagaPath) throw new Error('bulk operation saga path required');
 
   function loadState() {
-    const state = readJsonFile(sagaPath, { schemaVersion: 1, sagas: {} });
+    const state = runtimeStateStore().readRuntimeState('bulkOperationSagas', { file: sagaPath }).value;
     if (!state
       || state.schemaVersion !== 1
       || !state.sagas
@@ -319,7 +323,7 @@ function createBulkOperationSaga({
   }
 
   function writeState(state) {
-    writeJsonFile(sagaPath, pruneState(state));
+    runtimeStateStore().writeRuntimeState('bulkOperationSagas', pruneState(state), { file: sagaPath });
   }
 
   function writeSaga(saga) {

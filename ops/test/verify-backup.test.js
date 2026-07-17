@@ -12,14 +12,35 @@ const {
 } = require('../lib/backup-verify');
 
 test('validateSidecar enforces owes-truth schema version', () => {
+  assert.doesNotThrow(() => validateSidecar('owes-truth.json', JSON.stringify({
+    schemaVersion: 1,
+    bySlug: { alex: [] },
+    manifest: { complete: true },
+  })));
   assert.throws(
-    () => validateSidecar('owes-truth.json', JSON.stringify({ schemaVersion: 1, manifest: {} })),
-    /schemaVersion 2/
+    () => validateSidecar('owes-truth.json', JSON.stringify({ schemaVersion: 3, bySlug: {}, manifest: {} })),
+    /newer than supported/,
   );
   assert.doesNotThrow(() => validateSidecar('owes-truth.json', JSON.stringify({
     schemaVersion: 2,
+    bySlug: {},
     manifest: { complete: true },
   })));
+});
+
+test('validateSidecar preserves undeclared owes-truth metadata through v0 migration', () => {
+  const extraMeta = { auditTrail: { run: 7 }, tags: ['backup'] };
+  const legacy = JSON.stringify({
+    bySlug: { alex: [{ event: 'trip', amount: 12 }] },
+    extraMeta,
+  });
+  assert.doesNotThrow(() => validateSidecar('owes-truth.json', legacy));
+  const migrated = JSON.stringify({
+    schemaVersion: 2,
+    bySlug: { alex: [{ event: 'trip', amount: 12 }] },
+    extraMeta,
+  });
+  assert.doesNotThrow(() => validateSidecar('owes-truth.json', migrated));
 });
 
 test('validateSidecar narrowly validates transaction deletion saga state', () => {
@@ -28,7 +49,7 @@ test('validateSidecar narrowly validates transaction deletion saga state', () =>
       'transaction-deletion-sagas.json',
       JSON.stringify({ schemaVersion: 2, sagas: {} }),
     ),
-    /schemaVersion 1/,
+    /newer than supported/,
   );
   assert.throws(
     () => validateSidecar(
@@ -49,7 +70,7 @@ test('validateSidecar narrowly validates bulk operation saga state', () => {
       'bulk-operation-sagas.json',
       JSON.stringify({ schemaVersion: 2, sagas: {} }),
     ),
-    /schemaVersion 1/,
+    /newer than supported/,
   );
   assert.doesNotThrow(() => validateSidecar(
     'bulk-operation-sagas.json',
@@ -63,14 +84,14 @@ test('validateSidecar narrowly validates splitwise mirror resolution state', () 
       'splitwise-mirror-resolutions.json',
       JSON.stringify({ schemaVersion: 2, resolutions: [] }),
     ),
-    /schemaVersion 1/,
+    /newer than supported/,
   );
   assert.throws(
     () => validateSidecar(
       'splitwise-mirror-resolutions.json',
       JSON.stringify({ schemaVersion: 1 }),
     ),
-    /resolutions array/,
+    /resolutions must be an array/,
   );
   assert.doesNotThrow(() => validateSidecar(
     'splitwise-mirror-resolutions.json',
@@ -84,7 +105,7 @@ test('validateSidecar narrowly validates repayment confirmation saga state', () 
       'repayment-confirmation-sagas.json',
       JSON.stringify({ schemaVersion: 2, sagas: {} }),
     ),
-    /schemaVersion 1/,
+    /newer than supported/,
   );
   assert.doesNotThrow(() => validateSidecar(
     'repayment-confirmation-sagas.json',
@@ -117,26 +138,22 @@ test('validateReceiptReferences supports live and legacy metadata shapes', () =>
 });
 
 test('validateSidecar accepts live deletion-reference store shapes', () => {
-  assert.doesNotThrow(() => validateSidecar(
-    'receipts.json',
-    JSON.stringify({ schemaVersion: 1, byTxn: { txn: [] }, unknown: true }),
-  ));
-  assert.doesNotThrow(() => validateSidecar(
-    'reimb-links.json',
-    JSON.stringify({ schemaVersion: 1, links: [], unknown: true }),
-  ));
-  assert.doesNotThrow(() => validateSidecar(
-    'reimb-suggest.json',
-    JSON.stringify({ schemaVersion: 1, confirmed: {}, dismissed: [], unknown: true }),
-  ));
-  assert.doesNotThrow(() => validateSidecar(
-    'reconciliation.json',
-    JSON.stringify({ schemaVersion: 1, enabled: false, months: {}, unknown: true }),
-  ));
-  assert.doesNotThrow(() => validateSidecar(
-    'phantom-seen.json',
-    JSON.stringify({ schemaVersion: 1, seen: {}, unknown: true }),
-  ));
+  for (const [file, payload] of [
+    ['receipts.json', { schemaVersion: 1, byTxn: { txn: [] }, unknown: true }],
+    ['reimb-links.json', { schemaVersion: 1, links: [], unknown: true }],
+    ['reimb-suggest.json', { schemaVersion: 1, confirmed: {}, dismissed: [], unknown: true }],
+  ]) {
+    assert.doesNotThrow(() => validateSidecar(file, JSON.stringify(payload)));
+  }
+  for (const [file, payload] of [
+    ['reconciliation.json', { schemaVersion: 1, enabled: false, months: {}, unknown: true }],
+    ['phantom-seen.json', { schemaVersion: 1, seen: {}, unknown: true }],
+  ]) {
+    assert.throws(
+      () => validateSidecar(file, JSON.stringify(payload)),
+      /rejects unknown top-level field|dropped preserved/,
+    );
+  }
 });
 
 test('verify-backup accepts archives with embedded manifest and checksums', (t) => {

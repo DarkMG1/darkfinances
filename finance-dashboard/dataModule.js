@@ -25,7 +25,8 @@ const {
   monthRange: calendarMonthRange,
   todayYMD,
 } = require('./lib/date-only');
-const { readJsonFile, writeJsonFile } = require('./lib/json-store');
+const { readJsonFile, writeJsonFile, JsonStoreError } = require('./lib/json-store');
+const { readRuntimeStateByPath, writeRuntimeStateByPath, RuntimeStateError } = require('./lib/runtime-state-store');
 const {
   REFERENCE_STEPS: TRANSACTION_DELETION_REFERENCE_STEPS,
   rewriteTransactionDeletionReferences,
@@ -141,8 +142,25 @@ const TRANSACTION_DELETION_SAGAS_PATH = statePath('transactionDeletionSagas');
 const REPAYMENT_CONFIRMATION_SAGAS_PATH = statePath('repaymentConfirmationSagas');
 const BULK_OPERATION_SAGAS_PATH = statePath('bulkOperationSagas');
 const SPLITWISE_MIRROR_RESOLUTIONS_PATH = statePath('splitwiseMirrorResolutions');
-const readJsonSafe = (p, fallback, validate) => readJsonFile(p, fallback, validate);
-const writeJsonSafe = (p, obj) => writeJsonFile(p, obj);
+const readJsonSafe = (p, fallback, validate) => {
+  try {
+    const managed = readRuntimeStateByPath(p, { fallback, validate });
+    if (managed.meta.source !== 'unmanaged') return managed.value;
+    return readJsonFile(p, fallback, validate);
+  } catch (cause) {
+    if (cause instanceof RuntimeStateError) {
+      if (cause.code === 'RUNTIME_STATE_INVALID_SHAPE' || cause.code === 'RUNTIME_STATE_CORRUPT') {
+        throw new JsonStoreError(cause.message, {
+          code: cause.code === 'RUNTIME_STATE_CORRUPT' ? 'JSON_CORRUPT' : 'JSON_INVALID_SHAPE',
+          file: cause.file,
+          cause,
+        });
+      }
+    }
+    throw cause;
+  }
+};
+const writeJsonSafe = (p, obj) => writeRuntimeStateByPath(p, obj);
 
 const config = {
   dataDir: process.env.ACTUAL_DATA_DIR || '/tmp/actual-dashboard-cache',
@@ -880,7 +898,7 @@ async function getTrends({ months = 12, endMonth } = {}) {
   return withApi(async (api) => {
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
-    const accountOverrides = readJsonSafe(ACCOUNT_OVERRIDES_PATH, {});
+    const accountOverrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
     const accounts = (await api.getAccounts()).filter((account) => !accountOverrides[account.id]?.hidden);
     const [financeYear, financeMonth] = String(endMonth || todayYMD().slice(0, 7)).split('-').map(Number);
 
@@ -2511,10 +2529,7 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
 // Review inbox — one prioritized daily queue for the app home screen.
 // ---------------------------------------------------------------------------
 function readReviewState() {
-  const state = readJsonSafe(REVIEW_STATE_PATH, { schemaVersion: 1, dispositions: {} });
-  return state && state.schemaVersion === 1 && state.dispositions && typeof state.dispositions === 'object'
-    ? state
-    : { schemaVersion: 1, dispositions: {} };
+  return readRuntimeStateByPath(REVIEW_STATE_PATH).value;
 }
 
 function setReviewDisposition({ id, disposition, until, note } = {}) {

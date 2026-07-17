@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+const { validateBackupSidecar } = require('../../finance-dashboard/lib/runtime-state-store');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const STATE_SCHEMA_VERSION = 1;
@@ -89,80 +90,7 @@ function receiptRecords(receipts) {
 
 function validateSidecar(name, text) {
   const data = parseJson(name, text);
-  switch (name) {
-    case 'goals.json':
-    case 'events.json':
-    case 'rules.json':
-    case 'passkey-credentials.json':
-    case 'bills-paid.json':
-    case 'recurring-overrides.json':
-    case 'manual-assets.json':
-    case 'investment-holdings.json':
-      assertArray(name, data);
-      break;
-    case 'receipts.json':
-      receiptRecords(data);
-      break;
-    case 'reimb-links.json':
-      assertObject(name, data);
-      assertArray(`${name} links`, data.links);
-      break;
-    case 'reimb-suggest.json':
-      assertObject(name, data);
-      assertObject(`${name} confirmed`, data.confirmed);
-      assertArray(`${name} dismissed`, data.dismissed);
-      break;
-    case 'phantom-log.json':
-      assertObject(name, data);
-      assertArray(`${name} deleted`, data.deleted);
-      break;
-    case 'phantom-seen.json':
-      assertObject(name, data);
-      assertObject(`${name} seen`, data.seen);
-      break;
-    case 'reconciliation.json':
-      assertObject(name, data);
-      assertObject(`${name} months`, data.months);
-      break;
-    case 'transaction-deletion-sagas.json':
-      assertObject(name, data);
-      if (data.schemaVersion !== 1) throw new Error(`${name} must declare schemaVersion 1`);
-      assertObject(`${name} sagas`, data.sagas);
-      break;
-    case 'bulk-operation-sagas.json':
-      assertObject(name, data);
-      if (data.schemaVersion !== 1) throw new Error(`${name} must declare schemaVersion 1`);
-      assertObject(`${name} sagas`, data.sagas);
-      break;
-    case 'splitwise-mirror-resolutions.json':
-      assertObject(name, data);
-      if (data.schemaVersion !== 1) throw new Error(`${name} must declare schemaVersion 1`);
-      if (!Array.isArray(data.resolutions)) throw new Error(`${name} must include resolutions array`);
-      break;
-    case 'repayment-confirmation-sagas.json':
-      assertObject(name, data);
-      if (data.schemaVersion !== 1) throw new Error(`${name} must declare schemaVersion 1`);
-      assertObject(`${name} sagas`, data.sagas);
-      break;
-    case 'owes-truth.json':
-    case 'venmo-truth.json':
-      assertObject(name, data);
-      if (data.schemaVersion !== 2) throw new Error(`${name} must declare schemaVersion 2`);
-      if (!data.manifest || typeof data.manifest !== 'object') {
-        throw new Error(`${name} must include a manifest object`);
-      }
-      break;
-    case 'personal-config.json':
-    case 'owes-config.json':
-    case 'budget-settings.json':
-    case 'debt-planner.json':
-    case 'account-overrides.json':
-      assertObject(name, data);
-      break;
-    default:
-      parseJson(name, text);
-  }
-  return data;
+  return validateBackupSidecar(name, data);
 }
 
 function assertArchivedFile(root, relativePath, label) {
@@ -310,7 +238,8 @@ function verifyArchive({ archivePath, dashboardDir = null, requireCommit = false
 
     const receiptsPath = path.join(tempDir, 'receipts.json');
     if (fs.existsSync(receiptsPath)) {
-      validateReceiptReferences(parseJson('receipts.json', fs.readFileSync(receiptsPath, 'utf8')), tempDir);
+      const receipts = validateSidecar('receipts.json', fs.readFileSync(receiptsPath, 'utf8'));
+      validateReceiptReferences(receipts, tempDir);
     }
 
     if (dashboardDir) {

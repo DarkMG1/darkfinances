@@ -75,8 +75,9 @@ test('STATE_REGISTRY runtime files and JSON-store artifacts are ignored', (t) =>
   }
 });
 
-test('passkey credential artifacts are ignored pending PR-15 registry reconciliation', (t) => {
+test('passkey credential artifacts are ignored with registry durability contract', (t) => {
   const repo = temporaryGitRepo(t);
+  assert.equal(STATE_REGISTRY.passkeyCredentials.durability, 'passkey-server-writer');
 
   for (const [artifact, pathname] of Object.entries(passkeyCredentialArtifacts())) {
     assertIgnoreStatus(repo, pathname, true, `passkeyCredentials ${artifact}`);

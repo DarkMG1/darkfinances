@@ -9,7 +9,7 @@ node_modules/
 !*.env.example
 
 # Passkey credential store uses server.js's distinct atomic writer (no .last-good).
-# PR-15 follow-up: reconcile this store with STATE_REGISTRY's durability model.
+# passkey-credentials.json uses passkey-server-writer durability (see RUNTIME_STATE.md).
 passkey-credentials.json
 passkey-credentials.json.*.*.tmp
 

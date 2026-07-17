@@ -1,6 +1,7 @@
 const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'dataModule.js',
   'demoData.js',
+  'lib/account-overrides-schema.js',
   'lib/account-overrides.js',
   'lib/actual-coordinator.js',
   'lib/date-only.js',
@@ -26,6 +27,10 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/release-schema.js',
   'lib/safe-to-spend.js',
   'lib/serial-queue.js',
+  'lib/runtime-state-field-policy.js',
+  'lib/runtime-state-schemas.js',
+  'lib/runtime-state-semantics.js',
+  'lib/runtime-state-store.js',
   'lib/state-registry.js',
   'lib/transaction-deletion-references.js',
   'lib/transaction-deletion-saga.js',

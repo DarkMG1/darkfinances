@@ -301,6 +301,10 @@ class OperationJournal {
   }
 
   read() {
+    const { readRuntimeState, registryNameForPath } = require('./runtime-state-store');
+    if (registryNameForPath(this.file) === 'operationJournal') {
+      return readRuntimeState('operationJournal', { file: this.file }).value;
+    }
     return this.readState(
       this.file,
       { schemaVersion: OUTER_SCHEMA_VERSION, operations: {} },
@@ -564,6 +568,11 @@ class OperationJournal {
         .sort(([aKey, a], [bKey, b]) => terminalTime(a) - terminalTime(b) || compareStrings(aKey, bKey))
         .slice(0, terminal.length - MAX_TERMINAL_ENTRIES)
         .forEach(([key]) => delete state.operations[key]);
+    }
+    const { writeRuntimeState, registryNameForPath } = require('./runtime-state-store');
+    if (registryNameForPath(this.file) === 'operationJournal') {
+      writeRuntimeState('operationJournal', state, { file: this.file });
+      return;
     }
     this.writeState(this.file, state);
   }

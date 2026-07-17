@@ -3,6 +3,10 @@
 const crypto = require('crypto');
 const { KnownPreApplyError } = require('./errors');
 const { readJsonFile, writeJsonFile } = require('./json-store');
+
+function runtimeStateStore() {
+  return require('./runtime-state-store');
+}
 const {
   applyAllocationLink,
   applyConfirmationRecord,
@@ -152,7 +156,7 @@ function createRepaymentConfirmationSaga({
   if (!sagaPath) throw new Error('repayment confirmation saga path required');
 
   function loadState() {
-    const state = readJsonFile(sagaPath, { schemaVersion: 1, sagas: {} });
+    const state = runtimeStateStore().readRuntimeState('repaymentConfirmationSagas', { file: sagaPath }).value;
     if (!state
       || state.schemaVersion !== 1
       || !state.sagas
@@ -179,7 +183,7 @@ function createRepaymentConfirmationSaga({
   }
 
   function writeState(state) {
-    writeJsonFile(sagaPath, pruneState(state));
+    runtimeStateStore().writeRuntimeState('repaymentConfirmationSagas', pruneState(state), { file: sagaPath });
   }
 
   function writeSaga(saga) {
