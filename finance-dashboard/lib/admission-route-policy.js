@@ -116,6 +116,9 @@ function classifyReadRoute(req) {
   if (method === 'GET' && path === '/report.csv') {
     return { lane: 'read', endpoint, policy: 'actual-direct', weight: 2, cacheKey: null };
   }
+  if (method === 'GET' && path === '/reimbursement-export') {
+    return { lane: 'read', endpoint, policy: 'actual-direct', weight: 2, cacheKey: null };
+  }
   if (method === 'GET' && (path === '/rules' || path === '/manual-assets' || path === '/investments')) {
     return { lane: 'none', endpoint, policy: 'local', weight: 0, cacheKey: null };
   }

@@ -710,6 +710,37 @@ export interface ReimbursementLedger {
   months: { month: string; spend: number }[];
 }
 
+export interface ReimbursementExportLink {
+  linkKey: string;
+  inflowId: string | null;
+  expenseId: string | null;
+  person: string | null;
+  allocationCents: number | null;
+  allocationTrusted: boolean;
+  allocationAmbiguous: boolean;
+  allocationReason: string;
+  linkVersion: number;
+  inflowOrphan: boolean;
+  expenseOrphan: boolean;
+}
+
+export interface ReimbursementExport {
+  schemaVersion: number;
+  allocationPolicyVersion: string;
+  generatedAt: string;
+  financeTimeZone: string;
+  window: { from: string | null; to: string | null };
+  completeness: { status: 'complete' | 'incomplete'; reasons: Record<string, unknown>[] };
+  totals: {
+    trustedAllocationCents: number | null;
+    linkCount: number;
+    trustedLinkCount: number;
+    ambiguousLinkCount: number;
+    authoritative: boolean;
+  };
+  links: ReimbursementExportLink[];
+}
+
 export interface Receipt {
   id: string;
   txnId: string;

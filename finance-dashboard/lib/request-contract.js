@@ -375,6 +375,7 @@ const VERSIONED_READ_ROUTE_PATTERNS = [
   /^\/reimbursement$/i,
   /^\/review$/i,
   /^\/reimbursement-ledger$/i,
+  /^\/reimbursement-export$/i,
   /^\/insights$/i,
   /^\/merchant-history$/i,
   /^\/categories$/i,

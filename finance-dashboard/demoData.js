@@ -20,6 +20,7 @@ const {
   nextOccurrenceAfter,
   renewalWindow,
 } = require('./lib/recurrence');
+const { projectAllocationLedger } = require('./lib/reimbursement-export-ledger');
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const anchorDate = () => (process.env.DEMO_FINANCE_NOW ? new Date(process.env.DEMO_FINANCE_NOW) : new Date());
@@ -693,7 +694,32 @@ function repaymentSuggestions() {
   const suggestions = demoState.dismissedSuggestions.has('demo-sugg-alex') ? [] : [{ id: 'demo-sugg-alex', inflow, person: 'alex', owed: 142.5, allocations: [{ expense, amount: 112.5 }], matched: 112.5, remainder: 30, kind: 'over', score: 93, reason: 'Incoming Venmo looks like Alex paying back shared trip expenses.', createdAt: new Date().toISOString() }];
   return { suggestions, count: suggestions.length, generatedAt: new Date().toISOString(), range: { from: ymd(daysAgo(60)), to: financeAnchor() } };
 }
-function receipts(txnId) { return { receipts: demoState.receipts.filter((r) => !txnId || r.txnId === txnId).map((r) => ({ ...r })) }; }
+
+function receipts(txnId) {
+  return { receipts: demoState.receipts.filter((r) => !txnId || r.txnId === txnId).map((r) => ({ ...r })) };
+}
+
+function reimbursementExport() {
+  const links = [{
+    linkKey: 'tx-repay-demo:tx-expense-demo',
+    inflow: { id: 'tx-repay-demo', date: ymd(daysAgo(4)), payee: 'Venmo Alex', amount: 142.5, accountId: 'acc-checking', account: 'Checking' },
+    expense: { id: 'tx-expense-demo', date: ymd(daysAgo(20)), payee: 'Tahoe cabin share', amount: -112.5, accountId: 'acc-credit', account: 'Credit Card' },
+    allocationCents: 11250,
+    amount: 112.5,
+    person: 'alex',
+    version: 1,
+  }];
+  return projectAllocationLedger({
+    links,
+    liveById: {
+      'tx-repay-demo': { id: 'tx-repay-demo', date: links[0].inflow.date, payee: 'Venmo Alex', amountCents: 14250, accountId: 'acc-checking', accountName: 'Checking' },
+      'tx-expense-demo': { id: 'tx-expense-demo', date: links[0].expense.date, payee: 'Tahoe cabin share', amountCents: -11250, accountId: 'acc-credit', accountName: 'Credit Card' },
+    },
+    activeSagas: [],
+    provenance: { actualGeneration: 0, release: null, linksSidecarDigest: 'demo' },
+  });
+}
+
 function reimbLinks(id) {
   const links = demoState.links.filter((l) => !id || l.inflow.id === id || l.expense.id === id);
   return {
@@ -778,7 +804,7 @@ function deleteReceipt(id) { demoState.receipts = demoState.receipts.filter((r) 
 module.exports = {
   accounts, transactions, spending, trends, budgets, reimbursement, insights, categories, recurring, bills, income,
   goals: currentGoals, tags, manualAssets, investments, forecast, reports, review, today, events, rules, merchantHistory,
-  transactionDetail, reconciliation, reconcilePending, repaymentSuggestions, receipts, reimbLinks,
+  transactionDetail, reconciliation, reconcilePending, repaymentSuggestions, receipts, reimbLinks, reimbursementExport,
   saveGoal, deleteGoal, saveManualAsset, deleteManualAsset, saveRule, deleteRule, saveEvent, deleteEvent,
   createTransaction, updateTransaction, splitTransaction, unsplitTransaction, deleteTransaction,
   addReimbLink, deleteReimbLink, confirmRepayment, dismissRepayment, setReconcileItem, setReconcileMonth,

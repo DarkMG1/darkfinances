@@ -33,6 +33,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/receipt-limits.js',
   'lib/recurrence.js',
   'lib/reimbursement-allocation.js',
+  'lib/reimbursement-export-ledger.js',
   'lib/reimbursement-link-admission.js',
   'lib/reimbursement-link-saga.js',
   'lib/release-files.js',

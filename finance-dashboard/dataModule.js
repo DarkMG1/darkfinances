@@ -68,12 +68,24 @@ const {
 const {
   buildLegacyMigrationReport,
   classifyStoredLink,
+  endpointAdmissionFingerprint,
   enrichEndpointForRead,
   summarizeEndpointCapacity,
   sumTrustedAllocationsForExpense,
   sumTrustedAllocationsForInflow,
   trustedLinkedCents,
 } = require('./lib/reimbursement-allocation');
+const {
+  ExportSourceChangedError,
+  MAX_SNAPSHOT_ATTEMPTS,
+  ReimbursementExportIncompleteError,
+  buildTrustedAllocationIndex,
+  digestStableJson,
+  projectAllocationLedger,
+  redactExportPayload,
+  sortLinks,
+} = require('./lib/reimbursement-export-ledger');
+const { readReleaseIdentity } = require('./lib/release-identity');
 const {
   BulkOperationInProgressError,
   createBulkOperationSaga,
@@ -1723,6 +1735,88 @@ function exportReimbursementLegacyReport() {
   return buildLegacyMigrationReport(readReimbLinks().links);
 }
 
+async function resolveReimbursementExportLive(api, links) {
+  const payees = await api.getPayees();
+  const pn = Object.fromEntries(payees.map((p) => [p.id, p.name || '']));
+  const ids = new Set();
+  for (const link of links) {
+    if (link?.inflow?.id != null) ids.add(String(link.inflow.id));
+    if (link?.expense?.id != null) ids.add(String(link.expense.id));
+  }
+  const liveById = {};
+  let scanIncomplete = false;
+  for (const id of [...ids].sort()) {
+    try {
+      const live = await locateTransactionLive(api, id, {}, pn);
+      if (live) liveById[id] = live;
+    } catch (_) {
+      scanIncomplete = true;
+    }
+  }
+  return { liveById, scanIncomplete };
+}
+
+async function buildReimbursementExport({
+  from,
+  to,
+  strict = false,
+  releaseManifestPath,
+  operationBinding = null,
+} = {}) {
+  const coordinator = getActualCoordinator();
+  const manifestPath = releaseManifestPath
+    || process.env.RELEASE_MANIFEST_PATH
+    || path.join(__dirname, 'release-manifest.json');
+  const release = readReleaseIdentity(manifestPath);
+
+  for (let attempt = 1; attempt <= MAX_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    const captureGeneration = coordinator.generation;
+    const store = readReimbLinks();
+    const links = sortLinks(store.links);
+    const linksSidecarDigest = digestStableJson({ schemaVersion: store.schemaVersion || 2, links });
+    const activeSagas = getReimbursementLinkSagaManager().listNonterminalSagas();
+
+    const payload = await withApi(async (api) => {
+      if (coordinator.generation !== captureGeneration) {
+        throw new ExportSourceChangedError();
+      }
+      const { liveById, scanIncomplete } = await resolveReimbursementExportLive(api, links);
+      if (coordinator.generation !== captureGeneration) {
+        throw new ExportSourceChangedError();
+      }
+      return projectAllocationLedger({
+        links,
+        liveById,
+        activeSagas,
+        window: { from: from || null, to: to || null },
+        generatedAt: new Date().toISOString(),
+        scanIncomplete,
+        provenance: {
+          actualGeneration: captureGeneration,
+          release,
+          linksSidecarDigest,
+          inputDigests: {
+            linksSidecar: linksSidecarDigest,
+            liveEndpoints: digestStableJson(Object.keys(liveById).sort().map((id) => ({
+              id,
+              fingerprint: endpointAdmissionFingerprint(liveById[id]),
+            }))),
+          },
+          operationBinding,
+        },
+      });
+    }, { skipRecover: true });
+
+    if (coordinator.generation !== captureGeneration) continue;
+    const redacted = redactExportPayload(payload);
+    if (strict && redacted.completeness.status !== 'complete') {
+      throw new ReimbursementExportIncompleteError('strict export refused incomplete reimbursement allocation ledger', redacted);
+    }
+    return redacted;
+  }
+  throw new ExportSourceChangedError();
+}
+
 // ---------------------------------------------------------------------------
 // Repayment auto-matcher — suggest which incoming payments settle which fronted
 // (Reimbursement-category) expenses, per person. You confirm; confirming writes
@@ -2343,22 +2437,18 @@ async function getReimbursementLedger({ month } = {}) {
 
     // Payback allocations from the links store (amount-allocated / partial aware).
     const { links } = readReimbLinks();
+    const { byExpense: allocByExpCents, paymentsByExpense } = buildTrustedAllocationIndex(links);
     const allocByExp = {};
     const paymentsByExp = {};
-    for (const l of links) {
-      if (!l.expense) continue;
-      const eid = l.expense.id;
-      const trusted = trustedLinkedCents(l);
-      if (trusted <= 0) continue;
-      const amt = fromCents(trusted);
-      allocByExp[eid] = round2((allocByExp[eid] || 0) + amt);
-      if (l.inflow) (paymentsByExp[eid] = paymentsByExp[eid] || []).push({
-        id: String(l.inflow.id),
-        date: l.inflow.date || null,
-        payee: l.inflow.payee || 'Payment',
-        amount: amt,
+    for (const [expenseId, cents] of Object.entries(allocByExpCents)) {
+      allocByExp[expenseId] = fromCents(cents);
+      paymentsByExp[expenseId] = (paymentsByExpense[expenseId] || []).map((payment) => ({
+        id: payment.id,
+        date: payment.date,
+        payee: payment.payee,
+        amount: fromCents(payment.amountCents),
         allocationTrusted: true,
-      });
+      }));
     }
 
     const chargeStatus = (fronted, allocated, remaining) =>
@@ -5587,6 +5677,7 @@ module.exports = {
   deleteReimbLink,
   prepareReimbLinkAdmission,
   exportReimbursementLegacyReport,
+  buildReimbursementExport,
   getReview,
   setReviewDisposition,
   suggestRepayments,
