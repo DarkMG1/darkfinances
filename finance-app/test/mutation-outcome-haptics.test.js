@@ -643,6 +643,14 @@ test('profile purge clears scoped haptic sessions', () => {
     'utf8',
   );
   assert.match(source, /mutationOutcomeHaptics\.purgeScope\(operationScope\)/);
+  assert.ok(
+    source.indexOf('purgeOtaProfileState()')
+      < source.indexOf('mutationOutcomeHaptics.purgeScope(operationScope)'),
+  );
+  assert.ok(
+    source.indexOf('mutationOutcomeHaptics.purgeScope(operationScope)')
+      < source.indexOf('abortFinanceRequests()'),
+  );
 });
 
 function walk(dir) {
