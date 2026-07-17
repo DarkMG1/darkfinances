@@ -370,7 +370,6 @@ function verifyExtractedTree({
 
   const manifestPaths = validateManifestFiles(manifest);
   assertRequiredRuntimeStores(inventory, manifestPaths);
-  assertManifestProvenanceFields(manifest, bundleRoot);
   assertClosedWorldTree(bundleRoot, manifestPaths);
 
   const validateBackupSidecar = loadValidateBackupSidecar(toolingRoot);
@@ -437,6 +436,8 @@ function verifyExtractedTree({
       }
     }
   }
+
+  assertManifestProvenanceFields(manifest, bundleRoot, inventory);
 
   if (readOnly && !trustedPreExtracted) {
     // Archive verification always extracts to a private temp directory first.
@@ -518,6 +519,8 @@ function stageRuntimeFromBundle({
 module.exports = {
   assertSafeRelativePath,
   assertNoUnicodeNormalizationCollisions,
+  assertTarMembersSafe,
+  listTarMembers,
   redactErrorMessage,
   verifyBackupBundleArchive,
   verifyExtractedTree,

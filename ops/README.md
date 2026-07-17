@@ -313,27 +313,31 @@ install -m 700 ops/bin/restore-dashboard-runtime.sh \
   "$HOME/.local/bin/restore-dashboard-runtime.sh"
 ```
 
-Preview first:
+Preview first (performs every PR-16 archive check, generation-binding validation, and preflight
+without writing destination bytes):
 
 ```bash
-"$HOME/.local/bin/restore-dashboard-runtime.sh" /path/to/dashboard-runtime-<timestamp>.tgz
+RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
+  "$HOME/.local/bin/restore-dashboard-runtime.sh" \
+  /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
 ```
 
-Dry run prints archive contents and exits without writing. To restore:
+Dry run exits `2` on success. Live swap requires PR-18 writer quiescence evidence plus `CONFIRM=1`:
 
 ```bash
-systemctl --user stop finance-dashboard.service
-CONFIRM=1 "$HOME/.local/bin/restore-dashboard-runtime.sh" \
-  /path/to/dashboard-runtime-<timestamp>.tgz
-systemctl --user start finance-dashboard.service
+RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
+  CONFIRM=1 "$HOME/.local/bin/restore-dashboard-runtime.sh" \
+  /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
 ```
 
 The helper:
 
-- Refuses to restore while the dashboard service is active.
-- Rejects absolute paths and path traversal in the archive.
-- Creates a fresh pre-restore backup.
-- Restores private modes on JSON and receipt files.
+- Accepts only PR-16 verified backup bundles (sidecar manifest, checksum, embedded manifest, closed-world inventory).
+- Validates generation binding for active operation-journal entries and saga stores before swap.
+- Builds a complete replacement tree in private staging; destination-only stale files are removed.
+- Refuses unknown destination files outside the documented narrow exclusions.
+- Performs same-filesystem staged rename/swap with rollback capture and a resumable restore journal.
+- Refuses restore without a PR-18 quiescence admission token (this script does not stop/start services).
 
 Afterward, verify `/api/v1/ping`, browser passkey login, the app, receipts, reimbursements, and
 reconciliation state.
