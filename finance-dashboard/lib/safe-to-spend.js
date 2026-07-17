@@ -10,6 +10,7 @@ const SAFE_TO_SPEND_REASON = Object.freeze({
   budgetTargetsMissing: 'budget_targets_missing',
   budgetTargetCoveragePartial: 'budget_target_coverage_partial',
   targetlessCategorySpending: 'targetless_category_spending',
+  billRecurrenceUnresolved: 'bill_recurrence_unresolved',
   nonBillRecurrenceUnresolved: 'non_bill_recurrence_unresolved',
   goalCommitmentUnknown: 'goal_commitment_unknown',
   rolloverTreatmentUnknown: 'rollover_treatment_unknown',
@@ -23,6 +24,7 @@ const SAFE_TO_SPEND_REASON_ORDER = Object.freeze([
   SAFE_TO_SPEND_REASON.budgetTargetsMissing,
   SAFE_TO_SPEND_REASON.budgetTargetCoveragePartial,
   SAFE_TO_SPEND_REASON.targetlessCategorySpending,
+  SAFE_TO_SPEND_REASON.billRecurrenceUnresolved,
   SAFE_TO_SPEND_REASON.nonBillRecurrenceUnresolved,
   SAFE_TO_SPEND_REASON.goalCommitmentUnknown,
   SAFE_TO_SPEND_REASON.rolloverTreatmentUnknown,
@@ -65,6 +67,10 @@ function safeToSpendIncompleteReasons({
   }
 
   const recurrenceItems = [...(recurring.items || []), ...(recurring.hiddenItems || [])];
+  add(
+    SAFE_TO_SPEND_REASON.billRecurrenceUnresolved,
+    recurrenceItems.some((item) => item.status === 'active' && item.isBill === true && item.projectionUncertain === true),
+  );
   add(
     SAFE_TO_SPEND_REASON.nonBillRecurrenceUnresolved,
     recurrenceItems.some((item) => item.status === 'active' && item.isBill !== true),

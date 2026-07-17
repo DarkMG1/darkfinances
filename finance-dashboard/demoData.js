@@ -113,6 +113,7 @@ function bills() {
   const within = [];
   for (const it of activeSubs()) {
     if (!it.isBill) continue; // bills view = true bills only (rent/utilities/phone/internet)
+    if (!it.nextRenewal) continue;
     const diff = daysBetween(today, it.nextRenewal);
     if (diff >= 0 && diff <= 45) within.push({ id: `${it.key}|${it.nextRenewal}`, key: it.key, payee: it.payee, amount: it.amount, dueDate: it.nextRenewal, category: it.category, cadence: it.cadence, paid: false, paidDate: null, matched: null });
   }

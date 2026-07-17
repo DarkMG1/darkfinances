@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
 const path = require('node:path');
 
 function loadDemoData(nowIso) {
@@ -45,4 +46,11 @@ test('demo recurring lastCharged is relative to finance anchor, not device today
   const netflix = demo.recurring().items.find((item) => item.payee === 'Netflix');
   assert.equal(netflix.lastCharged, '2026-07-01');
   assert.equal(netflix.nextRenewal, '2026-08-01');
+});
+
+test('demo bills guard skips uncertain items without calling daysBetween(null)', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../demoData.js'), 'utf8');
+  assert.match(source, /if \(!it\.nextRenewal\) continue/);
+  const demo = loadDemoData('2026-07-09T17:01:00-07:00');
+  assert.doesNotThrow(() => demo.bills());
 });

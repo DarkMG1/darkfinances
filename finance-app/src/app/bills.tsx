@@ -97,6 +97,10 @@ export default function Bills() {
     ];
     for (const b of all) {
       const d = daysUntil(b.dueDate, financeToday);
+      if (d == null) {
+        buckets[2].items.push(b);
+        continue;
+      }
       if (d <= 7) buckets[0].items.push(b);
       else if (d <= 14) buckets[1].items.push(b);
       else buckets[2].items.push(b);

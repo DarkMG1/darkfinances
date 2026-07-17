@@ -606,8 +606,8 @@
       const [y, m, day] = d.split('-').map(Number);
       return Math.floor(Date.UTC(y, m - 1, day) / 86400000);
     };
-    const daysUntil = (d) => ymdOrdinal(d) - ymdOrdinal(financeToday());
-    const dueLabel = (d) => { const n = daysUntil(d); if (n < 0) return `${-n}d overdue`; if (n === 0) return 'today'; if (n === 1) return 'tomorrow'; if (n < 14) return `in ${n}d`; return fmtDay(d); };
+    const daysUntil = (d) => { if (!d) return null; return ymdOrdinal(d) - ymdOrdinal(financeToday()); };
+    const dueLabel = (d) => { if (!d) return 'date uncertain'; const n = daysUntil(d); if (n < 0) return `${-n}d overdue`; if (n === 0) return 'today'; if (n === 1) return 'tomorrow'; if (n < 14) return `in ${n}d`; return fmtDay(d); };
     const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
     const html = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (ch) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
