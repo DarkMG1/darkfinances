@@ -1,6 +1,7 @@
 .gitattributes text eol=lf
 .nvmrc text eol=lf
 actual-tools/package.json text eol=lf
+actual-tools/reimb-report.js text eol=lf
 actual-tools/test/trip-quickadd.test.js text eol=lf
 docs/** text eol=lf
 finance-app/scripts/verify-release-variant.js text eol=lf

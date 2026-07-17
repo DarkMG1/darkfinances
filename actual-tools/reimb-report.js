@@ -39,6 +39,8 @@ const signedMoney = (value) => `${Number(value) < 0 ? '-' : ''}${money(value)}`;
   await data.shutdownApi();
 })().catch(async (error) => {
   console.error('ERR', error?.stack || error);
-  try { await data.shutdownApi(); } catch (_) {}
+  try {
+    await data.shutdownApi();
+  } catch (_) {}
   process.exit(1);
 });
