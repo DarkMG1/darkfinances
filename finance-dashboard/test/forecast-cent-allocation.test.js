@@ -13,6 +13,12 @@ const {
   buildForecastBudgetDailyCents,
   GENERIC_BUDGET_SKIP_WARNING,
 } = require('../lib/domain/cent-allocation');
+const { ForecastMoneyValidationError } = require('../lib/errors');
+const {
+  forecastBillEventCents,
+  forecastIncomeEventCents,
+  sumOperatingCashBalanceCents,
+} = require('../lib/domain/forecast-money');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-forecast-cent-allocation-'));
 const fixturePath = path.join(__dirname, 'fixtures', 'safe-to-spend.js');
@@ -101,6 +107,8 @@ test('getForecast budget events conserve remaining cents for the current month',
   assert.equal(budgetCents, expectedRemaining);
   assert.equal(forecast.assumptions.genericBudget.complete, true);
   assert.equal(forecast.assumptions.genericBudget.remaining, fromCents(expectedRemaining));
+  assert.equal(forecast.assumptions.genericBudgetTarget, forecast.assumptions.genericBudget.target);
+  assert.ok(!forecast.warnings.includes(GENERIC_BUDGET_SKIP_WARNING));
 });
 
 test('getForecast conserves full future-month target when horizon covers the month', async () => {
@@ -221,6 +229,7 @@ test('invalid category budgets skip events and expose truthful nullable assumpti
     { name: 'Dining', target: '300.01', remaining: 50 },
   ]);
   assert.equal(invalid.complete, false);
+  assert.equal(invalid.assumptions.genericBudgetTarget, null);
   assert.equal(invalid.assumptions.target, null);
   assert.equal(invalid.assumptions.remaining, null);
   assert.deepEqual(invalid.assumptions.incompleteReasons, ['money_input_invalid']);
@@ -229,8 +238,19 @@ test('invalid category budgets skip events and expose truthful nullable assumpti
   await bootstrap(fixtures.complete.fixture);
   const forecast = await getForecast({ days: 45 });
   assert.equal(forecast.assumptions.genericBudget.complete, true);
+  assert.equal(forecast.assumptions.genericBudgetTarget, forecast.assumptions.genericBudget.target);
   assert.notEqual(forecast.assumptions.genericBudget.target, null);
   assert.notEqual(forecast.assumptions.genericBudget.remaining, null);
+  assert.ok(!forecast.warnings.includes(GENERIC_BUDGET_SKIP_WARNING));
+});
+
+test('getForecast rejects invalid income, bill, and start-balance money fail-closed', () => {
+  assert.throws(() => forecastIncomeEventCents(10.005), ForecastMoneyValidationError);
+  assert.throws(() => forecastBillEventCents(Number.NaN), ForecastMoneyValidationError);
+  assert.throws(
+    () => sumOperatingCashBalanceCents([{ balance: Number.MAX_VALUE }]),
+    ForecastMoneyValidationError,
+  );
 });
 
 test('getToday Safe-to-Spend quarantine is unchanged by cent allocation work', async () => {

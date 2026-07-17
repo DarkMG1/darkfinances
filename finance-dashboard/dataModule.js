@@ -80,6 +80,11 @@ const {
   buildForecastBudgetDailyCents,
   buildForecastGenericBudgetContext,
 } = require('./lib/domain/cent-allocation');
+const {
+  forecastBillEventCents,
+  forecastIncomeEventCents,
+  sumOperatingCashBalanceCents,
+} = require('./lib/domain/forecast-money');
 const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
 const { metricValue } = require('./lib/metric-provenance');
 const {
@@ -3087,19 +3092,12 @@ async function getForecast({ days = 90 } = {}) {
     getReimbursement({}),
   ]);
   const liquidAccounts = accountsForMetric(accounts.filter((account) => !account.hidden), 'operating_cash');
-  const startBalanceCents = sumCents(liquidAccounts.map((account) => toCents(account.balance)));
+  const startBalanceCents = sumOperatingCashBalanceCents(liquidAccounts);
   const eventRows = [];
   const pushEventCents = (date, label, amountCents, kind, provenance, sourceId = null) => {
     if (!date || date < today || date > horizon) return;
     if (!Number.isSafeInteger(amountCents) || amountCents === 0) return;
     eventRows.push({ date, label, amountCents, kind, provenance, sourceId });
-  };
-  const pushEventDollars = (date, label, amount, kind, provenance, sourceId = null) => {
-    try {
-      pushEventCents(date, label, toCents(Number(amount)), kind, provenance, sourceId);
-    } catch {
-      // Skip non-cent-safe event amounts rather than rounding them into the forecast.
-    }
   };
 
   for (const s of income.streams || []) {
@@ -3115,11 +3113,27 @@ async function getForecast({ days = 90 } = {}) {
       windowEnd: horizon,
     });
     for (const due of payDates) {
-      pushEventDollars(due, s.payee || 'Income', Math.abs(s.amount), 'income', 'inferred', s.key);
+      pushEventCents(
+        due,
+        s.payee || 'Income',
+        forecastIncomeEventCents(s.amount),
+        'income',
+        'inferred',
+        s.key,
+      );
     }
   }
   for (const b of bills.bills || []) {
-    if (!b.paid) pushEventDollars(b.dueDate, b.payee || 'Bill', -Math.abs(b.amount), 'bill', b.matched ? 'known' : 'inferred', b.id);
+    if (!b.paid) {
+      pushEventCents(
+        b.dueDate,
+        b.payee || 'Bill',
+        forecastBillEventCents(b.amount),
+        'bill',
+        b.matched ? 'known' : 'inferred',
+        b.id,
+      );
+    }
   }
 
   const genericCategories = (budgets.groups || []).flatMap((group) =>
@@ -3190,7 +3204,13 @@ async function getForecast({ days = 90 } = {}) {
     events: events.slice(0, 200),
     assumptions: {
       liquidAccounts: liquidAccounts.map((account) => ({ id: account.id, name: account.name })),
-      genericBudget: genericBudget.assumptions,
+      genericBudgetTarget: genericBudget.assumptions.genericBudgetTarget,
+      genericBudget: {
+        target: genericBudget.assumptions.target,
+        remaining: genericBudget.assumptions.remaining,
+        complete: genericBudget.assumptions.complete,
+        incompleteReasons: genericBudget.assumptions.incompleteReasons,
+      },
       billsExcludedFromGenericBudget: true,
       reimbursementsIncluded: false,
     },

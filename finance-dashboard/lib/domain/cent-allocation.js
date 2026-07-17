@@ -73,7 +73,6 @@ function pastAndRemainingCents(allocationsCents, positionIndex) {
 }
 
 function readCategoryMoneyCents(value) {
-  if (value == null) return 0;
   if (typeof value !== 'number') {
     throw new TypeError('category money field must be a number');
   }
@@ -83,9 +82,16 @@ function readCategoryMoneyCents(value) {
   return toCents(value);
 }
 
+function readCategoryFieldCents(category, field) {
+  if (!category || !Object.prototype.hasOwnProperty.call(category, field)) {
+    throw new TypeError('category money field is required');
+  }
+  return readCategoryMoneyCents(category[field]);
+}
+
 function trySumCategoryFieldCents(categories, field) {
   try {
-    const cents = sumCents((categories || []).map((category) => readCategoryMoneyCents(category[field])));
+    const cents = sumCents((categories || []).map((category) => readCategoryFieldCents(category, field)));
     return {
       cents,
       complete: true,
@@ -110,14 +116,17 @@ function buildForecastGenericBudgetContext(categories) {
       ...(targetSum.complete ? [] : targetSum.incompleteReasons),
       ...(remainingSum.complete ? [] : remainingSum.incompleteReasons),
     ])];
+  const targetDollars = complete ? fromCents(targetSum.cents) : null;
+  const remainingDollars = complete ? fromCents(remainingSum.cents) : null;
   return {
     targetSum,
     remainingSum,
     complete,
     incompleteReasons,
     assumptions: {
-      target: complete ? fromCents(targetSum.cents) : null,
-      remaining: complete ? fromCents(remainingSum.cents) : null,
+      genericBudgetTarget: targetDollars,
+      target: targetDollars,
+      remaining: remainingDollars,
       complete,
       incompleteReasons,
     },
@@ -192,6 +201,7 @@ module.exports = {
   allocateCentsOverDays,
   pastAndRemainingCents,
   readCategoryMoneyCents,
+  readCategoryFieldCents,
   trySumCategoryFieldCents,
   buildForecastGenericBudgetContext,
   buildForecastBudgetDailyCents,

@@ -50,6 +50,18 @@ class TransactionNotFoundError extends AppError {
   }
 }
 
+class ForecastMoneyValidationError extends AppError {
+  constructor(cause) {
+    super('Forecast money input is invalid', {
+      code: 'FORECAST_MONEY_INVALID',
+      status: 400,
+      expose: true,
+      cause,
+    });
+    this.name = 'ForecastMoneyValidationError';
+  }
+}
+
 function classifyError(error) {
   if (error instanceof AppError) return error;
   if (error instanceof JsonStoreError) {
@@ -99,6 +111,7 @@ function classifyError(error) {
 module.exports = {
   AccountNotFoundError,
   AppError,
+  ForecastMoneyValidationError,
   KnownPreApplyError,
   RequestValidationError,
   TransactionNotFoundError,

@@ -12,6 +12,7 @@ const {
   buildForecastBudgetDailyCents,
   buildForecastGenericBudgetContext,
   readCategoryMoneyCents,
+  readCategoryFieldCents,
   trySumCategoryFieldCents,
 } = require('../lib/domain/cent-allocation');
 
@@ -199,29 +200,34 @@ test('unsafe and non-integer allocation inputs throw instead of rounding', () =>
   assert.throws(() => allocateCentsOverDays(100, Number.MAX_SAFE_INTEGER), /allocation span|safe integer/);
 });
 
-test('readCategoryMoneyCents treats null and missing as semantic zero', () => {
-  assert.equal(readCategoryMoneyCents(null), 0);
-  assert.equal(readCategoryMoneyCents(undefined), 0);
-  assert.equal(readCategoryMoneyCents(0), 0);
-  assert.equal(readCategoryMoneyCents(12.34), toCents(12.34));
+test('readCategoryFieldCents requires explicit numeric fields; only numeric zero is valid', () => {
+  assert.equal(readCategoryFieldCents({ target: 0 }, 'target'), 0);
+  assert.equal(readCategoryFieldCents({ target: 12.34 }, 'target'), toCents(12.34));
+
+  assert.throws(() => readCategoryFieldCents({ name: 'Groceries' }, 'target'), /required/);
+  assert.throws(() => readCategoryFieldCents({ target: null }, 'target'), /must be a number/);
+  assert.throws(() => readCategoryFieldCents({}, 'target'), /required/);
 });
 
-test('trySumCategoryFieldCents rejects garbage and accepts explicit semantic zero', () => {
-  const valid = trySumCategoryFieldCents([{ target: 12.34 }, { target: 0.01 }, { target: 0 }], 'target');
+test('trySumCategoryFieldCents rejects garbage and missing fields', () => {
+  const valid = trySumCategoryFieldCents([
+    { target: 12.34, remaining: 0.01 },
+    { target: 0, remaining: 0 },
+  ], 'target');
   assert.equal(valid.complete, true);
-  assert.equal(valid.cents, toCents(12.34) + toCents(0.01));
+  assert.equal(valid.cents, toCents(12.34));
 
-  const missing = trySumCategoryFieldCents([{ name: 'Groceries' }, { target: 5 }], 'target');
-  assert.equal(missing.complete, true);
-  assert.equal(missing.cents, toCents(5));
+  const missing = trySumCategoryFieldCents([{ name: 'Groceries' }, { target: 5, remaining: 1 }], 'target');
+  assert.equal(missing.complete, false);
+  assert.equal(missing.cents, null);
 
   for (const bad of [
-    [{ target: 'foo' }],
-    [{ target: Number.NaN }],
-    [{ target: Number.POSITIVE_INFINITY }],
-    [{ target: '12.34' }],
-    [{ target: 1.005 }],
-    [{ target: Number.MAX_VALUE }],
+    [{ target: 'foo', remaining: 0 }],
+    [{ target: Number.NaN, remaining: 0 }],
+    [{ target: Number.POSITIVE_INFINITY, remaining: 0 }],
+    [{ target: '12.34', remaining: 0 }],
+    [{ target: 1.005, remaining: 0 }],
+    [{ target: Number.MAX_VALUE, remaining: 0 }],
   ]) {
     const invalid = trySumCategoryFieldCents(bad, 'target');
     assert.equal(invalid.complete, false, JSON.stringify(bad));
@@ -230,19 +236,22 @@ test('trySumCategoryFieldCents rejects garbage and accepts explicit semantic zer
   }
 });
 
-test('buildForecastGenericBudgetContext exposes truthful nullable assumptions', () => {
+test('buildForecastGenericBudgetContext exposes legacy alias and nested genericBudget', () => {
   const complete = buildForecastGenericBudgetContext([
     { target: 100, remaining: 75 },
     { target: 50, remaining: 25 },
   ]);
   assert.equal(complete.complete, true);
+  assert.equal(complete.assumptions.genericBudgetTarget, 150);
   assert.equal(complete.assumptions.target, 150);
   assert.equal(complete.assumptions.remaining, 100);
+  assert.equal(complete.assumptions.genericBudgetTarget, complete.assumptions.target);
   assert.deepEqual(complete.assumptions.incompleteReasons, []);
   assert.deepEqual(complete.warnings, []);
 
   const incomplete = buildForecastGenericBudgetContext([{ target: 100, remaining: 'bad' }]);
   assert.equal(incomplete.complete, false);
+  assert.equal(incomplete.assumptions.genericBudgetTarget, null);
   assert.equal(incomplete.assumptions.target, null);
   assert.equal(incomplete.assumptions.remaining, null);
   assert.equal(incomplete.assumptions.complete, false);
