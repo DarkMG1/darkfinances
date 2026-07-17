@@ -16,6 +16,7 @@ const { FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { SerialQueue } = require('./lib/serial-queue');
 const { OperationJournal } = require('./lib/operation-journal');
 const { executeJournaledOperation } = require('./lib/operation-executor');
+const { reconcileOperationJournalFromProof } = require('./lib/operation-reconciliation');
 const {
   MUTATION_ROUTES,
   getMutationRoute,
@@ -638,6 +639,23 @@ const syncAfterLocal = (operation) => operation
   ? operation.sync(() => data.syncNow())
   : data.syncNow();
 
+async function finalizeBulkMutation(operation, mutate, { kind } = {}) {
+  if (operation?.key && operation?.journalBinding?.fingerprint) {
+    data.assertBulkOperationJournalAdmission({
+      operationKey: operation.key,
+      journalBinding: operation.journalBinding,
+      kind,
+    });
+  }
+  const localResult = await applyLocal(operation, mutate);
+  if (localResult?.needsSync) {
+    await syncAfterLocal(operation);
+  }
+  cache.flushAll();
+  if (!operation?.key) return localResult;
+  return data.getBulkOperationResult(operation.key) || localResult;
+}
+
 async function setRecurring(req, operation) {
   const { key } = parse(schemas.keyParam, req.params, 'recurring key');
   const { status, hidden, forced, isBill, cancellation } = parse(schemas.recurringOverride, req.body, 'recurring override');
@@ -714,16 +732,25 @@ async function bankSyncH(_req, operation) {
 async function phantomCleanupH(req, operation) {
   const query = parse(schemas.phantomCleanupQuery, req.query, 'phantom cleanup query');
   const dryRun = query.dryRun === '1' || query.dryRun === 'true';
-  const r = await applyLocal(operation, () => data.cleanupPhantoms({
-    dryRun,
+  if (dryRun) {
+    return applyLocal(operation, () => data.cleanupPhantoms({
+      dryRun: true,
+      window: query.window,
+      agedDays: query.agedDays,
+      observeDays: query.observeDays,
+      holdAgedDays: query.holdAgedDays,
+      holdObserveDays: query.holdObserveDays,
+    }));
+  }
+  return finalizeBulkMutation(operation, () => data.cleanupPhantoms({
     window: query.window,
     agedDays: query.agedDays,
     observeDays: query.observeDays,
     holdAgedDays: query.holdAgedDays,
     holdObserveDays: query.holdObserveDays,
-  }));
-  if (!dryRun) { await syncAfterLocal(operation); cache.flushAll(); }
-  return r;
+    operationKey: operation.key,
+    journalBinding: operation.journalBinding,
+  }), { kind: 'phantom_cleanup' });
 }
 const phantomLogH = (req) => Promise.resolve(data.getPhantomLog({ limit: Number(req.query.limit) || 100 }));
 // Receipts
@@ -796,10 +823,11 @@ async function deleteTxn(req, operation) {
 }
 async function saveRuleH(req, operation) {
   const rule = parse(schemas.rule, req.body, 'categorization rule');
-  const result = await applyLocal(operation, () => data.saveRule(rule, { sync: false }));
-  if (result.applied) await syncAfterLocal(operation);
-  cache.flushAll();
-  return result;
+  return finalizeBulkMutation(operation, () => data.saveRule(rule, {
+    sync: false,
+    operationKey: operation.key,
+    journalBinding: operation.journalBinding,
+  }), { kind: 'rules_save' });
 }
 async function deleteRuleH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'rule id');
@@ -808,10 +836,11 @@ async function deleteRuleH(req, operation) {
   return result;
 }
 async function applyRulesH(_req, operation) {
-  const result = await applyLocal(operation, () => data.applyRules({ sync: false }));
-  if (result.applied || result.settleUpsMoved) await syncAfterLocal(operation);
-  cache.flushAll();
-  return result;
+  return finalizeBulkMutation(operation, () => data.applyRules({
+    sync: false,
+    operationKey: operation.key,
+    journalBinding: operation.journalBinding,
+  }), { kind: 'rules_apply' });
 }
 async function syncSharesH(_req, operation) {
   const result = await applyLocal(operation, () => data.syncSplitwiseShareExpenses({ sync: false }));
@@ -1066,16 +1095,65 @@ function sendApiError(req, res, error) {
   if (error && Array.isArray(error.issues)) body.issues = error.issues;
   return res.status(classified.status).json(body);
 }
-const runHandler = (req, fn, operation) =>
-  ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)
-    ? mutationQueue.run(() => fn(req, operation))
-    : fn(req, operation);
+const runHandler = (req, fn, operation) => {
+  if (operation) return fn(req, operation);
+  return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)
+    ? mutationQueue.run(() => fn(req))
+    : fn(req);
+};
 const raw = (fn) => async (req, res) => {
   try { res.json(await runHandler(req, fn)); } catch (e) { sendApiError(req, res, e); }
 };
 function operationJournalError(error, phase) {
   runtimeHealth.fatalErrorAt = new Date().toISOString();
   console.error(`[operation-journal:${phase}]`, error);
+}
+
+function bulkJournalProofFromOperation(operation) {
+  if (!operation?.fingerprint || operation.fingerprintVersion == null) return null;
+  return {
+    fingerprint: operation.fingerprint,
+    fingerprintVersion: operation.fingerprintVersion,
+    method: operation.method || null,
+    route: operation.route || null,
+  };
+}
+
+async function bulkTerminalProofResolver({ key, operation }) {
+  const journalOperation = bulkJournalProofFromOperation(operation);
+  if (!journalOperation) return null;
+  const result = data.proveBulkOperationJournalCompletion(key, journalOperation);
+  if (!result?.ok || result.status !== 'completed' || result.needsSync) return null;
+  return {
+    result,
+    fingerprint: journalOperation.fingerprint,
+    fingerprintVersion: journalOperation.fingerprintVersion,
+  };
+}
+
+async function readOperationStatus(key) {
+  return mutationQueue.run(() => reconcileOperationJournalFromProof(operationJournal, key, {
+    proofResolver: bulkTerminalProofResolver,
+    onJournalError: operationJournalError,
+  }));
+}
+
+async function executeVersionedMutation(req, fn, mutationRoute) {
+  const idempotencyKey = req.get('Idempotency-Key');
+  return executeJournaledOperation({
+    journal: operationJournal,
+    key: idempotencyKey,
+    request: {
+      method: req.method,
+      path: `${req.baseUrl || ''}${req.path || ''}` || req.path,
+      url: req.originalUrl,
+      body: req.body,
+    },
+    handler: (operation) => fn(req, operation),
+    requiresCheckpoint: mutationRoute.requiresCheckpoint,
+    onJournalError: operationJournalError,
+    terminalProofResolver: bulkTerminalProofResolver,
+  });
 }
 const env = (fn, mutationRoute = null) => async (req, res) => {
   const mutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -1089,20 +1167,7 @@ const env = (fn, mutationRoute = null) => async (req, res) => {
           expose: true,
         });
       }
-      const idempotencyKey = req.get('Idempotency-Key');
-      const execution = await executeJournaledOperation({
-        journal: operationJournal,
-        key: idempotencyKey,
-        request: {
-          method: req.method,
-          path: `${req.baseUrl || ''}${req.path || ''}` || req.path,
-          url: req.originalUrl,
-          body: req.body,
-        },
-        handler: (operation) => runHandler(req, fn, operation),
-        requiresCheckpoint: mutationRoute.requiresCheckpoint,
-        onJournalError: operationJournalError,
-      });
+      const execution = await mutationQueue.run(() => executeVersionedMutation(req, fn, mutationRoute));
       return res.json({ data: execution.result, operation: execution.operation });
     }
     const result = await runHandler(req, fn);
@@ -1219,7 +1284,7 @@ function registerV1Mutation(method, route, handler) {
   v1[method.toLowerCase()](route, env(handler, definition));
 }
 v1.get('/operations/:key', env(async (req) => {
-  const operation = operationJournal.status(req.params.key);
+  const operation = await readOperationStatus(req.params.key);
   if (!operation) {
     throw new AppError('Operation not found', {
       code: 'OPERATION_NOT_FOUND',

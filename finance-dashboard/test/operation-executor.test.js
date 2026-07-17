@@ -359,3 +359,64 @@ test('legacy started and failed records block handler execution', async (t) => {
   }
   assert.equal(calls, 0);
 });
+
+test('terminal proof reconciles orphan journal records without invoking the handler', async (t) => {
+  const { journal, file } = fixture(t);
+  let calls = 0;
+  const terminal = { ok: true, status: 'completed', applied: 2 };
+  const req = request();
+  journal.start('orphan-bulk-key', req);
+  const record = journal.get('orphan-bulk-key');
+  const resolver = async ({ key, operation }) => (key === 'orphan-bulk-key' ? {
+    result: terminal,
+    fingerprint: operation.fingerprint,
+    fingerprintVersion: operation.fingerprintVersion,
+  } : null);
+  const run = (activeJournal) => executeJournaledOperation({
+    journal: activeJournal,
+    key: 'orphan-bulk-key',
+    request: req,
+    terminalProofResolver: resolver,
+    handler: async () => { calls += 1; },
+  });
+  const replay = await run(journal);
+  const restarted = await run(new OperationJournal(file));
+  assert.equal(replay.operation.reconciled, true);
+  assert.equal(replay.operation.replayed, true);
+  assert.deepEqual(replay.result, terminal);
+  assert.deepEqual(restarted.result, terminal);
+  assert.equal(calls, 0);
+  assert.equal(journal.get('orphan-bulk-key').phase, 'completed');
+});
+
+test('reconciliation write failures remain outcome unknown and idempotent after restart', async (t) => {
+  const { journal, file } = fixture(t, { failWrites: [2] });
+  const terminal = { ok: true, status: 'completed' };
+  const req = request();
+  const resolver = async ({ operation }) => ({
+    result: terminal,
+    fingerprint: operation.fingerprint,
+    fingerprintVersion: operation.fingerprintVersion,
+  });
+  journal.start('reconcile-fault', req);
+  await expectCode(
+    executeJournaledOperation({
+      journal,
+      key: 'reconcile-fault',
+      request: req,
+      terminalProofResolver: resolver,
+      handler: async () => ({ shouldNotRun: true }),
+    }),
+    'OUTCOME_UNKNOWN',
+  );
+  assert.equal(journal.get('reconcile-fault').phase, 'started');
+  const replay = await executeJournaledOperation({
+    journal: new OperationJournal(file),
+    key: 'reconcile-fault',
+    request: req,
+    terminalProofResolver: resolver,
+    handler: async () => ({ shouldNotRun: true }),
+  });
+  assert.deepEqual(replay.result, terminal);
+  assert.equal(new OperationJournal(file).get('reconcile-fault').phase, 'completed');
+});

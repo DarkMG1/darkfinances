@@ -25,6 +25,7 @@ const STATE_REGISTRY = Object.freeze({
   reviewState: entry('REVIEW_STATE_PATH', 'review-state.json', 1, true, 'stable review fingerprints'),
   rules: entry('RULES_PATH', 'rules.json', 1, true, 'rule ids'),
   transactionDeletionSagas: entry('TRANSACTION_DELETION_SAGAS_PATH', 'transaction-deletion-sagas.json', 1, true, 'deleted Actual and sidecar transaction ids'),
+  bulkOperationSagas: entry('BULK_OPERATION_SAGAS_PATH', 'bulk-operation-sagas.json', 1, true, 'bulk rule and phantom mutation transaction ids'),
   repaymentConfirmationSagas: entry('REPAYMENT_CONFIRMATION_SAGAS_PATH', 'repayment-confirmation-sagas.json', 1, true, 'repayment confirmation inflow and expense transaction ids'),
   transactionSagas: entry('TRANSACTION_SAGAS_PATH', 'transaction-sagas.json', 1, true, 'Actual and sidecar transaction ids'),
   venmoTruth: entry('VENMO_TRUTH_PATH', 'venmo-truth.json', 1, true, 'Venmo transaction ids'),
