@@ -241,11 +241,6 @@ function verifyCompleteDestination({
   }
 }
 
-function verifyCompleteReplay(journal, context) {
-  verifyCompleteArchiveBindings(journal, context);
-  verifyCompleteDestination(context);
-}
-
 function sameFilesystem(left, right) {
   return fs.statSync(left).dev === fs.statSync(right).dev;
 }
@@ -950,8 +945,5 @@ module.exports = {
   buildAdmissionTokenForRestore,
   cleanupControlArtifacts,
   performRollback,
-  verifyCompleteReplay,
-  verifyCompleteArchiveBindings,
-  verifyCompleteDestination,
   JOURNAL_MAX_BYTES,
 };
