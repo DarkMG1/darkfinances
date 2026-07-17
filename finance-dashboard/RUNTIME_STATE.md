@@ -53,12 +53,15 @@ Optional JSON `null` is valid only for documented optional sidecars (`personalCo
 
 Journal and saga sidecars preserve active ownership during migration: non-terminal records cannot be terminalized and terminal proof cannot be fabricated by migration alone. Direct writes cannot weaken ownership, drop nonterminal sagas, or strip journal fingerprints/terminal proof.
 
-PR-16 owns backup bundle redesign; until then backup membership is guarded by parity tests rather than cross-package imports.
+PR-16 provides a versioned, relocatable dashboard runtime backup bundle with embedded verification tooling. The committed `ops/lib/backup-state-inventory.json` snapshot is generated deterministically from this registry and parity-enforced in tests.
 
 `finance-dashboard/test/backup-registry-parity.test.js` asserts exact parity between:
 
 - `STATE_REGISTRY` entries with `backup: true` (via `backupEntries()`)
+- `ops/lib/backup-state-inventory.json` (via `sidecarFilenames()`)
 - `ops/lib/backup-verify.js` `SIDECAR_FILES`
-- sidecar filenames enumerated in `ops/bin/backup-dashboard-runtime.sh`
+- runtime members derived by `ops/lib/list-backup-runtime-members.js`
 
-The backup script also archives the `receipts/` directory when present; that directory is not a registry JSON sidecar and is validated separately through receipt reference checks.
+The backup scripts also archive the `receipts/` directory when present and eligible `.last-good` sidecars for registry entries with `lastGoodPolicy: allow-on-primary-invalid`. Quarantine copies (`*.corrupt-*`) and environment files are excluded.
+
+Relocatable bundles (`darkfinances-dashboard-runtime-backup-bundle`, schema v1) embed runtime payloads under `runtime/`, verification tooling under `tooling/`, and a sidecar `bundle-manifest.json` with artifact identity, provenance, per-file digests/modes, runtime-state inventory metadata, and required restore tooling identity. Verify untrusted archives with `ops/bin/verify-backup-bundle.sh` (full archive trust chain). Use embedded `tooling/ops/bin/verify-backup-bundle.js` only for trusted pre-extracted trees. Requires Node 24+ and `tar`; no repository checkout is required when the ops verifier scripts are available. PR-17 owns staged live swap/generation-bound restore; PR-18 owns writer quiescence.

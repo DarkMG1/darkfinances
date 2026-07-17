@@ -4,39 +4,11 @@ const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const { validateBackupSidecar } = require('../../finance-dashboard/lib/runtime-state-store');
 
+const { sidecarFilenames } = require('./backup-bundle-inventory');
+
 const ROOT = path.resolve(__dirname, '..', '..');
 const STATE_SCHEMA_VERSION = 1;
-
-const SIDECAR_FILES = [
-  'account-overrides.json',
-  'bills-paid.json',
-  'budget-settings.json',
-  'debt-planner.json',
-  'events.json',
-  'goals.json',
-  'investment-holdings.json',
-  'manual-assets.json',
-  'operation-journal.json',
-  'owes-config.json',
-  'owes-truth.json',
-  'passkey-credentials.json',
-  'personal-config.json',
-  'phantom-log.json',
-  'phantom-seen.json',
-  'receipts.json',
-  'reimb-links.json',
-  'reimb-suggest.json',
-  'reconciliation.json',
-  'recurring-overrides.json',
-  'review-state.json',
-  'rules.json',
-  'transaction-deletion-sagas.json',
-  'bulk-operation-sagas.json',
-  'splitwise-mirror-resolutions.json',
-  'repayment-confirmation-sagas.json',
-  'transaction-sagas.json',
-  'venmo-truth.json',
-];
+const SIDECAR_FILES = sidecarFilenames();
 
 function sha256Buffer(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');

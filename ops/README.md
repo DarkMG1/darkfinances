@@ -16,9 +16,11 @@ reverse-proxy settings, and alert delivery before installation.
 | `systemd/actual-sync.timer` | Twice-daily Pacific-time bank-sync schedule. |
 | `systemd/finance-sync-failure@.service` | `OnFailure` bridge to the alert script. |
 | `bin/backup-dashboard-runtime.sh` | Private archive of dashboard JSON sidecars and receipts. |
+| `bin/build-backup-bundle.sh` | Relocatable runtime backup bundle with embedded verification tooling. |
 | `bin/backup-coordinated.sh` | Quiesced backup with embedded manifest, checksum, and release provenance. |
 | `bin/write-dashboard-release-manifest.sh` | Content-address the reviewed files in a dashboard deployment. |
 | `bin/verify-backup.sh` | Schema/checksum/receipt validation for a runtime archive. |
+| `bin/verify-backup-bundle.sh` | Read-only validation for a relocatable runtime backup bundle. |
 | `bin/restore-dashboard-runtime.sh` | Dry-run-first, CONFIRM-gated sidecar restore. |
 | `bin/finance-sync-alert.sh` | Telegram alert delivery through an existing OpenClaw destination. |
 | `logrotate-darkfinances.conf` | Rotation policy for finance logs that may contain transaction metadata. |
@@ -231,6 +233,59 @@ tar -tzf dashboard-runtime-<timestamp>.tgz
 Each archive embeds `.backup-manifest.json` with per-file SHA-256 checksums, schema version, git
 commit, and recovery metadata. A matching `dashboard-runtime-<timestamp>.tgz.manifest.json` is
 written beside the archive.
+
+### Relocatable runtime backup bundle (PR-16)
+
+For off-host verification drills without a repository checkout, build a self-contained bundle:
+
+```bash
+install -m 700 ops/bin/build-backup-bundle.sh \
+  "$HOME/.local/bin/build-backup-bundle.sh"
+FINANCE_DASHBOARD_DIR="$HOME/finance-dashboard" \
+  "$HOME/.local/bin/build-backup-bundle.sh"
+```
+
+Defaults match the runtime archive helper (`FINANCE_DASHBOARD_DIR`, `DARKFINANCES_BACKUP_DIR`).
+Each bundle includes:
+
+- `runtime/` — all registry `backup:true` sidecars present at build time, optional eligible
+  `.last-good` sidecars, and receipt bytes referenced by `receipts.json`
+- `tooling/` — embedded Node verification tooling (authoritative runtime-state schemas, inventory
+  snapshot, read-only verifier entrypoint)
+- `bundle-manifest.json` — artifact identity, provenance, file inventory (relative safe paths,
+  SHA-256, bytes, mode), runtime-state inventory digest, and required restore tooling identity
+
+Verify on any host with Node 24+ and `tar`:
+
+```bash
+ops/bin/verify-backup-bundle.sh /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
+sha256sum -c dashboard-runtime-backup-bundle-<timestamp>.tgz.sha256
+```
+
+The shell verifier runs the full archive trust chain: archive checksum sidecar, embedded/sidecar
+manifest parity, tar member/type/closed-world parity, bounded preflight, private temp extraction,
+extracted-tree verification, and optional publish to `DARKFINANCES_BUNDLE_EXTRACT_DIR` only after
+success. Untrusted archives are never certified by merely extracting and invoking the standalone tree
+verifier.
+
+For trusted pre-extracted bundle trees (for example after a successful archive verify), use the
+embedded `tooling/ops/bin/verify-backup-bundle.js`. That entrypoint skips archive checksum,
+sidecar/embedded parity, and tar member checks; do not use it as the first verifier for untrusted
+`.tgz` input.
+
+The verifier is read-only. It rejects symlinks, path traversal, duplicate paths, unexpected
+members, digest/size/mode mismatch, future bundle schema versions, missing required runtime stores,
+tampered provenance fields, archive bombs, and unsafe private modes.
+Passkey credential payloads are validated but never logged.
+
+Regenerate the committed inventory snapshot after registry changes:
+
+```bash
+node ops/lib/generate-backup-state-inventory.js
+```
+
+PR-17 adds staged live swap/generation-bound restore; PR-18 adds writer quiescence. Do not treat
+bundle verification as evidence of a successful production restore.
 
 ### Coordinated quiesced backup
 

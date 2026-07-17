@@ -10,17 +10,9 @@ repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 
 mkdir -p -m 700 "$destination"
 files=()
-for name in \
-  account-overrides.json bills-paid.json budget-settings.json debt-planner.json \
-  events.json goals.json investment-holdings.json manual-assets.json owes-config.json \
-  owes-truth.json passkey-credentials.json personal-config.json phantom-log.json \
-  phantom-seen.json receipts.json reimb-links.json reimb-suggest.json \
-  reconciliation.json recurring-overrides.json review-state.json rules.json \
-  operation-journal.json transaction-deletion-sagas.json bulk-operation-sagas.json splitwise-mirror-resolutions.json repayment-confirmation-sagas.json transaction-sagas.json \
-  venmo-truth.json receipts
-do
-  if [ -e "$dashboard/$name" ]; then files+=("$name"); fi
-done
+while IFS= read -r name; do
+  files+=("$name")
+done < <(node "$repo_root/ops/lib/list-backup-runtime-members.js" "$dashboard")
 
 if [ "${#files[@]}" -eq 0 ]; then
   echo "No dashboard runtime files found in $dashboard" >&2
