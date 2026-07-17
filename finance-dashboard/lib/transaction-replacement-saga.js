@@ -253,6 +253,18 @@ function sagaOwnedIds(saga) {
   return ids;
 }
 
+function presentTransactionIds(rows, targetIds) {
+  const targets = new Set([...targetIds].map(String));
+  const present = new Set();
+  for (const row of rows) {
+    if (targets.has(String(row?.id))) present.add(String(row.id));
+    for (const leg of row?.subtransactions || []) {
+      if (targets.has(String(leg?.id))) present.add(String(leg.id));
+    }
+  }
+  return present;
+}
+
 function isTerminalSaga(saga) {
   return saga?.recordVersion === RECORD_VERSION && TERMINAL_PHASES.has(saga.phase);
 }
@@ -338,6 +350,7 @@ function createTransactionReplacementSaga({
   applyReferenceStep,
   referencesConverged,
   referenceSteps,
+  assertExternalAvailable,
   terminalLimit = TERMINAL_LIMIT,
 }) {
   if (!sagaPath) throw new Error('transaction saga path required');
@@ -384,10 +397,10 @@ function createTransactionReplacementSaga({
 
   function assertAvailable({ accountId, ids, original } = {}) {
     const candidates = candidateTransactionIds({ ids, original });
-    if (!accountId || !candidates.size) return;
+    if (!candidates.size) return;
     const { state } = loadState();
     const conflict = Object.values(state.sagas).some((saga) => {
-      if (!blocksReplacement(saga) || !accountMatches(saga, accountId)) return false;
+      if (!blocksReplacement(saga) || (accountId && !accountMatches(saga, accountId))) return false;
       const owned = sagaOwnedIds(saga);
       return [...candidates].some((id) => owned.has(id));
     });
@@ -433,12 +446,75 @@ function createTransactionReplacementSaga({
     return { unresolved: true, error };
   }
 
+  function outcomeUnknown(message, cause) {
+    const error = new SagaOutcomeUnknownError(message);
+    if (cause) error.cause = cause;
+    return error;
+  }
+
   async function transactionsForAccount(api, accountId) {
     return api.getTransactions(accountId, ACCOUNT_RANGE_START, ACCOUNT_RANGE_END);
   }
 
   async function transactionsFor(api, saga) {
-    return transactionsForAccount(api, saga.accountId);
+    let accounts;
+    try {
+      accounts = await api.getAccounts();
+    } catch (error) {
+      throw outcomeUnknown('unable to enumerate Actual accounts during replacement recovery', error);
+    }
+    if (!Array.isArray(accounts)) {
+      throw outcomeUnknown('Actual account enumeration was invalid during replacement recovery');
+    }
+    const accountIds = accounts.map((account) => String(account?.id || '')).sort();
+    if (accountIds.some((id) => !id) || new Set(accountIds).size !== accountIds.length) {
+      throw outcomeUnknown('Actual account enumeration was invalid during replacement recovery');
+    }
+    if (!accountIds.includes(String(saga.accountId))) {
+      throw outcomeUnknown('replacement admission account is absent from Actual account enumeration');
+    }
+
+    const ownedIds = sagaOwnedIds(saga);
+    const temporaryIdentities = new Set([
+      normalizedValue(saga.identity?.value),
+      normalizedValue(saga.restoreIdentity?.value),
+    ].filter(Boolean).map(String));
+    let intendedRows = null;
+    const foreignIds = new Set();
+    let foreignTemporaryIdentity = false;
+    for (const accountId of accountIds) {
+      let rows;
+      try {
+        rows = await transactionsForAccount(api, accountId);
+      } catch (error) {
+        throw outcomeUnknown(
+          `unable to query Actual account ${accountId} during replacement recovery`,
+          error,
+        );
+      }
+      if (!Array.isArray(rows)) {
+        throw outcomeUnknown(
+          `Actual transaction query for account ${accountId} was invalid during replacement recovery`,
+        );
+      }
+      if (accountId === String(saga.accountId)) {
+        intendedRows = rows;
+        continue;
+      }
+      for (const id of presentTransactionIds(rows, ownedIds)) foreignIds.add(id);
+      if (rows.some((row) => temporaryIdentities.has(String(normalizedValue(row?.imported_id))))) {
+        foreignTemporaryIdentity = true;
+      }
+    }
+    if (foreignIds.size) {
+      throw outcomeUnknown(
+        `saga-owned transaction ids found outside replacement account: ${[...foreignIds].sort().join(',')}`,
+      );
+    }
+    if (foreignTemporaryIdentity) {
+      throw outcomeUnknown('temporary replacement identity found outside replacement account');
+    }
+    return intendedRows;
   }
 
   async function assertImportedIdentityAvailable(api, { accountId, original }) {
@@ -520,13 +596,14 @@ function createTransactionReplacementSaga({
     }, 'reference-plan-checkpoint', faultInjector);
   }
 
-  async function migrateReferences(saga, direction, donePhase, faultInjector) {
+  async function migrateReferences(api, saga, direction, donePhase, faultInjector) {
     const migration = saga.referenceMigration;
     if (!migration || migration.direction !== direction) {
       throw new Error(`missing ${direction} reference migration plan`);
     }
     for (const step of referenceSteps) {
       if (migration.completed.includes(step)) continue;
+      await transactionsFor(api, saga);
       await checkpoint(saga, { referenceStep: step }, `reference-${step}-pending-checkpoint`, faultInjector);
       await boundary(faultInjector, `reference-${step}-write`, saga, async () => {
         applyReferenceStep(step, migration.idMap, migration);
@@ -693,7 +770,7 @@ function createTransactionReplacementSaga({
       }
 
       if (saga.phase === 'references_pending') {
-        await migrateReferences(saga, 'forward', 'references_migrated', faultInjector);
+        await migrateReferences(api, saga, 'forward', 'references_migrated', faultInjector);
         continue;
       }
 
@@ -726,7 +803,10 @@ function createTransactionReplacementSaga({
         };
       }
 
-      if (saga.phase === 'sync_pending') return { needsSync: true };
+      if (saga.phase === 'sync_pending') {
+        await transactionsFor(api, saga);
+        return { needsSync: true };
+      }
       if (saga.phase === 'completed') {
         const rows = await transactionsFor(api, saga);
         const transaction = rowById(rows, saga.replacementIds?.parentId);
@@ -855,6 +935,7 @@ function createTransactionReplacementSaga({
       }
 
       if (saga.phase === 'restored_ready') {
+        await transactionsFor(api, saga);
         if (!saga.referenceMigration || saga.referenceMigration.direction !== 'rollback') {
           await prepareReferenceMigration(
             saga,
@@ -870,7 +951,7 @@ function createTransactionReplacementSaga({
       }
 
       if (saga.phase === 'rollback_references_pending') {
-        await migrateReferences(saga, 'rollback', 'rollback_references_migrated', faultInjector);
+        await migrateReferences(api, saga, 'rollback', 'rollback_references_migrated', faultInjector);
         continue;
       }
 
@@ -891,45 +972,65 @@ function createTransactionReplacementSaga({
         return { needsSync: true };
       }
 
-      if (saga.phase === 'rollback_sync_pending') return { needsSync: true };
+      if (saga.phase === 'rollback_sync_pending') {
+        await transactionsFor(api, saga);
+        return { needsSync: true };
+      }
       if (saga.phase === 'rolled_back') return { rolledBack: true };
       throw new Error(`unsupported rollback saga phase: ${saga.phase}`);
     }
   }
 
   async function terminalizeSynced(api, sagas, faultInjector) {
+    let firstError = null;
     for (const saga of sagas) {
-      const rows = await transactionsFor(api, saga);
-      if (saga.phase === 'sync_pending') {
-        const replacement = rowById(rows, saga.replacementIds?.parentId);
-        if (!replacement
-          || rowById(rows, saga.original.id)
-          || importedIdentityConflict(rows, saga.replacement.imported_id, [replacement.id])
-          || !shapeMatches(replacement, saga.replacement)) {
-          await rememberError(saga, new Error('replacement changed before terminal checkpoint'), 'sync_pending', faultInjector);
-          continue;
+      try {
+        const rows = await transactionsFor(api, saga);
+        if (saga.phase === 'sync_pending') {
+          const replacement = rowById(rows, saga.replacementIds?.parentId);
+          if (!replacement
+            || rowById(rows, saga.original.id)
+            || importedIdentityConflict(rows, saga.replacement.imported_id, [replacement.id])
+            || !shapeMatches(replacement, saga.replacement)) {
+            const error = new Error('replacement changed before terminal checkpoint');
+            await rememberError(saga, error, 'sync_pending', faultInjector);
+            firstError ||= error;
+            continue;
+          }
+          if (!referencesConverged(saga.referenceMigration.idMap, saga.referenceMigration)) {
+            const error = new Error('replacement references changed before terminal checkpoint');
+            await rememberError(saga, error, 'sync_pending', faultInjector);
+            firstError ||= error;
+            continue;
+          }
+          await checkpoint(saga, { phase: 'completed', lastError: null }, 'saga-terminal-write', faultInjector);
+        } else if (saga.phase === 'rollback_sync_pending') {
+          const restored = rowById(rows, saga.restoredIds?.parentId);
+          if (!restored
+            || rowById(rows, saga.replacementIds?.parentId)
+            || importedIdentityConflict(rows, saga.original.imported_id, [restored.id])
+            || !shapeMatches(restored, saga.original)) {
+            const error = new Error('rollback changed before terminal checkpoint');
+            await rememberError(saga, error, 'rollback_sync_pending', faultInjector);
+            firstError ||= error;
+            continue;
+          }
+          if (!referencesConverged(saga.referenceMigration.idMap, saga.referenceMigration)) {
+            const error = new Error('rollback references changed before terminal checkpoint');
+            await rememberError(saga, error, 'rollback_sync_pending', faultInjector);
+            firstError ||= error;
+            continue;
+          }
+          await checkpoint(saga, { phase: 'rolled_back', lastError: null }, 'saga-terminal-write', faultInjector);
         }
-        if (!referencesConverged(saga.referenceMigration.idMap, saga.referenceMigration)) {
-          await rememberError(saga, new Error('replacement references changed before terminal checkpoint'), 'sync_pending', faultInjector);
-          continue;
+      } catch (error) {
+        if (!isTerminalSaga(saga)) {
+          try { await rememberError(saga, error, saga.phase, faultInjector); } catch (_) {}
         }
-        await checkpoint(saga, { phase: 'completed', lastError: null }, 'saga-terminal-write', faultInjector);
-      } else if (saga.phase === 'rollback_sync_pending') {
-        const restored = rowById(rows, saga.restoredIds?.parentId);
-        if (!restored
-          || rowById(rows, saga.replacementIds?.parentId)
-          || importedIdentityConflict(rows, saga.original.imported_id, [restored.id])
-          || !shapeMatches(restored, saga.original)) {
-          await rememberError(saga, new Error('rollback changed before terminal checkpoint'), 'rollback_sync_pending', faultInjector);
-          continue;
-        }
-        if (!referencesConverged(saga.referenceMigration.idMap, saga.referenceMigration)) {
-          await rememberError(saga, new Error('rollback references changed before terminal checkpoint'), 'rollback_sync_pending', faultInjector);
-          continue;
-        }
-        await checkpoint(saga, { phase: 'rolled_back', lastError: null }, 'saga-terminal-write', faultInjector);
+        firstError ||= error;
       }
     }
+    if (firstError) throw firstError;
   }
 
   async function finishSync(api, sagas, faultInjector) {
@@ -963,6 +1064,7 @@ function createTransactionReplacementSaga({
     }
     const legOwnership = deriveLegOwnership(original, replacement, requestedLegs);
     assertAvailable({ accountId, original });
+    if (assertExternalAvailable) assertExternalAvailable({ accountId, original });
     await assertImportedIdentityAvailable(api, { accountId, original });
     preflightReferences();
     const identity = `df-replace:${crypto.randomUUID()}`;
@@ -1073,27 +1175,48 @@ function createTransactionReplacementSaga({
     return driveRollback(api, saga, { faultInjector });
   }
 
-  async function recover(api, { faultInjector } = {}) {
+  async function recover(api, { faultInjector, deferSync = false } = {}) {
     const loaded = loadState();
     if (loaded.changed) writeState(loaded.state);
     const active = Object.values(loaded.state.sagas).filter((saga) => !isTerminalSaga(saga));
     const syncPending = [];
+    const errors = [];
+    let firstThrownError = null;
     for (const saga of active) {
       let result;
       if (saga.phase === 'legacy_unresolved') continue;
-      if (saga.phase === 'legacy_reconcile_forward') {
-        result = await reconcileLegacyForward(api, saga, faultInjector);
-      } else if (saga.phase === 'legacy_reconcile_rollback') {
-        result = await reconcileLegacyRollback(api, saga, faultInjector);
-      } else if (saga.phase.startsWith('rollback_')
-        || ['restored_identified', 'restore_add_pending', 'restore_metadata_pending', 'restored_ready'].includes(saga.phase)) {
-        result = await driveRollback(api, saga, { faultInjector });
-      } else {
-        result = await driveForward(api, saga, { faultInjector, recovery: true });
+      try {
+        if (saga.phase === 'legacy_reconcile_forward') {
+          result = await reconcileLegacyForward(api, saga, faultInjector);
+        } else if (saga.phase === 'legacy_reconcile_rollback') {
+          result = await reconcileLegacyRollback(api, saga, faultInjector);
+        } else if (saga.phase.startsWith('rollback_')
+          || ['restored_identified', 'restore_add_pending', 'restore_metadata_pending', 'restored_ready'].includes(saga.phase)) {
+          result = await driveRollback(api, saga, { faultInjector });
+        } else {
+          result = await driveForward(api, saga, { faultInjector, recovery: true });
+        }
+      } catch (error) {
+        try { await rememberError(saga, error, saga.phase, faultInjector); } catch (_) {}
+        errors.push({ sagaId: saga.id, error });
+        firstThrownError ||= error;
+        continue;
       }
+      if (result?.unresolved) errors.push({ sagaId: saga.id, error: result.error });
       if (result?.needsSync) syncPending.push(saga);
     }
+    if (deferSync) {
+      return {
+        needsSync: syncPending.length > 0,
+        errors,
+      };
+    }
     await finishSync(api, syncPending, faultInjector);
+    if (firstThrownError) throw firstThrownError;
+    return {
+      needsSync: syncPending.length > 0,
+      errors,
+    };
   }
 
   async function markSynced(api, { faultInjector } = {}) {

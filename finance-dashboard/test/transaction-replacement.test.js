@@ -32,7 +32,12 @@ function fakeApi(original, { failFirstAdd = false } = {}) {
   let sequence = 0;
   let addCalls = 0;
   return {
-    async getTransactions() { return structuredClone(rows); },
+    async getAccounts() {
+      return [{ id: 'account', name: 'Account', closed: false, offbudget: false }];
+    },
+    async getTransactions(accountId) {
+      return accountId == null || accountId === 'account' ? structuredClone(rows) : [];
+    },
     async deleteTransaction(id) { rows = rows.filter((row) => row.id !== id); },
     async addTransactions(_accountId, [transaction]) {
       addCalls += 1;
@@ -158,6 +163,9 @@ test('startup recovery finishes sidecar migration after replacement commit', asy
   }));
   let synced = false;
   await recoverTransactionSagas({
+    async getAccounts() {
+      return [{ id: 'account', name: 'Account', closed: false, offbudget: false }];
+    },
     async getTransactions() { return [structuredClone(replacement)]; },
     async sync() { synced = true; },
   });

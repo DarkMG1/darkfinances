@@ -129,13 +129,27 @@ function durableActual({
 } = {}) {
   const state = {
     rows: structuredClone(rows),
+    accounts: [
+      { id: 'account', name: 'Account', closed: false, offbudget: false },
+      { id: 'closed-account', name: 'Closed', closed: true, offbudget: false },
+      { id: 'offbudget-account', name: 'Off Budget', closed: false, offbudget: true },
+    ],
+    failAccountEnumeration: false,
+    queryFailures: new Set(),
     sequence: 0,
     fired: new Set(),
     counts: { add: 0, delete: 0, update: 0, sync: 0 },
   };
   const adapter = {
     state,
+    async getAccounts() {
+      if (state.failAccountEnumeration) throw new Error('Actual account enumeration failed');
+      return structuredClone(state.accounts);
+    },
     async getTransactions(accountId, start, end) {
+      if (state.queryFailures.has(String(accountId))) {
+        throw new Error(`Actual transaction query failed for ${accountId}`);
+      }
       return state.rows
         .filter((row) => row.account === accountId && row.date >= start && row.date <= end)
         .map((row) => structuredClone(row));
@@ -556,6 +570,180 @@ test('apply-then-throw replacement add is reconciled by unique imported identity
   await recoverPastFault(api);
   assert.equal(api.state.counts.add, 1, 'recovery does not repeat an add that may have applied');
   assertConverged(api, replacement);
+});
+
+test('an original moved to a closed account before deletion remains untouched and nonterminal', async () => {
+  resetStores();
+  const api = durableActual();
+  const replacement = intendedSplit();
+  const interruption = faultSchedule([{ point: 'after:initial-saga-write' }]);
+  await interruptReplacement(api, replacement, interruption);
+  const storesBefore = readStores();
+  const receiptBefore = fs.readFileSync(path.join(process.env.RECEIPTS_DIR, 'receipt.jpg'));
+  api.state.rows.find((row) => row.id === original.id).account = 'closed-account';
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await assert.rejects(
+      recoverTransactionSagas(api),
+      (error) => error.code === 'TRANSACTION_REPLACEMENT_OUTCOME_UNKNOWN'
+        && /saga-owned transaction ids found outside replacement account: old-parent/.test(error.message),
+    );
+  }
+
+  assert.equal(api.state.rows.find((row) => row.id === original.id).account, 'closed-account');
+  assert.deepEqual(actualMutationCounts(api), { add: 0, delete: 0, update: 0, sync: 0 });
+  assert.equal(activeSaga().phase, 'delete_pending');
+  assert.deepEqual(readStores(), storesBefore);
+  assert.deepEqual(
+    fs.readFileSync(path.join(process.env.RECEIPTS_DIR, 'receipt.jpg')),
+    receiptBefore,
+  );
+});
+
+test('a checkpointed split replacement moved off-budget blocks rollback and reference effects', async () => {
+  resetStores();
+  const api = durableActual();
+  const replacement = intendedSplit();
+  const interruption = faultSchedule([{ point: 'after:replacement-id-checkpoint' }]);
+  await interruptReplacement(api, replacement, interruption);
+  const saga = activeSaga();
+  assert.equal(saga.phase, 'replacement_identified');
+  const replacementId = saga.replacementIds.parentId;
+  const checkpointedIds = [replacementId, ...saga.replacementIds.legIds].sort();
+  api.state.rows.find((row) => row.id === replacementId).account = 'offbudget-account';
+  const countsBefore = actualMutationCounts(api);
+  const storesBefore = readStores();
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await assert.rejects(
+      recoverTransactionSagas(api),
+      /saga-owned transaction ids found outside replacement account/,
+    );
+  }
+
+  const moved = api.state.rows.find((row) => row.id === replacementId);
+  assert.equal(moved.account, 'offbudget-account');
+  assert.deepEqual(
+    [moved.id, ...moved.subtransactions.map((leg) => leg.id)].sort(),
+    checkpointedIds,
+  );
+  assert.deepEqual(actualMutationCounts(api), countsBefore);
+  assert.deepEqual(readStores(), storesBefore);
+  assert.equal(activeSaga().phase, 'replacement_identified');
+});
+
+test('a checkpointed restored row moved across accounts remains nonterminal without recovery effects', async () => {
+  resetStores();
+  const api = durableActual();
+  const replacement = intendedSplit();
+  const interruption = faultSchedule([
+    { point: 'before:reference-plan-checkpoint', mode: 'error' },
+    { point: 'after:restored-id-checkpoint' },
+  ]);
+  await interruptReplacement(api, replacement, interruption);
+  const saga = activeSaga();
+  assert.equal(saga.phase, 'restored_identified');
+  const restoredId = saga.restoredIds.parentId;
+  api.state.rows.find((row) => row.id === restoredId).account = 'closed-account';
+  const countsBefore = actualMutationCounts(api);
+  const storesBefore = readStores();
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await assert.rejects(
+      recoverTransactionSagas(api),
+      /saga-owned transaction ids found outside replacement account/,
+    );
+  }
+
+  assert.equal(api.state.rows.find((row) => row.id === restoredId).account, 'closed-account');
+  assert.deepEqual(actualMutationCounts(api), countsBefore);
+  assert.deepEqual(readStores(), storesBefore);
+  assert.equal(activeSaga().phase, 'restore_metadata_pending');
+});
+
+test('an uncheckpointed temporary replacement identity in another account prevents a duplicate add', async () => {
+  resetStores();
+  const api = durableActual();
+  const replacement = intendedSplit();
+  const interruption = faultSchedule([{ point: 'before:replacement-add' }]);
+  await interruptReplacement(api, replacement, interruption);
+  const saga = activeSaga();
+  await api.addTransactions('closed-account', [
+    addableTransaction(saga.replacement, { imported_id: saga.identity.value }),
+  ]);
+  const countsBefore = actualMutationCounts(api);
+  const storesBefore = readStores();
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await assert.rejects(
+      recoverTransactionSagas(api),
+      (error) => error.code === 'TRANSACTION_REPLACEMENT_OUTCOME_UNKNOWN'
+        && error.message === 'temporary replacement identity found outside replacement account',
+    );
+  }
+
+  assert.deepEqual(actualMutationCounts(api), countsBefore);
+  assert.deepEqual(readStores(), storesBefore);
+  assert.equal(activeSaga().phase, 'replacement_add_pending');
+  assert.equal(
+    api.state.rows.filter((row) => row.imported_id === saga.identity.value).length,
+    1,
+  );
+});
+
+test('ordinary imported identity and financial lookalikes remain account-scoped', async () => {
+  resetStores();
+  const foreignLookalike = {
+    ...structuredClone(original),
+    id: 'foreign-imported-lookalike',
+    account: 'closed-account',
+  };
+  const api = durableActual({ rows: [original, decoy, unrelated, foreignLookalike] });
+  const replacement = intendedSplit();
+
+  await replaceActualTransaction(api, {
+    accountId: 'account',
+    original,
+    replacement,
+  });
+  await recoverPastFault(api);
+
+  assert.equal(latestSaga().phase, 'completed');
+  assert.deepEqual(
+    api.state.rows.find((row) => row.id === foreignLookalike.id),
+    foreignLookalike,
+  );
+  assertConverged(api, replacement);
+});
+
+test('account enumeration and cross-account query failures leave replacement nonterminal', async (t) => {
+  for (const failure of ['enumeration', 'query']) {
+    await t.test(failure, async () => {
+      resetStores();
+      const api = durableActual();
+      const replacement = intendedSplit();
+      const interruption = faultSchedule([{ point: 'after:initial-saga-write' }]);
+      await interruptReplacement(api, replacement, interruption);
+      const storesBefore = readStores();
+      if (failure === 'enumeration') {
+        api.state.failAccountEnumeration = true;
+      } else {
+        api.state.queryFailures.add('closed-account');
+      }
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await assert.rejects(
+          recoverTransactionSagas(api),
+          failure === 'enumeration'
+            ? /unable to enumerate Actual accounts/
+            : /unable to query Actual account closed-account/,
+        );
+      }
+      assert.deepEqual(actualMutationCounts(api), { add: 0, delete: 0, update: 0, sync: 0 });
+      assert.deepEqual(readStores(), storesBefore);
+      assert.equal(activeSaga().phase, 'delete_pending');
+    });
+  }
 });
 
 test('a prepared saga blocks a second replacement before identity generation or effects', async () => {

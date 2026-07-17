@@ -60,7 +60,7 @@ test('replacement conflict is a terminal 409 before the operation effect boundar
       initApi: async () => ({ ok: true }),
       shutdownApi: async () => ({ ok: true }),
       getHealth: () => ({ ready: true }),
-      assertTransactionReplacementAvailable: () => {
+      assertTransactionMutationAvailable: () => {
         mark('conflict-preflight');
         throw new KnownPreApplyError('A replacement for this transaction is already in progress', {
           code: 'TRANSACTION_REPLACEMENT_IN_PROGRESS',

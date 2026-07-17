@@ -22,6 +22,8 @@ for (const [key, file] of Object.entries({
   RECON_PATH: 'reconciliation.json',
   PHANTOM_SEEN_PATH: 'phantom-seen.json',
   RULES_PATH: 'rules.json',
+  TRANSACTION_SAGAS_PATH: 'transaction-sagas.json',
+  TRANSACTION_DELETION_SAGAS_PATH: 'transaction-deletion-sagas.json',
 })) process.env[key] = path.join(sidecars, file);
 
 const data = require('../dataModule');
@@ -103,8 +105,18 @@ const data = require('../dataModule');
         const payees = await data.api.getPayees();
         const payee = payees.find((item) => item.name === marker);
         const rows = await data.api.getTransactions(account.id, today, today);
-        for (const row of rows) if (row.payee === payee?.id || row.imported_payee === marker) await data.api.deleteTransaction(row.id);
-        await data.api.sync();
+        let deleted = false;
+        for (const row of rows) {
+          if (row.payee !== payee?.id && row.imported_payee !== marker) continue;
+          await data.deleteTransaction({
+            id: row.id,
+            accountId: account.id,
+            date: row.date,
+            allowImported: true,
+          });
+          deleted = true;
+        }
+        if (deleted) await data.syncNow();
       } catch (_) {}
     }
     try { await data.api.shutdown(); } catch (_) {}

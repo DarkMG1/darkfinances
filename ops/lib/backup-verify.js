@@ -15,6 +15,7 @@ const SIDECAR_FILES = [
   'goals.json',
   'investment-holdings.json',
   'manual-assets.json',
+  'operation-journal.json',
   'owes-config.json',
   'owes-truth.json',
   'passkey-credentials.json',
@@ -26,7 +27,10 @@ const SIDECAR_FILES = [
   'reimb-suggest.json',
   'reconciliation.json',
   'recurring-overrides.json',
+  'review-state.json',
   'rules.json',
+  'transaction-deletion-sagas.json',
+  'transaction-sagas.json',
   'venmo-truth.json',
 ];
 
@@ -61,26 +65,66 @@ function assertObject(label, value) {
   }
 }
 
+function receiptRecords(receipts) {
+  if (Array.isArray(receipts)) {
+    for (const receipt of receipts) assertObject('receipts.json entry', receipt);
+    return { format: 'legacy', records: receipts };
+  }
+
+  assertObject('receipts.json', receipts);
+  assertObject('receipts.json byTxn', receipts.byTxn);
+  const records = [];
+  for (const [txnId, bucket] of Object.entries(receipts.byTxn)) {
+    assertArray(`receipts.json byTxn.${txnId}`, bucket);
+    for (const receipt of bucket) {
+      assertObject(`receipts.json byTxn.${txnId} entry`, receipt);
+      records.push(receipt);
+    }
+  }
+  return { format: 'byTxn', records };
+}
+
 function validateSidecar(name, text) {
   const data = parseJson(name, text);
   switch (name) {
     case 'goals.json':
     case 'events.json':
     case 'rules.json':
-    case 'receipts.json':
     case 'passkey-credentials.json':
-    case 'reimb-links.json':
-    case 'reimb-suggest.json':
-    case 'phantom-log.json':
-    case 'phantom-seen.json':
     case 'bills-paid.json':
     case 'recurring-overrides.json':
     case 'manual-assets.json':
     case 'investment-holdings.json':
       assertArray(name, data);
       break;
+    case 'receipts.json':
+      receiptRecords(data);
+      break;
+    case 'reimb-links.json':
+      assertObject(name, data);
+      assertArray(`${name} links`, data.links);
+      break;
+    case 'reimb-suggest.json':
+      assertObject(name, data);
+      assertObject(`${name} confirmed`, data.confirmed);
+      assertArray(`${name} dismissed`, data.dismissed);
+      break;
+    case 'phantom-log.json':
+      assertObject(name, data);
+      assertArray(`${name} deleted`, data.deleted);
+      break;
+    case 'phantom-seen.json':
+      assertObject(name, data);
+      assertObject(`${name} seen`, data.seen);
+      break;
     case 'reconciliation.json':
       assertObject(name, data);
+      assertObject(`${name} months`, data.months);
+      break;
+    case 'transaction-deletion-sagas.json':
+      assertObject(name, data);
+      if (data.schemaVersion !== 1) throw new Error(`${name} must declare schemaVersion 1`);
+      assertObject(`${name} sagas`, data.sagas);
       break;
     case 'owes-truth.json':
     case 'venmo-truth.json':
@@ -103,20 +147,32 @@ function validateSidecar(name, text) {
   return data;
 }
 
+function assertArchivedFile(root, relativePath, label) {
+  if (typeof relativePath !== 'string' || !relativePath) {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, relativePath);
+  const relative = path.relative(resolvedRoot, resolved);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`unsafe receipt path: ${relativePath}`);
+  }
+  if (!fs.existsSync(resolved) || !fs.lstatSync(resolved).isFile()) {
+    throw new Error(`missing receipt file: ${relativePath}`);
+  }
+}
+
 function validateReceiptReferences(receipts, dashboardDir) {
-  assertArray('receipts.json', receipts);
-  for (const receipt of receipts) {
-    if (!receipt || typeof receipt !== 'object') {
-      throw new Error('receipts.json entries must be objects');
+  const { format, records } = receiptRecords(receipts);
+  for (const receipt of records) {
+    if (format === 'legacy' && receipt.path != null) {
+      assertArchivedFile(dashboardDir, receipt.path, 'receipt path');
     }
-    if (receipt.path) {
-      const resolved = path.resolve(dashboardDir, receipt.path);
-      if (!resolved.startsWith(path.resolve(dashboardDir))) {
-        throw new Error(`unsafe receipt path: ${receipt.path}`);
+    if (format === 'byTxn' && receipt.file != null) {
+      if (typeof receipt.file !== 'string' || path.basename(receipt.file) !== receipt.file) {
+        throw new Error(`unsafe receipt path: ${receipt.file}`);
       }
-      if (!fs.existsSync(resolved)) {
-        throw new Error(`missing receipt file: ${receipt.path}`);
-      }
+      assertArchivedFile(path.join(dashboardDir, 'receipts'), receipt.file, 'receipt file');
     }
   }
 }

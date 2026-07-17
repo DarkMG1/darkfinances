@@ -17,6 +17,8 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/safe-to-spend.js',
   'lib/serial-queue.js',
   'lib/state-registry.js',
+  'lib/transaction-deletion-references.js',
+  'lib/transaction-deletion-saga.js',
   'lib/transaction-references.js',
   'lib/transaction-replacement-references.js',
   'lib/transaction-replacement-saga.js',

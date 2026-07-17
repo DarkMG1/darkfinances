@@ -24,6 +24,7 @@ const STATE_REGISTRY = Object.freeze({
   recurringOverrides: entry('RECURRING_OVERRIDES_PATH', 'recurring-overrides.json', 1, true, 'recurring keys'),
   reviewState: entry('REVIEW_STATE_PATH', 'review-state.json', 1, true, 'stable review fingerprints'),
   rules: entry('RULES_PATH', 'rules.json', 1, true, 'rule ids'),
+  transactionDeletionSagas: entry('TRANSACTION_DELETION_SAGAS_PATH', 'transaction-deletion-sagas.json', 1, true, 'deleted Actual and sidecar transaction ids'),
   transactionSagas: entry('TRANSACTION_SAGAS_PATH', 'transaction-sagas.json', 1, true, 'Actual and sidecar transaction ids'),
   venmoTruth: entry('VENMO_TRUTH_PATH', 'venmo-truth.json', 1, true, 'Venmo transaction ids'),
 });

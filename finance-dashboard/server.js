@@ -655,8 +655,7 @@ async function markRecurring(req, operation) {
 async function splitTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date, legs } = parse(schemas.splitTransaction, req.body, 'transaction split');
-  data.assertTransactionReplacementAvailable({
-    accountId,
+  data.assertTransactionMutationAvailable({
     ids: [id, ...legs.map((leg) => leg.id).filter(Boolean)],
   });
   const result = await applyLocal(operation, () => data.splitTransaction({ id, accountId, date, legs }));
@@ -667,7 +666,7 @@ async function splitTxn(req, operation) {
 async function unsplitTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date, categoryId } = parse(schemas.unsplitTransaction, req.body, 'remove split');
-  data.assertTransactionReplacementAvailable({ accountId, ids: [id] });
+  data.assertTransactionMutationAvailable({ ids: [id] });
   const result = await applyLocal(operation, () => data.removeSplit({ id, accountId, date, categoryId }));
   await syncAfterLocal(operation);
   cache.flushAll();
@@ -676,9 +675,9 @@ async function unsplitTxn(req, operation) {
 async function setPayeeH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { payee, isLeg, parentId, accountId, date } = parse(schemas.setPayee, req.body, 'transaction payee');
-  if (isLeg) {
-    data.assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
-  }
+  data.assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
   const result = await applyLocal(operation, () =>
     data.setPayee({ id, payee, isLeg, parentId, accountId, date }));
   await syncAfterLocal(operation);
@@ -730,6 +729,9 @@ const phantomLogH = (req) => Promise.resolve(data.getPhantomLog({ limit: Number(
 // Receipts
 async function addReceiptH(req, operation) {
   const receipt = parse(schemas.receipt, req.body, 'receipt');
+  data.assertTransactionMutationAvailable({
+    ids: [receipt.txnId],
+  });
   try {
     await data.getTransactionById({
       id: receipt.txnId,
@@ -758,6 +760,7 @@ async function addReceiptH(req, operation) {
 const receiptsH = (req) => Promise.resolve(data.getReceipts({ txnId: req.query.txnId }));
 async function deleteReceiptH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'receipt id');
+  data.assertReceiptMutationAvailable({ id });
   return applyLocal(operation, () => data.deleteReceipt({ id }));
 }
 // Raw image stream (auth already enforced by the router). expo-image sends the
@@ -785,6 +788,7 @@ async function sweepReimbH(req, operation) {
 async function deleteTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date } = parse(schemas.deleteTransactionQuery, req.query, 'transaction delete query');
+  data.assertTransactionMutationAvailable({ ids: [id] });
   const result = await applyLocal(operation, () => data.deleteTransaction({ id, accountId, date }));
   await syncAfterLocal(operation); // persist the delete back to the Actual server
   cache.flushAll(); // removing a transaction shifts balances/spending/insights
@@ -860,9 +864,9 @@ async function deleteManualAssetH(req, operation) {
 async function setNotes(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { notes, isLeg, parentId, accountId, date } = parse(schemas.setNotes, req.body, 'transaction notes');
-  if (isLeg) {
-    data.assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
-  }
+  data.assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
   const result = await applyLocal(operation, () =>
     data.setTransactionNotes({ id, notes, isLeg, parentId, accountId, date }));
   await syncAfterLocal(operation);
@@ -872,6 +876,7 @@ async function setNotes(req, operation) {
 async function setDateH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { date, isLeg } = parse(schemas.setDate, req.body, 'transaction date');
+  data.assertTransactionMutationAvailable({ ids: [id] });
   const result = await applyLocal(operation, () => data.setTransactionDate({ id, date, isLeg }));
   await syncAfterLocal(operation);
   cache.flushAll();
@@ -893,9 +898,9 @@ async function deleteGoal(req, operation) {
 async function setCategory(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { categoryId, isLeg, parentId, accountId, date } = parse(schemas.setCategory, req.body, 'transaction category');
-  if (isLeg) {
-    data.assertTransactionReplacementAvailable({ accountId, ids: [parentId, id] });
-  }
+  data.assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
   const result = await applyLocal(operation, () =>
     data.setTransactionCategory({ id, categoryId, isLeg, parentId, accountId, date }));
   await syncAfterLocal(operation); // persist the write back to the Actual server
@@ -958,12 +963,14 @@ async function setBudget(req, operation) {
 const reimbLinks = (req) => Promise.resolve(data.getReimbLinks({ id: req.query.id }));
 async function addLink(req, operation) {
   const link = parse(schemas.reimbLink, req.body, 'reimbursement link');
+  data.assertTransactionMutationAvailable({ ids: [link.inflow?.id, link.expense?.id] });
   const r = await applyLocal(operation, () => data.addReimbLink(link));
   cache.flushAll(); // suggestions net against links
   return r;
 }
 async function confirmRepaymentH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'repayment id');
+  data.assertTransactionMutationAvailable({ ids: [id.startsWith('sg_') ? id.slice(3) : null] });
   const r = await applyLocal(operation, () =>
     data.confirmRepayment({ id, from: req.query.from, to: req.query.to }));
   await syncAfterLocal(operation); // persist the inflow's new category to the Actual server
@@ -975,6 +982,9 @@ async function dismissRepaymentH(req, operation) {
   const inflowId = req.body?.inflowId == null
     ? undefined
     : parse(schemas.idParam, { id: req.body.inflowId }, 'repayment inflow id').id;
+  data.assertTransactionMutationAvailable({
+    ids: [inflowId || (id.startsWith('sg_') ? id.slice(3) : null)],
+  });
   const r = await applyLocal(operation, () => data.dismissRepayment({ id, inflowId }));
   cache.flushAll();
   return r;
@@ -983,6 +993,7 @@ async function delLink(req, operation) {
   const inflowId = (req.body && req.body.inflowId) || req.query.inflowId;
   const expenseId = (req.body && req.body.expenseId) || req.query.expenseId;
   const parsed = parse(schemas.deleteReimbLink, { inflowId, expenseId }, 'reimbursement unlink');
+  data.assertTransactionMutationAvailable({ ids: [parsed.inflowId, parsed.expenseId] });
   const r = await applyLocal(operation, () => data.deleteReimbLink(parsed));
   cache.flushAll();
   return r;
@@ -993,6 +1004,7 @@ const reconciliationH = (req) => data.getReconciliation({ month: monthOf(req) })
 const reconcilePendingH = () => data.getReconcilePending();
 const setReconItemH = (req, operation) => {
   const item = parse(schemas.reconcileItem, req.body, 'reconciliation item');
+  data.assertTransactionMutationAvailable({ ids: [item.id] });
   return applyLocal(operation, () => data.setReconcileItem(item));
 };
 const setReconMonthH = (req, operation) => {

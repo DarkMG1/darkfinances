@@ -39,6 +39,7 @@ debt-planner.json
 investment-holdings.json
 operation-journal.json
 review-state.json
+transaction-deletion-sagas.json
 transaction-sagas.json
 release-manifest.json
 receipts/
