@@ -8,7 +8,7 @@ import { Card, EmptyState, ErrorState } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { ReconItem } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
-import { currentMonthKey } from '@/lib/selectedMonth';
+import { useCurrentMonthKey } from '@/lib/selectedMonth';
 import { colors, fmtDate, fmtSignedMoney, monthLabel } from '@/theme/colors';
 
 const stepMonth = (key: string, delta: number) => {
@@ -19,13 +19,14 @@ const stepMonth = (key: string, delta: number) => {
 
 export default function Reconcile() {
   const params = useLocalSearchParams<{ month?: string }>();
-  const initialMonth = params.month || stepMonth(currentMonthKey(), -1);
+  const curKey = useCurrentMonthKey();
+  const initialMonth = params.month || stepMonth(curKey, -1);
   return <ReconcileContent key={initialMonth} initialMonth={initialMonth} />;
 }
 
 function ReconcileContent({ initialMonth }: { initialMonth: string }) {
   const router = useRouter();
-  const curKey = currentMonthKey();
+  const curKey = useCurrentMonthKey();
   // Deep-link (from the nag banner) wins; otherwise default to last month.
   const [month, setMonth] = useState(initialMonth);
 

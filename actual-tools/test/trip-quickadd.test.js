@@ -26,6 +26,30 @@ test('trip quick-add refuses to replace malformed state', (t) => {
   assert.equal(fs.readFileSync(f.file, 'utf8'), '{broken');
 });
 
+test('trip quick-add defaults start date to finance today, not UTC truncation', (t) => {
+  const f = fixture(t);
+  const result = spawnSync(process.execPath, ['-e', `
+    process.env.TZ = 'UTC';
+    process.env.FINANCE_TIME_ZONE = 'America/Los_Angeles';
+    process.env.EVENTS_PATH = ${JSON.stringify(f.file)};
+    const RealDate = Date;
+    const fixed = new RealDate('2026-07-09T17:01:00-07:00');
+    global.Date = class extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(fixed);
+        else super(...args);
+      }
+      static now() { return fixed.getTime(); }
+    };
+    process.argv = ['node', ${JSON.stringify(script)}, 'add', 'Pacific Trip'];
+    require(${JSON.stringify(script)});
+  `], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const state = JSON.parse(fs.readFileSync(f.file, 'utf8'));
+  assert.equal(state.events[0].start, '2026-07-09');
+  assert.notEqual(new Date('2026-07-09T17:01:00-07:00').toISOString().slice(0, 10), '2026-07-09');
+});
+
 test('trip quick-add writes valid state atomically and privately', (t) => {
   const f = fixture(t);
   const result = f.run('add', 'Test Trip', '--start', '2026-07-01');

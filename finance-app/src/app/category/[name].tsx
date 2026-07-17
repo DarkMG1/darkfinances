@@ -10,16 +10,21 @@ import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { Avatar, EmptyState, ErrorState, PendingPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
+import {
+  calendarMonthWindow,
+  categoryRangeWindow,
+  monthsThrough,
+  relativePeriodLabel,
+  sixMonthChartWindow,
+  type CategoryRangeKey,
+  useFinanceToday,
+} from '@/lib/date-only';
 import { categoryIcon } from '@/theme/categoryIcons';
 import { colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
 
-const pad = (n: number) => String(n).padStart(2, '0');
-const ymd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-
-type CatRange = 'month' | '3m' | 'year' | 'all';
 type SortKey = 'newest' | 'oldest' | 'amountHigh' | 'amountLow';
 type BucketKey = 'spending' | 'bills' | 'subscriptions';
-const RANGES: { key: CatRange; label: string }[] = [
+const RANGES: { key: CategoryRangeKey; label: string }[] = [
   { key: 'month', label: 'Month' },
   { key: '3m', label: '3M' },
   { key: 'year', label: 'Year' },
@@ -32,46 +37,25 @@ const SORTS: { key: SortKey; label: string }[] = [
   { key: 'amountLow', label: 'Amount: Lowest' },
 ];
 
-function rangeWindow(key: CatRange, month?: string, explicitStart?: string, explicitEnd?: string, explicitLabel?: string): { start: string; end: string; label: string } {
-  if (explicitStart && explicitEnd) return { start: explicitStart, end: explicitEnd, label: relativePeriodLabel(explicitStart, explicitEnd, explicitLabel) };
-  const now = new Date();
-  const end = ymd(now);
-  if (key === 'month') {
-    if (month) {
-      const [y, m] = month.split('-').map(Number);
-      const last = new Date(y, m, 0).getDate();
-      return { start: `${month}-01`, end: `${month}-${pad(last)}`, label: monthLabel(month) };
-    }
-    return { start: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`, end, label: 'This month' };
+function rangeWindow(
+  key: CategoryRangeKey,
+  anchor: string,
+  month?: string,
+  explicitStart?: string,
+  explicitEnd?: string,
+  explicitLabel?: string,
+): { start: string; end: string; label: string } {
+  if (explicitStart && explicitEnd) {
+    return {
+      start: explicitStart,
+      end: explicitEnd,
+      label: relativePeriodLabel(explicitStart, explicitEnd, explicitLabel, anchor),
+    };
   }
-  if (key === '3m') { const d = new Date(now); d.setMonth(d.getMonth() - 2); return { start: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`, end, label: 'Last 3 months' }; }
-  if (key === 'year') return { start: `${now.getFullYear()}-01-01`, end, label: 'This year' };
-  return { start: '2000-01-01', end, label: 'All time' };
-}
-
-function relativePeriodLabel(start: string, end: string, fallback?: string) {
-  const now = new Date();
-  const currentMonth = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
-  const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const prevMonth = `${prev.getFullYear()}-${pad(prev.getMonth() + 1)}`;
-  const fullMonth = (month: string, s: string, e: string) => {
-    const [y, m] = month.split('-').map(Number);
-    const last = `${month}-${pad(new Date(y, m, 0).getDate())}`;
-    return s === `${month}-01` && (e === last || month === currentMonth);
-  };
-  const month = start.slice(0, 7);
-  if (month === currentMonth && fullMonth(month, start, end)) return 'This month';
-  if (month === prevMonth && fullMonth(month, start, end)) return 'Last month';
-  return fallback || 'Selected period';
-}
-
-function monthWindow(month: string) {
-  const now = new Date();
-  const currentMonth = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
-  const [year, m] = month.split('-').map(Number);
-  const start = `${month}-01`;
-  const end = month === currentMonth ? ymd(now) : `${month}-${pad(new Date(year, m, 0).getDate())}`;
-  return { start, end, label: relativePeriodLabel(start, end, monthLabel(month)) };
+  if (key === 'month' && month) {
+    return calendarMonthWindow(month, anchor);
+  }
+  return categoryRangeWindow(key, anchor);
 }
 
 function compactMoney(n: number) {
@@ -83,29 +67,29 @@ function compactMoney(n: number) {
 export default function CategoryDetail() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const financeToday = useFinanceToday();
   const params = useLocalSearchParams<{ name: string; month?: string; range?: string; start?: string; end?: string; label?: string; bucket?: BucketKey }>();
-  // expo-router already decodes route params; use as-is.
   const name = params.name ?? '';
   const isAllSpending = /^(spending|total spend)$/i.test(name);
   const isIncome = /^(income|earnings)$/i.test(name);
-  const [range] = useState<CatRange>(
-    (RANGES.some((r) => r.key === params.range) ? (params.range as CatRange) : 'month')
+  const [range] = useState<CategoryRangeKey>(
+    (RANGES.some((r) => r.key === params.range) ? (params.range as CategoryRangeKey) : 'month')
   );
   const [sort, setSort] = useState<SortKey>('newest');
   const [sortOpen, setSortOpen] = useState(false);
-  const baseWindow = rangeWindow(range, params.month, params.start, params.end, params.label);
+  const baseWindow = useMemo(
+    () => rangeWindow(range, financeToday, params.month, params.start, params.end, params.label),
+    [range, financeToday, params.month, params.start, params.end, params.label],
+  );
   const windowKey = `${name}-${params.bucket || ''}-${baseWindow.start}-${baseWindow.end}`;
   const [monthOverride, setMonthOverride] = useState<{ key: string; month: string } | null>(null);
-  const activeWindow = monthOverride?.key === windowKey ? monthWindow(monthOverride.month) : baseWindow;
+  const activeWindow = useMemo(() => {
+    if (monthOverride?.key === windowKey) return calendarMonthWindow(monthOverride.month, financeToday);
+    return baseWindow;
+  }, [monthOverride, windowKey, baseWindow, financeToday]);
   const { start, end, label } = activeWindow;
   const chartAnchorMonth = params.month || baseWindow.end.slice(0, 7);
-  const chartWindow = useMemo(() => {
-    const [y, m] = chartAnchorMonth.split('-').map(Number);
-    const base = new Date(y, m - 1, 1);
-    const first = new Date(base.getFullYear(), base.getMonth() - 5, 1);
-    const last = new Date(base.getFullYear(), base.getMonth() + 1, 0);
-    return { start: ymd(first), end: ymd(last) };
-  }, [chartAnchorMonth]);
+  const chartWindow = useMemo(() => sixMonthChartWindow(chartAnchorMonth), [chartAnchorMonth]);
 
   const selectedMonth = end.slice(0, 7);
   const queryCategory = params.bucket || isAllSpending ? undefined : name;
@@ -133,12 +117,7 @@ export default function CategoryDetail() {
   }, 0), [rows, isIncome]);
   const refunds = useMemo(() => rows.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0), [rows]);
   const chartMonths = useMemo(() => {
-    const [y, m] = chartAnchorMonth.split('-').map(Number);
-    const base = new Date(y, m - 1, 1);
-    const months = Array.from({ length: 6 }, (_, i) => {
-      const d = new Date(base.getFullYear(), base.getMonth() - 5 + i, 1);
-      return ymd(d).slice(0, 7);
-    });
+    const months = monthsThrough(chartAnchorMonth, 6);
     const totals = new Map(months.map((m) => [m, 0]));
     (allTxns.data ?? []).forEach((t) => {
       const ok = isAllSpending ? t.amount < 0 && !/^reimbursement$/i.test(t.category || '') : isIncome ? t.amount > 0 : isUncat ? !t.category : true;

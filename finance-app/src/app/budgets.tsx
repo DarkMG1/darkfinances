@@ -8,7 +8,7 @@ import { Card, CardTitle, EmptyState, ErrorState } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { GroupedBars, MonthNavigator, ProgressBar } from '@/components/charts';
 import { haptics } from '@/lib/haptics';
-import { currentMonthKey, useSelectedMonth } from '@/lib/selectedMonth';
+import { useCurrentMonthKey, useSelectedMonth } from '@/lib/selectedMonth';
 import { colors, fmtPos } from '@/theme/colors';
 
 type Editing = (BudgetCategory & { groupName: string }) | null;
@@ -25,7 +25,7 @@ const metaLabel = (c: BudgetCategory) => {
 export default function Budgets() {
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const curKey = currentMonthKey();
+  const curKey = useCurrentMonthKey();
   const [month, setMonth] = useSelectedMonth();
   // Current month keeps hitting the warmed `budgets-current` cache (month=undefined).
   const apiMonth = month === curKey ? undefined : month;

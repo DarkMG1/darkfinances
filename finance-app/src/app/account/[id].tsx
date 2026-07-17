@@ -8,15 +8,10 @@ import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { AccountRole, Transaction } from '@/api/generated/types';
-import { financeToday, previousMonth } from '@/lib/date-only';
+import { previousMonth, useFinanceToday } from '@/lib/date-only';
 import { haptics } from '@/lib/haptics';
 import { colors, fmtDay, fmtMoney } from '@/theme/colors';
 
-// Last ~3 calendar months of activity for this account.
-function windowStart(): string {
-  const current = financeToday().slice(0, 7);
-  return `${previousMonth(previousMonth(current))}-01`;
-}
 const ROLE_OPTIONS: { value: AccountRole; label: string }[] = [
   { value: 'operating_cash', label: 'Everyday cash' },
   { value: 'protected_savings', label: 'Protected savings' },
@@ -30,9 +25,14 @@ export default function AccountDetail() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const p = useLocalSearchParams<{ id: string; name?: string; balance?: string; hidden?: string; role?: AccountRole }>();
+  const financeToday = useFinanceToday();
+  const windowStart = useMemo(() => {
+    const current = financeToday.slice(0, 7);
+    return `${previousMonth(previousMonth(current))}-01`;
+  }, [financeToday]);
 
   const accounts = useAccounts();
-  const txns = useTransactions({ accountId: p.id, start: windowStart(), collapse: true });
+  const txns = useTransactions({ accountId: p.id, start: windowStart, collapse: true });
   const override = useSetAccountOverride();
   const account = (accounts.data ?? []).find((item) => item.id === p.id);
   const balance = account?.balance ?? (p.balance != null && p.balance !== '' ? Number(p.balance) : null);

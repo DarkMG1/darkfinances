@@ -8,6 +8,7 @@ import { SkeletonList } from '@/components/skeleton';
 import { OwesPerson, ReimbLeg, RepaymentSuggestion } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { colors, fmtDate, fmtPos, fmtSignedMoney } from '@/theme/colors';
+import { reimbursementWindow, type ReimbursementRangeKey, useFinanceToday } from '@/lib/date-only';
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 type Status = 'outstanding' | 'partial' | 'settled';
@@ -35,22 +36,15 @@ const bucketTitle = (name: string) => {
 
 // Summary window presets. Debts (People) are always lifetime; this only scopes
 // the fronted / paid-back / net headline so you can review, e.g., just June.
-type RangeKey = 'mtd' | '7d' | '30d' | 'life';
+type RangeKey = ReimbursementRangeKey;
 const RANGES: { key: RangeKey; label: string }[] = [
   { key: 'mtd', label: 'MTD' },
   { key: '7d', label: '7D' },
   { key: '30d', label: '30D' },
   { key: 'life', label: 'All' },
 ];
-const pad2 = (n: number) => String(n).padStart(2, '0');
-const ymd = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-function windowFor(r: RangeKey): { from?: string; to?: string; label: string } {
-  const now = new Date();
-  const to = ymd(now);
-  if (r === 'mtd') return { from: `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-01`, to, label: 'This month' };
-  if (r === '7d') { const d = new Date(now); d.setDate(d.getDate() - 6); return { from: ymd(d), to, label: 'Last 7 days' }; }
-  if (r === '30d') { const d = new Date(now); d.setDate(d.getDate() - 29); return { from: ymd(d), to, label: 'Last 30 days' }; }
-  return { label: 'Lifetime' };
+function windowFor(r: RangeKey, anchor: string) {
+  return reimbursementWindow(r, anchor);
 }
 
 // A person's debt is either tracked in a Splitwise trip/group, a set of direct
@@ -58,8 +52,9 @@ function windowFor(r: RangeKey): { from?: string; to?: string; label: string } {
 // so who owes you is stable regardless of which month you're browsing elsewhere.
 export default function Reimbursement() {
   const router = useRouter();
+  const financeToday = useFinanceToday();
   const [range, setRange] = useState<RangeKey>('mtd');
-  const win = windowFor(range);
+  const win = useMemo(() => windowFor(range, financeToday), [range, financeToday]);
   const reimb = useReimbursement({ from: win.from, to: win.to });
   const suggestions = useRepaymentSuggestions();
   const confirm = useConfirmRepayment();

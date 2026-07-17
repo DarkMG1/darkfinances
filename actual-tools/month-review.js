@@ -3,10 +3,9 @@
    category so the owner can verify categorization. Money Movement / Reimbursement / Income
    are summarized (net) rather than line-listed. */
 const api = require('@actual-app/api');
-const TZ = process.env.FINANCE_TIME_ZONE || process.env.TZ || 'America/Los_Angeles';
+const { todayYMD } = require('./lib/date-only');
 const c2 = (c) => (Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (c) => (c < 0 ? '-$' : '$') + c2(c);
-const financeToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 
 const MM_CAT = /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i;
 const REIMB_CAT = /^reimbursement$/i;
@@ -16,7 +15,7 @@ const TRANSFER_PAYEE = /\btransfer\s*:?\s*(to|from)\b/i;
   await api.init({ dataDir: process.env.FIX_DATA_DIR, serverURL: process.env.ACTUAL_SERVER_URL, password: process.env.ACTUAL_PASSWORD });
   await api.downloadBudget(process.env.ACTUAL_SYNC_ID);
 
-  const today = financeToday();
+  const today = todayYMD();
   const monthStart = today.slice(0, 8) + '01';
 
   const groups = await api.getCategoryGroups();

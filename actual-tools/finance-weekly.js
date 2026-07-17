@@ -9,21 +9,11 @@
  * Env (via run.sh + .actual.env): ACTUAL_SERVER_URL, ACTUAL_PASSWORD, ACTUAL_SYNC_ID, FIX_DATA_DIR
  */
 const api = require('@actual-app/api');
+const { addDays, todayYMD } = require('./lib/date-only');
 
-const TZ = process.env.FINANCE_TIME_ZONE || process.env.TZ || 'America/Los_Angeles';
 const c2 = (cents) => (Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (cents) => (cents < 0 ? '-$' : '$') + c2(cents);
 const signed = (cents) => (cents < 0 ? '-$' : '+$') + c2(cents);
-
-function financeToday() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-}
-function addDays(ymd, n) {
-  const [Y, M, D] = ymd.split('-').map(Number);
-  const dt = new Date(Date.UTC(Y, M - 1, D));
-  dt.setUTCDate(dt.getUTCDate() + n);
-  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
-}
 
 const MM_CAT = /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i;
 const REIMB_CAT = /^reimbursement$/i;
@@ -33,7 +23,7 @@ const TRANSFER_PAYEE = /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i;
   await api.init({ dataDir: process.env.FIX_DATA_DIR, serverURL: process.env.ACTUAL_SERVER_URL, password: process.env.ACTUAL_PASSWORD });
   await api.downloadBudget(process.env.ACTUAL_SYNC_ID);
 
-  const today = financeToday();
+  const today = todayYMD();
   const thisStart = addDays(today, -6), thisEnd = today;
   const lastStart = addDays(today, -13), lastEnd = addDays(today, -7);
 

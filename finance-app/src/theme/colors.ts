@@ -1,4 +1,6 @@
 // Shared dark palette, mirrors the web dashboard (darkfinances).
+import { daysUntilDateOnly } from '@/lib/date-only';
+
 export const colors = {
   bg: '#0a0a0f',
   surface: '#111118',
@@ -57,15 +59,12 @@ export const fmtDay = (d: string): string => {
   if (!y) return d;
   return new Date(y, m - 1, day).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 };
-export const daysUntil = (d: string): number => {
+export const daysUntil = (d: string, anchor?: string): number => {
   if (!d) return 0;
-  const now = new Date();
-  now.setHours(0, 0, 0, 0);
-  const [y, m, day] = d.split('-').map(Number);
-  return Math.round((new Date(y, m - 1, day).getTime() - now.getTime()) / 86400000);
+  return daysUntilDateOnly(d, anchor);
 };
-export const dueLabel = (d: string): string => {
-  const n = daysUntil(d);
+export const dueLabel = (d: string, anchor?: string): string => {
+  const n = daysUntil(d, anchor);
   if (n < 0) return `${-n}d overdue`;
   if (n === 0) return 'today';
   if (n === 1) return 'tomorrow';

@@ -10,7 +10,7 @@ import { AreaChart } from '@/components/charts';
 import { Account } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { useDashboardWidgets } from '@/lib/dashboard-widgets';
-import { financeToday } from '@/lib/date-only';
+import { useFinanceToday } from '@/lib/date-only';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -71,7 +71,8 @@ export default function Overview() {
   const liabilities = acctLiab - (manual.data?.liabilities ?? 0);
   const netWorth = assets + liabilities;
 
-  const curMonth = financeToday().slice(0, 7);
+  const financeToday = useFinanceToday();
+  const curMonth = financeToday.slice(0, 7);
   const cur = today.data?.spending.current;
   const prev = today.data?.spending.prev;
   const net = cur ? cur.totalIncome - cur.totalSpend : 0;
@@ -231,7 +232,7 @@ export default function Overview() {
                 </View>
                 <View style={{ flex: 1, paddingRight: 12 }}>
                   <Text style={styles.bannerLabel}>Next income</Text>
-                  <Text style={styles.bannerSub} numberOfLines={1}>{nextIncome.payee || 'Income'} · estimated {dueLabel(nextIncome.nextPay)}</Text>
+                  <Text style={styles.bannerSub} numberOfLines={1}>{nextIncome.payee || 'Income'} · estimated {dueLabel(nextIncome.nextPay, financeToday)}</Text>
                 </View>
                 <Text style={[styles.bannerValue, { color: colors.green }]}>+{fmtPos(nextIncome.amount ?? 0)} ›</Text>
               </Card>
@@ -263,7 +264,7 @@ export default function Overview() {
                     testID={`home-bill-row-${i}`}
                     avatar={<Avatar label={b.payee} category={b.category} size={34} />}
                     title={b.payee}
-                    subtitle={`Estimated ${dueLabel(b.dueDate)}`}
+                    subtitle={`Estimated ${dueLabel(b.dueDate, financeToday)}`}
                     value={fmtPos(b.amount)}
                     chevron={false}
                   />
