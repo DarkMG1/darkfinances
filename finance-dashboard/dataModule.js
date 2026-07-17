@@ -76,6 +76,10 @@ const {
 } = require('./lib/transaction-replacement-saga');
 const { buildCategoryInfo, transactionLeaves, summarizeCents } = require('./lib/domain/classification');
 const { fromCents, toCents } = require('./lib/domain/money');
+const {
+  buildForecastBudgetDailyCents,
+  trySumCategoryFieldCents,
+} = require('./lib/domain/cent-allocation');
 const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
 const { metricValue } = require('./lib/metric-provenance');
 const {
@@ -3115,17 +3119,29 @@ async function getForecast({ days = 90 } = {}) {
       .filter((category) => !BILL_CAT.test(`${group.name || ''} ${category.name || ''}`))
       .map((category) => category)
   );
-  const genericTarget = round2(genericCategories.reduce((sum, category) => sum + (category.target || 0), 0));
-  const currentGenericRemaining = round2(genericCategories.reduce((sum, category) => sum + (category.remaining || 0), 0));
-  const currentMonth = today.slice(0, 7);
-  const currentDaysRemaining = Math.max(1, daysInMonth(currentMonth) - Number(today.slice(8, 10)) + 1);
-  for (let i = 0; i <= horizonDays; i++) {
-    const date = addDays(today, i);
-    const month = date.slice(0, 7);
-    const dailyBudget = month === currentMonth
-      ? currentGenericRemaining / currentDaysRemaining
-      : genericTarget / Math.max(1, daysInMonth(month));
-    if (dailyBudget > 0.005) pushEvent(date, 'Planned non-bill spending', -dailyBudget, 'budget', 'planned');
+  const genericTargetSum = trySumCategoryFieldCents(genericCategories, 'target');
+  const genericRemainingSum = trySumCategoryFieldCents(genericCategories, 'remaining');
+  const genericTarget = genericTargetSum.complete ? fromCents(genericTargetSum.cents) : round2(
+    genericCategories.reduce((sum, category) => sum + (category.target || 0), 0)
+  );
+  const currentGenericRemaining = genericRemainingSum.complete ? fromCents(genericRemainingSum.cents) : round2(
+    genericCategories.reduce((sum, category) => sum + (category.remaining || 0), 0)
+  );
+  const forecastWarnings = [];
+  if (genericTargetSum.complete && genericRemainingSum.complete) {
+    const budgetEntries = buildForecastBudgetDailyCents({
+      today,
+      horizonDays,
+      currentMonthRemainingCents: genericRemainingSum.cents,
+      fullMonthTargetCents: genericTargetSum.cents,
+      addDays,
+      daysInMonth,
+    });
+    for (const entry of budgetEntries) {
+      pushEvent(entry.date, 'Planned non-bill spending', -fromCents(entry.centsCents), 'budget', 'planned');
+    }
+  } else {
+    forecastWarnings.push('Generic budget forecast skipped because category amounts are not safe integer cents.');
   }
   const possibleReimbursement = reimb.totalOwed > 0.5
     ? { date: addDays(today, 14), amount: round2(reimb.totalOwed), includedInBalance: false }
@@ -3173,6 +3189,7 @@ async function getForecast({ days = 90 } = {}) {
     warnings: [
       ...(lowest.balance < 0 ? [`Projected cash drops below $0 on ${lowest.date}`] : []),
       ...(possibleReimbursement ? ['Possible reimbursements are shown separately and are not counted as guaranteed cash.'] : []),
+      ...forecastWarnings,
     ],
   };
 }
