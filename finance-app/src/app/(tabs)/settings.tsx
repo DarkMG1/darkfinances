@@ -9,6 +9,7 @@ import { useReconcilePending, useSetReconcileEnabled } from '@/api/hooks/finance
 import { useServerConfig } from '@/state/server';
 import { verifyConnectionConfig } from '@/api/client/requests';
 import { authenticate, isBiometricAvailable } from '@/lib/biometric';
+import { checkForUpdatesManual, useOtaUpdateStatus } from '@/lib/auto-update';
 import { DASHBOARD_WIDGETS, useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { buildRedactedDiagnostics } from '@/lib/diagnostics';
 import { DEFAULT_LOW_BALANCE, DEFAULT_THRESHOLD, ensurePermission, getNotifSettings, NOTIF, notifyNotifSettingsChanged } from '@/lib/notifications';
@@ -28,7 +29,7 @@ export default function Settings() {
   const [editUrl, setEditUrl] = useState(serverUrl ?? '');
   const [newToken, setNewToken] = useState('');
   const [status, setStatus] = useState<string | null>(null);
-  const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+  const liveUpdateStatus = useOtaUpdateStatus();
   const [notif, setNotif] = useState(getNotifSettings());
   const [thresholdText, setThresholdText] = useState(String(getNotifSettings().threshold || DEFAULT_THRESHOLD));
   const [lowText, setLowText] = useState(String(getNotifSettings().lowBalanceThreshold || DEFAULT_LOW_BALANCE));
@@ -80,24 +81,8 @@ export default function Settings() {
     }
   };
 
-  const checkUpdates = async () => {
-    if (!Updates.isEnabled) {
-      setUpdateStatus('OTA runs only in a release (sideloaded) build');
-      return;
-    }
-    setUpdateStatus('Checking…');
-    try {
-      const res = await Updates.checkForUpdateAsync();
-      if (!res.isAvailable) {
-        setUpdateStatus('Up to date');
-        return;
-      }
-      setUpdateStatus('Downloading update…');
-      await Updates.fetchUpdateAsync();
-      setUpdateStatus('Update downloaded; restart prompt ready');
-    } catch (e: any) {
-      setUpdateStatus(e?.message || 'Update check failed');
-    }
+  const checkUpdates = () => {
+    void checkForUpdatesManual();
   };
   const exportDiagnostics = async () => {
     const diagnostics = buildRedactedDiagnostics({ serverUrl, demo, faceId });
@@ -346,7 +331,7 @@ export default function Settings() {
         <Pressable testID="settings-export-diagnostics-button" style={({ pressed }) => [styles.smallBtn, { marginTop: 8, backgroundColor: colors.surface2 }, pressed && { opacity: 0.7 }]} onPress={exportDiagnostics}>
           <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>Export Redacted Diagnostics</Text>
         </Pressable>
-        {updateStatus ? <Text style={styles.status}>{updateStatus}</Text> : null}
+        {liveUpdateStatus ? <Text style={styles.status}>{liveUpdateStatus}</Text> : null}
       </Card>
 
       <Pressable testID="settings-disconnect-button" style={({ pressed }) => [styles.disconnect, pressed && { opacity: 0.7 }]} onPress={disconnect}>

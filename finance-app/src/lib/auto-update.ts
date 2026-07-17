@@ -1,6 +1,51 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 import { Alert, AppState } from 'react-native';
 import * as Updates from 'expo-updates';
+import { getOtaUpdateDisplayStatus } from '@/lib/ota-update-display';
+import { createOtaUpdateOwner } from '@/lib/ota-update-owner';
+import { createOtaUpdatePersistence } from '@/lib/ota-update-persistence';
+import { nativePendingFromUpdates } from '@/lib/ota-update-owner-runner';
+import { kv } from '@/lib/storage';
+
+const persistence = createOtaUpdatePersistence({
+  getString: (key: string) => kv.getString(key),
+  setString: (key: string, value: string | null) => kv.setString(key, value),
+});
+
+type NativePending = { pending: boolean; updateId: string | null };
+
+let sharedOwner: ReturnType<typeof createOtaUpdateOwner> | null = null;
+const otaNativePendingRef: { current: NativePending } = { current: { pending: false, updateId: null } };
+
+function getSharedOwner() {
+  if (!sharedOwner) {
+    sharedOwner = createOtaUpdateOwner({
+      isSupported: () => Updates.isEnabled,
+      persistence,
+      checkForUpdate: () => Updates.checkForUpdateAsync(),
+      fetchUpdate: () => Updates.fetchUpdateAsync(),
+      reload: () => Updates.reloadAsync(),
+      showPrompt: ({ onRestart, onLater }: { onRestart: () => void; onLater: () => void }) => {
+        Alert.alert(
+          'Update ready',
+          'The latest update has downloaded. Restart now to apply it?',
+          [
+            { text: 'Later', style: 'cancel', onPress: onLater },
+            { text: 'Restart', onPress: onRestart },
+          ],
+        );
+      },
+      getNativePending: () => otaNativePendingRef.current,
+    });
+  }
+  return sharedOwner;
+}
+
+export function useOtaUpdateStatus(): string | null {
+  const owner = getSharedOwner();
+  const snapshot = useSyncExternalStore(owner.subscribe, owner.getSnapshot, owner.getSnapshot);
+  return getOtaUpdateDisplayStatus(snapshot);
+}
 
 // Auto-check for an OTA update on JS launch AND whenever the app returns to the
 // foreground. The native `checkAutomatically: ON_LOAD` only fires on a true cold
@@ -9,55 +54,48 @@ import * as Updates from 'expo-updates';
 // common "reopen the app" case. Download while the privacy gate is active, but
 // wait to prompt until Face ID and its fade have completely settled.
 export function useAutoUpdate(canPrompt: boolean) {
-  const { isUpdatePending } = Updates.useUpdates();
-  const busy = useRef(false);
-  const fetched = useRef(false);
-  const prompted = useRef(false);
-  const lastAt = useRef(0);
-  const [downloaded, setDownloaded] = useState(false);
+  const updates = Updates.useUpdates();
+  const owner = getSharedOwner();
+
+  const { isUpdatePending, downloadedUpdate } = updates;
 
   useEffect(() => {
-    if (!Updates.isEnabled) return; // dev client / Expo Go — OTA disabled
+    owner.initialize();
+    owner.maybeAutoCheck();
+  }, [owner]);
 
-    const check = async () => {
-      if (busy.current || fetched.current) return;
-      if (Date.now() - lastAt.current < 30_000) return; // throttle rapid fg/bg toggles
-      busy.current = true;
-      lastAt.current = Date.now();
-      try {
-        const res = await Updates.checkForUpdateAsync();
-        if (res.isAvailable) {
-          await Updates.fetchUpdateAsync();
-          fetched.current = true;
-          setDownloaded(true);
-        }
-      } catch {
-        /* offline / transient network — ignore and retry on the next foreground */
-      } finally {
-        busy.current = false;
-      }
-    };
+  useEffect(() => {
+    otaNativePendingRef.current = nativePendingFromUpdates(updates);
+    owner.syncNativePending();
+  }, [owner, isUpdatePending, downloadedUpdate, updates]);
 
-    check(); // initial JS load (covers warm starts where ON_LOAD didn't apply)
-    const sub = AppState.addEventListener('change', (s) => {
-      if (s === 'active') check();
+  useEffect(() => {
+    owner.setPromptGateOpen(canPrompt);
+  }, [canPrompt, owner]);
+
+  useEffect(() => {
+    const active = AppState.currentState === 'active';
+    owner.setAppActive(active);
+    const sub = AppState.addEventListener('change', (next) => {
+      owner.setAppActive(next === 'active');
     });
     return () => sub.remove();
-  }, []);
+  }, [owner]);
 
-  useEffect(() => {
-    if (!Updates.isEnabled || !canPrompt || prompted.current) return;
-    if (!downloaded && !isUpdatePending) return;
-    if (AppState.currentState !== 'active') return;
+  useSyncExternalStore(owner.subscribe, owner.getSnapshot, owner.getSnapshot);
+}
 
-    const timer = setTimeout(() => {
-      if (AppState.currentState !== 'active' || prompted.current) return;
-      prompted.current = true;
-      Alert.alert('Update ready', 'The latest update has downloaded. Restart now to apply it?', [
-        { text: 'Later', style: 'cancel' },
-        { text: 'Restart', onPress: () => { void Updates.reloadAsync(); } },
-      ]);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [canPrompt, downloaded, isUpdatePending]);
+export async function checkForUpdatesManual() {
+  const owner = getSharedOwner();
+  return owner.requestManualCheck();
+}
+
+export function getOtaUpdateSnapshot() {
+  return getSharedOwner().getSnapshot();
+}
+
+export function __resetOtaUpdateOwnerForTests() {
+  sharedOwner?.dispose();
+  sharedOwner = null;
+  otaNativePendingRef.current = { pending: false, updateId: null };
 }
