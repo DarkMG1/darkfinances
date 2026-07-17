@@ -5,13 +5,13 @@
 const api = require('@actual-app/api');
 const { todayYMD } = require('./lib/date-only');
 const { buildToolCategoryInfo, classifiedLeavesForAccounts, incompleteTransferLeaves } = require('./lib/transfer-classification');
-const c2 = (c) => (Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const money = (c) => (c < 0 ? '-$' : '$') + c2(c);
+const { monthReviewRealSpendTotalLine } = require('./lib/real-spend-total-line');
+const money = (c) => (c < 0 ? '-$' : '$') + (Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const MM_CAT = /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i;
 const REIMB_CAT = /^reimbursement$/i;
 
-(async () => {
+async function main() {
   await api.init({ dataDir: process.env.FIX_DATA_DIR, serverURL: process.env.ACTUAL_SERVER_URL, password: process.env.ACTUAL_PASSWORD });
   await api.downloadBudget(process.env.ACTUAL_SYNC_ID);
 
@@ -70,7 +70,7 @@ const REIMB_CAT = /^reimbursement$/i;
     }
   }
   out.push('');
-  out.push(`### REAL SPEND TOTAL: ${money(grand)}`);
+  out.push(monthReviewRealSpendTotalLine(grand, { incomplete: incomplete.length > 0 }));
 
   for (const kind of ['mm', 'reimb']) {
     const kk = keys.filter((k) => k.startsWith(kind + '::'));
@@ -105,4 +105,8 @@ const REIMB_CAT = /^reimbursement$/i;
   console.log(out.join('\n'));
   await api.shutdown();
   if (process.env.DIGEST_STRICT === '1' && incomplete.length) process.exit(2);
-})().catch((e) => { console.error('REVIEW_ERR', (e && e.stack) || e); process.exit(1); });
+}
+
+if (require.main === module) {
+  main().catch((e) => { console.error('REVIEW_ERR', (e && e.stack) || e); process.exit(1); });
+}
