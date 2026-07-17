@@ -7,7 +7,10 @@ const { assertNotSymlink } = require('./coordinated-operation-layout');
 
 const REGISTRY_KIND = 'darkfinances-coordinated-admission-registry-entry';
 const REGISTRY_SCHEMA_VERSION = 1;
+const TERMINAL_SCHEMA_VERSION = 2;
 const REGISTRY_MAX_BYTES = 4096;
+const TERMINAL_CONSUMED = 'consumed';
+const TERMINAL_REVOKED = 'revoked';
 
 function registryRootForLayout(layout) {
   return path.join(layout.controlRoot, 'admission-registry');
@@ -17,16 +20,20 @@ function registeredPath(registryRoot, nonce) {
   return path.join(registryRoot, 'registered', `${nonce}.json`);
 }
 
-function consumedPath(registryRoot, nonce) {
+function terminalPath(registryRoot, nonce) {
+  return path.join(registryRoot, 'terminal', `${nonce}.json`);
+}
+
+function legacyConsumedPath(registryRoot, nonce) {
   return path.join(registryRoot, 'consumed', `${nonce}.json`);
 }
 
-function revokedPath(registryRoot, nonce) {
+function legacyRevokedPath(registryRoot, nonce) {
   return path.join(registryRoot, 'revoked', `${nonce}.json`);
 }
 
 function ensureRegistryDirs(registryRoot) {
-  for (const sub of ['registered', 'consumed', 'revoked']) {
+  for (const sub of ['registered', 'terminal', 'consumed', 'revoked']) {
     fs.mkdirSync(path.join(registryRoot, sub), { recursive: true, mode: 0o700 });
   }
 }
@@ -76,6 +83,56 @@ function writeMarkerAtomic(filePath, payload) {
   fsyncPath(path.dirname(filePath), true);
 }
 
+function normalizeTerminalMarker(parsed, label = 'admission terminal marker') {
+  if (parsed.terminal === TERMINAL_CONSUMED || parsed.terminal === TERMINAL_REVOKED) {
+    if (parsed.kind !== REGISTRY_KIND) throw new Error(`${label} kind mismatch`);
+    if (parsed.schemaVersion !== TERMINAL_SCHEMA_VERSION) {
+      throw new Error(`${label} schemaVersion ${parsed.schemaVersion} is unsupported`);
+    }
+    return {
+      terminal: parsed.terminal,
+      at: parsed.at || parsed.consumedAt || parsed.revokedAt,
+      reasonCode: parsed.reasonCode ?? null,
+      nonce: parsed.nonce,
+    };
+  }
+  if (parsed.consumedAt) {
+    return { terminal: TERMINAL_CONSUMED, at: parsed.consumedAt, reasonCode: null, nonce: parsed.nonce };
+  }
+  if (parsed.revokedAt) {
+    return {
+      terminal: TERMINAL_REVOKED,
+      at: parsed.revokedAt,
+      reasonCode: parsed.reasonCode ?? null,
+      nonce: parsed.nonce,
+    };
+  }
+  throw new Error(`${label} has invalid terminal state`);
+}
+
+function readTerminalMarker(registryRoot, nonce) {
+  const unified = terminalPath(registryRoot, nonce);
+  if (fs.existsSync(unified)) {
+    return normalizeTerminalMarker(readRegistryJson(unified, 'admission terminal marker'));
+  }
+  const hasConsumed = fs.existsSync(legacyConsumedPath(registryRoot, nonce));
+  const hasRevoked = fs.existsSync(legacyRevokedPath(registryRoot, nonce));
+  if (hasConsumed && hasRevoked) {
+    throw new Error('admission registry legacy dual terminal markers detected');
+  }
+  if (hasConsumed) {
+    return normalizeTerminalMarker(
+      readRegistryJson(legacyConsumedPath(registryRoot, nonce), 'admission legacy consumption marker'),
+    );
+  }
+  if (hasRevoked) {
+    return normalizeTerminalMarker(
+      readRegistryJson(legacyRevokedPath(registryRoot, nonce), 'admission legacy revocation marker'),
+    );
+  }
+  return null;
+}
+
 function readRegisteredEntry(registryRoot, nonce) {
   const filePath = registeredPath(registryRoot, nonce);
   if (!fs.existsSync(filePath)) return null;
@@ -88,11 +145,28 @@ function readRegisteredEntry(registryRoot, nonce) {
   return entry;
 }
 
-function markerExists(registryRoot, nonce, kind) {
-  const filePath = kind === 'consumed'
-    ? consumedPath(registryRoot, nonce)
-    : revokedPath(registryRoot, nonce);
-  return fs.existsSync(filePath);
+function claimTerminal(registryRoot, nonce, terminal, { reasonCode = null } = {}) {
+  ensureRegistryDirs(registryRoot);
+  const filePath = terminalPath(registryRoot, nonce);
+  const payload = {
+    kind: REGISTRY_KIND,
+    schemaVersion: TERMINAL_SCHEMA_VERSION,
+    nonce,
+    terminal,
+    at: new Date().toISOString(),
+    ...(terminal === TERMINAL_REVOKED
+      ? { reasonCode: String(reasonCode || 'revoked').slice(0, 64) }
+      : {}),
+  };
+  try {
+    writeMarkerAtomic(filePath, payload);
+    return { created: true, marker: normalizeTerminalMarker(payload) };
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const existing = readTerminalMarker(registryRoot, nonce);
+    if (!existing) throw new Error('admission terminal marker conflict without readable state');
+    return { created: false, marker: existing };
+  }
 }
 
 function registerAdmission(layout, { nonce, runId, journalId, issuedAt, expiresAt }) {
@@ -121,8 +195,9 @@ function assertAdmissionConsumable(layout, nonce, { runId = null, journalId = nu
   const registryRoot = registryRootForLayout(layout);
   const entry = readRegisteredEntry(registryRoot, nonce);
   if (!entry) throw new Error('admission token nonce is not registered');
-  if (markerExists(registryRoot, nonce, 'revoked')) throw new Error('admission token revoked');
-  if (markerExists(registryRoot, nonce, 'consumed')) throw new Error('admission token already consumed');
+  const terminal = readTerminalMarker(registryRoot, nonce);
+  if (terminal?.terminal === TERMINAL_REVOKED) throw new Error('admission token revoked');
+  if (terminal?.terminal === TERMINAL_CONSUMED) throw new Error('admission token already consumed');
   if (Date.parse(entry.expiresAt) < Date.now()) throw new Error('admission token expired');
   if (runId && entry.runId !== runId) throw new Error('admission token runId mismatch');
   if (journalId && entry.journalId !== journalId) throw new Error('admission token journalId mismatch');
@@ -132,53 +207,38 @@ function assertAdmissionConsumable(layout, nonce, { runId = null, journalId = nu
 function consumeAdmission(layout, nonce) {
   const registryRoot = registryRootForLayout(layout);
   const entry = assertAdmissionConsumable(layout, nonce);
-  ensureRegistryDirs(registryRoot);
-  const markerFile = consumedPath(registryRoot, nonce);
-  try {
-    writeMarkerAtomic(markerFile, {
-      kind: REGISTRY_KIND,
-      schemaVersion: REGISTRY_SCHEMA_VERSION,
-      nonce,
-      consumedAt: new Date().toISOString(),
-    });
-  } catch (error) {
-    if (error.code === 'EEXIST') throw new Error('admission token already consumed');
-    throw error;
+  const result = claimTerminal(registryRoot, nonce, TERMINAL_CONSUMED);
+  if (result.created) {
+    return { ...entry, consumedAt: result.marker.at };
   }
-  return { ...entry, consumedAt: readRegistryJson(markerFile, 'admission consumption marker').consumedAt };
+  if (result.marker.terminal === TERMINAL_CONSUMED) {
+    throw new Error('admission token already consumed');
+  }
+  throw new Error('admission token revoked');
 }
 
 function revokeAdmission(layout, nonce, reasonCode = 'revoked') {
   const registryRoot = registryRootForLayout(layout);
-  if (!readRegisteredEntry(registryRoot, nonce)) return null;
-  if (markerExists(registryRoot, nonce, 'consumed')) return readRegisteredEntry(registryRoot, nonce);
-  ensureRegistryDirs(registryRoot);
-  const markerFile = revokedPath(registryRoot, nonce);
-  if (fs.existsSync(markerFile)) {
-    return readRegisteredEntry(registryRoot, nonce);
-  }
-  try {
-    writeMarkerAtomic(markerFile, {
-      kind: REGISTRY_KIND,
-      schemaVersion: REGISTRY_SCHEMA_VERSION,
-      nonce,
-      revokedAt: new Date().toISOString(),
-      reasonCode: String(reasonCode).slice(0, 64),
-    });
-  } catch (error) {
-    if (error.code === 'EEXIST') return readRegisteredEntry(registryRoot, nonce);
-    throw error;
-  }
-  return readRegisteredEntry(registryRoot, nonce);
+  const entry = readRegisteredEntry(registryRoot, nonce);
+  if (!entry) return null;
+  const result = claimTerminal(registryRoot, nonce, TERMINAL_REVOKED, { reasonCode });
+  if (result.created) return entry;
+  if (result.marker.terminal === TERMINAL_REVOKED) return entry;
+  throw new Error('admission token already consumed');
 }
 
 module.exports = {
   REGISTRY_KIND,
   REGISTRY_SCHEMA_VERSION,
+  TERMINAL_SCHEMA_VERSION,
+  TERMINAL_CONSUMED,
+  TERMINAL_REVOKED,
   registryRootForLayout,
   registeredPath,
-  consumedPath,
-  revokedPath,
+  terminalPath,
+  legacyConsumedPath,
+  legacyRevokedPath,
+  readTerminalMarker,
   registerAdmission,
   assertAdmissionConsumable,
   consumeAdmission,
