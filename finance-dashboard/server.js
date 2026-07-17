@@ -46,6 +46,12 @@ const {
 } = require('./lib/reimbursement-export-ledger');
 const { boundedJsonMiddleware } = require('./lib/bounded-json');
 const {
+  attachQueryStatsHeaders,
+  buildQueryCacheFingerprint,
+  getActiveQueryStats,
+  runWithQueryInstrumentation,
+} = require('./lib/bounded-ledger-access');
+const {
   DEFAULT_MAX_JSON_BYTES,
   RECEIPT_MAX_JSON_BYTES,
 } = require('./lib/receipt-limits');
@@ -634,13 +640,13 @@ function cachedActual(key, fn, ttl = 300) {
 // request to recompute the heavy 18-month aggregations from scratch.
 const WARM_TARGETS = [
   { key: 'accounts', ttl: 300, fn: () => data.getAccounts() },
-  { key: 'spending-current', ttl: 180, fn: () => data.getSpending({ month: undefined }) },
-  { key: 'trends-12', ttl: 600, fn: () => data.getTrends({ months: 12 }) },
-  { key: 'trends-60', ttl: 600, fn: () => data.getTrends({ months: 60 }) },
-  { key: 'recurring-18', ttl: 600, fn: () => data.getRecurring({ window: 18 }) },
-  { key: 'income-12', ttl: 600, fn: () => data.getIncome({ window: 12 }) },
-  { key: 'bills-45', ttl: 600, fn: () => data.getBills({ days: 45 }) },
-  { key: 'reimb-d-d-false', ttl: 300, fn: () => data.getReimbursement({}) },
+  { key: buildQueryCacheFingerprint({ kind: 'spending', month: 'current', start: '', end: '' }), ttl: 180, fn: () => data.getSpending({ month: undefined }) },
+  { key: buildQueryCacheFingerprint({ kind: 'trends', months: 12, endMonth: 'current' }), ttl: 600, fn: () => data.getTrends({ months: 12 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'trends', months: 60, endMonth: 'current' }), ttl: 600, fn: () => data.getTrends({ months: 60 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'recurring', window: 18 }), ttl: 600, fn: () => data.getRecurring({ window: 18 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'income', window: 12 }), ttl: 600, fn: () => data.getIncome({ window: 12 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'bills', days: 45 }), ttl: 600, fn: () => data.getBills({ days: 45 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'reimb', from: 'd', to: 'd', openOnly: false }), ttl: 300, fn: () => data.getReimbursement({}) },
   { key: 'categories', ttl: 300, fn: () => data.getCategories() },
 ];
 
@@ -682,7 +688,16 @@ const resolvers = {
     const today = todayYMD();
     const startDate = start || `${today.slice(0, 7)}-01`;
     const endDate = end || today;
-    const key = `txns-${accountId || 'all'}-${startDate}-${endDate}-${category || 'all'}-${bucket || 'none'}-${budgetOnly ? 'budget' : 'all'}-${collapse ? 'c' : 'x'}`;
+    const key = buildQueryCacheFingerprint({
+      kind: 'txns',
+      accountId: accountId || 'all',
+      startDate,
+      endDate,
+      category: category || 'all',
+      bucket: bucket || 'none',
+      budgetOnly: budgetOnly ? 'budget' : 'all',
+      collapse: collapse ? 'c' : 'x',
+    });
     return cachedActual(key, () => data.getTransactions({ accountId, start: startDate, end: endDate, category, bucket, budgetOnly, collapse }), 120);
   },
   txnById: (req) => {
@@ -692,23 +707,33 @@ const resolvers = {
   },
   merchantHistory: (req) => {
     const { payee, months } = req.query;
-    return cachedActual(`mhist-${(payee || '').toLowerCase()}-${months || 12}`, () => data.getMerchantHistory({ payee, months: months ? Number(months) : 12 }), 180);
+    const span = months ? Number(months) : 12;
+    const key = buildQueryCacheFingerprint({ kind: 'mhist', payee: (payee || '').toLowerCase(), months: span });
+    return cachedActual(key, () => data.getMerchantHistory({ payee, months: span }), 180);
   },
   spending: (req) => {
     const start = req.query.start ? String(req.query.start) : undefined;
     const end = req.query.end ? String(req.query.end) : undefined;
-    const key = start && end ? `spending-${start}-${end}` : `spending-${monthOf(req) || 'current'}`;
+    const key = buildQueryCacheFingerprint({
+      kind: 'spending',
+      month: monthOf(req) || 'current',
+      start: start || '',
+      end: end || '',
+    });
     return cachedActual(key, () => data.getSpending({ month: monthOf(req), start, end }), 180);
   },
   trends: (req) => {
     const months = Math.min(60, Math.max(3, parseInt(req.query.months, 10) || 12));
-    return cachedActual(`trends-${months}`, () => data.getTrends({ months }), 600);
+    const endMonth = req.query.endMonth ? String(req.query.endMonth) : '';
+    const key = buildQueryCacheFingerprint({ kind: 'trends', months, endMonth: endMonth || 'current' });
+    return cachedActual(key, () => data.getTrends({ months, endMonth: endMonth || undefined }), 600);
   },
   budgets: (req) => cachedActual(`budgets-${monthOf(req) || 'current'}`, () => data.getBudgets({ month: monthOf(req) }), 300),
   reimbursement: (req) => {
     const { from, to } = req.query;
     const openOnly = req.query.openOnly === '1' || req.query.openOnly === 'true';
-    return cachedActual(`reimb-${from || 'd'}-${to || 'd'}-${openOnly}`, () => data.getReimbursement({ from, to, openOnly }), 300);
+    const key = buildQueryCacheFingerprint({ kind: 'reimb', from: from || 'd', to: to || 'd', openOnly });
+    return cachedActual(key, () => data.getReimbursement({ from, to, openOnly }), 300);
   },
   review: (req) => cachedActual(`review-${monthOf(req) || 'current'}`, () => data.getReview({ month: monthOf(req) }), 120),
   reimbursementLedger: (req) => cachedActual(`reimb-ledger-${monthOf(req) || 'current'}`, () => data.getReimbursementLedger({ month: monthOf(req) }), 180),
@@ -721,28 +746,45 @@ const resolvers = {
   recurring: (req) => {
     const window = Math.min(36, Math.max(6, parseInt(req.query.window, 10) || 18));
     if (req.query.debug === '1') return data.getRecurring({ window, debug: true, minDates: Math.max(1, parseInt(req.query.minDates, 10) || 3) });
-    return cachedActual(`recurring-${window}`, () => data.getRecurring({ window }), 600);
+    const key = buildQueryCacheFingerprint({ kind: 'recurring', window });
+    return cachedActual(key, () => data.getRecurring({ window }), 600);
   },
   bills: (req) => {
     const days = Math.min(120, Math.max(7, parseInt(req.query.days, 10) || 45));
-    return cachedActual(`bills-${days}`, () => data.getBills({ days }), 600);
+    const key = buildQueryCacheFingerprint({ kind: 'bills', days });
+    return cachedActual(key, () => data.getBills({ days }), 600);
   },
   forecast: (req) => {
     const days = Math.min(180, Math.max(30, parseInt(req.query.days, 10) || 90));
-    return cachedActual(`forecast-${days}`, () => data.getForecast({ days }), 300);
+    const key = buildQueryCacheFingerprint({ kind: 'forecast', days });
+    return cachedActual(key, () => data.getForecast({ days }), 300);
   },
   income: (req) => {
     const window = Math.min(24, Math.max(6, parseInt(req.query.window, 10) || 12));
-    return cachedActual(`income-${window}`, () => data.getIncome({ window }), 600);
+    const key = buildQueryCacheFingerprint({ kind: 'income', window });
+    return cachedActual(key, () => data.getIncome({ window }), 600);
   },
   search: (req) => {
     const q = (req.query.q || '').toString();
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
-    const { start, end } = req.query;
-    return cachedActual(`search-${q}-${start || ''}-${end || ''}-${limit}`, () => data.searchTransactions({ q, start, end, limit }), 120);
+    const { start, end, cursor } = req.query;
+    const key = buildQueryCacheFingerprint({
+      kind: 'search',
+      q,
+      start: start || '',
+      end: end || '',
+      limit,
+      cursor: cursor || '',
+    });
+    return cachedActual(key, () => data.searchTransactions({ q, start, end, limit, cursor }), 120);
   },
   goals: () => cachedActual('goals', () => data.getGoals(), 120),
-  tags: () => cachedActual('tags', () => data.getTags(), 120),
+  tags: (req) => {
+    const start = req.query.start ? String(req.query.start) : '';
+    const end = req.query.end ? String(req.query.end) : '';
+    const key = buildQueryCacheFingerprint({ kind: 'tags', start, end });
+    return cachedActual(key, () => data.getTags({ start: start || undefined, end: end || undefined }), 120);
+  },
   rules: () => cachedLocal('rules', () => Promise.resolve({ ...data.getRules(), catalog: data.getCatalogDisplay() }), 120),
   manualAssets: () => cachedLocal('manual-assets', () => Promise.resolve(data.getManualAssets()), 120),
   investments: () => cachedLocal('investments', () => Promise.resolve(data.getInvestments()), 120),
@@ -1314,7 +1356,11 @@ const runHandler = (req, fn, operation) => {
   return withReadAdmission(req, actualCoordinator, () => fn(req), { admission: requestAdmission });
 };
 const raw = (fn) => async (req, res) => {
-  try { res.json(await runHandler(req, fn)); } catch (e) { sendApiError(req, res, e); }
+  try {
+    const payload = await runWithQueryInstrumentation(() => runHandler(req, fn));
+    attachQueryStatsHeaders(res, getActiveQueryStats());
+    res.json(payload);
+  } catch (e) { sendApiError(req, res, e); }
 };
 function operationJournalError(error, phase) {
   runtimeHealth.fatalErrorAt = new Date().toISOString();

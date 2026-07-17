@@ -100,6 +100,28 @@ class TransactionNotFoundError extends AppError {
   }
 }
 
+class QueryRangeExceededError extends AppError {
+  constructor(message = 'Requested ledger window exceeds supported bounds') {
+    super(message, {
+      code: 'QUERY_RANGE_EXCEEDED',
+      status: 400,
+      expose: true,
+    });
+    this.name = 'QueryRangeExceededError';
+  }
+}
+
+class QueryResultLimitExceededError extends AppError {
+  constructor(message = 'Requested ledger result exceeds supported bounds') {
+    super(message, {
+      code: 'QUERY_RESULT_LIMIT_EXCEEDED',
+      status: 413,
+      expose: true,
+    });
+    this.name = 'QueryResultLimitExceededError';
+  }
+}
+
 class ForecastMoneyValidationError extends AppError {
   constructor(cause) {
     super('Forecast money input is invalid', {
@@ -166,6 +188,8 @@ module.exports = {
   AppError,
   ForecastMoneyValidationError,
   KnownPreApplyError,
+  QueryRangeExceededError,
+  QueryResultLimitExceededError,
   RequestValidationError,
   TransactionNotFoundError,
   classifyError,

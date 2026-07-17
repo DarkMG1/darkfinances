@@ -1,0 +1,340 @@
+'use strict';
+
+const crypto = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
+const { addDays, daysBetween, todayYMD } = require('./date-only');
+const { buildCategoryInfo } = require('./domain/classification');
+const {
+  LEDGER_EPOCH,
+  loadQueryScalingConfig,
+} = require('./query-scaling-config');
+const {
+  QueryRangeExceededError,
+  QueryResultLimitExceededError,
+} = require('./errors');
+
+const DEFAULT_CLASSIFICATION_PATTERNS = Object.freeze({
+  incomeGroup: /^income$/i,
+  moneyMovementGroup: /money\s*movement/i,
+  moneyMovementCategory: /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i,
+  reimbursementCategory: /^reimbursement$/i,
+});
+
+const instrumentationStore = new AsyncLocalStorage();
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function createQueryStats() {
+  return {
+    accountsQueried: 0,
+    getTransactionsCalls: 0,
+    rowsScanned: 0,
+    rowsReturned: 0,
+    elapsedMs: 0,
+    budgetExhausted: false,
+    aborted: false,
+  };
+}
+
+function getActiveQueryStats() {
+  return instrumentationStore.getStore()?.stats ?? null;
+}
+
+function getActiveQueryAbortSignal() {
+  return instrumentationStore.getStore()?.signal ?? null;
+}
+
+function runWithQueryInstrumentation(fn, { budgetMs, signal } = {}) {
+  const stats = createQueryStats();
+  const started = Date.now();
+  const config = loadQueryScalingConfig();
+  const effectiveBudget = budgetMs ?? config.queryBudgetMs;
+  return instrumentationStore.run({ stats, signal, budgetMs: effectiveBudget }, async () => {
+    try {
+      return await fn(stats);
+    } finally {
+      stats.elapsedMs = Date.now() - started;
+      if (effectiveBudget != null && stats.elapsedMs > effectiveBudget) stats.budgetExhausted = true;
+    }
+  });
+}
+
+function attachQueryStatsHeaders(res, stats) {
+  if (!res || !stats) return;
+  res.setHeader('X-Finance-Query-Accounts', String(stats.accountsQueried || 0));
+  res.setHeader('X-Finance-Query-Calls', String(stats.getTransactionsCalls || 0));
+  res.setHeader('X-Finance-Query-Rows-Scanned', String(stats.rowsScanned || 0));
+  res.setHeader('X-Finance-Query-Rows-Returned', String(stats.rowsReturned || 0));
+  res.setHeader('X-Finance-Query-Elapsed-Ms', String(stats.elapsedMs || 0));
+  if (stats.budgetExhausted) res.setHeader('X-Finance-Query-Budget-Exhausted', '1');
+  if (stats.aborted) res.setHeader('X-Finance-Query-Aborted', '1');
+}
+
+function assertCanonicalDate(value, fieldName) {
+  const text = String(value || '');
+  if (!DATE_RE.test(text)) {
+    throw new QueryRangeExceededError(`${fieldName} must be a canonical YYYY-MM-DD date`);
+  }
+  const [year, month, day] = text.split('-').map(Number);
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day
+  ) {
+    throw new QueryRangeExceededError(`${fieldName} is not a valid calendar date`);
+  }
+  return text;
+}
+
+function validateCanonicalDateRange(start, end, {
+  config = loadQueryScalingConfig(),
+  purpose = 'ledger query',
+  maxSpanDays = config.maxLedgerQueryDays,
+  allowOpenEnd = false,
+} = {}) {
+  if (start == null && end == null) {
+    throw new QueryRangeExceededError(`${purpose} requires a bounded start and end date`);
+  }
+  const startDate = start == null ? LEDGER_EPOCH : assertCanonicalDate(start, 'start');
+  let endDate = end == null ? (allowOpenEnd ? todayYMD() : todayYMD()) : assertCanonicalDate(end, 'end');
+  if (!allowOpenEnd && end == null) endDate = todayYMD();
+  if (startDate > endDate) {
+    throw new QueryRangeExceededError(`${purpose} start must be on or before end`);
+  }
+  const spanDays = daysBetween(startDate, endDate) + 1;
+  if (spanDays > maxSpanDays) {
+    throw new QueryRangeExceededError(
+      `${purpose} range of ${spanDays} days exceeds the maximum of ${maxSpanDays} days`,
+    );
+  }
+  return { start: startDate, end: endDate, spanDays };
+}
+
+function resolveNetWorthQueryStart({ windowStart, end, config = loadQueryScalingConfig() } = {}) {
+  const epochSpan = daysBetween(LEDGER_EPOCH, end) + 1;
+  if (epochSpan <= config.maxLedgerQueryDays) {
+    return { start: LEDGER_EPOCH, complete: true };
+  }
+  return { start: windowStart, complete: false };
+}
+
+function resolveBoundedLedgerStart({
+  configuredStart,
+  end,
+  config = loadQueryScalingConfig(),
+} = {}) {
+  const start = configuredStart || LEDGER_EPOCH;
+  const endDate = end || todayYMD();
+  const spanDays = daysBetween(start, endDate) + 1;
+  if (spanDays <= config.maxLedgerQueryDays) {
+    return { start, end: endDate, complete: true, configuredStart: start };
+  }
+  const boundedStart = addDays(endDate, -(config.maxLedgerQueryDays - 1));
+  const effectiveStart = boundedStart > start ? boundedStart : start;
+  return {
+    start: effectiveStart,
+    end: endDate,
+    complete: effectiveStart <= start,
+    configuredStart: start,
+  };
+}
+
+async function loadLedgerReadContext(api, {
+  accountFilter,
+  includeClosed = true,
+  classificationPatterns = DEFAULT_CLASSIFICATION_PATTERNS,
+} = {}) {
+  const [accountsRaw, groups, payees] = await Promise.all([
+    api.getAccounts(),
+    api.getCategoryGroups(),
+    api.getPayees(),
+  ]);
+  const catInfo = buildCategoryInfo(groups, classificationPatterns);
+  const payeeMap = Object.fromEntries(payees.map((p) => [p.id, p.name || '']));
+  const accountMap = Object.fromEntries(accountsRaw.map((a) => [a.id, a.name || a.id]));
+  let accounts = accountsRaw;
+  if (typeof accountFilter === 'function') accounts = accounts.filter(accountFilter);
+  else if (!includeClosed) accounts = accounts.filter((a) => !a.closed);
+  return {
+    accounts,
+    accountsRaw,
+    groups,
+    payees,
+    catInfo,
+    payeeMap,
+    accountMap,
+  };
+}
+
+function normalizePayeeKey(name) {
+  return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function buildClearedSupersederIndex(clearedByAccountId, nameOf) {
+  const index = new Map();
+  for (const [accountId, transactions] of clearedByAccountId.entries()) {
+    const buckets = new Map();
+    for (const txn of transactions) {
+      const key = normalizePayeeKey(nameOf(txn));
+      if (!key || key.length < 3) continue;
+      const list = buckets.get(key) || [];
+      list.push(txn);
+      buckets.set(key, list);
+    }
+    index.set(String(accountId), buckets);
+  }
+  return index;
+}
+
+function findSupersedingCleared({ pending, clearedIndex, nameOf, payeeName, amountCents }) {
+  const key = normalizePayeeKey(payeeName || nameOf(pending));
+  if (!key) return null;
+  const buckets = clearedIndex.get(String(pending.accountId || pending._accountId || ''));
+  if (!buckets) return null;
+  const magP = Math.abs(Number(amountCents) || 0);
+  const loDate = addDays(String(pending.date).slice(0, 10), -1);
+  const candidates = [];
+  for (const [bucketKey, list] of buckets.entries()) {
+    if (bucketKey.includes(key) || key.includes(bucketKey)) candidates.push(...list);
+  }
+  for (const candidate of candidates) {
+    if (String(candidate.id) === String(pending.id)) continue;
+    const magQ = Math.abs(Number(candidate.amount) || 0);
+    const near = Math.abs(magQ - magP) <= Math.max(200, magP * 0.30);
+    if (near && candidate.date >= loDate) return candidate;
+  }
+  return null;
+}
+
+async function fetchAccountTransactionsBounded(api, {
+  accounts,
+  start,
+  end,
+  maxRows,
+  config = loadQueryScalingConfig(),
+  signal,
+} = {}) {
+  const stats = getActiveQueryStats();
+  const effectiveSignal = signal || getActiveQueryAbortSignal();
+  const rowCap = maxRows ?? config.maxLedgerRowsPerRead;
+  const batches = [];
+  let totalRows = 0;
+
+  for (const account of accounts) {
+    if (effectiveSignal?.aborted) {
+      if (stats) stats.aborted = true;
+      break;
+    }
+    const txns = await api.getTransactions(account.id, start, end);
+    if (stats) {
+      stats.getTransactionsCalls += 1;
+      stats.accountsQueried += 1;
+      stats.rowsScanned += txns.length;
+    }
+    totalRows += txns.length;
+    if (totalRows > rowCap) {
+      throw new QueryResultLimitExceededError(
+        `Ledger read scanned ${totalRows} rows, exceeding the maximum of ${rowCap}`,
+      );
+    }
+    batches.push({ account, transactions: txns });
+  }
+
+  if (stats) stats.rowsReturned += totalRows;
+  return batches;
+}
+
+function flattenAccountTransactions(batches) {
+  const out = [];
+  for (const { account, transactions } of batches) {
+    for (const txn of transactions) out.push({ account, transaction: txn });
+  }
+  return out;
+}
+
+function indexTransactionsById(batches) {
+  const byId = new Map();
+  for (const { account, transactions } of batches) {
+    for (const txn of transactions) {
+      byId.set(String(txn.id), { account, transaction: txn });
+      for (const sub of txn.subtransactions || []) {
+        if (sub?.id != null) byId.set(String(sub.id), { account, transaction: txn, leg: sub });
+      }
+    }
+  }
+  return byId;
+}
+
+function buildQueryCacheFingerprint(parts) {
+  return crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32);
+}
+
+function encodeSearchCursor(payload) {
+  return Buffer.from(JSON.stringify({ v: 1, ...payload }), 'utf8').toString('base64url');
+}
+
+function decodeSearchCursor(cursor, { config = loadQueryScalingConfig() } = {}) {
+  if (!cursor) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
+  } catch (_) {
+    throw new QueryRangeExceededError('search cursor is invalid');
+  }
+  if (!parsed || parsed.v !== 1) throw new QueryRangeExceededError('search cursor is unsupported');
+  const range = validateCanonicalDateRange(parsed.start, parsed.end, {
+    config,
+    purpose: 'search cursor',
+    maxSpanDays: config.maxSearchRangeDays,
+  });
+  const offset = Number.parseInt(String(parsed.offset || 0), 10);
+  const limit = Number.parseInt(String(parsed.limit || 200), 10);
+  if (!Number.isFinite(offset) || offset < 0) throw new QueryRangeExceededError('search cursor offset is invalid');
+  if (!Number.isFinite(limit) || limit < 1 || limit > config.maxSearchLimit) {
+    throw new QueryRangeExceededError('search cursor limit is invalid');
+  }
+  return {
+    ...range,
+    offset,
+    limit,
+    q: String(parsed.q || ''),
+  };
+}
+
+function resolveSearchWindow({ start, end, config = loadQueryScalingConfig() } = {}) {
+  const today = todayYMD();
+  const endDate = end ? assertCanonicalDate(end, 'end') : today;
+  const startDate = start
+    ? assertCanonicalDate(start, 'start')
+    : addDays(endDate, -(config.defaultSearchLookbackDays - 1));
+  return validateCanonicalDateRange(startDate, endDate, {
+    config,
+    purpose: 'transaction search',
+    maxSpanDays: config.maxSearchRangeDays,
+  });
+}
+
+module.exports = {
+  DEFAULT_CLASSIFICATION_PATTERNS,
+  LEDGER_EPOCH,
+  assertCanonicalDate,
+  attachQueryStatsHeaders,
+  buildClearedSupersederIndex,
+  buildQueryCacheFingerprint,
+  createQueryStats,
+  decodeSearchCursor,
+  encodeSearchCursor,
+  fetchAccountTransactionsBounded,
+  findSupersedingCleared,
+  flattenAccountTransactions,
+  getActiveQueryAbortSignal,
+  getActiveQueryStats,
+  indexTransactionsById,
+  loadLedgerReadContext,
+  normalizePayeeKey,
+  resolveBoundedLedgerStart,
+  resolveNetWorthQueryStart,
+  resolveSearchWindow,
+  runWithQueryInstrumentation,
+  validateCanonicalDateRange,
+};
