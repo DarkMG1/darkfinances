@@ -710,14 +710,12 @@ async function setRecurring(req, operation) {
   return runActualProjectionMutation(
     () => applyLocal(operation, () =>
       data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation })),
-    'recurring-18',
   );
 }
 async function markRecurring(req, operation) {
   const { payee, isBill } = parse(schemas.markRecurring, req.body, 'recurring merchant');
   return runActualProjectionMutation(
     () => applyLocal(operation, () => data.markRecurring({ payee, isBill })),
-    'recurring-18',
   );
 }
 async function splitTxn(req, operation) {
@@ -1024,7 +1022,6 @@ async function markBill(req, operation) {
   const { id, key, dueDate, paid } = parse(schemas.markBill, req.body, 'bill state');
   return runActualProjectionMutation(
     () => applyLocal(operation, () => data.setBillPaid({ id, key, dueDate, paid })),
-    'bills-45',
   );
 }
 
@@ -1032,7 +1029,6 @@ async function setOwes(req, operation) {
   const config = parse(schemas.owesConfig, req.body, 'reimbursement configuration');
   return runActualProjectionMutation(
     () => applyLocal(operation, () => data.setOwesConfig(config)),
-    'reimb-d-d-false', 'today',
   );
 }
 
@@ -1056,9 +1052,9 @@ const reimbLinks = (req) => Promise.resolve(data.getReimbLinks({ id: req.query.i
 async function addLink(req, operation) {
   const link = parse(schemas.reimbLink, req.body, 'reimbursement link');
   data.assertTransactionMutationAvailable({ ids: [link.inflow?.id, link.expense?.id] });
-  const r = await applyLocal(operation, () => data.addReimbLink(link));
-  invalidateHttpCache(); // suggestions net against links
-  return r;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.addReimbLink(link)),
+  );
 }
 async function confirmRepaymentH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'repayment id');
@@ -1086,18 +1082,18 @@ async function dismissRepaymentH(req, operation) {
   data.assertTransactionMutationAvailable({
     ids: [inflowId || (id.startsWith('sg_') ? id.slice(3) : null)],
   });
-  const r = await applyLocal(operation, () => data.dismissRepayment({ id, inflowId }));
-  invalidateHttpCache();
-  return r;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.dismissRepayment({ id, inflowId })),
+  );
 }
 async function delLink(req, operation) {
   const inflowId = (req.body && req.body.inflowId) || req.query.inflowId;
   const expenseId = (req.body && req.body.expenseId) || req.query.expenseId;
   const parsed = parse(schemas.deleteReimbLink, { inflowId, expenseId }, 'reimbursement unlink');
   data.assertTransactionMutationAvailable({ ids: [parsed.inflowId, parsed.expenseId] });
-  const r = await applyLocal(operation, () => data.deleteReimbLink(parsed));
-  invalidateHttpCache();
-  return r;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteReimbLink(parsed)),
+  );
 }
 
 // Reconciliation — read fresh (not cached) so checkboxes reflect instantly.

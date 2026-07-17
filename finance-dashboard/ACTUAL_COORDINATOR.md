@@ -13,7 +13,7 @@ instance. The coordinator is the single contract for that shared resource.
 | HTTP mutations touching Actual | `mutationQueue` → dataModule → `runWrite` | `invalidateHttpCache()` |
 | Splitwise mirror preflight | `runRead` (`skipRecover: true`) | n/a |
 | Saga recovery / `initApi` / `syncNow` / `shutdownApi` | `runRecover` | `syncNow` invalidates before lane release |
-| Sidecar mutations affecting Actual-derived projections | `runActualProjectionMutation` (write lane through persist + invalidate) | `invalidateActualProjection(...keys)` |
+| Sidecar mutations affecting Actual-derived projections | `runActualProjectionMutation` (write lane through persist + invalidate) | full `invalidateActualProjection()` (generation bump + flush) |
 | Sidecar mutations affecting local-only projections | none | `invalidateLocalCache(...keys)` |
 | Graceful shutdown | drain mutations → `shutdownApi` → `shutdownHandoff` | n/a |
 
@@ -61,10 +61,14 @@ discarded at publish time.
    inside `runRecover` after saga sync succeeds, before releasing the lane.
 5. **Sidecar projection invalidation** — mutations that change Actual-derived HTTP
    projections (events, account overrides, review disposition, goals, reconciliation,
-   receipts, recurring overrides, …) run through `runActualProjectionMutation`, which
-   holds the coordinator write lane through sidecar persistence and then calls
-   `invalidateActualProjection`. `cachedRead` admits generation at cache miss and
-   retries once when publication is discarded mid-fill.
+   receipts, recurring/bills horizons, reimbursement links/config, …) run through
+   `runActualProjectionMutation`, which holds the coordinator write lane through
+   sidecar persistence and then bumps generation. Dynamic resolver families
+   (`recurring-*`, `bills-*`, `reimb-*`, `reimb-ledger-*`, `reimb-suggest-*`, …)
+   use full invalidation (no exact-key list) because horizons and query params vary.
+   Narrow exact-key invalidation is reserved for stable single-key projections
+   (e.g. `events`, `goals`). `cachedRead` admits generation at cache miss and
+   retries when publication is discarded mid-fill.
 6. **HTTP mutation queue unchanged** — versioned mutations serialize on
    `SerialQueue('finance-mutations')`; coordinator serializes Actual access.
 7. **Bounded diagnostics** — `/api/v1/ping` exposes `actualCoordinator` health.

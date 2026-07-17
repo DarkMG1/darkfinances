@@ -790,3 +790,290 @@ test('bills sidecar mutation completes before subsequent GET returns fresh proje
   const markerAfterGet = fs.readFileSync(path.join(dir, 'marker.log'), 'utf8').trim().split('\n');
   assert.ok(markerAfterGet.indexOf('setBillPaid') < markerAfterGet.lastIndexOf('fill:start'));
 });
+
+function lastInvalidationEvent(pingBody) {
+  const events = pingBody.data.actualCoordinator.recent.filter((e) => e.kind === 'invalidate');
+  return events.at(-1);
+}
+
+function sidecarMockShell(extraMock) {
+  return `
+    ${markLine()}
+    const path = require('path');
+    const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
+    const mock = {
+      initApi: async () => ({ ok: true }),
+      shutdownApi: async () => ({ ok: true }),
+      getHealth: () => ({ ready: true }),
+      syncNow: async () => ({ ok: true }),
+      assertTransactionMutationAvailable: () => {},
+      ${extraMock}
+    };
+    require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
+  `;
+}
+
+test('recurring sidecar mutation fully invalidates every warmed horizon variant', async (t) => {
+  const port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-coordinator-recurring-family-'));
+  const { child, logs, base } = spawnServer(dir, port, sidecarMockShell(`
+      callsByWindow: {},
+      getRecurring: async function({ window } = {}) {
+        const w = String(window ?? 18);
+        this.callsByWindow[w] = (this.callsByWindow[w] || 0) + 1;
+        mark('recurring:' + w + ':' + this.callsByWindow[w]);
+        return [{ key: 'rent', window: Number(w), pass: this.callsByWindow[w] }];
+      },
+      setRecurringOverride: async () => ({ ok: true }),
+  `));
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch (_) {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitForServer(base, child, logs);
+
+  for (const window of [12, 30]) {
+    const warm = await apiRequest(base, `/api/v1/recurring?window=${window}`);
+    assert.equal(warm.response.status, 200);
+    assert.equal(warm.body.data[0].pass, 1);
+  }
+  const cached = await apiRequest(base, '/api/v1/recurring?window=12');
+  assert.equal(cached.body.data[0].pass, 1);
+
+  const mutate = await apiRequest(base, '/api/v1/recurring/rent/override', {
+    method: 'POST',
+    key: 'recurring-family',
+    body: { status: 'active', hidden: false },
+  });
+  assert.equal(mutate.response.status, 200);
+
+  const { body: pingAfter } = await apiRequest(base, '/api/v1/ping');
+  assert.equal(lastInvalidationEvent(pingAfter).keys, null);
+
+  for (const window of [12, 30]) {
+    const fresh = await apiRequest(base, `/api/v1/recurring?window=${window}`);
+    assert.equal(fresh.response.status, 200);
+    assert.equal(fresh.body.data[0].pass, 2, `recurring-${window} should recompute after mutation`);
+  }
+});
+
+test('bills sidecar mutation fully invalidates every warmed days horizon variant', async (t) => {
+  const port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-coordinator-bills-family-'));
+  const { child, logs, base } = spawnServer(dir, port, sidecarMockShell(`
+      callsByDays: {},
+      getBills: async function({ days } = {}) {
+        const d = String(days ?? 45);
+        this.callsByDays[d] = (this.callsByDays[d] || 0) + 1;
+        mark('bills:' + d + ':' + this.callsByDays[d]);
+        return [{ id: 'b1', days: Number(d), pass: this.callsByDays[d] }];
+      },
+      setBillPaid: async () => ({ ok: true }),
+  `));
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch (_) {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitForServer(base, child, logs);
+
+  for (const days of [14, 90]) {
+    const warm = await apiRequest(base, `/api/v1/bills?days=${days}`);
+    assert.equal(warm.response.status, 200);
+    assert.equal(warm.body.data[0].pass, 1);
+  }
+  const cached = await apiRequest(base, '/api/v1/bills?days=14');
+  assert.equal(cached.body.data[0].pass, 1);
+
+  const mutate = await apiRequest(base, '/api/v1/bills/paid', {
+    method: 'POST',
+    key: 'bills-family',
+    body: { id: 'b1', key: 'rent', dueDate: '2026-07-15', paid: true },
+  });
+  assert.equal(mutate.response.status, 200);
+
+  const { body: pingAfter } = await apiRequest(base, '/api/v1/ping');
+  assert.equal(lastInvalidationEvent(pingAfter).keys, null);
+
+  for (const days of [14, 90]) {
+    const fresh = await apiRequest(base, `/api/v1/bills?days=${days}`);
+    assert.equal(fresh.body.data[0].pass, 2, `bills-${days} should recompute after mutation`);
+  }
+});
+
+test('owes sidecar mutation fully invalidates every warmed reimbursement projection key', async (t) => {
+  const port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-coordinator-owes-family-'));
+  const { child, logs, base } = spawnServer(dir, port, sidecarMockShell(`
+      callsByKey: {},
+      bump(key) {
+        this.callsByKey[key] = (this.callsByKey[key] || 0) + 1;
+        mark(key + ':' + this.callsByKey[key]);
+        return this.callsByKey[key];
+      },
+      getReimbursement: async function({ from, to, openOnly } = {}) {
+        const key = 'reimb-' + (from || 'd') + '-' + (to || 'd') + '-' + !!openOnly;
+        return { key, pass: this.bump(key) };
+      },
+      getReimbursementLedger: async function({ month } = {}) {
+        const key = 'reimb-ledger-' + (month || 'current');
+        return { key, pass: this.bump(key) };
+      },
+      suggestRepayments: async function({ from, to } = {}) {
+        const key = 'reimb-suggest-' + (from || 'd') + '-' + (to || 'd');
+        return { key, suggestions: [], pass: this.bump(key) };
+      },
+      getToday: async function() { return { pass: this.bump('today') }; },
+      setOwesConfig: async () => ({ ok: true }),
+  `));
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch (_) {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitForServer(base, child, logs);
+
+  const warmTargets = [
+    '/api/v1/reimbursement?from=2026-01-01&to=2026-03-31&openOnly=1',
+    '/api/v1/reimbursement',
+    '/api/v1/reimbursement-ledger?month=2026-07',
+    '/api/v1/repayments/suggestions?from=2026-01-01&to=2026-06-30',
+    '/api/v1/today',
+  ];
+  for (const pathname of warmTargets) {
+    const warm = await apiRequest(base, pathname);
+    assert.equal(warm.response.status, 200);
+    assert.equal(warm.body.data.pass, 1, pathname);
+  }
+  const cached = await apiRequest(base, '/api/v1/reimbursement?from=2026-01-01&to=2026-03-31&openOnly=1');
+  assert.equal(cached.body.data.pass, 1);
+
+  const mutate = await apiRequest(base, '/api/v1/owes-config', {
+    method: 'POST',
+    key: 'owes-family',
+    body: { expected: {} },
+  });
+  assert.equal(mutate.response.status, 200);
+
+  const { body: pingAfter } = await apiRequest(base, '/api/v1/ping');
+  assert.equal(lastInvalidationEvent(pingAfter).keys, null);
+
+  for (const pathname of warmTargets) {
+    const fresh = await apiRequest(base, pathname);
+    assert.equal(fresh.response.status, 200);
+    assert.equal(fresh.body.data.pass, 2, pathname);
+  }
+});
+
+test('reimb link sidecar mutation fully invalidates every warmed reimbursement projection key', async (t) => {
+  const port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-coordinator-link-family-'));
+  const { child, logs, base } = spawnServer(dir, port, sidecarMockShell(`
+      callsByKey: {},
+      bump(key) {
+        this.callsByKey[key] = (this.callsByKey[key] || 0) + 1;
+        mark(key + ':' + this.callsByKey[key]);
+        return this.callsByKey[key];
+      },
+      getReimbursement: async function({ from, to, openOnly } = {}) {
+        const key = 'reimb-' + (from || 'd') + '-' + (to || 'd') + '-' + !!openOnly;
+        return { key, pass: this.bump(key) };
+      },
+      getReimbursementLedger: async function({ month } = {}) {
+        const key = 'reimb-ledger-' + (month || 'current');
+        return { key, pass: this.bump(key) };
+      },
+      suggestRepayments: async function({ from, to } = {}) {
+        const key = 'reimb-suggest-' + (from || 'd') + '-' + (to || 'd');
+        return { key, suggestions: [], pass: this.bump(key) };
+      },
+      addReimbLink: async () => ({ ok: true, inflowId: 'in1', expenseId: 'ex1' }),
+  `));
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch (_) {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitForServer(base, child, logs);
+
+  const warmTargets = [
+    '/api/v1/reimbursement?from=2026-02-01&to=2026-04-30&openOnly=true',
+    '/api/v1/reimbursement-ledger?month=2026-06',
+    '/api/v1/repayments/suggestions?from=2026-02-01&to=2026-05-31',
+  ];
+  for (const pathname of warmTargets) {
+    const warm = await apiRequest(base, pathname);
+    assert.equal(warm.response.status, 200);
+    assert.equal(warm.body.data.pass, 1, pathname);
+  }
+
+  const mutate = await apiRequest(base, '/api/v1/reimb-links', {
+    method: 'POST',
+    key: 'link-family',
+    body: {
+      inflow: { id: 'in1', amount: 50, date: '2026-07-01' },
+      expense: { id: 'ex1', amount: -50, date: '2026-06-15' },
+      amount: 50,
+    },
+  });
+  assert.equal(mutate.response.status, 200);
+
+  const { body: pingAfter } = await apiRequest(base, '/api/v1/ping');
+  assert.equal(lastInvalidationEvent(pingAfter).keys, null);
+
+  for (const pathname of warmTargets) {
+    const fresh = await apiRequest(base, pathname);
+    assert.equal(fresh.body.data.pass, 2, pathname);
+  }
+});
+
+test('dismiss repayment sidecar mutation uses projection write lane with full invalidation', async (t) => {
+  const port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-coordinator-dismiss-family-'));
+  const { child, logs, base, releaseFill } = spawnServerWithSidecarGate(dir, port, sidecarMockShell(`
+      callsByKey: {},
+      fillCount: 0,
+      bump(key) {
+        this.callsByKey[key] = (this.callsByKey[key] || 0) + 1;
+        mark(key + ':' + this.callsByKey[key]);
+        return this.callsByKey[key];
+      },
+      suggestRepayments: async function({ from, to } = {}) {
+        const key = 'reimb-suggest-' + (from || 'd') + '-' + (to || 'd');
+        this.fillCount += 1;
+        if (this.fillCount === 2) {
+          mark('fill:start');
+          await waitSidecarRelease();
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        const pass = this.bump(key);
+        return { suggestions: [], pass };
+      },
+      dismissRepayment: async () => ({ ok: true, dismissed: 'in1' }),
+  `));
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch (_) {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitForServer(base, child, logs);
+
+  const warm = await apiRequest(base, '/api/v1/repayments/suggestions?from=2026-03-01&to=2026-06-30');
+  assert.equal(warm.body.data.pass, 1);
+
+  const readPromise = apiRequest(base, '/api/v1/repayments/suggestions?from=2026-08-01&to=2026-09-30');
+  await waitForMarker(dir, 'fill:start');
+  const mutatePromise = apiRequest(base, '/api/v1/repayments/sg_in1/dismiss', {
+    method: 'POST',
+    key: 'dismiss-family',
+    body: {},
+  });
+  releaseFill();
+  const [{ body: firstBody }, { response: mutateResponse }] = await Promise.all([readPromise, mutatePromise]);
+  assert.equal(mutateResponse.status, 200);
+  assert.equal(firstBody.data.pass, 1);
+
+  const { body: pingAfter } = await apiRequest(base, '/api/v1/ping');
+  assert.equal(lastInvalidationEvent(pingAfter).keys, null);
+
+  const freshWarm = await apiRequest(base, '/api/v1/repayments/suggestions?from=2026-03-01&to=2026-06-30');
+  assert.equal(freshWarm.body.data.pass, 2);
+  const freshOther = await apiRequest(base, '/api/v1/repayments/suggestions?from=2026-08-01&to=2026-09-30');
+  assert.equal(freshOther.body.data.pass, 2);
+});
