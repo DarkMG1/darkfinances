@@ -19,6 +19,7 @@ const {
   DEFAULT_DEBOUNCE_MS,
   DEFAULT_ONLINE_SETTLE_MS,
   createReconnectRefreshOwner,
+  getReconnectStaleWarningStore,
   resetReconnectRefreshStateForTests,
 } = require('../src/lib/reconnect-refresh');
 const { createReconnectRefreshOwnerRunner } = require('../src/lib/reconnect-refresh-owner-runner');
@@ -35,6 +36,7 @@ const {
   registerReconnectRefreshRetry,
   registerReconnectServerRecovery,
   registerReconnectConnectivityPhase,
+  purgeReconnectRefreshProfileState,
   resetReconnectRefreshRegistryForTests: resetRegistry,
 } = require('../src/lib/reconnect-refresh-registry');
 
@@ -511,7 +513,6 @@ test('purge via registry clears live owner confirmed identity', async () => {
     resetReconnectRefreshOwnerRuntimeForTests,
     updateReconnectRefreshRuntimeConfig,
   } = require('../src/lib/reconnect-refresh-owner-runtime');
-  const { purgeReconnectRefreshProfileState } = require('../src/lib/reconnect-refresh-registry');
   resetReconnectRefreshStateForTests();
   resetRegistry();
   resetReconnectRefreshOwnerRuntimeForTests();
@@ -530,9 +531,121 @@ test('purge via registry clears live owner confirmed identity', async () => {
   owner.startRefresh('manual');
   while (owner.isInFlight()) await Promise.resolve();
   assert.equal(owner.getConfirmedIdentity(SCOPE_A)?.cacheGeneration, 3);
+  getReconnectStaleWarningStore().set(SCOPE_A, { code: 'RECONNECT_REFRESH_FAILED' });
   purgeReconnectRefreshProfileState(SCOPE_A);
   assert.equal(owner.getConfirmedIdentity(SCOPE_A), null);
+  assert.equal(getReconnectStaleWarningStore().get(SCOPE_A), null);
   resetReconnectRefreshOwnerRuntimeForTests();
+});
+
+test('profile purge via registry succeeds before owner runtime is configured', () => {
+  const {
+    isReconnectRefreshOwnerConfigured,
+    resetReconnectRefreshOwnerRuntimeForTests,
+  } = require('../src/lib/reconnect-refresh-owner-runtime');
+  resetReconnectRefreshStateForTests();
+  resetRegistry();
+  resetReconnectRefreshOwnerRuntimeForTests();
+  assert.equal(isReconnectRefreshOwnerConfigured(), false);
+  getReconnectStaleWarningStore().set(SCOPE_A, { code: 'RECONNECT_REFRESH_FAILED' });
+  assert.doesNotThrow(() => purgeReconnectRefreshProfileState(SCOPE_A));
+  assert.equal(getReconnectStaleWarningStore().get(SCOPE_A), null);
+});
+
+test('profile purge transitions from persistence-only to configured owner purge', async () => {
+  const {
+    configureReconnectRefreshOwnerDeps,
+    getSharedReconnectRefreshOwner,
+    isReconnectRefreshOwnerConfigured,
+    resetReconnectRefreshOwnerRuntimeForTests,
+    updateReconnectRefreshRuntimeConfig,
+  } = require('../src/lib/reconnect-refresh-owner-runtime');
+  resetReconnectRefreshStateForTests();
+  resetRegistry();
+  resetReconnectRefreshOwnerRuntimeForTests();
+
+  getReconnectStaleWarningStore().set(SCOPE_A, { code: 'RECONNECT_SOURCE_TIMEOUT' });
+  purgeReconnectRefreshProfileState(SCOPE_A);
+  assert.equal(getReconnectStaleWarningStore().get(SCOPE_A), null);
+  assert.equal(isReconnectRefreshOwnerConfigured(), false);
+
+  configureReconnectRefreshOwnerDeps({
+    fetchSourceFreshness: async () => probePayload(2, 'rev-partial', 1),
+    reconcileOperations: async () => ({ checked: 0, completed: 0, failed: 0, unresolved: 0 }),
+    refreshActiveQueries: async () => {},
+  });
+  updateReconnectRefreshRuntimeConfig({
+    scope: SCOPE_A,
+    profileGeneration: 1,
+    active: true,
+    demo: false,
+  });
+  const owner = getSharedReconnectRefreshOwner();
+  owner.startRefresh('manual');
+  while (owner.isInFlight()) await Promise.resolve();
+  getReconnectStaleWarningStore().set(SCOPE_A, { code: 'RECONNECT_REFRESH_FAILED' });
+  purgeReconnectRefreshProfileState(SCOPE_A);
+  assert.equal(owner.getConfirmedIdentity(SCOPE_A), null);
+  assert.equal(getReconnectStaleWarningStore().get(SCOPE_A), null);
+
+  resetReconnectRefreshOwnerRuntimeForTests();
+  getReconnectStaleWarningStore().set(SCOPE_A, { code: 'RECONNECT_SOURCE_AUTH' });
+  assert.doesNotThrow(() => purgeReconnectRefreshProfileState(SCOPE_A));
+  assert.equal(getReconnectStaleWarningStore().get(SCOPE_A), null);
+  assert.equal(isReconnectRefreshOwnerConfigured(), false);
+});
+
+test('configured owner purge surfaces owner failures without swallowing', () => {
+  const {
+    configureReconnectRefreshOwnerDeps,
+    getSharedReconnectRefreshOwner,
+    resetReconnectRefreshOwnerRuntimeForTests,
+    updateReconnectRefreshRuntimeConfig,
+  } = require('../src/lib/reconnect-refresh-owner-runtime');
+  resetReconnectRefreshStateForTests();
+  resetRegistry();
+  resetReconnectRefreshOwnerRuntimeForTests();
+  configureReconnectRefreshOwnerDeps({
+    fetchSourceFreshness: async () => probePayload(1),
+    reconcileOperations: async () => ({}),
+    refreshActiveQueries: async () => {},
+  });
+  updateReconnectRefreshRuntimeConfig({
+    scope: SCOPE_A,
+    profileGeneration: 1,
+    active: true,
+    demo: false,
+  });
+  const owner = getSharedReconnectRefreshOwner();
+  owner.purgeProfile = () => {
+    throw new Error('configured owner purge failed');
+  };
+  getReconnectStaleWarningStore().set(SCOPE_A, { code: 'RECONNECT_REFRESH_FAILED' });
+  assert.throws(
+    () => purgeReconnectRefreshProfileState(SCOPE_A),
+    /configured owner purge failed/,
+  );
+  assert.equal(getReconnectStaleWarningStore().get(SCOPE_A), null);
+  resetReconnectRefreshOwnerRuntimeForTests();
+});
+
+test('reconnect refresh registry and owner runtime avoid import cycles', () => {
+  const registrySource = fs.readFileSync(
+    path.join(__dirname, '../src/lib/reconnect-refresh-registry.js'),
+    'utf8',
+  );
+  const runtimeSource = fs.readFileSync(
+    path.join(__dirname, '../src/lib/reconnect-refresh-owner-runtime.js'),
+    'utf8',
+  );
+  const refreshSource = fs.readFileSync(
+    path.join(__dirname, '../src/lib/reconnect-refresh.js'),
+    'utf8',
+  );
+  assert.doesNotMatch(registrySource, /reconnect-refresh-owner-runtime/);
+  assert.match(runtimeSource, /require\('\.\/reconnect-refresh'\)/);
+  assert.doesNotMatch(runtimeSource, /reconnect-refresh-registry/);
+  assert.match(refreshSource, /require\('\.\/reconnect-refresh-owner-runtime'\)/);
 });
 
 test('finance status banner routes online ping recovery through reconnect owner', () => {

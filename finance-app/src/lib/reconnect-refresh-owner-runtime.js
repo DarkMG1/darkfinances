@@ -62,7 +62,12 @@ function updateReconnectRefreshRuntimeConfig(next) {
   owner.setActive(runtimeConfig.active);
 }
 
+function isReconnectRefreshOwnerConfigured() {
+  return ownerDeps != null;
+}
+
 function purgeReconnectRefreshOwnerProfile(scope) {
+  if (!ownerDeps) return;
   getSharedReconnectRefreshOwner().purgeProfile(scope);
 }
 
@@ -80,6 +85,7 @@ function resetReconnectRefreshOwnerRuntimeForTests() {
 module.exports = {
   configureReconnectRefreshOwnerDeps,
   getSharedReconnectRefreshOwner,
+  isReconnectRefreshOwnerConfigured,
   purgeReconnectRefreshOwnerProfile,
   resetReconnectRefreshOwnerRuntimeForTests,
   updateReconnectRefreshRuntimeConfig,

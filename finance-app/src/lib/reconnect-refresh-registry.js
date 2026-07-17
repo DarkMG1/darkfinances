@@ -1,6 +1,6 @@
 'use strict';
 
-const { purgeReconnectRefreshOwnerProfile } = require('./reconnect-refresh-owner-runtime');
+const { purgeReconnectRefreshProfileState } = require('./reconnect-refresh');
 
 /** @type {(() => boolean) | null} */
 let retryHandler = null;
@@ -53,10 +53,6 @@ function requestReconnectServerRecovery() {
 
 function getReconnectConnectivityPhase() {
   return connectivityPhaseHandler?.() ?? 'unknown';
-}
-
-function purgeReconnectRefreshProfileState(scope) {
-  purgeReconnectRefreshOwnerProfile(scope);
 }
 
 function resetReconnectRefreshRegistryForTests() {

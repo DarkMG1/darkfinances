@@ -332,11 +332,12 @@ function resetReconnectRefreshStateForTests() {
 
 function purgeReconnectRefreshProfileState(scope) {
   defaultStaleWarningStore.purge(scope);
-  try {
-    const { purgeReconnectRefreshOwnerProfile } = require('./reconnect-refresh-owner-runtime');
+  const {
+    isReconnectRefreshOwnerConfigured,
+    purgeReconnectRefreshOwnerProfile,
+  } = require('./reconnect-refresh-owner-runtime');
+  if (isReconnectRefreshOwnerConfigured()) {
     purgeReconnectRefreshOwnerProfile(scope);
-  } catch {
-    // Owner runtime is configured only after the React owner mounts.
   }
 }
 
