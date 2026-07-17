@@ -4,6 +4,7 @@ import {
   prepareFinanceOperationProfilePurge,
 } from '@/lib/finance-operations';
 import { purgeOtaProfileState } from '@/lib/auto-update';
+import { mutationOutcomeHaptics } from '@/lib/haptics';
 import { purgeNotificationProfileState } from '@/lib/notifications';
 import { purgeProfileGeneration } from '@/lib/notification-reconciliation';
 import { abortFinanceRequests } from '@/lib/request-lifecycle';
@@ -27,6 +28,7 @@ export async function purgeFinanceProfile(
   prepareFinanceOperationProfilePurge(operationScope);
   purgeProfileGeneration(scope);
   purgeOtaProfileState();
+  if (operationScope) mutationOutcomeHaptics.purgeScope(operationScope);
   abortFinanceRequests();
   await clearFinanceQueries();
   queryClient.getMutationCache().clear();

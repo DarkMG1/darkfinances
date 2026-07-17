@@ -48,12 +48,11 @@ export default function Overview() {
     haptics.tap();
     bankSync.mutate(undefined, {
       onSuccess: (r) => {
-        haptics.success();
         const cleared = r?.phantom?.deletedCount ?? 0;
         if (r?.warning) Alert.alert('Synced with a warning', `Your ledger was refreshed, but the bank fetch reported: ${r.warning}`);
         else if (cleared > 0) Alert.alert('Synced', `${cleared} stale pending charge${cleared === 1 ? '' : 's'} may need cleanup. Nothing was deleted.`);
       },
-      onError: (e) => { haptics.warning(); Alert.alert('Sync failed', e.error || 'Please try again.'); },
+      onError: (e) => { Alert.alert('Sync failed', e.error || 'Please try again.'); },
     });
   };
 
