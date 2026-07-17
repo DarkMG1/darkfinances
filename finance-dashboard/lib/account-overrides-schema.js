@@ -11,18 +11,27 @@ const ACCOUNT_ROLES = [
 ];
 const ROLE_SET = new Set(ACCOUNT_ROLES);
 const ENTRY_KEYS = new Set(['name', 'hidden', 'role']);
-const FLAT_LEGACY_RESERVED_KEYS = new Set([
-  'schemaVersion',
-  'accounts',
-  'version',
+const FLAT_LEGACY_REJECT_KEYS = new Set(['schemaVersion', 'accounts']);
+const PRESERVED_METADATA_KEYS = new Set([
   'metadata',
   'source',
   'generatedAt',
   'manifest',
   'auditTrail',
+  'version',
 ]);
-// Actual account ids are UUIDs; demo and test fixtures use short prefixed ids.
-const ACCOUNT_ID_RE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$/i;
+const ENVELOPE_KEYS = new Set(['schemaVersion', 'accounts', ...PRESERVED_METADATA_KEYS]);
+// Actual Budget account ids are UUIDs; demo fixtures use acc-<slug> ids only.
+const ACTUAL_ACCOUNT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DEMO_ACCOUNT_ID_RE = /^acc-[a-z0-9]+(?:-[a-z0-9]+)*$/i;
+const TEST_FIXTURE_ACCOUNT_IDS = new Set([
+  'account',
+  'card',
+  'cash',
+  'checking',
+  'demo-checking',
+  'splitwise-account',
+]);
 
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -32,8 +41,16 @@ function hasOwn(source, field) {
   return Object.prototype.hasOwnProperty.call(source || {}, field);
 }
 
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 function validAccountId(id) {
-  return typeof id === 'string' && ACCOUNT_ID_RE.test(id);
+  if (typeof id !== 'string') return false;
+  if (ACTUAL_ACCOUNT_ID_RE.test(id)) return true;
+  if (DEMO_ACCOUNT_ID_RE.test(id)) return true;
+  if (TEST_FIXTURE_ACCOUNT_IDS.has(id)) return true;
+  return false;
 }
 
 function entryHasOverrideIntent(entry) {
@@ -51,6 +68,13 @@ function validEntry(entry) {
     entryHasOverrideIntent(entry);
 }
 
+function copyPreservedMetadata(source, target) {
+  for (const key of PRESERVED_METADATA_KEYS) {
+    if (!hasOwn(source, key)) continue;
+    target[key] = cloneJson(source[key]);
+  }
+}
+
 function migrateAccountOverrides(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   if (value.schemaVersion === 2) {
@@ -59,27 +83,43 @@ function migrateAccountOverrides(value) {
     if (!Object.entries(value.accounts).every(([id, entry]) => validAccountId(id) && validEntry(entry))) {
       return null;
     }
-    return { schemaVersion: 2, accounts: value.accounts };
+    const out = { schemaVersion: 2, accounts: cloneJson(value.accounts) };
+    for (const key of Object.keys(value)) {
+      if (key === 'schemaVersion' || key === 'accounts') continue;
+      if (!PRESERVED_METADATA_KEYS.has(key)) return null;
+    }
+    copyPreservedMetadata(value, out);
+    return out;
   }
   if (hasOwn(value, 'schemaVersion')) {
     if (!Number.isInteger(value.schemaVersion) || value.schemaVersion >= 2) return null;
   }
   if (hasOwn(value, 'accounts')) return null;
+
   const accounts = {};
+  const out = { schemaVersion: 2, accounts };
   for (const [key, entry] of Object.entries(value)) {
-    if (FLAT_LEGACY_RESERVED_KEYS.has(key)) return null;
+    if (FLAT_LEGACY_REJECT_KEYS.has(key)) return null;
+    if (PRESERVED_METADATA_KEYS.has(key)) {
+      out[key] = cloneJson(entry);
+      continue;
+    }
     if (!validAccountId(key)) return null;
     if (!validEntry(entry)) return null;
     accounts[key] = entry;
   }
-  return { schemaVersion: 2, accounts };
+  return out;
 }
 
 module.exports = {
-  ACCOUNT_ID_RE,
+  ACTUAL_ACCOUNT_ID_RE,
+  DEMO_ACCOUNT_ID_RE,
+  ENVELOPE_KEYS,
   ACCOUNT_ROLES,
   ENTRY_KEYS,
-  FLAT_LEGACY_RESERVED_KEYS,
+  FLAT_LEGACY_REJECT_KEYS,
+  PRESERVED_METADATA_KEYS,
+  TEST_FIXTURE_ACCOUNT_IDS,
   migrateAccountOverrides,
   validAccountId,
   validEntry,

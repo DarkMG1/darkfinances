@@ -46,7 +46,6 @@ const STATE_REGISTRY = Object.freeze({
   }),
   passkeyCredentials: entry('PASSKEY_CREDENTIALS_FILE', 'passkey-credentials.json', 1, true, 'passkey credential ids', {
     durability: 'passkey-server-writer',
-    optionalMissing: true,
     lastGoodPolicy: 'never',
     backup: true,
     references: 'passkey credential ids',

@@ -34,7 +34,18 @@ Entries with `lastGoodPolicy: allow-on-primary-invalid` may serve reads from `*.
 
 ## Passkey credentials
 
-`passkeyCredentials` is registered for backup/inventory alignment but uses durability contract `passkey-server-writer`. `server.js` remains the sole writer; the runtime store rejects direct writes so the registry does not claim `.last-good` durability that the server writer does not provide.
+`passkeyCredentials` is registered for backup/inventory alignment but uses durability contract `passkey-server-writer`. `server.js` remains the sole writer via `lib/passkey-credentials-store.js`, which validates against the same runtime schema and persists a canonical bare array with `0600` atomic rename (no `.last-good`).
+
+Reads normalize through the authoritative schema:
+
+- **Missing file (`ENOENT`)** → empty array `[]` (valid unregistered enrollment state).
+- **Bare array** → load unchanged.
+- **Documented `{ credentials: [...] }` wrapper** → unwrap losslessly in memory; writer re-canonicalizes to bare array on save.
+- **JSON literal `null` or other invalid roots** → fail closed (never treated as missing/unregistered).
+
+`lastGoodPolicy: never` — corrupt primaries are not recovered from sidecars.
+
+Optional JSON `null` is valid only for documented optional sidecars (`personalConfig`, `owesConfig`, `owesTruth`, `venmoTruth`). Passkey is the explicit security exception.
 
 ## Saga stores
 

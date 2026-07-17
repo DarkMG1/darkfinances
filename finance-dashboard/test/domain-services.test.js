@@ -55,11 +55,12 @@ test('split parents flatten to cent-preserving leaves', () => {
 });
 
 test('account override migration is versioned and roles survive renames', () => {
-  const migrated = migrateAccountOverrides({ account: { name: 'Renamed', role: 'operating_cash' } });
+  const accountId = '00000000-0000-4000-8000-000000000010';
+  const migrated = migrateAccountOverrides({ [accountId]: { name: 'Renamed', role: 'operating_cash' } });
   assert.equal(migrated.schemaVersion, 2);
-  assert.equal(migrated.accounts.account.role, 'operating_cash');
-  migrated.accounts.account.name = 'Another name';
-  assert.equal(migrated.accounts.account.role, 'operating_cash');
+  assert.equal(migrated.accounts[accountId].role, 'operating_cash');
+  migrated.accounts[accountId].name = 'Another name';
+  assert.equal(migrated.accounts[accountId].role, 'operating_cash');
   assert.deepEqual(accountsForMetric([{ id: 'a', role: 'operating_cash' }, { id: 'b', role: 'unknown' }], 'operating_cash'), [{ id: 'a', role: 'operating_cash' }]);
 });
 

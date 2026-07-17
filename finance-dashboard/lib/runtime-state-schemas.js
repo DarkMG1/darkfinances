@@ -843,11 +843,12 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
 
   passkeyCredentials: defineStore('passkeyCredentials', {
     currentVersion: 1,
-    optionalMissing: true,
     lastGoodPolicy: 'never',
-    missingValue: () => null,
+    missingValue: () => [],
     migrate(raw) {
-      if (raw == null) return { value: null, changed: false, version: 1 };
+      if (raw == null) {
+        invalidShapeError('passkeyCredentials', 'passkeyCredentials JSON null is invalid');
+      }
       if (Array.isArray(raw)) {
         return { value: cloneJson(raw), changed: false, version: 1 };
       }
@@ -865,7 +866,7 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
       invalidShapeError('passkeyCredentials', 'passkeyCredentials must be an array or { credentials: [...] } wrapper');
     },
     validate(value) {
-      return value == null || Array.isArray(value);
+      return Array.isArray(value);
     },
   }),
 });

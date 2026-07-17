@@ -1,6 +1,6 @@
 'use strict';
 
-const { validEntry } = require('./account-overrides-schema');
+const { validEntry, PRESERVED_METADATA_KEYS } = require('./account-overrides-schema');
 
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -9,7 +9,7 @@ function isPlainObject(value) {
 const RESERVED_OPEN_MAP_KEYS = new Set(['schemaVersion']);
 
 const ENVELOPE_KEYS = Object.freeze({
-  accountOverrides: new Set(['schemaVersion', 'accounts']),
+  accountOverrides: new Set(['schemaVersion', 'accounts', 'metadata', 'source', 'generatedAt', 'manifest', 'auditTrail', 'version']),
   debtPlanner: new Set(['debts', 'schemaVersion']),
   events: new Set(['events', 'schemaVersion']),
   investmentHoldings: new Set(['holdings', 'schemaVersion']),
@@ -52,6 +52,10 @@ const LEGACY_MIGRATION_SHAPES = Object.freeze({
     legacyShape: 'flat account-id map (no schemaVersion 2 envelope)',
     consumed: 'each top-level key with a valid account entry',
     preservedAs: 'accounts.<key>',
+  }, {
+    legacyShape: 'flat map with recognized metadata keys alongside account overrides',
+    consumed: 'valid account-id keys and recognized metadata keys only',
+    preservedAs: 'accounts.<id> plus metadata/source/generatedAt/manifest/auditTrail/version',
   }],
   billsPaid: [{
     legacyShape: 'open-map (any top-level keys)',
@@ -228,6 +232,10 @@ function legacyConsumedTopLevelKeys(name, raw) {
 
   if (name === 'accountOverrides' && isPlainObject(raw) && raw.schemaVersion !== 2) {
     for (const [key, entry] of Object.entries(raw)) {
+      if (PRESERVED_METADATA_KEYS.has(key)) {
+        consumed.add(key);
+        continue;
+      }
       if (validEntry(entry)) consumed.add(key);
     }
     return consumed;

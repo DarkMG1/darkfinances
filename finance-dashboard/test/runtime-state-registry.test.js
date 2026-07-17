@@ -41,8 +41,16 @@ function writeLastGood(env, name, value) {
 
 const FIXTURES = {
   accountOverrides: {
-    current: { schemaVersion: 2, accounts: { a1: { name: 'Cash', role: 'operating_cash' } } },
-    legacy: { a1: { name: 'Cash', role: 'operating_cash' } },
+    current: {
+      schemaVersion: 2,
+      accounts: { '00000000-0000-4000-8000-000000000001': { name: 'Cash', role: 'operating_cash' } },
+      metadata: { writer: 'fixture' },
+    },
+    legacy: { '00000000-0000-4000-8000-000000000001': { name: 'Cash', role: 'operating_cash' } },
+    legacyMixed: {
+      '00000000-0000-4000-8000-000000000001': { hidden: true, role: 'operating_cash' },
+      metadata: { writer: 'legacy-import', run: 3 },
+    },
     malformed: { schemaVersion: 2, accounts: [] },
     future: { schemaVersion: 9, accounts: {} },
   },
@@ -372,9 +380,32 @@ const FIXTURES = {
     future: { schemaVersion: 9, bySlug: {} },
   },
   passkeyCredentials: {
-    current: [{ id: 'cred-1', userId: 'owner', transports: ['internal'] }],
-    legacy: [{ id: 'cred-1', userId: 'owner', transports: ['internal'] }],
-    legacyWrapper: { credentials: [{ id: 'cred-1', userId: 'owner', transports: ['internal'] }] },
+    current: [{
+      credentialID: 'cred-1',
+      credentialPublicKey: Buffer.from('public-key-bytes').toString('base64'),
+      counter: 0,
+      transports: ['internal'],
+      createdAt: '2026-07-13T00:00:00.000Z',
+      lastUsedAt: null,
+    }],
+    legacy: [{
+      credentialID: 'cred-1',
+      credentialPublicKey: Buffer.from('public-key-bytes').toString('base64'),
+      counter: 0,
+      transports: ['internal'],
+      createdAt: '2026-07-13T00:00:00.000Z',
+      lastUsedAt: null,
+    }],
+    legacyWrapper: {
+      credentials: [{
+        credentialID: 'cred-1',
+        credentialPublicKey: Buffer.from('public-key-bytes').toString('base64'),
+        counter: 0,
+        transports: ['internal'],
+        createdAt: '2026-07-13T00:00:00.000Z',
+        lastUsedAt: null,
+      }],
+    },
     malformed: { credentials: 'bad' },
     future: { schemaVersion: 9, credentials: [] },
   },
@@ -430,6 +461,14 @@ for (const [name, fixtures] of Object.entries(FIXTURES)) {
     if (name === 'reviewState') {
       assert.equal(first.value.dispositions['fp-1'], 'hidden');
       assert.deepEqual(first.value.dispositions['task:1'], fixtures.legacy['task:1']);
+    }
+    if (name === 'accountOverrides' && fixtures.legacyMixed) {
+      resetWriteGuards();
+      const mixedEnv = tempEnv(t);
+      writePrimary(mixedEnv.env, name, fixtures.legacyMixed);
+      const mixed = readRuntimeState(name, { env: mixedEnv.env }).value;
+      assert.deepEqual(mixed.metadata, fixtures.legacyMixed.metadata);
+      assert.equal(mixed.accounts['00000000-0000-4000-8000-000000000001'].hidden, true);
     }
   });
 
@@ -1106,6 +1145,13 @@ test('registry-wide policy matrix matches fixtures and production preserve metad
     }
     if (entry.policy === 'reject' && entry.shape === 'envelope' && entry.allowedTopLevel) {
       const withExtra = { ...sample, undeclaredFixtureKey: true };
+      if (entry.name === 'accountOverrides') {
+        assert.throws(
+          () => RUNTIME_STATE_SCHEMAS[entry.name].migrate(withExtra),
+          /legacy payload is not migratable/,
+        );
+        continue;
+      }
       assert.throws(() => {
         const migrated = RUNTIME_STATE_SCHEMAS[entry.name].migrate(withExtra).value;
         const { enforceUnknownFieldPolicy } = require('../lib/runtime-state-field-policy');
@@ -1127,8 +1173,8 @@ test('passkeyCredentials legacy wrapper unwraps losslessly', (t) => {
   assert.deepEqual(loaded, FIXTURES.passkeyCredentials.current);
 });
 
-test('optional personalConfig and owesConfig accept JSON null root', (t) => {
-  for (const name of ['personalConfig', 'owesConfig']) {
+test('optional personalConfig owesConfig and truth sidecars accept JSON null root', (t) => {
+  for (const name of ['personalConfig', 'owesConfig', 'owesTruth', 'venmoTruth']) {
     resetWriteGuards();
     const { env } = tempEnv(t);
     writePrimary(env, name, null);
@@ -1136,6 +1182,21 @@ test('optional personalConfig and owesConfig accept JSON null root', (t) => {
     assert.equal(result.value, null);
     assert.equal(result.meta.source, 'primary');
   }
+});
+
+test('passkeyCredentials missing file defaults to empty array enrollment state', (t) => {
+  resetWriteGuards();
+  const { env } = tempEnv(t);
+  const result = readRuntimeState('passkeyCredentials', { env });
+  assert.deepEqual(result.value, []);
+  assert.equal(result.meta.source, 'missing-default');
+});
+
+test('passkeyCredentials JSON null root fails closed', (t) => {
+  resetWriteGuards();
+  const { env } = tempEnv(t);
+  writePrimary(env, 'passkeyCredentials', null);
+  assert.throws(() => readRuntimeState('passkeyCredentials', { env }), RuntimeStateError);
 });
 
 test('non-optional JSON null root quarantines primary and recovers from last-good', (t) => {
@@ -1173,13 +1234,57 @@ test('passkeyCredentials never uses last-good even when sidecar exists', (t) => 
   );
 });
 
-test('accountOverrides flat legacy rejects ambiguous metadata objects', () => {
+test('accountOverrides flat legacy preserves recognized metadata alongside valid accounts', () => {
   const { migrateAccountOverrides } = require('../lib/account-overrides-schema');
-  assert.equal(migrateAccountOverrides({ metadata: { hidden: true } }), null);
-  assert.equal(migrateAccountOverrides({ auditTrail: { role: 'unknown' } }), null);
-  assert.equal(migrateAccountOverrides({ 'bad id!': { hidden: true } }), null);
-  assert.equal(migrateAccountOverrides({ a1: { notes: 'x' } }), null);
-  assert.ok(migrateAccountOverrides({ a1: { hidden: true } }));
+  const accountId = '00000000-0000-4000-8000-000000000101';
+  const mixed = migrateAccountOverrides({
+    [accountId]: { hidden: true, role: 'operating_cash' },
+    metadata: { writer: 'legacy-import', run: 3 },
+    auditTrail: { importedAt: '2026-07-13T00:00:00.000Z' },
+  });
+  assert.deepEqual(mixed, {
+    schemaVersion: 2,
+    accounts: { [accountId]: { hidden: true, role: 'operating_cash' } },
+    metadata: { writer: 'legacy-import', run: 3 },
+    auditTrail: { importedAt: '2026-07-13T00:00:00.000Z' },
+  });
+});
+
+test('accountOverrides flat legacy rejects ambiguous non-account keys', () => {
+  const { migrateAccountOverrides } = require('../lib/account-overrides-schema');
+  const accountId = '00000000-0000-4000-8000-000000000101';
+  assert.equal(migrateAccountOverrides({ rogue: { hidden: true } }), null);
+  assert.equal(migrateAccountOverrides({
+    [accountId]: { hidden: true },
+    rogue: { hidden: true },
+  }), null);
+  assert.equal(migrateAccountOverrides({ [accountId]: { notes: 'x' } }), null);
+  assert.equal(migrateAccountOverrides({ acct1: { hidden: true } }), null);
+});
+
+test('accountOverrides v2 metadata round-trips through read write and backup validation', (t) => {
+  resetWriteGuards();
+  const { env } = tempEnv(t);
+  const accountId = '00000000-0000-4000-8000-000000000202';
+  const payload = {
+    schemaVersion: 2,
+    accounts: { [accountId]: { name: 'Cash', role: 'operating_cash' } },
+    metadata: { writer: 'runtime-test', run: 9 },
+  };
+  writeRuntimeState('accountOverrides', payload, { env, enforceOwnership: false });
+  const loaded = readRuntimeState('accountOverrides', { env }).value;
+  assert.deepEqual(loaded.metadata, payload.metadata);
+  writeRuntimeState('accountOverrides', {
+    ...loaded,
+    accounts: {
+      ...loaded.accounts,
+      [accountId]: { ...loaded.accounts[accountId], hidden: true },
+    },
+  }, { env, enforceOwnership: false });
+  const roundTrip = readRuntimeState('accountOverrides', { env }).value;
+  assert.deepEqual(roundTrip.metadata, payload.metadata);
+  assert.equal(roundTrip.accounts[accountId].hidden, true);
+  assert.doesNotThrow(() => validateBackupSidecar('account-overrides.json', roundTrip));
 });
 
 const PRESENT_WRONG_TYPE = {
