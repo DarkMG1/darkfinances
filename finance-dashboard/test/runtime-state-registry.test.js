@@ -374,7 +374,8 @@ const FIXTURES = {
   passkeyCredentials: {
     current: [{ id: 'cred-1', userId: 'owner', transports: ['internal'] }],
     legacy: [{ id: 'cred-1', userId: 'owner', transports: ['internal'] }],
-    malformed: { credentials: [] },
+    legacyWrapper: { credentials: [{ id: 'cred-1', userId: 'owner', transports: ['internal'] }] },
+    malformed: { credentials: 'bad' },
     future: { schemaVersion: 9, credentials: [] },
   },
 };
@@ -1117,3 +1118,154 @@ test('registry-wide policy matrix matches fixtures and production preserve metad
 function schemaFor(name) {
   return RUNTIME_STATE_SCHEMAS[name];
 }
+
+test('passkeyCredentials legacy wrapper unwraps losslessly', (t) => {
+  resetWriteGuards();
+  const { env } = tempEnv(t);
+  writePrimary(env, 'passkeyCredentials', FIXTURES.passkeyCredentials.legacyWrapper);
+  const loaded = readRuntimeState('passkeyCredentials', { env }).value;
+  assert.deepEqual(loaded, FIXTURES.passkeyCredentials.current);
+});
+
+test('optional personalConfig and owesConfig accept JSON null root', (t) => {
+  for (const name of ['personalConfig', 'owesConfig']) {
+    resetWriteGuards();
+    const { env } = tempEnv(t);
+    writePrimary(env, name, null);
+    const result = readRuntimeState(name, { env });
+    assert.equal(result.value, null);
+    assert.equal(result.meta.source, 'primary');
+  }
+});
+
+test('non-optional JSON null root quarantines primary and recovers from last-good', (t) => {
+  resetWriteGuards();
+  const { env, dir } = tempEnv(t);
+  writeLastGood(env, 'debtPlanner', FIXTURES.debtPlanner.current);
+  writePrimary(env, 'debtPlanner', null);
+  const result = readRuntimeState('debtPlanner', { env });
+  assert.equal(result.meta.source, 'last-good');
+  assert.deepEqual(result.value, FIXTURES.debtPlanner.current);
+  assert.ok(fs.readdirSync(dir).some((entry) => entry.includes('.corrupt-')));
+});
+
+test('non-optional JSON null root without last-good blocks writes', (t) => {
+  resetWriteGuards();
+  const { env } = tempEnv(t);
+  writePrimary(env, 'debtPlanner', null);
+  assert.throws(() => readRuntimeState('debtPlanner', { env }), RuntimeStateError);
+  assert.throws(
+    () => writeRuntimeState('debtPlanner', FIXTURES.debtPlanner.current, { env }),
+    (error) => error.code === 'RUNTIME_STATE_WRITE_BLOCKED',
+  );
+});
+
+test('passkeyCredentials never uses last-good even when sidecar exists', (t) => {
+  resetWriteGuards();
+  const { env } = tempEnv(t);
+  const { assertWritable } = require('../lib/runtime-state-store');
+  writeLastGood(env, 'passkeyCredentials', FIXTURES.passkeyCredentials.current);
+  writePrimary(env, 'passkeyCredentials', FIXTURES.passkeyCredentials.malformed);
+  assert.throws(() => readRuntimeState('passkeyCredentials', { env }), RuntimeStateError);
+  assert.throws(
+    () => assertWritable(statePath('passkeyCredentials', env)),
+    (error) => error.code === 'RUNTIME_STATE_WRITE_BLOCKED',
+  );
+});
+
+test('accountOverrides flat legacy rejects ambiguous metadata objects', () => {
+  const { migrateAccountOverrides } = require('../lib/account-overrides-schema');
+  assert.equal(migrateAccountOverrides({ metadata: { hidden: true } }), null);
+  assert.equal(migrateAccountOverrides({ auditTrail: { role: 'unknown' } }), null);
+  assert.equal(migrateAccountOverrides({ 'bad id!': { hidden: true } }), null);
+  assert.equal(migrateAccountOverrides({ a1: { notes: 'x' } }), null);
+  assert.ok(migrateAccountOverrides({ a1: { hidden: true } }));
+});
+
+const PRESENT_WRONG_TYPE = {
+  debtPlanner: { debts: 'bad' },
+  events: { events: {} },
+  investmentHoldings: { holdings: null },
+  manualAssets: { items: false },
+  phantomLog: { deleted: {} },
+  phantomSeen: { seen: [] },
+  receipts: { schemaVersion: 1, byTxn: [] },
+  reimbursementSuggestions: { confirmed: [], dismissed: {} },
+  reconciliation: { enabled: 'yes', months: {} },
+  rules: { rules: {} },
+  operationJournal: { schemaVersion: 1, operations: 'bad' },
+  transactionSagas: { schemaVersion: 1, sagas: [] },
+  transactionDeletionSagas: { schemaVersion: 1, sagas: null },
+  bulkOperationSagas: { schemaVersion: 1, sagas: 'bad' },
+  repaymentConfirmationSagas: { schemaVersion: 1, sagas: ['x'] },
+};
+
+for (const [name, payload] of Object.entries(PRESENT_WRONG_TYPE)) {
+  test(`present-but-wrong-type field quarantines ${name} without silent emptying`, (t) => {
+    resetWriteGuards();
+    const { env, dir } = tempEnv(t);
+    const fixture = FIXTURES[name];
+    writeLastGood(env, name, fixture.current);
+    writePrimary(env, name, payload);
+    const result = readRuntimeState(name, { env });
+    assert.equal(result.meta.source, 'last-good');
+    assert.deepEqual(result.value, fixture.current);
+    assert.ok(fs.readdirSync(dir).some((entry) => entry.includes('.corrupt-')));
+    if (name === 'operationJournal') {
+      assert.ok(Object.keys(result.value.operations).length > 0);
+    }
+    if (name.endsWith('Sagas')) {
+      assert.ok(Object.keys(result.value.sagas).length > 0);
+    }
+  });
+
+  test(`present-but-wrong-type field blocks ${name} writes without last-good`, (t) => {
+    resetWriteGuards();
+    const { env } = tempEnv(t);
+    writePrimary(env, name, payload);
+    assert.throws(() => readRuntimeState(name, { env }), RuntimeStateError);
+    assert.throws(
+      () => writeRuntimeState(name, FIXTURES[name].current, { env }),
+      (error) => error.code === 'RUNTIME_STATE_WRITE_BLOCKED',
+    );
+  });
+}
+
+test('operationJournal adversarial empty operations cannot erase active ownership on write', (t) => {
+  resetWriteGuards();
+  const { env } = tempEnv(t);
+  const stamp = STAMP;
+  const original = {
+    schemaVersion: 1,
+    operations: {
+      'idem-key-12345678': {
+        key: 'idem-key-12345678',
+        recordVersion: 2,
+        fingerprint: 'a'.repeat(64),
+        fingerprintVersion: 2,
+        method: 'POST',
+        route: '/api/v1/test',
+        status: 'started',
+        phase: 'started',
+        startedAt: stamp,
+        updatedAt: stamp,
+      },
+    },
+  };
+  writeRuntimeState('operationJournal', original, { env, enforceOwnership: false });
+  assert.throws(
+    () => writeRuntimeState('operationJournal', { schemaVersion: 1, operations: {} }, { env }),
+    /cannot drop a nonterminal operation/,
+  );
+});
+
+test('bulkOperationSagas adversarial empty sagas cannot erase active ownership on write', (t) => {
+  resetWriteGuards();
+  const { env } = tempEnv(t);
+  const original = COMPLETE_SAGA_FIXTURES.bulkOperationSagas;
+  writeRuntimeState('bulkOperationSagas', original, { env, enforceOwnership: false });
+  assert.throws(
+    () => writeRuntimeState('bulkOperationSagas', { schemaVersion: 1, sagas: {} }, { env }),
+    /cannot drop a nonterminal/,
+  );
+});

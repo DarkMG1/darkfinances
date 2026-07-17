@@ -29,6 +29,64 @@ function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function invalidShapeError(name, message) {
+  const error = new Error(message || `${name} has invalid shape`);
+  error.code = 'RUNTIME_STATE_INVALID_SHAPE';
+  throw error;
+}
+
+function migrationShapeError(name, message) {
+  const error = new Error(message || `${name} legacy payload is not migratable`);
+  error.code = 'RUNTIME_STATE_MIGRATION_FAILED';
+  throw error;
+}
+
+function hasOwn(source, field) {
+  return Object.prototype.hasOwnProperty.call(source || {}, field);
+}
+
+function ownPlainObjectField(name, source, field, defaultValue) {
+  if (!hasOwn(source, field)) return defaultValue;
+  const value = source[field];
+  if (!isPlainObject(value) || Array.isArray(value)) {
+    invalidShapeError(name, `${name}.${field} must be an object`);
+  }
+  return cloneJson(value);
+}
+
+function ownArrayField(name, source, field, defaultValue) {
+  if (!hasOwn(source, field)) return defaultValue;
+  const value = source[field];
+  if (!Array.isArray(value)) {
+    invalidShapeError(name, `${name}.${field} must be an array`);
+  }
+  return cloneJson(value);
+}
+
+function ownBooleanField(name, source, field, defaultValue) {
+  if (!hasOwn(source, field)) return defaultValue;
+  const value = source[field];
+  if (typeof value !== 'boolean') {
+    invalidShapeError(name, `${name}.${field} must be a boolean`);
+  }
+  return value;
+}
+
+function requirePlainObjectRoot(name, source) {
+  if (!isPlainObject(source)) {
+    invalidShapeError(name, `${name} must be a JSON object`);
+  }
+}
+
+function readSagasField(name, source) {
+  if (!hasOwn(source, 'sagas')) return {};
+  const sagas = source.sagas;
+  if (!isPlainObject(sagas) || Array.isArray(sagas)) {
+    invalidShapeError(name, `${name}.sagas must be an object`);
+  }
+  return sagas;
+}
+
 function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -91,7 +149,7 @@ function migrateReviewState(raw) {
     }
     return {
       schemaVersion: 1,
-      dispositions: isPlainObject(source?.dispositions) ? cloneJson(source.dispositions) : {},
+      dispositions: ownPlainObjectField('reviewState', source, 'dispositions', {}),
     };
   }, [
     (legacy) => {
@@ -105,11 +163,11 @@ function migrateReviewState(raw) {
 }
 
 function migrateEnvelope(name, raw, currentVersion, buildCurrent, legacyMigrations = []) {
-  if (raw == null) return { value: buildCurrent(), changed: false, version: currentVersion };
+  if (raw == null) {
+    invalidShapeError(name, `${name} must be a JSON object`);
+  }
   if (!isPlainObject(raw) && !Array.isArray(raw)) {
-    const error = new Error(`${name} must be a JSON object or array`);
-    error.code = 'RUNTIME_STATE_INVALID_SHAPE';
-    throw error;
+    invalidShapeError(name, `${name} must be a JSON object or array`);
   }
 
   let working = cloneJson(raw);
@@ -219,28 +277,28 @@ function migrateSagaStore(name, raw, currentVersion) {
     raw,
     currentVersion,
     (source, { normalizeOnly } = {}) => {
-      if (normalizeOnly && Array.isArray(source?.sagas)) {
-        const error = new Error(`${name} sagas must be an object`);
-        error.code = 'RUNTIME_STATE_INVALID_SHAPE';
-        throw error;
-      }
-      const sagas = isPlainObject(source?.sagas) && !Array.isArray(source.sagas) ? source.sagas : {};
+      const sagas = readSagasField(name, source);
       if (!normalizeOnly) {
         return { schemaVersion: currentVersion, sagas: cloneJson(sagas) };
       }
       const normalized = { schemaVersion: currentVersion, sagas: {} };
       for (const [id, saga] of Object.entries(sagas)) {
         if (!isPlainObject(saga)) {
-          const error = new Error(`${name} saga ${id} is malformed`);
-          error.code = 'RUNTIME_STATE_INVALID_SHAPE';
-          throw error;
+          invalidShapeError(name, `${name} saga ${id} is malformed`);
         }
         normalized.sagas[id] = cloneJson({ ...saga, id: saga.id || id });
       }
       return normalized;
     },
     [
-      (legacy) => (isPlainObject(legacy) ? { schemaVersion: 1, sagas: legacy.sagas && isPlainObject(legacy.sagas) ? legacy.sagas : {} } : null),
+      (legacy) => {
+        if (!isPlainObject(legacy)) return null;
+        if (!hasOwn(legacy, 'sagas')) return { schemaVersion: 1, sagas: {} };
+        if (!isPlainObject(legacy.sagas) || Array.isArray(legacy.sagas)) {
+          invalidShapeError(name, `${name}.sagas must be an object`);
+        }
+        return { schemaVersion: 1, sagas: legacy.sagas };
+      },
     ],
   );
 
@@ -304,7 +362,7 @@ function migrateReceipts(raw) {
     raw,
     1,
     (source) => {
-      const byTxn = isPlainObject(source?.byTxn) ? cloneJson(source.byTxn) : {};
+      const byTxn = ownPlainObjectField('receipts', source, 'byTxn', {});
       const store = { schemaVersion: 1, byTxn };
       return preserveUnknownTopLevel(source, new Set(['schemaVersion', 'byTxn']), store);
     },
@@ -313,7 +371,9 @@ function migrateReceipts(raw) {
 }
 
 function migrateGoals(raw) {
-  if (raw == null) return { value: [], changed: false, version: 1 };
+  if (raw == null) {
+    invalidShapeError('goals', 'goals must be a JSON object or array');
+  }
   if (Array.isArray(raw)) {
     return { value: cloneJson(raw), changed: false, version: 1 };
   }
@@ -382,7 +442,10 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     currentVersion: 1,
     missingValue: () => ({}),
     migrate(raw) {
-      return migrateEnvelope('billsPaid', raw, 1, (source) => (isPlainObject(source) ? cloneJson(source) : {}));
+      return migrateEnvelope('billsPaid', raw, 1, (source) => {
+        requirePlainObjectRoot('billsPaid', source);
+        return cloneJson(source);
+      });
     },
     validate(value) {
       return isPlainObject(value);
@@ -393,7 +456,10 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     currentVersion: 1,
     missingValue: () => ({}),
     migrate(raw) {
-      return migrateEnvelope('budgetSettings', raw, 1, (source) => (isPlainObject(source) ? cloneJson(source) : {}));
+      return migrateEnvelope('budgetSettings', raw, 1, (source) => {
+        requirePlainObjectRoot('budgetSettings', source);
+        return cloneJson(source);
+      });
     },
     validate(value) {
       return isPlainObject(value);
@@ -405,7 +471,7 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     missingValue: () => ({ debts: [] }),
     migrate(raw) {
       return migrateEnvelope('debtPlanner', raw, 1, (source) => ({
-        debts: Array.isArray(source?.debts) ? cloneJson(source.debts) : [],
+        debts: ownArrayField('debtPlanner', source, 'debts', []),
       }));
     },
     validate(value) {
@@ -418,7 +484,7 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     missingValue: () => ({ events: [] }),
     migrate(raw) {
       return migrateEnvelope('events', raw, 1, (source) => ({
-        events: Array.isArray(source?.events) ? cloneJson(source.events) : Array.isArray(source) ? cloneJson(source) : [],
+        events: ownArrayField('events', source, 'events', []),
       }), [
         (legacy) => (Array.isArray(legacy) ? { events: legacy } : null),
       ]);
@@ -432,7 +498,9 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     currentVersion: 1,
     missingValue: () => [],
     migrate(raw) {
-      if (raw == null) return { value: [], changed: false, version: 1 };
+      if (raw == null) {
+        invalidShapeError('goals', 'goals must be a JSON object or array');
+      }
       if (isPlainObject(raw) && Number.isInteger(raw.schemaVersion)) {
         rejectFutureVersion('goals', raw.schemaVersion, 1);
       }
@@ -448,7 +516,7 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     missingValue: () => ({ holdings: [] }),
     migrate(raw) {
       return migrateEnvelope('investmentHoldings', raw, 1, (source) => ({
-        holdings: Array.isArray(source?.holdings) ? cloneJson(source.holdings) : Array.isArray(source) ? cloneJson(source) : [],
+        holdings: ownArrayField('investmentHoldings', source, 'holdings', []),
       }), [
         (legacy) => (Array.isArray(legacy) ? { holdings: legacy } : null),
       ]);
@@ -463,7 +531,7 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     missingValue: () => ({ items: [] }),
     migrate(raw) {
       return migrateEnvelope('manualAssets', raw, 1, (source) => ({
-        items: Array.isArray(source?.items) ? cloneJson(source.items) : Array.isArray(source) ? cloneJson(source) : [],
+        items: ownArrayField('manualAssets', source, 'items', []),
       }), [
         (legacy) => (Array.isArray(legacy) ? { items: legacy } : null),
       ]);
@@ -484,7 +552,7 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
         1,
         (source) => ({
           schemaVersion: 1,
-          operations: isPlainObject(source?.operations) ? cloneJson(source.operations) : {},
+          operations: ownPlainObjectField('operationJournal', source, 'operations', {}),
         }),
       );
       if (!validOperationJournalState(result.value)) {
@@ -544,7 +612,7 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     missingValue: () => ({ deleted: [] }),
     migrate(raw) {
       return migrateEnvelope('phantomLog', raw, 1, (source) => ({
-        deleted: Array.isArray(source?.deleted) ? cloneJson(source.deleted) : [],
+        deleted: ownArrayField('phantomLog', source, 'deleted', []),
       }));
     },
     validate(value) {
@@ -557,7 +625,7 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     missingValue: () => ({ seen: {} }),
     migrate(raw) {
       return migrateEnvelope('phantomSeen', raw, 1, (source) => ({
-        seen: isPlainObject(source?.seen) ? cloneJson(source.seen) : {},
+        seen: ownPlainObjectField('phantomSeen', source, 'seen', {}),
       }));
     },
     validate(value) {
@@ -570,7 +638,9 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     unknownFieldPolicy: 'preserve-top-level',
     missingValue: () => ({ schemaVersion: 1, byTxn: {} }),
     migrate(raw) {
-      if (raw == null) return { value: { schemaVersion: 1, byTxn: {} }, changed: false, version: 1 };
+      if (raw == null) {
+        invalidShapeError('receipts', 'receipts must be a JSON object or array');
+      }
       return migrateReceipts(raw);
     },
     validate(value) {
@@ -608,8 +678,8 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     migrate(raw) {
       return migrateEnvelope('reimbursementSuggestions', raw, 1, (source) => {
         const store = {
-          confirmed: isPlainObject(source?.confirmed) ? cloneJson(source.confirmed) : {},
-          dismissed: Array.isArray(source?.dismissed) ? cloneJson(source.dismissed) : [],
+          confirmed: ownPlainObjectField('reimbursementSuggestions', source, 'confirmed', {}),
+          dismissed: ownArrayField('reimbursementSuggestions', source, 'dismissed', []),
         };
         return preserveUnknownTopLevel(source, new Set(['confirmed', 'dismissed']), store);
       });
@@ -626,8 +696,8 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     missingValue: () => ({ enabled: false, months: {} }),
     migrate(raw) {
       return migrateEnvelope('reconciliation', raw, 1, (source) => ({
-        enabled: Boolean(source?.enabled),
-        months: isPlainObject(source?.months) ? cloneJson(source.months) : {},
+        enabled: ownBooleanField('reconciliation', source, 'enabled', false),
+        months: ownPlainObjectField('reconciliation', source, 'months', {}),
       }));
     },
     validate(value) {
@@ -641,7 +711,10 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     currentVersion: 1,
     missingValue: () => ({}),
     migrate(raw) {
-      return migrateEnvelope('recurringOverrides', raw, 1, (source) => (isPlainObject(source) ? cloneJson(source) : {}));
+      return migrateEnvelope('recurringOverrides', raw, 1, (source) => {
+        requirePlainObjectRoot('recurringOverrides', source);
+        return cloneJson(source);
+      });
     },
     validate(value) {
       return isPlainObject(value);
@@ -666,7 +739,7 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     missingValue: () => ({ rules: [] }),
     migrate(raw) {
       return migrateEnvelope('rules', raw, 1, (source) => ({
-        rules: Array.isArray(source?.rules) ? cloneJson(source.rules) : Array.isArray(source) ? cloneJson(source) : [],
+        rules: ownArrayField('rules', source, 'rules', []),
       }), [
         (legacy) => (Array.isArray(legacy) ? { rules: legacy } : null),
       ]);
@@ -701,7 +774,9 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     unknownFieldPolicy: 'preserve-top-level',
     missingValue: () => ({ schemaVersion: 1, resolutions: [] }),
     migrate(raw) {
-      if (raw == null) return { value: { schemaVersion: 1, resolutions: [] }, changed: false, version: 1 };
+      if (raw == null) {
+        invalidShapeError('splitwiseMirrorResolutions', 'splitwiseMirrorResolutions must be a JSON object');
+      }
       if (isPlainObject(raw) && Number.isInteger(raw.schemaVersion)) {
         rejectFutureVersion('splitwiseMirrorResolutions', raw.schemaVersion, 1);
       }
@@ -773,7 +848,21 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
     missingValue: () => null,
     migrate(raw) {
       if (raw == null) return { value: null, changed: false, version: 1 };
-      return migrateEnvelope('passkeyCredentials', raw, 1, (source) => cloneJson(source));
+      if (Array.isArray(raw)) {
+        return { value: cloneJson(raw), changed: false, version: 1 };
+      }
+      if (isPlainObject(raw)) {
+        if (Number.isInteger(raw.schemaVersion)) {
+          rejectFutureVersion('passkeyCredentials', raw.schemaVersion, 1);
+        }
+        if (hasOwn(raw, 'credentials')) {
+          if (!Array.isArray(raw.credentials)) {
+            invalidShapeError('passkeyCredentials', 'passkeyCredentials.credentials must be an array');
+          }
+          return { value: cloneJson(raw.credentials), changed: true, version: 1 };
+        }
+      }
+      invalidShapeError('passkeyCredentials', 'passkeyCredentials must be an array or { credentials: [...] } wrapper');
     },
     validate(value) {
       return value == null || Array.isArray(value);

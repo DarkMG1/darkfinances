@@ -40,4 +40,12 @@ Entries with `lastGoodPolicy: allow-on-primary-invalid` may serve reads from `*.
 
 Journal and saga sidecars preserve active ownership during migration: non-terminal records cannot be terminalized and terminal proof cannot be fabricated by migration alone. Direct writes cannot weaken ownership, drop nonterminal sagas, or strip journal fingerprints/terminal proof.
 
-PR-16 owns backup bundle redesign; this document only records contracts consumed by backup verification. The backup script sidecar list in `ops/lib/backup-verify.js` remains hardcoded.
+PR-16 owns backup bundle redesign; until then backup membership is guarded by parity tests rather than cross-package imports.
+
+`finance-dashboard/test/backup-registry-parity.test.js` asserts exact parity between:
+
+- `STATE_REGISTRY` entries with `backup: true` (via `backupEntries()`)
+- `ops/lib/backup-verify.js` `SIDECAR_FILES`
+- sidecar filenames enumerated in `ops/bin/backup-dashboard-runtime.sh`
+
+The backup script also archives the `receipts/` directory when present; that directory is not a registry JSON sidecar and is validated separately through receipt reference checks.

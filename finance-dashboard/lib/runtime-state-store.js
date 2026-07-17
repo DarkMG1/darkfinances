@@ -75,7 +75,7 @@ function readRawFile(file) {
 
 function parseJson(file, raw) {
   try {
-    return JSON.parse(raw);
+    return { kind: 'ok', value: JSON.parse(raw) };
   } catch (cause) {
     return { kind: 'corrupt', cause };
   }
@@ -235,7 +235,7 @@ function recoverFromLastGood(name, schema, file, { validate, semanticMode = 'rea
     });
   }
 
-  const migrated = schema.migrate(parsed);
+  const migrated = schema.migrate(parsed.value);
   if (!schema.validateCurrent(migrated.value)) {
     markWriteGuard(file, 'invalid-last-good');
     throw new RuntimeStateError(`Refusing invalid .last-good for ${path.basename(file)}`, {
@@ -248,7 +248,7 @@ function recoverFromLastGood(name, schema, file, { validate, semanticMode = 'rea
     name,
     cloneJson(migrated.value),
     file,
-    { validate, semanticMode, raw: parsed, schema },
+    { validate, semanticMode, raw: parsed.value, schema },
   );
 
   writeGuards.delete(file);
@@ -315,7 +315,7 @@ function readRuntimeState(name, {
     });
   }
 
-  return loadParsedValue(name, parsed, schema, targetFile, {
+  return loadParsedValue(name, parsed.value, schema, targetFile, {
     validate,
     semanticMode: semantic ? 'read' : 'skip',
   });
