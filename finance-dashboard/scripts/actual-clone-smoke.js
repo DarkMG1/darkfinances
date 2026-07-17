@@ -24,6 +24,7 @@ for (const [key, file] of Object.entries({
   RULES_PATH: 'rules.json',
   TRANSACTION_SAGAS_PATH: 'transaction-sagas.json',
   TRANSACTION_DELETION_SAGAS_PATH: 'transaction-deletion-sagas.json',
+  REPAYMENT_CONFIRMATION_SAGAS_PATH: 'repayment-confirmation-sagas.json',
 })) process.env[key] = path.join(sidecars, file);
 
 const data = require('../dataModule');

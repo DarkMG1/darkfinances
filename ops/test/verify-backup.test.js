@@ -43,6 +43,20 @@ test('validateSidecar narrowly validates transaction deletion saga state', () =>
   ));
 });
 
+test('validateSidecar narrowly validates repayment confirmation saga state', () => {
+  assert.throws(
+    () => validateSidecar(
+      'repayment-confirmation-sagas.json',
+      JSON.stringify({ schemaVersion: 2, sagas: {} }),
+    ),
+    /schemaVersion 1/,
+  );
+  assert.doesNotThrow(() => validateSidecar(
+    'repayment-confirmation-sagas.json',
+    JSON.stringify({ schemaVersion: 1, sagas: {} }),
+  ));
+});
+
 test('validateReceiptReferences supports live and legacy metadata shapes', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-receipts-'));
   fs.mkdirSync(path.join(root, 'receipts'));

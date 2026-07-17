@@ -35,7 +35,8 @@ Replacement reference migration preserves evidence. Removed legs map to the repl
 retained legs map only to a uniquely proven generated successor, and receipts, reimbursement
 snapshots/amounts, reconciliation, and phantom-seen values are retained while IDs change. Receipt
 bytes are never removed by this workflow; transaction-deletion cleanup belongs to PR-09.
-The deletion workflow is documented in `TRANSACTION_DELETION.md`; active replacement and deletion
+The deletion workflow is documented in `TRANSACTION_DELETION.md`; repayment confirmation in
+`REPAYMENT_CONFIRMATION.md`; active replacement, deletion, and repayment confirmation
 records enforce bidirectional parent/leg ownership before either operation is admitted.
 Reimbursement mappings are validated as one complete plan before the first sidecar write: endpoint
 self-collapses and duplicate mapped link, suggestion, or allocation relationships fail closed and

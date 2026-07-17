@@ -970,9 +970,18 @@ async function addLink(req, operation) {
 }
 async function confirmRepaymentH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'repayment id');
+  const from = req.query.from;
+  const to = req.query.to;
   data.assertTransactionMutationAvailable({ ids: [id.startsWith('sg_') ? id.slice(3) : null] });
+  const admission = await data.validateRepaymentConfirmationAdmission({ id, from, to });
   const r = await applyLocal(operation, () =>
-    data.confirmRepayment({ id, from: req.query.from, to: req.query.to }));
+    data.confirmRepayment({
+      id,
+      from,
+      to,
+      operationIdentity: operation?.key,
+      admission,
+    }));
   await syncAfterLocal(operation); // persist the inflow's new category to the Actual server
   cache.flushAll();
   return r;
