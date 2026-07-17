@@ -56,11 +56,11 @@ function sameTransactionId(left, right) {
   return String(left) === String(right);
 }
 
+const { trustedLinkedCents, classifyStoredLink, ambiguousLegacyLinksOnEndpoint } = require('./reimbursement-allocation');
+
 function linkedAmountCents(link, expenseId) {
   if (!sameTransactionId(link?.expense?.id, expenseId)) return 0;
-  if (link.amount != null) return Math.abs(toCents(link.amount));
-  if (link.expense?.amount != null) return Math.abs(toCents(Math.abs(link.expense.amount)));
-  return 0;
+  return trustedLinkedCents(link);
 }
 
 function validateAllocationPlan({
@@ -133,10 +133,11 @@ function applyAllocationLink(store, {
     (link) => sameTransactionId(link?.inflow?.id, inf.id) && sameTransactionId(link?.expense?.id, exp.id),
   );
   if (existing) {
-    const existingCents = existing.amount != null
-      ? Math.abs(toCents(existing.amount))
-      : Math.abs(toCents(Math.abs(exp.amount)));
-    if (existingCents !== allocCents) {
+    const classified = classifyStoredLink(existing);
+    if (classified.ambiguous) {
+      planInvalid(`legacy ambiguous reimbursement link for ${inf.id}->${exp.id} requires manual resolution`);
+    }
+    if (!classified.trusted || classified.allocationCents !== allocCents) {
       throw new Error(`conflicting reimbursement link amount for ${inf.id}->${exp.id}`);
     }
     if (person && existing.person !== person) existing.person = person;
@@ -146,8 +147,11 @@ function applyAllocationLink(store, {
   store.links.push({
     inflow: inf,
     expense: exp,
+    allocationCents: allocCents,
     amount: alloc,
     person: person || null,
+    version: 1,
+    linkKey: `${inf.id}:${exp.id}`,
     createdAt: new Date().toISOString(),
   });
   return true;
@@ -168,10 +172,8 @@ function linksConverged(plan, store, {
     );
     if (!link) return false;
     const expected = allocationAmountCents(allocation);
-    const actual = link.amount != null
-      ? Math.abs(toCents(link.amount))
-      : Math.abs(toCents(Math.abs(link.expense?.amount || 0)));
-    if (actual !== expected) return false;
+    const classified = classifyStoredLink(link);
+    if (!classified.trusted || classified.allocationCents !== expected) return false;
     if (person && link.person && link.person !== person) return false;
   }
   for (const allocation of plan.allocations || []) {

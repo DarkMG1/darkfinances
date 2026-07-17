@@ -204,14 +204,15 @@ test('money routes reject before data mutation and durably journal known failure
       name: 'reimbursement-reference',
       pathname: '/api/v1/reimb-links',
       invalid: { inflow: reimbRef('inflow', '112.50'), expense: reimbRef('expense', -112.5) },
-      valid: { inflow: reimbRef('inflow', 112.5), expense: reimbRef('expense', -112.5) },
+      valid: { inflow: reimbRef('inflow', 112.5), expense: reimbRef('expense', -112.5), allocationCents: 11250 },
       mutation: 'addReimbLink',
     },
     {
       name: 'reimbursement-allocation',
       pathname: '/api/v1/reimb-links',
       invalid: { inflow: reimbRef('inflow-2', 112.5), expense: reimbRef('expense-2', -112.5), amount: 0.001 },
-      valid: { inflow: reimbRef('inflow-2', 112.5), expense: reimbRef('expense-2', -112.5), amount: 12.34 },
+      invalidMissing: { inflow: reimbRef('inflow-3', 112.5), expense: reimbRef('expense-3', -112.5) },
+      valid: { inflow: reimbRef('inflow-2', 112.5), expense: reimbRef('expense-2', -112.5), allocationCents: 1234 },
       mutation: 'addReimbLink',
     },
     {
@@ -234,6 +235,11 @@ test('money routes reject before data mutation and durably journal known failure
     const result = await post(base, entry.pathname, `money-boundary-${index}`, entry.invalid);
     assert.equal(result.response.status, 400, `${entry.name}: ${JSON.stringify(result.body)}`);
     assert.equal(result.body.code, 'INVALID_REQUEST');
+    if (entry.invalidMissing) {
+      const missing = await post(base, entry.pathname, `money-boundary-${index}-missing`, entry.invalidMissing);
+      assert.equal(missing.response.status, 400, `${entry.name} missing allocation: ${JSON.stringify(missing.body)}`);
+      assert.equal(missing.body.code, 'INVALID_REQUEST');
+    }
   }
   assert.equal(fs.existsSync(marker), false, 'invalid requests must not invoke data mutations');
   assert.equal(fs.existsSync(journal), true, 'versioned validation failures must be durable');

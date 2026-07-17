@@ -299,6 +299,45 @@ test('active saga with matching generation binding restores successfully', (t) =
   assert.equal(fs.existsSync(path.join(destination, 'bulk-operation-sagas.json')), true);
 });
 
+test('active reimbursement link saga with matching generation binding restores successfully', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-reimb-link-saga-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeProductionDashboard(dashboard, {
+    overrides: {
+      reimbursementLinkSagas: {
+        schemaVersion: 1,
+        sagas: {
+          link1: {
+            id: 'link1',
+            recordVersion: 1,
+            phase: 'prepared',
+            status: 'started',
+            action: 'link',
+            inflowId: 'in1',
+            expenseId: 'ex1',
+            updatedAt: '2026-07-13T00:00:00.000Z',
+          },
+        },
+      },
+    },
+  });
+  const archive = buildBundle(root, dashboard);
+
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(destination, 'reimb-links.json'), '{"schemaVersion":2,"links":[]}\n', { mode: 0o600 });
+
+  const result = runStagedRestore({
+    archivePath: archive,
+    destinationRoot: destination,
+    dryRun: false,
+    confirm: true,
+    env: admissionEnv(root, destination, archive),
+  });
+  assert.equal(result.phase, PHASE.COMPLETE);
+  assert.equal(fs.existsSync(path.join(destination, 'reimbursement-link-sagas.json')), true);
+});
+
 test('active saga with mismatched Actual/release generation fails before swap', (t) => {
   const root = mkRoot(t, 'darkfinances-restore-mismatch-');
   const dashboard = path.join(root, 'dashboard');

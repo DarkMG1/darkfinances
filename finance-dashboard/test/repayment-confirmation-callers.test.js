@@ -19,6 +19,7 @@ const stateFiles = {
   REIMB_LINKS_PATH: 'links.json',
   REIMB_SUGGEST_PATH: 'suggestions.json',
   REPAYMENT_CONFIRMATION_SAGAS_PATH: 'repayment-confirmation-sagas.json',
+  REIMBURSEMENT_LINK_SAGAS_PATH: 'reimbursement-link-sagas.json',
   TRANSACTION_SAGAS_PATH: 'transaction-sagas.json',
   TRANSACTION_DELETION_SAGAS_PATH: 'transaction-deletion-sagas.json',
 };
@@ -149,7 +150,7 @@ function reset(rows = crossDateRows()) {
     expected: {},
     debtorPatterns: { alex: 'alex' },
   });
-  writeJson(process.env.REIMB_LINKS_PATH, { schemaVersion: 1, unknown: 'keep', links: [] });
+  writeJson(process.env.REIMB_LINKS_PATH, { schemaVersion: 2, unknown: 'keep', links: [] });
   writeJson(process.env.REIMB_SUGGEST_PATH, {
     schemaVersion: 1,
     unknown: { keep: true },
@@ -157,6 +158,7 @@ function reset(rows = crossDateRows()) {
     dismissed: [],
   });
   writeJson(process.env.REPAYMENT_CONFIRMATION_SAGAS_PATH, { schemaVersion: 1, sagas: {} });
+  writeJson(process.env.REIMBURSEMENT_LINK_SAGAS_PATH, { schemaVersion: 1, sagas: {} });
 }
 
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -413,8 +415,9 @@ test('active repayment ownership blocks transaction mutations before effects', a
       run: () => data.addReimbLink({
         inflow: { id: 'repay-inflow', amount: 50 },
         expense: { id: 1001, amount: -30 },
+        allocationCents: 3000,
       }),
-      async: false,
+      async: true,
     },
     {
       label: 'confirmRepayment',

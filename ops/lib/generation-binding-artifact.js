@@ -18,6 +18,7 @@ const ACTIVE_SAGA_STORES = Object.freeze([
   'transactionSagas',
   'transactionDeletionSagas',
   'repaymentConfirmationSagas',
+  'reimbursementLinkSagas',
   'bulkOperationSagas',
 ]);
 

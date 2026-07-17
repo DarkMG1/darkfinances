@@ -296,6 +296,7 @@ test('replacement ownership blocks transaction and reference mutations before ef
     () => data.addReimbLink({
       inflow: { id: manualSplit.id, amount: 10 },
       expense: { id: 'unrelated', amount: -10 },
+      allocationCents: 1000,
     }),
     () => data.setReconcileItem({
       month: manualSplit.date.slice(0, 7),
@@ -446,6 +447,7 @@ test('active deletion blocks a second delete and every replacement caller for it
     () => data.addReimbLink({
       inflow: { id: manualSplit.id, amount: 10 },
       expense: { id: 'unrelated', amount: -10 },
+      allocationCents: 1000,
     }),
     () => data.deleteReimbLink({
       inflowId: manualSplit.id,

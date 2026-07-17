@@ -94,10 +94,10 @@ function snapshotTree(root) {
   return files;
 }
 
-test('backup-state-inventory matches STATE_REGISTRY with 28 backup stores', () => {
+test('backup-state-inventory matches STATE_REGISTRY with 29 backup stores', () => {
   const inventory = assertInventoryMatchesRegistry();
-  assert.equal(inventory.storeCount, 28);
-  assert.equal(sidecarFilenames().length, 28);
+  assert.equal(inventory.storeCount, 29);
+  assert.equal(sidecarFilenames().length, 29);
 });
 
 test('generate-backup-state-inventory is deterministic and parity-enforced', () => {
@@ -139,7 +139,7 @@ test('build and verify relocatable bundle under alternate prefix without reposit
   const manifest = JSON.parse(fs.readFileSync(path.join(extract, 'bundle-manifest.json'), 'utf8'));
   assert.equal(manifest.kind, BUNDLE_KIND);
   assert.equal(manifest.schemaVersion, BUNDLE_SCHEMA_VERSION);
-  assert.equal(manifest.runtimeState.storeCount, 28);
+  assert.equal(manifest.runtimeState.storeCount, 29);
   assert.equal(manifest.restoreTooling.verifyEntrypoint, VERIFY_ENTRYPOINT);
   assert.ok(manifest.files.some((entry) => entry.path === 'runtime/passkey-credentials.json'));
   assert.ok(manifest.files.some((entry) => entry.path === 'runtime/goals.json.last-good'));

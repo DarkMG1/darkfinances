@@ -229,6 +229,7 @@ test('delete and replacement ownership conflicts are terminal before operation e
       body: {
         inflow: { id: 'delete-owned', amount: 10, accountId: 'account' },
         expense: { id: 'unrelated-expense', amount: -10, accountId: 'account' },
+        allocationCents: 1000,
       },
     },
     {

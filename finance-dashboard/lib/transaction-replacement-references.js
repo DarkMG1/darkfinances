@@ -1,5 +1,7 @@
 'use strict';
 
+const { linkPairKey } = require('./reimbursement-allocation');
+
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
 }
@@ -79,7 +81,9 @@ function rewriteTransactionReplacementReferences(stores, idMap) {
     defaults: { schemaVersion: 1 },
   });
 
-  const links = preserveRuntimeEnvelope(stores.links, { links: [] });
+  const links = preserveRuntimeEnvelope(stores.links, { links: [] }, {
+    defaults: { schemaVersion: 2 },
+  });
   const linkPairs = new Set();
   for (const link of stores.links?.links || []) {
     const inflowId = link?.inflow?.id == null ? null : mappedId(idMap, link.inflow.id);
@@ -87,6 +91,7 @@ function rewriteTransactionReplacementReferences(stores, idMap) {
     assertRelationship(linkPairs, inflowId, expenseId, 'reimbursement link');
     const next = {
       ...link,
+      linkKey: linkPairKey(inflowId, expenseId),
       inflow: { ...link.inflow, id: inflowId },
       expense: { ...link.expense, id: expenseId },
     };

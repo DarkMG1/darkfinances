@@ -22,12 +22,12 @@ test('STATE_REGISTRY backup:true inventory matches backup-verify SIDECAR_FILES e
   assert.equal(registryNames.length, Object.keys(STATE_REGISTRY).length);
   assert.deepEqual(registryFiles, verifyFiles);
   assert.deepEqual(registryFiles, inventoryFiles);
-  assert.equal(registryFiles.length, 28);
+  assert.equal(registryFiles.length, 29);
 });
 
 test('committed backup-state-inventory.json matches STATE_REGISTRY', () => {
   const inventory = assertInventoryMatchesRegistry();
-  assert.equal(inventory.storeCount, 28);
+  assert.equal(inventory.storeCount, 29);
 });
 
 test('backup-dashboard-runtime.sh derives members from inventory helper', () => {
@@ -44,6 +44,6 @@ test('backup-dashboard-runtime.sh derives members from inventory helper', () => 
 
 test('list-backup-runtime-members derives members from inventory', () => {
   const inventory = loadBackupStateInventory();
-  assert.equal(inventory.stores.length, 28);
+  assert.equal(inventory.stores.length, 29);
   assert.equal(inventory.auxiliary.receiptsDirectory, 'receipts');
 });
