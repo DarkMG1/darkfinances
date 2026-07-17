@@ -36,9 +36,11 @@ const signedMoney = (value) => `${Number(value) < 0 ? '-' : ''}${money(value)}`;
       console.log(`  ${event.event}: ${event.status} · net ${signedMoney(event.net)} · ${event.n} item(s)`);
     }
   }
-  await data.api.shutdown();
+  await data.shutdownApi();
 })().catch(async (error) => {
   console.error('ERR', error?.stack || error);
-  try { await data.api.shutdown(); } catch (_) {}
+  try {
+    await data.shutdownApi();
+  } catch (_) {}
   process.exit(1);
 });

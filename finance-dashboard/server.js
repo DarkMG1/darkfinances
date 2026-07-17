@@ -14,6 +14,7 @@ const {
 } = require('./lib/errors');
 const { FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { SerialQueue } = require('./lib/serial-queue');
+const { getActualCoordinator } = require('./lib/actual-coordinator');
 const { OperationJournal } = require('./lib/operation-journal');
 const { executeJournaledOperation } = require('./lib/operation-executor');
 const { reconcileOperationJournalFromProof } = require('./lib/operation-reconciliation');
@@ -34,6 +35,8 @@ const {
 
 const app = express();
 const cache = new NodeCache({ stdTTL: 300 }); // 5 min cache
+const actualCoordinator = getActualCoordinator();
+actualCoordinator.bindCache(cache);
 const mutationQueue = new SerialQueue('finance-mutations');
 const operationJournal = new OperationJournal();
 const RELEASE_MANIFEST_PATH = process.env.RELEASE_MANIFEST_PATH || path.join(__dirname, 'release-manifest.json');
@@ -501,10 +504,56 @@ function demoMiddleware(v1mode) {
   };
 }
 
-function cached(key, fn, ttl = 300) {
+function invalidateHttpCache() {
+  actualCoordinator.invalidateGeneration();
+}
+
+// Generation-bound keys are filled via cachedActual and must never be evicted with
+// plain cache.del — always use invalidateActualProjection so generation advances.
+// Local keys (rules, manual-assets, investments) use cachedLocal / invalidateLocalCache.
+function invalidateActualProjection(...keys) {
+  const list = keys.flat().filter(Boolean);
+  actualCoordinator.invalidateGeneration(list.length > 0 ? { keys: list } : {});
+}
+
+// Sidecar writes that change Actual-derived HTTP projections must hold the
+// coordinator write lane through persistence and invalidation so overlapping
+// cachedActual fills cannot publish under a post-mutation generation while the
+// sidecar is still pre-mutation.
+function runActualProjectionMutation(task, ...keys) {
+  const list = keys.flat().filter(Boolean);
+  const label = list.length > 0 ? list.join(',') : 'all';
+  return actualCoordinator.runWrite(async () => {
+    try {
+      return await task();
+    } finally {
+      // Sidecar persistence may succeed before journal local_applied throws
+      // (OUTCOME_UNKNOWN). Invalidate so cachedActual cannot serve pre-mutation
+      // projections after durable sidecar writes. Pre-effect task errors are
+      // safe to invalidate — no durable mutation occurred.
+      if (list.length > 0) invalidateActualProjection(...list);
+      else invalidateActualProjection();
+    }
+  }, { invalidateBefore: false, label: `projection:${label}` });
+}
+
+function invalidateLocalCache(...keys) {
+  const list = keys.flat().filter(Boolean);
+  if (list.length === 0) cache.flushAll();
+  else cache.del(list);
+}
+
+function cachedLocal(key, fn, ttl = 300) {
   const hit = cache.get(key);
   if (hit !== undefined) return Promise.resolve(hit);
-  return fn().then(d => { cache.set(key, d, ttl); return d; });
+  return fn().then((value) => {
+    cache.set(key, value, ttl);
+    return value;
+  });
+}
+
+function cachedActual(key, fn, ttl = 300) {
+  return actualCoordinator.cachedRead(key, fn, ttl);
 }
 
 // Hot cache keys the app + dashboard hit on load. Keys MUST match the strings the
@@ -522,16 +571,15 @@ const WARM_TARGETS = [
   { key: 'reimb-d-d-false', ttl: 300, fn: () => data.getReimbursement({}) },
   { key: 'categories', ttl: 300, fn: () => data.getCategories() },
 ];
+
 async function warmCache() {
-  await Promise.allSettled(
-    WARM_TARGETS.map(async ({ key, ttl, fn }) => {
-      try {
-        cache.set(key, await fn(), ttl);
-      } catch (e) {
-        console.error(`warmCache ${key} failed:`, e.message);
-      }
-    })
-  );
+  for (const { key, ttl, fn } of WARM_TARGETS) {
+    try {
+      await cachedActual(key, fn, ttl);
+    } catch (e) {
+      console.error(`warmCache ${key} failed:`, e.message);
+    }
+  }
 }
 
 // Session-only gate for the web app + static assets. /api/v1/* runs its own
@@ -556,8 +604,8 @@ app.use(demoMiddleware(false));
 // ---- Endpoint resolvers (shared by legacy /api and versioned /api/v1) -------
 const monthOf = (req) => req.query.month;
 const resolvers = {
-  accounts: () => cached('accounts', () => data.getAccounts()),
-  today: () => cached('today', () => mutationQueue.run(() => data.getToday()), 30),
+  accounts: () => cachedActual('accounts', () => data.getAccounts()),
+  today: () => cachedActual('today', () => data.getToday(), 30),
   transactions: (req) => {
     const { accountId, start, end, category, bucket } = req.query;
     const budgetOnly = req.query.budgetOnly === '1' || req.query.budgetOnly === 'true';
@@ -566,70 +614,70 @@ const resolvers = {
     const startDate = start || `${today.slice(0, 7)}-01`;
     const endDate = end || today;
     const key = `txns-${accountId || 'all'}-${startDate}-${endDate}-${category || 'all'}-${bucket || 'none'}-${budgetOnly ? 'budget' : 'all'}-${collapse ? 'c' : 'x'}`;
-    return cached(key, () => data.getTransactions({ accountId, start: startDate, end: endDate, category, bucket, budgetOnly, collapse }), 120);
+    return cachedActual(key, () => data.getTransactions({ accountId, start: startDate, end: endDate, category, bucket, budgetOnly, collapse }), 120);
   },
   txnById: (req) => {
     const { id } = req.params;
     const { accountId, date } = req.query;
-    return data.getTransactionById({ id, accountId, date });
+    return actualCoordinator.runRead(() => data.getTransactionById({ id, accountId, date }), { label: 'txnById' });
   },
   merchantHistory: (req) => {
     const { payee, months } = req.query;
-    return cached(`mhist-${(payee || '').toLowerCase()}-${months || 12}`, () => data.getMerchantHistory({ payee, months: months ? Number(months) : 12 }), 180);
+    return cachedActual(`mhist-${(payee || '').toLowerCase()}-${months || 12}`, () => data.getMerchantHistory({ payee, months: months ? Number(months) : 12 }), 180);
   },
   spending: (req) => {
     const start = req.query.start ? String(req.query.start) : undefined;
     const end = req.query.end ? String(req.query.end) : undefined;
     const key = start && end ? `spending-${start}-${end}` : `spending-${monthOf(req) || 'current'}`;
-    return cached(key, () => data.getSpending({ month: monthOf(req), start, end }), 180);
+    return cachedActual(key, () => data.getSpending({ month: monthOf(req), start, end }), 180);
   },
   trends: (req) => {
     const months = Math.min(60, Math.max(3, parseInt(req.query.months, 10) || 12));
-    return cached(`trends-${months}`, () => data.getTrends({ months }), 600);
+    return cachedActual(`trends-${months}`, () => data.getTrends({ months }), 600);
   },
-  budgets: (req) => cached(`budgets-${monthOf(req) || 'current'}`, () => data.getBudgets({ month: monthOf(req) }), 300),
+  budgets: (req) => cachedActual(`budgets-${monthOf(req) || 'current'}`, () => data.getBudgets({ month: monthOf(req) }), 300),
   reimbursement: (req) => {
     const { from, to } = req.query;
     const openOnly = req.query.openOnly === '1' || req.query.openOnly === 'true';
-    return cached(`reimb-${from || 'd'}-${to || 'd'}-${openOnly}`, () => data.getReimbursement({ from, to, openOnly }), 300);
+    return cachedActual(`reimb-${from || 'd'}-${to || 'd'}-${openOnly}`, () => data.getReimbursement({ from, to, openOnly }), 300);
   },
-  review: (req) => cached(`review-${monthOf(req) || 'current'}`, () => data.getReview({ month: monthOf(req) }), 120),
-  reimbursementLedger: (req) => cached(`reimb-ledger-${monthOf(req) || 'current'}`, () => data.getReimbursementLedger({ month: monthOf(req) }), 180),
+  review: (req) => cachedActual(`review-${monthOf(req) || 'current'}`, () => data.getReview({ month: monthOf(req) }), 120),
+  reimbursementLedger: (req) => cachedActual(`reimb-ledger-${monthOf(req) || 'current'}`, () => data.getReimbursementLedger({ month: monthOf(req) }), 180),
   repaymentSuggestions: (req) => {
     const { from, to } = req.query;
-    return cached(`reimb-suggest-${from || 'd'}-${to || 'd'}`, () => data.suggestRepayments({ from, to }), 120);
+    return cachedActual(`reimb-suggest-${from || 'd'}-${to || 'd'}`, () => data.suggestRepayments({ from, to }), 120);
   },
-  insights: (req) => cached(`insights-${monthOf(req) || 'current'}`, () => data.getInsights({ month: monthOf(req) }), 300),
-  categories: () => cached('categories', () => data.getCategories()),
+  insights: (req) => cachedActual(`insights-${monthOf(req) || 'current'}`, () => data.getInsights({ month: monthOf(req) }), 300),
+  categories: () => cachedActual('categories', () => data.getCategories()),
   recurring: (req) => {
     const window = Math.min(36, Math.max(6, parseInt(req.query.window, 10) || 18));
     if (req.query.debug === '1') return data.getRecurring({ window, debug: true, minDates: Math.max(1, parseInt(req.query.minDates, 10) || 3) });
-    return cached(`recurring-${window}`, () => data.getRecurring({ window }), 600);
+    return cachedActual(`recurring-${window}`, () => data.getRecurring({ window }), 600);
   },
   bills: (req) => {
     const days = Math.min(120, Math.max(7, parseInt(req.query.days, 10) || 45));
-    return cached(`bills-${days}`, () => data.getBills({ days }), 600);
+    return cachedActual(`bills-${days}`, () => data.getBills({ days }), 600);
   },
   forecast: (req) => {
     const days = Math.min(180, Math.max(30, parseInt(req.query.days, 10) || 90));
-    return cached(`forecast-${days}`, () => data.getForecast({ days }), 300);
+    return cachedActual(`forecast-${days}`, () => data.getForecast({ days }), 300);
   },
   income: (req) => {
     const window = Math.min(24, Math.max(6, parseInt(req.query.window, 10) || 12));
-    return cached(`income-${window}`, () => data.getIncome({ window }), 600);
+    return cachedActual(`income-${window}`, () => data.getIncome({ window }), 600);
   },
   search: (req) => {
     const q = (req.query.q || '').toString();
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
     const { start, end } = req.query;
-    return cached(`search-${q}-${start || ''}-${end || ''}-${limit}`, () => data.searchTransactions({ q, start, end, limit }), 120);
+    return cachedActual(`search-${q}-${start || ''}-${end || ''}-${limit}`, () => data.searchTransactions({ q, start, end, limit }), 120);
   },
-  goals: () => cached('goals', () => data.getGoals(), 120),
-  tags: () => cached('tags', () => data.getTags(), 120),
-  rules: () => cached('rules', () => Promise.resolve({ ...data.getRules(), catalog: data.getCatalogDisplay() }), 120),
-  manualAssets: () => cached('manual-assets', () => Promise.resolve(data.getManualAssets()), 120),
-  investments: () => cached('investments', () => Promise.resolve(data.getInvestments()), 120),
-  reports: (req) => cached(`reports-${monthOf(req) || 'current'}`, () => data.getReports({ month: monthOf(req) }), 300),
+  goals: () => cachedActual('goals', () => data.getGoals(), 120),
+  tags: () => cachedActual('tags', () => data.getTags(), 120),
+  rules: () => cachedLocal('rules', () => Promise.resolve({ ...data.getRules(), catalog: data.getCatalogDisplay() }), 120),
+  manualAssets: () => cachedLocal('manual-assets', () => Promise.resolve(data.getManualAssets()), 120),
+  investments: () => cachedLocal('investments', () => Promise.resolve(data.getInvestments()), 120),
+  reports: (req) => cachedActual(`reports-${monthOf(req) || 'current'}`, () => data.getReports({ month: monthOf(req) }), 300),
 };
 
 const applyLocal = (operation, mutation) => operation
@@ -651,7 +699,7 @@ async function finalizeBulkMutation(operation, mutate, { kind } = {}) {
   if (localResult?.needsSync) {
     await syncAfterLocal(operation);
   }
-  cache.flushAll();
+  invalidateHttpCache();
   if (!operation?.key) return localResult;
   return data.getBulkOperationResult(operation.key) || localResult;
 }
@@ -659,16 +707,16 @@ async function finalizeBulkMutation(operation, mutate, { kind } = {}) {
 async function setRecurring(req, operation) {
   const { key } = parse(schemas.keyParam, req.params, 'recurring key');
   const { status, hidden, forced, isBill, cancellation } = parse(schemas.recurringOverride, req.body, 'recurring override');
-  const result = await applyLocal(operation, () =>
-    data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation }));
-  cache.flushAll();
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () =>
+      data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation })),
+  );
 }
 async function markRecurring(req, operation) {
   const { payee, isBill } = parse(schemas.markRecurring, req.body, 'recurring merchant');
-  const result = await applyLocal(operation, () => data.markRecurring({ payee, isBill }));
-  cache.flushAll();
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.markRecurring({ payee, isBill })),
+  );
 }
 async function splitTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
@@ -678,7 +726,7 @@ async function splitTxn(req, operation) {
   });
   const result = await applyLocal(operation, () => data.splitTransaction({ id, accountId, date, legs }));
   await syncAfterLocal(operation);
-  cache.flushAll();
+  invalidateHttpCache();
   return result;
 }
 async function unsplitTxn(req, operation) {
@@ -687,7 +735,7 @@ async function unsplitTxn(req, operation) {
   data.assertTransactionMutationAvailable({ ids: [id] });
   const result = await applyLocal(operation, () => data.removeSplit({ id, accountId, date, categoryId }));
   await syncAfterLocal(operation);
-  cache.flushAll();
+  invalidateHttpCache();
   return result;
 }
 async function setPayeeH(req, operation) {
@@ -699,7 +747,7 @@ async function setPayeeH(req, operation) {
   const result = await applyLocal(operation, () =>
     data.setPayee({ id, payee, isLeg, parentId, accountId, date }));
   await syncAfterLocal(operation);
-  cache.flushAll();
+  invalidateHttpCache();
   return result;
 }
 async function bankSyncH(_req, operation) {
@@ -715,11 +763,11 @@ async function bankSyncH(_req, operation) {
     result = await data.bankSync();
   }
   if (!result.ok) {
-    cache.flushAll();
+    invalidateHttpCache();
     return { ...result, phantom: { skipped: true, reason: 'bank sync did not complete' } };
   }
   const phantom = await data.cleanupPhantoms({ dryRun: true });
-  cache.flushAll();
+  invalidateHttpCache();
   return {
     ...result,
     phantom,
@@ -782,13 +830,19 @@ async function addReceiptH(req, operation) {
     }
     throw error;
   }
-  return applyLocal(operation, () => data.addReceipt(receipt));
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.addReceipt(receipt)),
+    'today', 'review-current',
+  );
 }
 const receiptsH = (req) => Promise.resolve(data.getReceipts({ txnId: req.query.txnId }));
 async function deleteReceiptH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'receipt id');
   data.assertReceiptMutationAvailable({ id });
-  return applyLocal(operation, () => data.deleteReceipt({ id }));
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteReceipt({ id })),
+    'today', 'review-current',
+  );
 }
 // Raw image stream (auth already enforced by the router). expo-image sends the
 // token via headers, so this just serves the file bytes with the right type.
@@ -809,7 +863,7 @@ async function sweepReimbH(req, operation) {
   const { tags, from, to } = parse(schemas.reimbursementSweep, req.body, 'reimbursement sweep');
   const result = await applyLocal(operation, () => data.sweepReimbursementTags({ tags, from, to }));
   await syncAfterLocal(operation);
-  cache.flushAll();
+  invalidateHttpCache();
   return result;
 }
 async function deleteTxn(req, operation) {
@@ -818,7 +872,7 @@ async function deleteTxn(req, operation) {
   data.assertTransactionMutationAvailable({ ids: [id] });
   const result = await applyLocal(operation, () => data.deleteTransaction({ id, accountId, date }));
   await syncAfterLocal(operation); // persist the delete back to the Actual server
-  cache.flushAll(); // removing a transaction shifts balances/spending/insights
+  invalidateHttpCache(); // removing a transaction shifts balances/spending/insights
   return result;
 }
 async function saveRuleH(req, operation) {
@@ -832,7 +886,7 @@ async function saveRuleH(req, operation) {
 async function deleteRuleH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'rule id');
   const result = await applyLocal(operation, () => data.deleteRule({ id }));
-  cache.flushAll();
+  invalidateLocalCache('rules');
   return result;
 }
 async function applyRulesH(_req, operation) {
@@ -851,43 +905,47 @@ async function syncSharesH(_req, operation) {
   }), { kind: 'splitwise_mirror' });
 }
 async function eventsH() {
-  return cached('events', () => data.getEvents(), 60);
+  return cachedActual('events', () => data.getEvents(), 60);
 }
 async function saveEventH(req, operation) {
   const event = parse(schemas.event, req.body, 'event');
-  const result = await applyLocal(operation, () => data.saveEvent(event));
-  cache.del('events');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.saveEvent(event)),
+    'events',
+  );
 }
 async function deleteEventH(req, operation) {
   const { slug } = parse(schemas.slugParam, req.params, 'event slug');
-  const result = await applyLocal(operation, () => data.deleteEvent({ slug }));
-  cache.del('events');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteEvent({ slug })),
+    'events',
+  );
 }
 async function setAccountOverrideH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'account id');
   const { name, hidden, role } = parse(schemas.accountOverride, req.body, 'account override');
-  const result = await applyLocal(operation, () => data.setAccountOverride({ id, name, hidden, role }));
-  cache.del(['accounts', 'today']);
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setAccountOverride({ id, name, hidden, role })),
+    'accounts', 'today',
+  );
 }
 async function setReviewDispositionH(req, operation) {
   const disposition = parse(schemas.reviewDisposition, req.body, 'review disposition');
-  const result = await applyLocal(operation, () => data.setReviewDisposition(disposition));
-  cache.del(['today', 'review-current']);
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setReviewDisposition(disposition)),
+    'today', 'review-current',
+  );
 }
 async function saveManualAssetH(req, operation) {
   const asset = parse(schemas.manualAsset, req.body, 'manual asset');
   const result = await applyLocal(operation, () => data.saveManualAsset(asset));
-  cache.del('manual-assets');
+  invalidateLocalCache('manual-assets');
   return result;
 }
 async function deleteManualAssetH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'manual asset id');
   const result = await applyLocal(operation, () => data.deleteManualAsset({ id }));
-  cache.del('manual-assets');
+  invalidateLocalCache('manual-assets');
   return result;
 }
 async function setNotes(req, operation) {
@@ -899,7 +957,7 @@ async function setNotes(req, operation) {
   const result = await applyLocal(operation, () =>
     data.setTransactionNotes({ id, notes, isLeg, parentId, accountId, date }));
   await syncAfterLocal(operation);
-  cache.flushAll();
+  invalidateHttpCache();
   return result;
 }
 async function setDateH(req, operation) {
@@ -908,20 +966,22 @@ async function setDateH(req, operation) {
   data.assertTransactionMutationAvailable({ ids: [id] });
   const result = await applyLocal(operation, () => data.setTransactionDate({ id, date, isLeg }));
   await syncAfterLocal(operation);
-  cache.flushAll();
+  invalidateHttpCache();
   return result;
 }
 async function saveGoal(req, operation) {
   const goal = parse(schemas.goal, req.body, 'goal');
-  const result = await applyLocal(operation, () => data.saveGoal(goal));
-  cache.del('goals');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.saveGoal(goal)),
+    'goals', 'today',
+  );
 }
 async function deleteGoal(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'goal id');
-  const result = await applyLocal(operation, () => data.deleteGoal(id));
-  cache.del('goals');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteGoal(id)),
+    'goals', 'today',
+  );
 }
 
 async function setCategory(req, operation) {
@@ -933,7 +993,7 @@ async function setCategory(req, operation) {
   const result = await applyLocal(operation, () =>
     data.setTransactionCategory({ id, categoryId, isLeg, parentId, accountId, date }));
   await syncAfterLocal(operation); // persist the write back to the Actual server
-  cache.flushAll();
+  invalidateHttpCache();
   return result;
 }
 // Manual refresh: pull the latest deltas from the Actual server, clear stale
@@ -946,7 +1006,6 @@ async function doRefresh(operation) {
   // Detect split deltas without changing the user's allocation.
   const splits = await data.reconcileSplits();
   const phantom = await data.cleanupPhantoms({ dryRun: true });
-  cache.flushAll();
   await warmCache();
   return {
     ok: true,
@@ -961,23 +1020,23 @@ async function doRefresh(operation) {
 
 async function markBill(req, operation) {
   const { id, key, dueDate, paid } = parse(schemas.markBill, req.body, 'bill state');
-  const result = await applyLocal(operation, () => data.setBillPaid({ id, key, dueDate, paid }));
-  cache.flushAll(); // bills are cached per horizon
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setBillPaid({ id, key, dueDate, paid })),
+  );
 }
 
 async function setOwes(req, operation) {
   const config = parse(schemas.owesConfig, req.body, 'reimbursement configuration');
-  const result = await applyLocal(operation, () => data.setOwesConfig(config));
-  cache.flushAll(); // reimbursement aggregations depend on this config
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setOwesConfig(config)),
+  );
 }
 
 async function createTxn(req, operation) {
   const transaction = parse(schemas.createTransaction, req.body, 'transaction');
   const result = await applyLocal(operation, () => data.createTransaction(transaction, { sync: false }));
   await syncAfterLocal(operation);
-  cache.flushAll(); // a new transaction shifts balances/spending/insights
+  invalidateHttpCache(); // a new transaction shifts balances/spending/insights
   return result;
 }
 
@@ -985,7 +1044,7 @@ async function setBudget(req, operation) {
   const { month, categoryId, amount } = parse(schemas.budget, req.body, 'budget amount');
   const result = await applyLocal(operation, () => data.setBudgetAmount({ month, categoryId, amount }));
   await syncAfterLocal(operation); // persist the write back to the Actual server
-  cache.flushAll(); // budget targets feed budgets + insights
+  invalidateHttpCache(); // budget targets feed budgets + insights
   return result;
 }
 
@@ -993,9 +1052,9 @@ const reimbLinks = (req) => Promise.resolve(data.getReimbLinks({ id: req.query.i
 async function addLink(req, operation) {
   const link = parse(schemas.reimbLink, req.body, 'reimbursement link');
   data.assertTransactionMutationAvailable({ ids: [link.inflow?.id, link.expense?.id] });
-  const r = await applyLocal(operation, () => data.addReimbLink(link));
-  cache.flushAll(); // suggestions net against links
-  return r;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.addReimbLink(link)),
+  );
 }
 async function confirmRepaymentH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'repayment id');
@@ -1012,7 +1071,7 @@ async function confirmRepaymentH(req, operation) {
       admission,
     }));
   await syncAfterLocal(operation); // persist the inflow's new category to the Actual server
-  cache.flushAll();
+  invalidateHttpCache();
   return r;
 }
 async function dismissRepaymentH(req, operation) {
@@ -1023,18 +1082,18 @@ async function dismissRepaymentH(req, operation) {
   data.assertTransactionMutationAvailable({
     ids: [inflowId || (id.startsWith('sg_') ? id.slice(3) : null)],
   });
-  const r = await applyLocal(operation, () => data.dismissRepayment({ id, inflowId }));
-  cache.flushAll();
-  return r;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.dismissRepayment({ id, inflowId })),
+  );
 }
 async function delLink(req, operation) {
   const inflowId = (req.body && req.body.inflowId) || req.query.inflowId;
   const expenseId = (req.body && req.body.expenseId) || req.query.expenseId;
   const parsed = parse(schemas.deleteReimbLink, { inflowId, expenseId }, 'reimbursement unlink');
   data.assertTransactionMutationAvailable({ ids: [parsed.inflowId, parsed.expenseId] });
-  const r = await applyLocal(operation, () => data.deleteReimbLink(parsed));
-  cache.flushAll();
-  return r;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteReimbLink(parsed)),
+  );
 }
 
 // Reconciliation — read fresh (not cached) so checkboxes reflect instantly.
@@ -1043,15 +1102,24 @@ const reconcilePendingH = () => data.getReconcilePending();
 const setReconItemH = (req, operation) => {
   const item = parse(schemas.reconcileItem, req.body, 'reconciliation item');
   data.assertTransactionMutationAvailable({ ids: [item.id] });
-  return applyLocal(operation, () => data.setReconcileItem(item));
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setReconcileItem(item)),
+    'today', 'review-current',
+  );
 };
 const setReconMonthH = (req, operation) => {
   const month = parse(schemas.reconcileMonth, req.body, 'reconciliation month');
-  return applyLocal(operation, () => data.setReconcileMonth(month));
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setReconcileMonth(month)),
+    'today', 'review-current',
+  );
 };
 const setReconEnabledH = (req, operation) => {
   const setting = parse(schemas.reconcileEnabled, req.body, 'reconciliation setting');
-  return applyLocal(operation, () => data.setReconcileEnabled(setting));
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setReconcileEnabled(setting)),
+    'today', 'review-current',
+  );
 };
 
 // Monthly CSV export (raw text/csv, used by web download + app share sheet).
@@ -1309,6 +1377,7 @@ v1.get('/ping', env(async () => {
     startedAt: runtimeHealth.startedAt,
     financeTimeZone: FINANCE_TIME_ZONE,
     actual,
+    actualCoordinator: actualCoordinator.getHealth(),
     queuedMutations: mutationQueue.size,
     release: releaseIdentity(),
   };
@@ -1398,7 +1467,6 @@ async function periodicSync() {
   try {
     await mutationQueue.run(async () => {
       await data.syncNow();
-      cache.flushAll();
       await warmCache(); // repopulate hot keys so the next request isn't a cold recompute
     });
   } catch (e) {

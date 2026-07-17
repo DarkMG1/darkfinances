@@ -2,6 +2,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'dataModule.js',
   'demoData.js',
   'lib/account-overrides.js',
+  'lib/actual-coordinator.js',
   'lib/date-only.js',
   'lib/domain/classification.js',
   'lib/domain/money.js',

@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "vendor:chart-js:verify": "node scripts/verify-chart-js-asset.js",
     "vendor:chart-js:pin": "node scripts/pin-chart-js-asset.js",
-    "test": "npm run vendor:chart-js:verify && node scripts/check-dashboard-install-contract.js && npm run check && node --test test/*.test.js"
+    "test": "npm run vendor:chart-js:verify && node scripts/check-dashboard-install-contract.js && npm run check && ALLOW_RAW_ACTUAL_API=1 node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",
