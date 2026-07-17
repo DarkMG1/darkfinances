@@ -247,6 +247,21 @@ node scripts/actual-clone-smoke.js
 The script creates, splits, edits, unsplits, and deletes test transactions. Never point it at the
 production budget.
 
+## Graceful shutdown
+
+On `SIGTERM` or `SIGINT` the dashboard stops HTTP admission, **awaits the HTTP close/drain
+callback** (including active Actual-backed GET responses), drains the mutation queue, then calls
+`data.shutdownApi()` / coordinator `shutdownHandoff`. See [`ACTUAL_COORDINATOR.md`](./ACTUAL_COORDINATOR.md)
+for the full ordering contract.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FINANCE_SHUTDOWN_TIMEOUT_MS` | `15000` | Hard cap from first signal to process exit. |
+| `FINANCE_MUTATION_DRAIN_TIMEOUT_MS` | `10000` | Sub-budget for mutation-queue drain after HTTP drain. |
+
+On timeout the process logs redacted socket diagnostics, force-closes remaining connections when
+supported, exits nonzero, and skips Actual shutdown while HTTP work could still reach Actual.
+
 ## Production operations
 
 The reviewed service unit, environment-file contract, backups, restore safeguards, and deployment

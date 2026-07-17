@@ -80,17 +80,29 @@ discarded at publish time.
 chains rooted in the active lane bypass re-entry; concurrent HTTP requests queue behind
 the lane holder. Depth is capped at `MAX_NEST_DEPTH` (32).
 
-## Shutdown handoff (PR-14 compatible)
+## Shutdown handoff (PR-14)
 
-HTTP read drain remains PR-14's scope. Actual shutdown ordering:
+Process shutdown is orchestrated by `lib/graceful-shutdown.js` and must preserve this
+ordering so no accepted HTTP handler still uses Actual when `shutdownHandoff` begins:
 
-1. `mutationQueue.close()` — stop mutation admission.
-2. `httpServer.close()`.
-3. `mutationQueue.drain()`.
-4. `data.shutdownApi()` → `shutdownHandoff`: stop admission → drain in-flight work →
-   saga sync + `api.shutdown` → `shutdownFinalized` (never reopened).
+1. Stop periodic sync timer — no new background sync tasks.
+2. `mutationQueue.close()` — reject new mutation admission (including on keep-alive
+   connections that remain open until HTTP drain completes).
+3. `httpServer.close()` and **await the close callback** — active GET responses and
+   in-flight HTTP-bound mutations finish before proceeding. `closeIdleConnections()` runs
+   when admission stops so idle keep-alive sockets do not block drain.
+4. `mutationQueue.drain()` — finish accepted non-HTTP queue work (e.g. in-flight periodic
+   sync that started before the timer was cleared).
+5. `data.shutdownApi()` → `shutdownHandoff`: coordinator stop admission → drain in-flight
+   Actual lane work → saga sync + `api.shutdown` → `shutdownFinalized` (never reopened).
 
-The server must not call `actualCoordinator.close()` before `shutdownApi`.
+**Timeout / force-termination:** a bounded budget (`FINANCE_SHUTDOWN_TIMEOUT_MS`, default
+15s) applies from the first signal. On HTTP drain timeout the process logs redacted socket
+diagnostics, force-closes remaining connections when supported, exits nonzero, and **does
+not** call `shutdownApi()` while accepted HTTP work could still reach Actual.
+
+The server must not call `actualCoordinator.close()` before `shutdownApi`. Duplicate
+`SIGTERM`/`SIGINT` deliveries invoke shutdown once (idempotent).
 
 ## Stale-fill window
 

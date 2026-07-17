@@ -14,6 +14,7 @@ const {
 } = require('./lib/errors');
 const { FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { SerialQueue } = require('./lib/serial-queue');
+const { bindGracefulShutdownSignals } = require('./lib/graceful-shutdown');
 const { getActualCoordinator } = require('./lib/actual-coordinator');
 const { OperationJournal } = require('./lib/operation-journal');
 const { executeJournaledOperation } = require('./lib/operation-executor');
@@ -1513,29 +1514,11 @@ const httpServer = app.listen(PORT, '127.0.0.1', () => {
     });
 });
 
-let shuttingDown = false;
-async function gracefulShutdown(signal) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(`Received ${signal}; draining finance writes`);
-  if (periodicSyncTimer) clearInterval(periodicSyncTimer);
-  mutationQueue.close();
-  httpServer.close();
-  const forcedExit = setTimeout(() => {
-    console.error('Graceful shutdown timed out');
-    process.exit(1);
-  }, 15_000);
-  forcedExit.unref();
-  try {
-    await mutationQueue.drain(10_000);
-    await data.shutdownApi();
-    clearTimeout(forcedExit);
-    process.exit(0);
-  } catch (error) {
-    console.error('Graceful shutdown failed:', error);
-    clearTimeout(forcedExit);
-    process.exit(1);
-  }
-}
-process.once('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
-process.once('SIGINT', () => { void gracefulShutdown('SIGINT'); });
+bindGracefulShutdownSignals({
+  httpServer,
+  mutationQueue,
+  shutdownApi: () => data.shutdownApi(),
+  stopPeriodicSync: () => {
+    if (periodicSyncTimer) clearInterval(periodicSyncTimer);
+  },
+});
