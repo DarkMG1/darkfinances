@@ -3,6 +3,7 @@ import {
   clearFinanceOperationReconciliationDiagnostic,
   prepareFinanceOperationProfilePurge,
 } from '@/lib/finance-operations';
+import { purgeOtaProfileState } from '@/lib/auto-update';
 import { purgeNotificationProfileState } from '@/lib/notifications';
 import { purgeProfileGeneration } from '@/lib/notification-reconciliation';
 import { abortFinanceRequests } from '@/lib/request-lifecycle';
@@ -25,6 +26,7 @@ export async function purgeFinanceProfile(
 ): Promise<void> {
   prepareFinanceOperationProfilePurge(operationScope);
   purgeProfileGeneration(scope);
+  purgeOtaProfileState();
   abortFinanceRequests();
   await clearFinanceQueries();
   queryClient.getMutationCache().clear();
