@@ -1124,7 +1124,7 @@ async function getTrends({ months = 12, endMonth } = {}) {
     const buckets = [];
     for (let i = months - 1; i >= 0; i--) {
       const r = monthRange(financeYear, financeMonth - 1 - i);
-      buckets.push({ ...r, income: 0, expense: 0, knownIncome: 0, knownExpense: 0, transferIncompleteCount: 0 });
+      buckets.push({ ...r, income: 0, expense: 0, knownIncome: 0, knownExpense: 0, transferIncompleteCount: 0, transferIncompleteLeaves: [] });
     }
     const byKey = Object.fromEntries(buckets.map((b) => [b.key, b]));
     const lastEnd = buckets[buckets.length - 1].end;
@@ -1155,6 +1155,7 @@ async function getTrends({ months = 12, endMonth } = {}) {
         })) {
           if (lf.kind === 'incomplete' && lf.provenance === PROVENANCE.TRANSFER_IDENTITY) {
             b.transferIncompleteCount += 1;
+            b.transferIncompleteLeaves.push(lf);
             continue;
           }
           if (lf.countsAsIncome) {
@@ -1177,6 +1178,7 @@ async function getTrends({ months = 12, endMonth } = {}) {
         idx++;
       }
       const complete = b.transferIncompleteCount === 0;
+      const monthCompleteness = projectionCompletenessFromLeaves(b.transferIncompleteLeaves);
       return {
         month: b.key,
         netWorth: d2(run),
@@ -1186,12 +1188,7 @@ async function getTrends({ months = 12, endMonth } = {}) {
         knownSpendSubtotal: complete ? undefined : d2(b.knownExpense),
         knownIncomeSubtotal: complete ? undefined : d2(b.knownIncome),
         net: complete ? d2(b.income - b.expense) : null,
-        completeness: {
-          complete,
-          incompleteReasons: complete ? [] : ['transfer_identity_unresolved'],
-          transferIdentityUnresolvedCount: b.transferIncompleteCount,
-          transferIdentityReasons: complete ? [] : ['transfer_identity_unresolved'],
-        },
+        completeness: monthCompleteness,
       };
     });
     return {

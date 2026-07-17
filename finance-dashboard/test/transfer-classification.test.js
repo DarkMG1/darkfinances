@@ -214,6 +214,21 @@ test('hasActualTransferIdentity uses transfer_id and transferred_id on parents a
   }), true);
 });
 
+test('trend month completeness preserves leaf-specific transfer reasons', () => {
+  const { projectionCompletenessFromLeaves } = require('../lib/domain/projection-completeness');
+  const incompleteLeaves = [
+    { kind: 'incomplete', provenance: PROVENANCE.TRANSFER_IDENTITY, reason: TRANSFER_REASON.PAIR_AMOUNT_MISMATCH },
+    { kind: 'incomplete', provenance: PROVENANCE.TRANSFER_IDENTITY, reason: TRANSFER_REASON.PAIR_SIGN_MISMATCH },
+  ];
+  const completeness = projectionCompletenessFromLeaves(incompleteLeaves);
+  assert.equal(completeness.complete, false);
+  assert.deepEqual(completeness.transferIdentityReasons, [
+    TRANSFER_REASON.PAIR_AMOUNT_MISMATCH,
+    TRANSFER_REASON.PAIR_SIGN_MISMATCH,
+  ]);
+  assert.equal(completeness.transferIdentityUnresolvedCount, 2);
+});
+
 test('demo fixtures carry explicit synthetic identity and exclude transfers from merchant history', () => {
   process.env.FINANCE_TIME_ZONE = 'America/Los_Angeles';
   process.env.DEMO_FINANCE_NOW = '2026-07-09T17:01:00-07:00';

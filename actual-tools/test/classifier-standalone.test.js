@@ -55,3 +55,45 @@ test('standalone copied-tree executes without finance-dashboard require', () => 
   assert.equal(digest.sha256, crypto.createHash('sha256').update(source).digest('hex'));
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+test('verify-classifier fails on tampered vendor without self-repair', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'actual-tools-tamper-'));
+  fs.cpSync(toolsRoot, tmp, { recursive: true });
+  const vendorPath = path.join(tmp, 'vendor', 'classification.js');
+  const before = fs.readFileSync(vendorPath, 'utf8');
+  fs.writeFileSync(vendorPath, `${before}\n// tamper\n`);
+  const result = spawnSync(process.execPath, [path.join(tmp, 'scripts', 'verify-classifier.js')], {
+    cwd: tmp,
+    encoding: 'utf8',
+  });
+  assert.notEqual(result.status, 0, 'tampered vendor must fail verification');
+  assert.match(result.stderr || result.stdout, /verify-classifier:/);
+  assert.match(fs.readFileSync(vendorPath, 'utf8'), /tamper/);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('verify-classifier fails on digest drift without self-repair', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'actual-tools-digest-drift-'));
+  fs.cpSync(toolsRoot, tmp, { recursive: true });
+  const digestPath = path.join(tmp, 'vendor', 'classification.digest.json');
+  const vendorPath = path.join(tmp, 'vendor', 'classification.js');
+  const vendorBefore = fs.readFileSync(vendorPath, 'utf8');
+  const digest = JSON.parse(fs.readFileSync(digestPath, 'utf8'));
+  digest.sha256 = '0'.repeat(64);
+  fs.writeFileSync(digestPath, `${JSON.stringify(digest, null, 2)}\n`);
+  const result = spawnSync(process.execPath, [path.join(tmp, 'scripts', 'verify-classifier.js')], {
+    cwd: tmp,
+    encoding: 'utf8',
+  });
+  assert.notEqual(result.status, 0, 'digest drift must fail verification');
+  assert.match(result.stderr || result.stdout, /vendor classifier drift/);
+  assert.equal(fs.readFileSync(vendorPath, 'utf8'), vendorBefore);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('finance-digest MTD headline labels incomplete totals as known lower bound', () => {
+  const source = fs.readFileSync(path.join(toolsRoot, 'finance-digest.js'), 'utf8');
+  assert.match(source, /MTD REAL SPENDING — INCOMPLETE.*known_lower_bound=/);
+  assert.match(source, /authoritative_total=UNAVAILABLE/);
+  assert.match(source, /if \(mtdIncomplete\)/);
+});

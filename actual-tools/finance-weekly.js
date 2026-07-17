@@ -9,7 +9,7 @@
  * Env (via run.sh + .actual.env): ACTUAL_SERVER_URL, ACTUAL_PASSWORD, ACTUAL_SYNC_ID, FIX_DATA_DIR
  */
 const api = require('@actual-app/api');
-const { addDays, todayYMD } = require('./lib/date-only');
+const { addDays, FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { buildToolCategoryInfo, classifiedLeavesForAccounts, incompleteTransferLeaves } = require('./lib/transfer-classification');
 
 const c2 = (cents) => (Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -61,12 +61,17 @@ const REIMB_CAT = /^reimbursement$/i;
     return { realCents, byCat, byPayee, income, payeeSet: new Set(real.filter((e) => e.amount < 0).map((e) => e.payee)) };
   }
   const T = week(thisStart, thisEnd), L = week(lastStart, lastEnd);
+  const incomplete = incompleteTransferLeaves(classified);
 
   const out = [];
   out.push(`FINANCE WEEKLY (deterministic; numbers are EXACT - format verbatim, do not recompute)`);
-  out.push(`generated=${today} tz=${TZ} this_week=${thisStart}..${thisEnd} last_week=${lastStart}..${lastEnd}`);
+  out.push(`generated=${today} tz=${FINANCE_TIME_ZONE} this_week=${thisStart}..${thisEnd} last_week=${lastStart}..${lastEnd}`);
   out.push('');
-  out.push(`[REAL SPEND] this=${money(T.realCents)} last=${money(L.realCents)} change=${signed(T.realCents - L.realCents)}`);
+  if (incomplete.length) {
+    out.push(`[REAL SPEND — INCOMPLETE] this_known_lower_bound=${money(T.realCents)} last_known_lower_bound=${money(L.realCents)} authoritative_total=UNAVAILABLE`);
+  } else {
+    out.push(`[REAL SPEND] this=${money(T.realCents)} last=${money(L.realCents)} change=${signed(T.realCents - L.realCents)}`);
+  }
   out.push('');
   out.push(`[BY CATEGORY this vs last] (spent)`);
   const cats = [...new Set([...Object.keys(T.byCat), ...Object.keys(L.byCat)])];
@@ -87,7 +92,6 @@ const REIMB_CAT = /^reimbursement$/i;
   out.push(`[OFF-TREND] biggest category changes (this vs last)`);
   const trend = catRows.map((r) => ({ n: r.n, d: r.t - r.l })).filter((r) => Math.abs(r.d) >= 1).sort((a, b) => Math.abs(b.d) - Math.abs(a.d)).slice(0, 4);
   if (trend.length) for (const r of trend) out.push(`- ${r.n} | ${signed(r.d)}`); else out.push('- none');
-  const incomplete = incompleteTransferLeaves(classified);
   if (incomplete.length) {
     out.push('');
     const reasons = [...new Set(incomplete.map((leaf) => leaf.transferReason || leaf.reason).filter(Boolean))].sort();

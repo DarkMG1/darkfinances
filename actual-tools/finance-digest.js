@@ -103,7 +103,12 @@ const REIMB_CAT = /^reimbursement$/i;
     out.push(`- ${b.name} | ${money(b.bal)} | ${b.offbudget ? 'off-budget' : 'on-budget'}`);
   }
   out.push('');
-  out.push(`[MTD REAL SPENDING] total=${money(mRealCents)} (excludes Money Movement, Income, Reimbursement)`);
+  const mtdIncomplete = incomplete.length > 0;
+  if (mtdIncomplete) {
+    out.push(`[MTD REAL SPENDING — INCOMPLETE] known_lower_bound=${money(mRealCents)} authoritative_total=UNAVAILABLE (excludes Money Movement, Income, Reimbursement; transfer identity unresolved)`);
+  } else {
+    out.push(`[MTD REAL SPENDING] total=${money(mRealCents)} (excludes Money Movement, Income, Reimbursement)`);
+  }
   for (const r of catRows) out.push(`- ${r.name} | ${money(r.spent)}`);
   out.push('');
   out.push(`[MONEY MOVEMENT MTD] (separate, NOT spending)`);

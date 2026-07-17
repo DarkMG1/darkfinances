@@ -11,6 +11,7 @@ import { haptics } from '@/lib/haptics';
 import { addDateOnlyDays, monthEnd, useFinanceToday } from '@/lib/date-only';
 import { buildBudgetMetrics, buildNonSpendingMetrics } from '@/lib/spending-metrics.js';
 import { useSelectedMonth } from '@/lib/selectedMonth';
+import { trendPeriodComplete } from '@/components/charts';
 import { categoryColors, colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
 
 type Period = 'week' | 'month' | 'quarter' | 'year';
@@ -106,6 +107,7 @@ export default function Spending() {
     return trimmed.length ? trimmed : [{ month: curKey, spend: fallbackSpend, income: fallbackIncome, net: fallbackSpend != null && fallbackIncome != null ? fallbackIncome - fallbackSpend : null, netWorth: 0 }];
   }, [trends.data, curKey, cur, spendingComplete]);
   const chartMonths = useMemo(() => availMonths.slice(-6), [availMonths]);
+  const chartHasIncomplete = chartMonths.some((m) => m.spend == null || m.income == null);
 
   const entries = useMemo(
     () => (cur ? Object.entries(cur.spending).sort((a, b) => b[1] - a[1]) : []),
@@ -196,6 +198,7 @@ export default function Spending() {
     <Screen title="Spending" right={headerRight} onRefresh={refresh} testID="spending-screen">
       <View style={styles.controlsCard}>
         <PeriodChips value={period} onChange={setPeriod} />
+        {chartHasIncomplete ? <Text style={styles.incompleteNote} accessibilityRole="text">Some months unavailable — transfer identity unresolved</Text> : null}
         <DualMonthBars months={chartMonths} selected={month} onSelect={setMonth} />
       </View>
 
@@ -434,18 +437,38 @@ function PeriodChips({ value, onChange }: { value: Period; onChange: (p: Period)
 }
 
 function DualMonthBars({ months, selected, onSelect }: { months: { month: string; spend: number | null; income: number | null }[]; selected: string; onSelect: (m: string) => void }) {
-  const max = Math.max(1, ...months.map((m) => Math.max(m.spend ?? 0, m.income ?? 0)));
+  const values = months.flatMap((m) => [m.spend, m.income].filter((v): v is number => v != null));
+  const max = Math.max(1, ...values);
   const barMax = 48;
   return (
-    <View style={styles.monthWrap}>
+    <View style={styles.monthWrap} accessibilityRole="adjustable" accessibilityLabel={`Monthly income and spending chart${months.some((m) => m.spend == null || m.income == null) ? ', some months unavailable' : ''}`}>
       <View style={styles.monthBars}>
         {months.map((m) => {
           const on = m.month === selected;
+          const incomeVal = m.income;
+          const spendVal = m.spend;
+          const incomeUnavailable = incomeVal == null;
+          const spendUnavailable = spendVal == null;
           return (
-            <Pressable key={m.month} onPress={() => { haptics.tap(); onSelect(m.month); }} style={[styles.monthCell, on && styles.monthCellOn]}>
+            <Pressable
+              key={m.month}
+              accessibilityRole="button"
+              accessibilityState={{ selected: on }}
+              accessibilityLabel={`${monthLabel(m.month)}${incomeUnavailable || spendUnavailable ? ', unavailable' : `, income ${fmtPos(incomeVal ?? 0)}, spend ${fmtPos(spendVal ?? 0)}`}`}
+              onPress={() => { haptics.tap(); onSelect(m.month); }}
+              style={[styles.monthCell, on && styles.monthCellOn]}
+            >
               <View style={styles.barStage}>
-                <View style={[styles.incomeBar, { height: Math.max(2, ((m.income ?? 0) / max) * barMax) }]} />
-                <View style={[styles.spendBar, { height: Math.max(2, ((m.spend ?? 0) / max) * barMax) }]} />
+                {incomeUnavailable ? (
+                  <View style={[styles.unavailableBar, { height: 10 }]} />
+                ) : (
+                  <View style={[styles.incomeBar, { height: Math.max(incomeVal === 0 ? 0 : 2, (incomeVal / max) * barMax) }]} />
+                )}
+                {spendUnavailable ? (
+                  <View style={[styles.unavailableBar, { height: 10 }]} />
+                ) : (
+                  <View style={[styles.spendBar, { height: Math.max(spendVal === 0 ? 0 : 2, (spendVal / max) * barMax) }]} />
+                )}
               </View>
               <Text style={[styles.monthText, on && styles.monthTextOn]}>{monthLabel(m.month).split(' ')[0]}</Text>
             </Pressable>
@@ -650,6 +673,7 @@ const styles = StyleSheet.create({
   periodChipOn: { backgroundColor: 'rgba(124,110,247,0.18)', borderColor: 'rgba(168,152,255,0.55)' },
   periodText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
   periodTextOn: { color: colors.accentLight },
+  incompleteNote: { color: colors.muted, fontSize: 11, marginBottom: 8 },
   monthWrap: { marginBottom: 0 },
   monthBars: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
   monthCell: { flex: 1, minHeight: 82, borderRadius: 12, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 7, borderWidth: 1, borderColor: 'transparent' },
@@ -657,6 +681,7 @@ const styles = StyleSheet.create({
   barStage: { height: 56, flexDirection: 'row', alignItems: 'flex-end', gap: 5 },
   incomeBar: { width: 7, borderRadius: 4, backgroundColor: colors.green },
   spendBar: { width: 7, borderRadius: 4, backgroundColor: colors.accentLight },
+  unavailableBar: { width: 7, borderRadius: 4, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.muted },
   monthText: { color: colors.muted, fontSize: 11, marginTop: 5, fontWeight: '600' },
   monthTextOn: { color: colors.text, fontWeight: '800' },
   legendRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10 },
