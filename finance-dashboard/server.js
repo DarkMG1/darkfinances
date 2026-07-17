@@ -47,6 +47,7 @@ const {
 const { boundedJsonMiddleware } = require('./lib/bounded-json');
 const {
   attachQueryStatsHeaders,
+  assertCursorSigningConfigured,
   buildQueryCacheFingerprint,
   runWithQueryInstrumentation,
 } = require('./lib/bounded-ledger-access');
@@ -156,6 +157,9 @@ const localOrigin = publicHostname === 'localhost' || publicHostname === '127.0.
 
 if (!process.env.SESSION_SECRET && !localOrigin) {
   throw new Error('SESSION_SECRET is required for a non-local deployment');
+}
+if (!localOrigin && process.env.DEMO_ONLY !== '1') {
+  assertCursorSigningConfigured();
 }
 if (SELFTEST && !localOrigin) {
   throw new Error('SELFTEST may only be used with a loopback PUBLIC_ORIGIN');

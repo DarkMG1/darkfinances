@@ -114,18 +114,19 @@ describe('query scaling integration', () => {
   it('rejects oversized row scans with 413 and clears retained batches', async () => {
     process.env.FINANCE_QUERY_MAX_LEDGER_ROWS = '10';
     delete process.env.FINANCE_QUERY_MAX_LEDGER_DAYS;
-    fixture.reset({ accountCount: 2, rowsPerAccount: 20, anchorMonth: '2024-06', yearSpan: 1 });
+    fixture.reset({ accountCount: 2, rowsPerAccount: 8, anchorMonth: '2024-06', yearSpan: 1 });
     await data.resetApi();
     await data.initApi({ skipRecover: true });
     let stats;
     await assert.rejects(
-      async () => runWithQueryInstrumentation(async () => {
+      async () => runWithQueryInstrumentation(async (activeStats) => {
+        stats = activeStats;
         await data.getTransactions({ start: '2024-01-01', end: '2024-12-31' });
-        stats = getActiveQueryStats();
       }),
       QueryResultLimitExceededError,
     );
-    assert.ok((stats?.peakRowsRetained ?? 0) <= 10);
+    assert.ok((stats?.rowsScanned ?? 0) > 10, 'rowsScanned may exceed row cap while scanning chunks');
+    assert.ok((stats?.peakRowsRetained ?? 0) <= 10, 'peakRowsRetained must never exceed row cap');
     delete process.env.FINANCE_QUERY_MAX_LEDGER_ROWS;
   });
 

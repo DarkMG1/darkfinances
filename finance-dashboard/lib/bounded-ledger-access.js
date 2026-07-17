@@ -9,6 +9,7 @@ const {
   loadQueryScalingConfig,
 } = require('./query-scaling-config');
 const {
+  QueryCursorSecretError,
   QueryRangeExceededError,
   QueryResultLimitExceededError,
 } = require('./errors');
@@ -21,8 +22,36 @@ const DEFAULT_CLASSIFICATION_PATTERNS = Object.freeze({
 });
 
 const SEARCH_CURSOR_VERSION = 2;
+const DEV_CURSOR_FALLBACK = 'finance-query-cursor-dev-only';
 const instrumentationStore = new AsyncLocalStorage();
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isValidStableCursorSecret(value) {
+  const text = String(value || '').trim();
+  return text.length >= 8 && text !== DEV_CURSOR_FALLBACK;
+}
+
+function allowsDevCursorFallback({ allowDevFallback } = {}) {
+  if (allowDevFallback === true) return true;
+  if (process.env.NODE_ENV === 'test') return true;
+  if (process.env.DEMO_ONLY === '1') return true;
+  return false;
+}
+
+function resolveCursorSigningSecret({ allowDevFallback } = {}) {
+  const explicit = String(process.env.FINANCE_QUERY_CURSOR_SECRET || '').trim();
+  if (explicit) return explicit;
+  const syncId = String(process.env.ACTUAL_SYNC_ID || '').trim();
+  if (isValidStableCursorSecret(syncId)) return syncId;
+  if (allowsDevCursorFallback({ allowDevFallback })) return DEV_CURSOR_FALLBACK;
+  throw new QueryCursorSecretError(
+    'Query cursor signing requires FINANCE_QUERY_CURSOR_SECRET or a validated ACTUAL_SYNC_ID',
+  );
+}
+
+function assertCursorSigningConfigured({ allowDevFallback } = {}) {
+  resolveCursorSigningSecret({ allowDevFallback });
+}
 
 function createQueryStats() {
   return {
@@ -153,15 +182,9 @@ function splitCalendarChunks(start, end, chunkDays) {
   return chunks;
 }
 
-function cursorSigningSecret() {
-  return process.env.FINANCE_QUERY_CURSOR_SECRET
-    || process.env.ACTUAL_SYNC_ID
-    || 'finance-query-cursor-dev-only';
-}
-
 function signSearchCursorPayload(payload) {
   const body = JSON.stringify(payload);
-  const signature = crypto.createHmac('sha256', cursorSigningSecret()).update(body).digest('base64url');
+  const signature = crypto.createHmac('sha256', resolveCursorSigningSecret()).update(body).digest('base64url');
   return Buffer.from(JSON.stringify({ payload, signature }), 'utf8').toString('base64url');
 }
 
@@ -176,7 +199,7 @@ function verifySearchCursorPayload(token) {
     throw new QueryRangeExceededError('search cursor is invalid');
   }
   const body = JSON.stringify(envelope.payload);
-  const expected = crypto.createHmac('sha256', cursorSigningSecret()).update(body).digest('base64url');
+  const expected = crypto.createHmac('sha256', resolveCursorSigningSecret()).update(body).digest('base64url');
   if (envelope.signature !== expected) {
     throw new QueryRangeExceededError('search cursor signature is invalid');
   }
@@ -427,9 +450,11 @@ function rowBeforeSearchAnchor(row, anchorDate, anchorId) {
 
 module.exports = {
   DEFAULT_CLASSIFICATION_PATTERNS,
+  DEV_CURSOR_FALLBACK,
   LEDGER_EPOCH,
   SEARCH_CURSOR_VERSION,
   assertCanonicalDate,
+  assertCursorSigningConfigured,
   attachQueryStatsHeaders,
   buildClearedSupersederIndex,
   buildQueryCacheFingerprint,
@@ -448,6 +473,7 @@ module.exports = {
   loadLedgerReadContext,
   normalizePayeeKey,
   resolveBoundedLedgerStart,
+  resolveCursorSigningSecret,
   resolveNetWorthQueryStart,
   resolveSearchWindow,
   rowBeforeSearchAnchor,

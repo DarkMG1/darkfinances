@@ -183,3 +183,48 @@ test('renderSafeToSpend surfaces authoritative incompleteReasons when unavailabl
   assert.match(dom.safeToSpendReasons.innerHTML, /goal_commitment_unknown/);
   assert.equal(dom.safeToSpendReasons.hidden, false);
 });
+
+function loadRenderMetricPos() {
+  const start = script.indexOf('function renderMetricPos(');
+  assert.ok(start >= 0, 'renderMetricPos helper must exist in dashboard script');
+  let depth = 0;
+  let started = false;
+  let end = start;
+  for (let i = start; i < script.length; i += 1) {
+    if (script[i] === '{') {
+      depth += 1;
+      started = true;
+    }
+    if (script[i] === '}') {
+      depth -= 1;
+      if (started && depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+  const sandbox = {
+    fmtPos: (n) => '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+  };
+  vm.runInNewContext(`${script.slice(start, end)}; renderMetricPos;`, sandbox);
+  return sandbox.renderMetricPos;
+}
+
+test('browser dashboard renderMetricPos handles complete, lower-bound, and unavailable reimbursement totals', () => {
+  const renderMetricPos = loadRenderMetricPos();
+  assert.equal(renderMetricPos({ complete: true, value: 255 }), '$255.00');
+  assert.equal(renderMetricPos({ complete: true, value: 0 }), '$0.00');
+  assert.equal(
+    renderMetricPos({
+      complete: false,
+      value: null,
+      lowerBound: 142.5,
+      lowerBoundLabel: 'at least (partial ledger scan)',
+    }),
+    'at least (partial ledger scan) $142.50',
+  );
+  assert.equal(renderMetricPos({ complete: false, value: null, lowerBound: 0 }), 'Unavailable');
+  assert.equal(renderMetricPos({ complete: false, value: null }), 'Unavailable');
+  assert.equal(renderMetricPos(null), 'Unavailable');
+  assert.doesNotMatch(renderMetricPos({ complete: false, value: null }), /\$NaN/);
+});

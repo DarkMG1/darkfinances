@@ -7,6 +7,7 @@ const server = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8
 const generated = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'endpoints.ts'), 'utf8');
 const browser = fs.readFileSync(path.resolve(__dirname, '..', 'public', 'index.html'), 'utf8');
 const appHome = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'index.tsx'), 'utf8');
+const appReimbursement = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'reimbursement.tsx'), 'utf8');
 
 function serverRoutes() {
   const direct = [...server.matchAll(/\bv1\.(get|post|delete|put|patch)\('([^']+)'/g)]
@@ -95,4 +96,15 @@ test('app and web render incomplete Safe-to-Spend as unavailable, never zero', (
   assert.match(appHome, /Safe to Spend unavailable/);
   assert.match(appHome, /liquidity\.safeToSpend\.incompleteReasons/);
   assert.doesNotMatch(appHome, /fmtMoney\(safeToSpend\.value\s*\|\|\s*0\)/);
+});
+
+test('legacy web reimbursement renders MetricValue totals without NaN or fabricated zero', () => {
+  assert.match(browser, /function renderMetricPos\(/);
+  assert.match(browser, /metric\?\.complete === true && Number\.isFinite\(metric\.value\)/);
+  assert.match(browser, /renderMetricPos\(data\.totalOwed\)/);
+  assert.doesNotMatch(browser, /fmtPos\(data\.totalOwed\)/);
+  assert.match(browser, /return fallback;/);
+
+  assert.match(appReimbursement, /totalOwedMetric\?\.complete \? \(totalOwedMetric\.value \?\? 0\)/);
+  assert.match(appReimbursement, /grandLowerBound != null \?/);
 });

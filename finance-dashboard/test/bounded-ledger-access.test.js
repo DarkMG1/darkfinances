@@ -8,13 +8,19 @@ const {
   encodeSearchCursor,
   enforceRowBudgetOrThrow,
   resolveBoundedLedgerStart,
+  resolveCursorSigningSecret,
+  assertCursorSigningConfigured,
   resolveNetWorthQueryStart,
   resolveSearchWindow,
   validateCanonicalDateRange,
 } = require('../lib/bounded-ledger-access');
 const { loadQueryScalingConfig } = require('../lib/query-scaling-config');
 const { daysBetween } = require('../lib/date-only');
-const { QueryRangeExceededError, QueryResultLimitExceededError } = require('../lib/errors');
+const {
+  QueryCursorSecretError,
+  QueryRangeExceededError,
+  QueryResultLimitExceededError,
+} = require('../lib/errors');
 
 process.env.FINANCE_QUERY_CURSOR_SECRET = 'test-cursor-secret';
 
@@ -175,5 +181,86 @@ describe('bounded ledger access', () => {
       QueryResultLimitExceededError,
     );
     assert.equal(batches.length, 0);
+  });
+
+  it('rejects production cursor signing when no stable secret is configured', () => {
+    const saved = {
+      nodeEnv: process.env.NODE_ENV,
+      demoOnly: process.env.DEMO_ONLY,
+      cursorSecret: process.env.FINANCE_QUERY_CURSOR_SECRET,
+      syncId: process.env.ACTUAL_SYNC_ID,
+    };
+    delete process.env.FINANCE_QUERY_CURSOR_SECRET;
+    delete process.env.ACTUAL_SYNC_ID;
+    process.env.NODE_ENV = 'production';
+    delete process.env.DEMO_ONLY;
+    try {
+      assert.throws(
+        () => resolveCursorSigningSecret(),
+        QueryCursorSecretError,
+      );
+      assert.throws(
+        () => assertCursorSigningConfigured(),
+        QueryCursorSecretError,
+      );
+      assert.throws(
+        () => encodeSearchCursor({
+          start: '2024-01-01',
+          end: '2024-01-31',
+          q: '',
+          limit: 10,
+          generation: 1,
+        }),
+        QueryCursorSecretError,
+      );
+    } finally {
+      process.env.NODE_ENV = saved.nodeEnv;
+      if (saved.demoOnly == null) delete process.env.DEMO_ONLY;
+      else process.env.DEMO_ONLY = saved.demoOnly;
+      if (saved.cursorSecret == null) delete process.env.FINANCE_QUERY_CURSOR_SECRET;
+      else process.env.FINANCE_QUERY_CURSOR_SECRET = saved.cursorSecret;
+      if (saved.syncId == null) delete process.env.ACTUAL_SYNC_ID;
+      else process.env.ACTUAL_SYNC_ID = saved.syncId;
+    }
+  });
+
+  it('accepts validated ACTUAL_SYNC_ID when explicit cursor secret is absent', () => {
+    const saved = {
+      cursorSecret: process.env.FINANCE_QUERY_CURSOR_SECRET,
+      syncId: process.env.ACTUAL_SYNC_ID,
+    };
+    delete process.env.FINANCE_QUERY_CURSOR_SECRET;
+    process.env.ACTUAL_SYNC_ID = 'stable-sync-id-12345678';
+    try {
+      assert.equal(resolveCursorSigningSecret(), 'stable-sync-id-12345678');
+      const cursor = encodeSearchCursor({
+        start: '2024-01-01',
+        end: '2024-01-31',
+        q: '',
+        limit: 10,
+        generation: 3,
+      });
+      assert.equal(decodeSearchCursor(cursor, { expectedGeneration: 3 }).generation, 3);
+    } finally {
+      if (saved.cursorSecret == null) delete process.env.FINANCE_QUERY_CURSOR_SECRET;
+      else process.env.FINANCE_QUERY_CURSOR_SECRET = saved.cursorSecret;
+      if (saved.syncId == null) delete process.env.ACTUAL_SYNC_ID;
+      else process.env.ACTUAL_SYNC_ID = saved.syncId;
+    }
+  });
+
+  it('invalidates cursors signed before a secret rotation', () => {
+    const saved = process.env.FINANCE_QUERY_CURSOR_SECRET;
+    process.env.FINANCE_QUERY_CURSOR_SECRET = 'rotation-secret-a';
+    const cursor = encodeSearchCursor({
+      start: '2024-01-01',
+      end: '2024-01-31',
+      q: '',
+      limit: 10,
+      generation: 1,
+    });
+    process.env.FINANCE_QUERY_CURSOR_SECRET = 'rotation-secret-b';
+    assert.throws(() => decodeSearchCursor(cursor), QueryRangeExceededError);
+    process.env.FINANCE_QUERY_CURSOR_SECRET = saved;
   });
 });

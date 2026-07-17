@@ -35,7 +35,11 @@ cd .. && npm run check
 | `FINANCE_QUERY_LEDGER_CHUNK_DAYS` | 120 | Calendar chunk size for sequential fetches |
 | `FINANCE_QUERY_MAX_TXN_LIST_ROWS` | 10000 | Max formatted transaction rows returned |
 | `FINANCE_QUERY_MAX_SEARCH_RANGE_DAYS` | 1095 | Max search window |
-| `FINANCE_QUERY_CURSOR_SECRET` | ACTUAL_SYNC_ID | HMAC secret for search cursors |
+| `FINANCE_QUERY_CURSOR_SECRET` | ACTUAL_SYNC_ID | HMAC secret for search cursors; required on non-local deployments when `ACTUAL_SYNC_ID` is absent or invalid |
 | `FINANCE_QUERY_BUDGET_MS` | 120000 | Instrumentation budget marker |
+
+Production and other non-local deployments fail closed at startup when neither `FINANCE_QUERY_CURSOR_SECRET` nor a validated `ACTUAL_SYNC_ID` (≥8 chars, not the dev fallback) is configured. The dev-only fallback applies only under `NODE_ENV=test`, `DEMO_ONLY=1`, or loopback development.
+
+Row-cap semantics: `rowsScanned` may exceed `FINANCE_QUERY_MAX_LEDGER_ROWS` when a single Actual chunk allocates more rows than the retain budget, but `peakRowsRetained` (and `X-Finance-Query-Peak-Retained`) never exceeds the cap.
 
 Exceeded bounds return HTTP 400 (`QUERY_RANGE_EXCEEDED`) or 413 (`QUERY_RESULT_LIMIT_EXCEEDED`).

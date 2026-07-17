@@ -713,6 +713,19 @@
       }
     }
 
+    function renderMetricPos(metric, fallback = 'Unavailable') {
+      if (metric?.complete === true && Number.isFinite(metric.value)) return fmtPos(metric.value);
+      if (
+        metric?.complete === false
+        && metric?.lowerBound != null
+        && Number.isFinite(metric.lowerBound)
+        && metric.lowerBound > 0
+      ) {
+        return `${metric.lowerBoundLabel || 'at least'} ${fmtPos(metric.lowerBound)}`;
+      }
+      return fallback;
+    }
+
     async function loadToday() {
       try {
         const response = await fetch('/api/v1/today');
@@ -859,7 +872,7 @@
     // ---- Reimbursement --------------------------------------------------------
     async function loadReimbursement() {
       const data = await (await fetch('/api/reimbursement')).json();
-      document.getElementById('oweTotal').textContent = fmtPos(data.totalOwed);
+      document.getElementById('oweTotal').textContent = renderMetricPos(data.totalOwed);
       const owers = data.owes || [];
       const oweList = document.getElementById('oweList');
       if (!owers.length) oweList.innerHTML = '<div class="empty-state">All settled up 🎉</div>';

@@ -122,6 +122,17 @@ class QueryResultLimitExceededError extends AppError {
   }
 }
 
+class QueryCursorSecretError extends AppError {
+  constructor(message = 'Query cursor signing secret is not configured') {
+    super(message, {
+      code: 'QUERY_CURSOR_SECRET_UNAVAILABLE',
+      status: 500,
+      expose: false,
+    });
+    this.name = 'QueryCursorSecretError';
+  }
+}
+
 class ForecastMoneyValidationError extends AppError {
   constructor(cause) {
     super('Forecast money input is invalid', {
@@ -188,6 +199,7 @@ module.exports = {
   AppError,
   ForecastMoneyValidationError,
   KnownPreApplyError,
+  QueryCursorSecretError,
   QueryRangeExceededError,
   QueryResultLimitExceededError,
   RequestValidationError,

@@ -18,7 +18,17 @@ class QueryResultLimitExceededError extends Error {
   }
 }
 
+class QueryCursorSecretError extends Error {
+  constructor(message = 'Query cursor signing secret is not configured') {
+    super(message);
+    this.name = 'QueryCursorSecretError';
+    this.code = 'QUERY_CURSOR_SECRET_UNAVAILABLE';
+    this.status = 500;
+  }
+}
+
 module.exports = {
+  QueryCursorSecretError,
   QueryRangeExceededError,
   QueryResultLimitExceededError,
 };
