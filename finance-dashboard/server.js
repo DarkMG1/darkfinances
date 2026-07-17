@@ -524,10 +524,16 @@ function runActualProjectionMutation(task, ...keys) {
   const list = keys.flat().filter(Boolean);
   const label = list.length > 0 ? list.join(',') : 'all';
   return actualCoordinator.runWrite(async () => {
-    const result = await task();
-    if (list.length > 0) invalidateActualProjection(...list);
-    else invalidateActualProjection();
-    return result;
+    try {
+      return await task();
+    } finally {
+      // Sidecar persistence may succeed before journal local_applied throws
+      // (OUTCOME_UNKNOWN). Invalidate so cachedActual cannot serve pre-mutation
+      // projections after durable sidecar writes. Pre-effect task errors are
+      // safe to invalidate — no durable mutation occurred.
+      if (list.length > 0) invalidateActualProjection(...list);
+      else invalidateActualProjection();
+    }
   }, { invalidateBefore: false, label: `projection:${label}` });
 }
 
@@ -701,16 +707,18 @@ async function finalizeBulkMutation(operation, mutate, { kind } = {}) {
 async function setRecurring(req, operation) {
   const { key } = parse(schemas.keyParam, req.params, 'recurring key');
   const { status, hidden, forced, isBill, cancellation } = parse(schemas.recurringOverride, req.body, 'recurring override');
-  const result = await applyLocal(operation, () =>
-    data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation }));
-  invalidateHttpCache();
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () =>
+      data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation })),
+    'recurring-18',
+  );
 }
 async function markRecurring(req, operation) {
   const { payee, isBill } = parse(schemas.markRecurring, req.body, 'recurring merchant');
-  const result = await applyLocal(operation, () => data.markRecurring({ payee, isBill }));
-  invalidateHttpCache();
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.markRecurring({ payee, isBill })),
+    'recurring-18',
+  );
 }
 async function splitTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
@@ -1014,16 +1022,18 @@ async function doRefresh(operation) {
 
 async function markBill(req, operation) {
   const { id, key, dueDate, paid } = parse(schemas.markBill, req.body, 'bill state');
-  const result = await applyLocal(operation, () => data.setBillPaid({ id, key, dueDate, paid }));
-  invalidateHttpCache(); // bills are cached per horizon
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setBillPaid({ id, key, dueDate, paid })),
+    'bills-45',
+  );
 }
 
 async function setOwes(req, operation) {
   const config = parse(schemas.owesConfig, req.body, 'reimbursement configuration');
-  const result = await applyLocal(operation, () => data.setOwesConfig(config));
-  invalidateHttpCache(); // reimbursement aggregations depend on this config
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setOwesConfig(config)),
+    'reimb-d-d-false', 'today',
+  );
 }
 
 async function createTxn(req, operation) {

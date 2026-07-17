@@ -438,6 +438,8 @@ test('production-path cachedActual fill cannot republish after mutation invalida
     fs.rmSync(dir, { recursive: true, force: true });
   });
   await waitForServer(base, child, logs);
+  const { body: pingBefore } = await apiRequest(base, '/api/v1/ping');
+  const genBefore = pingBefore.data.actualCoordinator.generation;
   const readPromise = apiRequest(base, '/api/v1/accounts');
   await new Promise((resolve) => setTimeout(resolve, 5));
   const invalidatePromise = apiRequest(base, '/api/v1/recurring/test-key/override', {
@@ -448,11 +450,10 @@ test('production-path cachedActual fill cannot republish after mutation invalida
   const [{ body: firstBody }, { response: invalidateResponse }] = await Promise.all([readPromise, invalidatePromise]);
   assert.equal(invalidateResponse.status, 200);
   assert.ok(['StaleDuringFill', 'FreshAfterInvalidate'].includes(firstBody.data[0].name));
+  const { body: pingAfterMutate } = await apiRequest(base, '/api/v1/ping');
+  assert.ok(pingAfterMutate.data.actualCoordinator.generation > genBefore);
   const { body: secondBody } = await apiRequest(base, '/api/v1/accounts');
   assert.equal(secondBody.data[0].name, 'FreshAfterInvalidate');
-  const { body: pingBody } = await apiRequest(base, '/api/v1/ping');
-  const stats = pingBody.data.actualCoordinator.stats;
-  assert.ok(stats.staleFillsDiscarded >= 1 || stats.staleFillRetries >= 1);
 });
 
 test('account override sidecar mutation discards in-flight accounts fill', async (t) => {
@@ -470,6 +471,7 @@ test('account override sidecar mutation discards in-flight accounts fill', async
       syncNow: async () => ({ ok: true }),
       getAccounts: async () => {
         accountsCall += 1;
+        mark('getAccounts:' + accountsCall);
         mark('fill:start');
         await waitSidecarRelease();
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -484,6 +486,8 @@ test('account override sidecar mutation discards in-flight accounts fill', async
     fs.rmSync(dir, { recursive: true, force: true });
   });
   await waitForServer(base, child, logs);
+  const { body: pingBefore } = await apiRequest(base, '/api/v1/ping');
+  const genBefore = pingBefore.data.actualCoordinator.generation;
   const readPromise = apiRequest(base, '/api/v1/accounts');
   await waitForMarker(dir, 'fill:start');
   const mutatePromise = apiRequest(base, '/api/v1/accounts/a1/override', {
@@ -495,10 +499,12 @@ test('account override sidecar mutation discards in-flight accounts fill', async
   const [{ body: firstBody }, { response: mutateResponse }] = await Promise.all([readPromise, mutatePromise]);
   assert.equal(mutateResponse.status, 200);
   assert.equal(firstBody.data[0].name, 'BeforeOverride');
+  const { body: pingAfterMutate } = await apiRequest(base, '/api/v1/ping');
+  assert.ok(pingAfterMutate.data.actualCoordinator.generation > genBefore);
   const { body: secondBody } = await apiRequest(base, '/api/v1/accounts');
   assert.equal(secondBody.data[0].name, 'AfterOverride');
-  const { body: pingBody } = await apiRequest(base, '/api/v1/ping');
-  assert.ok(pingBody.data.actualCoordinator.generation >= 1);
+  const marker = fs.readFileSync(path.join(dir, 'marker.log'), 'utf8').trim().split('\n');
+  assert.ok(marker.includes('getAccounts:2'));
 });
 
 test('events sidecar mutation discards in-flight events fill', async (t) => {
@@ -530,6 +536,8 @@ test('events sidecar mutation discards in-flight events fill', async (t) => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
   await waitForServer(base, child, logs);
+  const { body: pingBefore } = await apiRequest(base, '/api/v1/ping');
+  const genBefore = pingBefore.data.actualCoordinator.generation;
   const readPromise = apiRequest(base, '/api/v1/events');
   await waitForMarker(dir, 'fill:start');
   const mutatePromise = apiRequest(base, '/api/v1/events', {
@@ -541,10 +549,12 @@ test('events sidecar mutation discards in-flight events fill', async (t) => {
   const [{ body: firstBody }, { response: mutateResponse }] = await Promise.all([readPromise, mutatePromise]);
   assert.equal(mutateResponse.status, 200);
   assert.equal(firstBody.data.events[0].name, 'StaleEvent');
+  const { body: pingAfterMutate } = await apiRequest(base, '/api/v1/ping');
+  assert.ok(pingAfterMutate.data.actualCoordinator.generation > genBefore);
   const { body: secondBody } = await apiRequest(base, '/api/v1/events');
   assert.equal(secondBody.data.events[0].name, 'FreshEvent');
-  const { body: pingBody } = await apiRequest(base, '/api/v1/ping');
-  assert.ok(pingBody.data.actualCoordinator.generation >= 1);
+  const marker = fs.readFileSync(path.join(dir, 'marker.log'), 'utf8').trim().split('\n');
+  assert.ok(marker.filter((line) => line === 'fill:start').length >= 2);
 });
 
 test('goals sidecar mutation discards in-flight goals fill', async (t) => {
@@ -576,6 +586,8 @@ test('goals sidecar mutation discards in-flight goals fill', async (t) => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
   await waitForServer(base, child, logs);
+  const { body: pingBefore } = await apiRequest(base, '/api/v1/ping');
+  const genBefore = pingBefore.data.actualCoordinator.generation;
   const readPromise = apiRequest(base, '/api/v1/goals');
   await waitForMarker(dir, 'fill:start');
   const mutatePromise = apiRequest(base, '/api/v1/goals', {
@@ -587,8 +599,194 @@ test('goals sidecar mutation discards in-flight goals fill', async (t) => {
   const [{ body: firstBody }, { response: mutateResponse }] = await Promise.all([readPromise, mutatePromise]);
   assert.equal(mutateResponse.status, 200);
   assert.equal(firstBody.data[0].name, 'StaleGoal');
+  const { body: pingAfterMutate } = await apiRequest(base, '/api/v1/ping');
+  assert.ok(pingAfterMutate.data.actualCoordinator.generation > genBefore);
   const { body: secondBody } = await apiRequest(base, '/api/v1/goals');
   assert.equal(secondBody.data[0].name, 'FreshGoal');
-  const { body: pingBody } = await apiRequest(base, '/api/v1/ping');
-  assert.ok(pingBody.data.actualCoordinator.generation >= 1);
+  const marker = fs.readFileSync(path.join(dir, 'marker.log'), 'utf8').trim().split('\n');
+  assert.ok(marker.filter((line) => line === 'fill:start').length >= 2);
+});
+
+test('projection mutation invalidates cache when journal local_applied persistence fails', async (t) => {
+  const port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-coordinator-journal-fail-'));
+  const journalPath = path.join(dir, 'operation-journal.json');
+  const { child, logs, base } = spawnServer(dir, port, `
+    const fs = require('fs');
+    const path = require('path');
+    const root = process.env.TEST_DASHBOARD_ROOT;
+    const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');
+    const journalModPath = require.resolve(path.join(root, 'lib/operation-journal.js'));
+    const { writeJsonFile } = require(path.join(root, 'lib/json-store.js'));
+    const journalMod = require(journalModPath);
+    const OrigJournal = journalMod.OperationJournal;
+    journalMod.OperationJournal = class PatchedOperationJournal extends OrigJournal {
+      constructor(file, options = {}) {
+        let writeCount = 0;
+        super(file, {
+          ...options,
+          writeState(target, state) {
+            writeCount += 1;
+            if (writeCount === 2) {
+              const error = new Error('injected local_applied journal failure');
+              error.code = 'INJECTED_WRITE_FAILURE';
+              throw error;
+            }
+            writeJsonFile(target, state);
+          },
+        });
+      }
+    };
+    const dataPath = require.resolve(path.join(root, 'dataModule.js'));
+    let mutated = false;
+    const mock = {
+      initApi: async () => ({ ok: true }),
+      shutdownApi: async () => ({ ok: true }),
+      getHealth: () => ({ ready: true }),
+      syncNow: async () => ({ ok: true }),
+      getEvents: async () => {
+        mark('getEvents:' + (mutated ? 'fresh' : 'stale'));
+        return {
+          events: [{ slug: 'trip', name: mutated ? 'FreshAfterSidecar' : 'CachedStale', taggedCount: 0 }],
+        };
+      },
+      saveEvent: async () => {
+        mark('saveEvent');
+        mutated = true;
+        return { ok: true, slug: 'trip' };
+      },
+    };
+    require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
+  `);
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch (_) {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitForServer(base, child, logs);
+
+  const warm = await apiRequest(base, '/api/v1/events');
+  assert.equal(warm.response.status, 200);
+  assert.equal(warm.body.data.events[0].name, 'CachedStale');
+
+  const mutate = await apiRequest(base, '/api/v1/events', {
+    method: 'POST',
+    key: 'journal-fail-events',
+    body: { name: 'Trip', slug: 'trip' },
+  });
+  assert.equal(mutate.response.status, 409);
+  assert.equal(mutate.body.code, 'OUTCOME_UNKNOWN');
+
+  const op = await apiRequest(base, '/api/v1/operations/journal-fail-events');
+  assert.equal(op.response.status, 200);
+  assert.equal(op.body.data.phase, 'started');
+
+  const fresh = await apiRequest(base, '/api/v1/events');
+  assert.equal(fresh.response.status, 200);
+  assert.equal(fresh.body.data.events[0].name, 'FreshAfterSidecar');
+
+  const marker = fs.readFileSync(path.join(dir, 'marker.log'), 'utf8').trim().split('\n');
+  assert.ok(marker.includes('saveEvent'));
+  assert.ok(marker.indexOf('saveEvent') < marker.lastIndexOf('getEvents:fresh'));
+  assert.equal(fs.existsSync(journalPath), true);
+});
+
+test('recurring sidecar mutation discards in-flight recurring fill', async (t) => {
+  const port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-coordinator-recurring-stale-'));
+  const { child, logs, base, releaseFill } = spawnServerWithSidecarGate(dir, port, `
+    ${markLine()}
+    const path = require('path');
+    const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
+    let recurringCall = 0;
+    const mock = {
+      initApi: async () => ({ ok: true }),
+      shutdownApi: async () => ({ ok: true }),
+      getHealth: () => ({ ready: true }),
+      syncNow: async () => ({ ok: true }),
+      getRecurring: async () => {
+        recurringCall += 1;
+        mark('fill:start');
+        await waitSidecarRelease();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return [{ key: 'rent', name: recurringCall === 1 ? 'StaleRecurring' : 'FreshRecurring' }];
+      },
+      setRecurringOverride: async () => ({ ok: true }),
+    };
+    require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
+  `);
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch (_) {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitForServer(base, child, logs);
+  const { body: pingBefore } = await apiRequest(base, '/api/v1/ping');
+  const genBefore = pingBefore.data.actualCoordinator.generation;
+  const readPromise = apiRequest(base, '/api/v1/recurring?window=18');
+  await waitForMarker(dir, 'fill:start');
+  const mutatePromise = apiRequest(base, '/api/v1/recurring/rent/override', {
+    method: 'POST',
+    key: 'recurring-stale',
+    body: { status: 'active', hidden: false },
+  });
+  releaseFill();
+  const [{ body: firstBody }, { response: mutateResponse }] = await Promise.all([readPromise, mutatePromise]);
+  assert.equal(mutateResponse.status, 200);
+  assert.equal(firstBody.data[0].name, 'StaleRecurring');
+  const { body: pingAfterMutate } = await apiRequest(base, '/api/v1/ping');
+  assert.ok(pingAfterMutate.data.actualCoordinator.generation > genBefore);
+  const { body: secondBody } = await apiRequest(base, '/api/v1/recurring?window=18');
+  assert.equal(secondBody.data[0].name, 'FreshRecurring');
+  const marker = fs.readFileSync(path.join(dir, 'marker.log'), 'utf8').trim().split('\n');
+  assert.ok(marker.filter((line) => line === 'fill:start').length >= 2);
+});
+
+test('bills sidecar mutation completes before subsequent GET returns fresh projection', async (t) => {
+  const port = await unusedPort();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-coordinator-bills-fresh-'));
+  const { child, logs, base, releaseFill } = spawnServerWithSidecarGate(dir, port, `
+    ${markLine()}
+    const path = require('path');
+    const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
+    let billsCall = 0;
+    const mock = {
+      initApi: async () => ({ ok: true }),
+      shutdownApi: async () => ({ ok: true }),
+      getHealth: () => ({ ready: true }),
+      syncNow: async () => ({ ok: true }),
+      getBills: async () => {
+        billsCall += 1;
+        mark('fill:start');
+        await waitSidecarRelease();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return [{ id: 'b1', name: billsCall === 1 ? 'StaleBill' : 'FreshBill', paid: billsCall > 1 }];
+      },
+      setBillPaid: async () => {
+        mark('setBillPaid');
+        return { ok: true };
+      },
+    };
+    require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
+  `);
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch (_) {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await waitForServer(base, child, logs);
+  const readPromise = apiRequest(base, '/api/v1/bills?days=45');
+  await waitForMarker(dir, 'fill:start');
+  const mutatePromise = apiRequest(base, '/api/v1/bills/paid', {
+    method: 'POST',
+    key: 'bills-fresh',
+    body: { id: 'b1', key: 'rent', dueDate: '2026-07-15', paid: true },
+  });
+  releaseFill();
+  const [{ body: firstBody }, { response: mutateResponse }] = await Promise.all([readPromise, mutatePromise]);
+  assert.equal(mutateResponse.status, 200);
+  assert.equal(firstBody.data[0].name, 'StaleBill');
+  const marker = fs.readFileSync(path.join(dir, 'marker.log'), 'utf8').trim().split('\n');
+  assert.ok(marker.includes('setBillPaid'));
+  const { body: secondBody } = await apiRequest(base, '/api/v1/bills?days=45');
+  assert.equal(secondBody.data[0].name, 'FreshBill');
+  const markerAfterGet = fs.readFileSync(path.join(dir, 'marker.log'), 'utf8').trim().split('\n');
+  assert.ok(markerAfterGet.indexOf('setBillPaid') < markerAfterGet.lastIndexOf('fill:start'));
 });

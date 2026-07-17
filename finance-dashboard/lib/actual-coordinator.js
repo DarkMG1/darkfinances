@@ -5,6 +5,8 @@ const { SerialQueue } = require('./serial-queue');
 
 const MAX_NEST_DEPTH = 32;
 const DEFAULT_DEADLOCK_MS = 30_000;
+/** Max fill recomputes when generation bumps during cachedActual I/O. */
+const MAX_STALE_FILL_ATTEMPTS = 4;
 const laneStorage = new AsyncLocalStorage();
 
 class ActualCoordinator {
@@ -22,6 +24,7 @@ class ActualCoordinator {
       invalidations: 0,
       staleFillsDiscarded: 0,
       staleFillRetries: 0,
+      staleFillExhaustions: 0,
       cacheHits: 0,
       cacheMisses: 0,
       nestedBypasses: 0,
@@ -145,22 +148,29 @@ class ActualCoordinator {
       return Promise.resolve(hit);
     }
     this.stats.cacheMisses += 1;
-    const admittedGeneration = this.generation;
     return this.runRead(async () => {
-      const rehit = this.readCacheEntry(key);
+      let rehit = this.readCacheEntry(key);
       if (rehit !== undefined) {
         this.stats.cacheHits += 1;
         return rehit;
       }
-      const value = await fn();
-      if (this.publishCacheEntry(key, value, ttl, admittedGeneration)) {
-        return value;
+      for (let attempt = 1; attempt <= MAX_STALE_FILL_ATTEMPTS; attempt += 1) {
+        const captureGeneration = this.generation;
+        const value = await fn();
+        if (this.publishCacheEntry(key, value, ttl, captureGeneration)) {
+          return value;
+        }
+        this.stats.staleFillRetries += 1;
+        rehit = this.readCacheEntry(key);
+        if (rehit !== undefined) {
+          this.stats.cacheHits += 1;
+          return rehit;
+        }
       }
-      this.stats.staleFillRetries += 1;
-      const retryGeneration = this.generation;
-      const retryValue = await fn();
-      this.publishCacheEntry(key, retryValue, ttl, retryGeneration);
-      return retryValue;
+      this.stats.staleFillExhaustions += 1;
+      throw new Error(
+        `${this.name} cache fill for "${key}" exhausted ${MAX_STALE_FILL_ATTEMPTS} stale-fill attempts`,
+      );
     }, { label: `cache:${key}` });
   }
 
@@ -238,4 +248,5 @@ module.exports = {
   setActualCoordinator,
   resetActualCoordinator,
   MAX_NEST_DEPTH,
+  MAX_STALE_FILL_ATTEMPTS,
 };

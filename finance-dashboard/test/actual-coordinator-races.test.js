@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const NodeCache = require('node-cache');
-const { ActualCoordinator } = require('../lib/actual-coordinator');
+const { ActualCoordinator, MAX_STALE_FILL_ATTEMPTS } = require('../lib/actual-coordinator');
 
 function legacyCached(cache, key, fn, ttl = 300) {
   const hit = cache.get(key);
@@ -143,7 +143,7 @@ test('cachedRead admits generation at cache miss and retries after invalidation 
     await gate;
     return { events: [{ name: calls === 1 ? 'StaleEvent' : 'FreshEvent' }] };
   }, 30);
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  await new Promise((resolve) => setImmediate(resolve));
   coordinator.invalidateGeneration({ keys: ['events'] });
   release();
   const result = await fill;
@@ -152,4 +152,47 @@ test('cachedRead admits generation at cache miss and retries after invalidation 
   assert.equal(calls, 2);
   assert.equal(coordinator.getHealth().stats.staleFillsDiscarded, 1);
   assert.equal(coordinator.getHealth().stats.staleFillRetries, 1);
+});
+
+test('cachedRead survives double invalidation during one fill attempt', async () => {
+  const coordinator = new ActualCoordinator('double-invalidate');
+  const cache = new NodeCache();
+  coordinator.bindCache(cache);
+  let calls = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const fill = coordinator.cachedRead('accounts', async () => {
+    calls += 1;
+    await gate;
+    return { name: calls === 1 ? 'StaleDuringFill' : 'FreshAfterDouble' };
+  }, 30);
+  await new Promise((resolve) => setImmediate(resolve));
+  coordinator.invalidateGeneration({ keys: ['accounts'] });
+  coordinator.invalidateGeneration({ keys: ['accounts'] });
+  release();
+  const result = await fill;
+  assert.equal(result.name, 'FreshAfterDouble');
+  assert.equal(coordinator.readCacheEntry('accounts').name, 'FreshAfterDouble');
+  assert.equal(calls, 2);
+  assert.equal(coordinator.getHealth().stats.staleFillsDiscarded, 1);
+  assert.equal(coordinator.getHealth().stats.staleFillRetries, 1);
+});
+
+test('cachedRead fails closed when stale-fill attempts are exhausted under churn', async () => {
+  const coordinator = new ActualCoordinator('exhaust-churn');
+  const cache = new NodeCache();
+  coordinator.bindCache(cache);
+  let calls = 0;
+  await assert.rejects(
+    coordinator.cachedRead('goals', async () => {
+      calls += 1;
+      coordinator.invalidateGeneration({ keys: ['goals'] });
+      return { name: `attempt-${calls}` };
+    }, 30),
+    /exhausted 4 stale-fill attempts/,
+  );
+  assert.equal(calls, MAX_STALE_FILL_ATTEMPTS);
+  assert.equal(coordinator.readCacheEntry('goals'), undefined);
+  assert.equal(coordinator.getHealth().stats.staleFillExhaustions, 1);
+  assert.equal(coordinator.getHealth().stats.staleFillRetries, MAX_STALE_FILL_ATTEMPTS);
 });
