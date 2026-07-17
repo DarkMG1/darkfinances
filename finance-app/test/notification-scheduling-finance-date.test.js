@@ -8,10 +8,11 @@ const { addDateOnlyDays, financeTodayAt } = require('../src/lib/finance-date-cor
 test('classifyBillReminder anchors due/day comparisons to finance today', () => {
   const dueDate = '2026-07-16';
   const financeToday = '2026-07-15';
-  const beforeNine = Date.parse('2026-07-15T08:30:00-07:00');
-  const afterNine = Date.parse('2026-07-15T10:00:00-07:00');
-  const dueDay = Date.parse('2026-07-16T12:00:00-07:00');
-  const overdueDay = Date.parse('2026-07-17T12:00:00-07:00');
+  const [y, m, d] = financeToday.split('-').map(Number);
+  const beforeNine = new Date(y, m - 1, d, 8, 30, 0).getTime();
+  const afterNine = new Date(y, m - 1, d, 10, 0, 0).getTime();
+  const dueDay = Date.parse('2026-07-16T12:00:00');
+  const overdueDay = Date.parse('2026-07-17T12:00:00');
 
   assert.equal(
     classifyBillReminder({ key: 'rent', dueDate, paid: false }, beforeNine, 'scope', financeToday).kind,
@@ -34,7 +35,8 @@ test('classifyBillReminder anchors due/day comparisons to finance today', () => 
 test('classifyBillReminder keeps day-before delivery at 9am local wall clock', () => {
   const dueDate = '2026-03-10';
   const financeToday = addDateOnlyDays(dueDate, -1);
-  const beforeNine = Date.parse('2026-03-09T08:00:00-08:00');
+  const [y, m, d] = financeToday.split('-').map(Number);
+  const beforeNine = new Date(y, m - 1, d, 8, 0, 0).getTime();
   const plan = classifyBillReminder({ key: 'rent', dueDate, paid: false }, beforeNine, 'scope', financeToday);
   assert.equal(plan.kind, 'dayBefore');
   assert.equal(plan.triggerDate.getHours(), 9);
