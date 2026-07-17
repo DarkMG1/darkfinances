@@ -1,6 +1,6 @@
 'use strict';
 
-const { AdmissionOverloadedError, AdmissionUnavailableError } = require('./errors');
+const { AdmissionOverloadedError, AdmissionUnavailableError, admissionOverloadRequiresKeyReuse } = require('./errors');
 const { loadAdmissionLimitsConfig } = require('./admission-limits-config');
 
 const TRAFFIC = Object.freeze({
@@ -110,7 +110,7 @@ class RequestAdmissionController {
     return bucket.pending > 0 || bucket.running > 0;
   }
 
-  _touchPrincipalBucket(laneState, principal) {
+  _touchPrincipalBucket(laneState, principal, lane, endpoint, trafficClass) {
     let bucket = laneState.principals.get(principal);
     if (bucket) {
       bucket.lastAccess = this.now();
@@ -130,7 +130,7 @@ class RequestAdmissionController {
       }
       if (evictKey == null) {
         this.stats.principalMapRejections += 1;
-        throw this._overloadError();
+        throw this._overloadError(1, { lane, endpoint, trafficClass });
       }
       laneState.principals.delete(evictKey);
     }
@@ -141,12 +141,6 @@ class RequestAdmissionController {
 
   _getBucket(laneState, principal) {
     return laneState.principals.get(principal) || null;
-  }
-
-  _deleteIdleBucketIfEmpty(laneState, principal) {
-    const bucket = laneState.principals.get(principal);
-    if (!bucket || this._bucketIsActive(bucket)) return;
-    laneState.principals.delete(principal);
   }
 
   endpointWeight(endpoint) {
@@ -212,8 +206,8 @@ class RequestAdmissionController {
     return true;
   }
 
-  _reserve(laneState, principal, weight, trafficClass) {
-    const bucket = this._touchPrincipalBucket(laneState, principal);
+  _reserve(laneState, principal, weight, trafficClass, lane, endpoint) {
+    const bucket = this._touchPrincipalBucket(laneState, principal, lane, endpoint, trafficClass);
     laneState.globalPending += weight;
     laneState.classPending[trafficClass] += weight;
     bucket.pending += weight;
@@ -372,12 +366,19 @@ class RequestAdmissionController {
     }
   }
 
-  _overloadError(retryAfterSeconds = 1) {
+  _overloadError(retryAfterSeconds = 1, { lane, endpoint, trafficClass, source = 'admission' } = {}) {
     this.stats.overloadRejections += 1;
-    return new AdmissionOverloadedError(
-      'Request admission limit reached; retry with the same Idempotency-Key for mutations',
-      { retryAfterSeconds },
-    );
+    const requiresKeyReuse = admissionOverloadRequiresKeyReuse({ lane, source, trafficClass });
+    const message = requiresKeyReuse
+      ? 'Request admission limit reached; retry with the same Idempotency-Key for mutations'
+      : 'Request admission limit reached; retry later';
+    return new AdmissionOverloadedError(message, {
+      retryAfterSeconds,
+      lane,
+      endpoint,
+      trafficClass,
+      source,
+    });
   }
 
   _convertTrafficClass(ticket, nextClass) {
@@ -414,17 +415,17 @@ class RequestAdmissionController {
     if (lane === 'lightweight') this.stats.lightweightAdmissions += 1;
 
     if (this._canStartNow(laneState, limits, principal, effectiveWeight, trafficClass)) {
-      this._reserve(laneState, principal, effectiveWeight, trafficClass);
+      this._reserve(laneState, principal, effectiveWeight, trafficClass, lane, endpoint);
       this._promoteToRunning(laneState, principal, effectiveWeight, trafficClass);
       return this._makeTicket(lane, principal, effectiveWeight, endpoint, trafficClass);
     }
 
     if (!this._canAdmitClass(laneState, limits, trafficClass, effectiveWeight)) {
-      throw this._overloadError();
+      throw this._overloadError(1, { lane, endpoint, trafficClass });
     }
 
     if (laneState.globalPending + laneState.globalRunning + effectiveWeight > this.config.maxPendingDepth) {
-      throw this._overloadError();
+      throw this._overloadError(1, { lane, endpoint, trafficClass });
     }
 
     const deferred = createDeferred();
@@ -460,7 +461,11 @@ class RequestAdmissionController {
       if (this._removeWaiter(laneState, waiter)) {
         this._releasePending(laneState, principal, effectiveWeight, trafficClass);
         this.stats.waitAborts += 1;
-        deferred.reject(new AdmissionUnavailableError('Client aborted before admission started'));
+        deferred.reject(new AdmissionUnavailableError('Client aborted before admission started', {
+          lane,
+          endpoint,
+          trafficClass,
+        }));
       }
     };
 
@@ -470,7 +475,7 @@ class RequestAdmissionController {
     }
 
     try {
-      this._reserve(laneState, principal, effectiveWeight, trafficClass);
+      this._reserve(laneState, principal, effectiveWeight, trafficClass, lane, endpoint);
       this._enqueueWaiter(laneState, waiter);
 
       waitTimer = setTimeout(() => {
@@ -479,7 +484,11 @@ class RequestAdmissionController {
         cleanupTimers();
         this._releasePending(laneState, principal, effectiveWeight, trafficClass);
         this.stats.waitTimeouts += 1;
-        deferred.reject(this._overloadError(Math.max(1, Math.ceil(maxWaitMs / 1000))));
+        deferred.reject(this._overloadError(Math.max(1, Math.ceil(maxWaitMs / 1000)), {
+          lane,
+          endpoint,
+          trafficClass,
+        }));
       }, maxWaitMs);
       waitTimer.unref?.();
 
@@ -493,7 +502,7 @@ class RequestAdmissionController {
         cleanupTimers();
         this._releasePending(laneState, principal, effectiveWeight, trafficClass);
         this.stats.pendingAgeTimeouts += 1;
-        deferred.reject(this._overloadError());
+        deferred.reject(this._overloadError(1, { lane, endpoint, trafficClass }));
       }, Math.min(250, this.config.maxPendingAgeMs));
       ageTimer.unref?.();
 
@@ -544,7 +553,11 @@ class RequestAdmissionController {
     const limits = laneLimits(this.config, 'mutation');
     if (!this._canAdmitClass(laneState, limits, TRAFFIC.ORDINARY, ticket.weight)) {
       ticket.release();
-      throw this._overloadError();
+      throw this._overloadError(1, {
+        lane: 'mutation',
+        endpoint,
+        trafficClass: TRAFFIC.ORDINARY,
+      });
     }
     this._convertTrafficClass(ticket, TRAFFIC.ORDINARY);
     return { ticket, mode: 'ordinary', existing: null };

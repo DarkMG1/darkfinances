@@ -39,8 +39,22 @@ class AccountNotFoundError extends AppError {
   }
 }
 
+function admissionOverloadRequiresKeyReuse({ lane, source, trafficClass } = {}) {
+  if (source === 'queue') return true;
+  if (lane === 'mutation') return true;
+  if (trafficClass === 'recovery') return true;
+  return false;
+}
+
 class AdmissionOverloadedError extends AppError {
-  constructor(message, { retryAfterSeconds = 1, requiresIdempotencyKeyReuse = true } = {}) {
+  constructor(message, {
+    retryAfterSeconds = 1,
+    requiresIdempotencyKeyReuse,
+    lane,
+    source = 'admission',
+    endpoint,
+    trafficClass,
+  } = {}) {
     super(message, {
       code: 'ADMISSION_OVERLOADED',
       status: 429,
@@ -48,18 +62,30 @@ class AdmissionOverloadedError extends AppError {
     });
     this.name = 'AdmissionOverloadedError';
     this.retryAfterSeconds = retryAfterSeconds;
-    this.requiresIdempotencyKeyReuse = requiresIdempotencyKeyReuse;
+    this.lane = lane ?? undefined;
+    this.source = source;
+    this.endpoint = endpoint ?? undefined;
+    this.trafficClass = trafficClass ?? undefined;
+    this.requiresIdempotencyKeyReuse = requiresIdempotencyKeyReuse
+      ?? admissionOverloadRequiresKeyReuse({ lane, source, trafficClass });
   }
 }
 
 class AdmissionUnavailableError extends AppError {
-  constructor(message = 'Request admission is unavailable') {
+  constructor(message = 'Request admission is unavailable', {
+    lane,
+    endpoint,
+    trafficClass,
+  } = {}) {
     super(message, {
       code: 'ADMISSION_UNAVAILABLE',
       status: 503,
       expose: true,
     });
     this.name = 'AdmissionUnavailableError';
+    this.lane = lane ?? undefined;
+    this.endpoint = endpoint ?? undefined;
+    this.trafficClass = trafficClass ?? undefined;
   }
 }
 
@@ -134,6 +160,7 @@ function classifyError(error) {
 
 module.exports = {
   AccountNotFoundError,
+  admissionOverloadRequiresKeyReuse,
   AdmissionOverloadedError,
   AdmissionUnavailableError,
   AppError,

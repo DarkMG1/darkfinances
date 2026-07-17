@@ -21,14 +21,20 @@ function apiErrorBody(error, req) {
   if (error && Array.isArray(error.issues) && error.issues.length) {
     body.issues = sanitizeIssues(error.issues);
   }
-  if (error?.requiresIdempotencyKeyReuse === true) {
-    body.requiresIdempotencyKeyReuse = true;
-  }
   if (error instanceof AdmissionOverloadedError || error instanceof AdmissionUnavailableError) {
     body.admission = {
       retryAfterSeconds: error.retryAfterSeconds ?? undefined,
-      requiresIdempotencyKeyReuse: error.requiresIdempotencyKeyReuse ?? undefined,
+      lane: error.lane ?? undefined,
+      source: error.source ?? undefined,
+      endpoint: error.endpoint ?? undefined,
+      trafficClass: error.trafficClass ?? undefined,
     };
+    if (error instanceof AdmissionOverloadedError && error.requiresIdempotencyKeyReuse === true) {
+      body.requiresIdempotencyKeyReuse = true;
+      body.admission.requiresIdempotencyKeyReuse = true;
+    }
+  } else if (error?.requiresIdempotencyKeyReuse === true) {
+    body.requiresIdempotencyKeyReuse = true;
   }
   return { status: classified.status, body };
 }

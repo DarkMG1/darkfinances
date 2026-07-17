@@ -21,7 +21,7 @@ class SerialQueue {
       this.rejectedOverCapacity += 1;
       return Promise.reject(new AdmissionOverloadedError(
         `${this.name} pending capacity exceeded; retry with the same Idempotency-Key for mutations`,
-        { retryAfterSeconds: 1 },
+        { retryAfterSeconds: 1, lane: 'mutation', source: 'queue' },
       ));
     }
     this.pending += 1;

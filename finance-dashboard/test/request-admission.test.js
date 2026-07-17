@@ -565,14 +565,69 @@ test('missing Idempotency-Key fails before admission or queue work', async () =>
   assertCountersZero(admission);
 });
 
-test('overload envelope uses request id metadata and requires idempotency key reuse', () => {
-  const req = { requestId: 'req-123' };
-  const body = apiErrorBody(new AdmissionOverloadedError('busy', { retryAfterSeconds: 2 }), req);
+test('read overload envelope omits idempotency key reuse metadata', () => {
+  const req = { requestId: 'req-read' };
+  const body = apiErrorBody(new AdmissionOverloadedError('busy', {
+    retryAfterSeconds: 2,
+    lane: 'read',
+    endpoint: 'get /accounts',
+  }), req);
   assert.equal(body.status, 429);
   assert.equal(body.body.code, 'ADMISSION_OVERLOADED');
-  assert.equal(body.body.requestId, 'req-123');
-  assert.equal(body.body.requiresIdempotencyKeyReuse, true);
+  assert.equal(body.body.requestId, 'req-read');
+  assert.equal(body.body.requiresIdempotencyKeyReuse, undefined);
+  assert.equal(body.body.admission.lane, 'read');
+  assert.equal(body.body.admission.requiresIdempotencyKeyReuse, undefined);
   assert.equal(body.body.admission.retryAfterSeconds, 2);
+});
+
+test('mutation overload envelope includes idempotency key reuse metadata', () => {
+  const req = { requestId: 'req-mut' };
+  const body = apiErrorBody(new AdmissionOverloadedError('busy', {
+    retryAfterSeconds: 2,
+    lane: 'mutation',
+    endpoint: 'post /budgets',
+  }), req);
+  assert.equal(body.body.requiresIdempotencyKeyReuse, true);
+  assert.equal(body.body.admission.requiresIdempotencyKeyReuse, true);
+  assert.equal(body.body.admission.lane, 'mutation');
+});
+
+test('abort after admission before mutation queue does not execute handler', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({ recoveryReserve: 1, controlReserve: 0 }));
+  const queue = new SerialQueue('mutations', { maxPending: 8 });
+  const journal = new OperationJournal();
+  const abort = new AbortController();
+  const key = 'abort-key-12345678';
+  let handlerRuns = 0;
+
+  const { ticket } = await admission.acquireMutationWithJournalPeek({
+    principal: 'token:api',
+    endpoint: 'post /budgets',
+    weight: 1,
+    peekJournal: () => journal.get(key),
+    signal: abort.signal,
+  });
+  await Promise.resolve();
+  abort.abort();
+
+  await assert.rejects(async () => {
+    if (abort.signal.aborted) {
+      throw new AdmissionUnavailableError('Client aborted before mutation started', {
+        lane: 'mutation',
+        endpoint: 'post /budgets',
+      });
+    }
+    return queue.run(async () => {
+      handlerRuns += 1;
+      return { ok: true };
+    });
+  }, AdmissionUnavailableError);
+
+  ticket.release();
+  assert.equal(handlerRuns, 0);
+  assert.equal(queue.pending, 0);
+  assertCountersZero(admission);
 });
 
 test('closeAdmission rejects new work with 503 semantics and clears waiters', async () => {

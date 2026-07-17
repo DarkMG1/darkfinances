@@ -876,7 +876,7 @@ async function deleteReceiptH(req, operation) {
 async function receiptImageH(req, res) {
   try {
     await withReadAdmission(req, actualCoordinator, async () => {
-      const f = data.getReceiptFile({ id: req.params.id });
+      const f = await Promise.resolve(data.getReceiptFile({ id: req.params.id }));
       if (!f) {
         sendApiErrorCode(req, res, 'NOT_FOUND');
         return;

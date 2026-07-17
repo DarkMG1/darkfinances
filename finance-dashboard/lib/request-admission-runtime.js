@@ -60,9 +60,13 @@ async function withVersionedMutationAdmission(req, operationJournal, mutationQue
       signal: abort.signal,
     });
     try {
+      await Promise.resolve();
       if (abort.signal.aborted) {
         const { AdmissionUnavailableError } = require('./errors');
-        throw new AdmissionUnavailableError('Client aborted before mutation started');
+        throw new AdmissionUnavailableError('Client aborted before mutation started', {
+          lane: 'mutation',
+          endpoint: route.endpoint,
+        });
       }
       return await runMutationQueue(mutationQueue, fn);
     } finally {
@@ -94,6 +98,14 @@ async function withLegacyMutationAdmission(req, mutationQueue, fn, {
       signal: abort.signal,
     });
     try {
+      await Promise.resolve();
+      if (abort.signal.aborted) {
+        const { AdmissionUnavailableError } = require('./errors');
+        throw new AdmissionUnavailableError('Client aborted before mutation started', {
+          lane: 'mutation',
+          endpoint: route.endpoint,
+        });
+      }
       return await runMutationQueue(mutationQueue, fn);
     } finally {
       ticket.release();
@@ -169,7 +181,11 @@ async function withReadAdmission(req, actualCoordinator, fn, {
     try {
       if (abort.signal.aborted) {
         const { AdmissionUnavailableError } = require('./errors');
-        throw new AdmissionUnavailableError('Client aborted before read started');
+        throw new AdmissionUnavailableError('Client aborted before read started', {
+          lane,
+          endpoint: routeSpec.endpoint,
+          trafficClass,
+        });
       }
       return await fn();
     } finally {
