@@ -36,12 +36,14 @@ Entries with `lastGoodPolicy: allow-on-primary-invalid` may serve reads from `*.
 
 `passkeyCredentials` is registered for backup/inventory alignment but uses durability contract `passkey-server-writer`. `server.js` remains the sole writer via `lib/passkey-credentials-store.js`, which validates against the same runtime schema and persists a canonical bare array with `0600` atomic rename (no `.last-good`).
 
-Reads normalize through the authoritative schema:
+Reads normalize through the authoritative schema and `lib/passkey-credentials-schema.js` entry validation (required `credentialID`, `credentialPublicKey`, non-negative integer `counter`; optional `transports`/`createdAt`/`lastUsedAt`):
 
 - **Missing file (`ENOENT`)** → empty array `[]` (valid unregistered enrollment state).
-- **Bare array** → load unchanged.
+- **Bare array** → load unchanged when every entry validates.
 - **Documented `{ credentials: [...] }` wrapper** → unwrap losslessly in memory; writer re-canonicalizes to bare array on save.
-- **JSON literal `null` or other invalid roots** → fail closed (never treated as missing/unregistered).
+- **JSON literal `null`, malformed roots, or nonfunctional entries such as `[{}]`** → fail closed (never treated as missing/unregistered).
+
+Production reads use `readRuntimeState('passkeyCredentials', { file })` so quarantine/write-guard behavior matches the runtime store. External writes call `assertWritable(file)` before the atomic bare-array save.
 
 `lastGoodPolicy: never` — corrupt primaries are not recovered from sidecars.
 

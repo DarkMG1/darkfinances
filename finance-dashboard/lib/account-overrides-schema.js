@@ -24,14 +24,6 @@ const ENVELOPE_KEYS = new Set(['schemaVersion', 'accounts', ...PRESERVED_METADAT
 // Actual Budget account ids are UUIDs; demo fixtures use acc-<slug> ids only.
 const ACTUAL_ACCOUNT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEMO_ACCOUNT_ID_RE = /^acc-[a-z0-9]+(?:-[a-z0-9]+)*$/i;
-const TEST_FIXTURE_ACCOUNT_IDS = new Set([
-  'account',
-  'card',
-  'cash',
-  'checking',
-  'demo-checking',
-  'splitwise-account',
-]);
 
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -47,10 +39,7 @@ function cloneJson(value) {
 
 function validAccountId(id) {
   if (typeof id !== 'string') return false;
-  if (ACTUAL_ACCOUNT_ID_RE.test(id)) return true;
-  if (DEMO_ACCOUNT_ID_RE.test(id)) return true;
-  if (TEST_FIXTURE_ACCOUNT_IDS.has(id)) return true;
-  return false;
+  return ACTUAL_ACCOUNT_ID_RE.test(id) || DEMO_ACCOUNT_ID_RE.test(id);
 }
 
 function entryHasOverrideIntent(entry) {
@@ -119,7 +108,6 @@ module.exports = {
   ENTRY_KEYS,
   FLAT_LEGACY_REJECT_KEYS,
   PRESERVED_METADATA_KEYS,
-  TEST_FIXTURE_ACCOUNT_IDS,
   migrateAccountOverrides,
   validAccountId,
   validEntry,

@@ -2,60 +2,14 @@
 
 const crypto = require('crypto');
 const fs = require('fs');
-const { RUNTIME_STATE_SCHEMAS } = require('./runtime-state-schemas');
-const { RuntimeStateError } = require('./runtime-state-store');
-
-function passkeySchema() {
-  return RUNTIME_STATE_SCHEMAS.passkeyCredentials;
-}
-
-function migratePasskeyCredentialsRaw(raw) {
-  try {
-    return passkeySchema().migrate(raw);
-  } catch (cause) {
-    if (cause?.code === 'RUNTIME_STATE_FUTURE_SCHEMA') {
-      throw new RuntimeStateError(cause.message, { code: cause.code, cause });
-    }
-    throw new RuntimeStateError(cause.message, {
-      code: cause.code || 'RUNTIME_STATE_MIGRATION_FAILED',
-      cause,
-    });
-  }
-}
-
-function assertPasskeyCredentialEntry(entry, index) {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-    throw new RuntimeStateError(`passkey credential ${index} must be an object`, {
-      code: 'RUNTIME_STATE_WRITE_INVALID',
-    });
-  }
-  if (typeof entry.credentialID !== 'string' || !entry.credentialID) {
-    throw new RuntimeStateError(`passkey credential ${index} requires credentialID`, {
-      code: 'RUNTIME_STATE_WRITE_INVALID',
-    });
-  }
-  if (typeof entry.credentialPublicKey !== 'string' || !entry.credentialPublicKey) {
-    throw new RuntimeStateError(`passkey credential ${index} requires credentialPublicKey`, {
-      code: 'RUNTIME_STATE_WRITE_INVALID',
-    });
-  }
-  if (!Number.isInteger(entry.counter) || entry.counter < 0) {
-    throw new RuntimeStateError(`passkey credential ${index} requires non-negative integer counter`, {
-      code: 'RUNTIME_STATE_WRITE_INVALID',
-    });
-  }
-}
-
-function validatePasskeyCredentialsForExternalWrite(credentials) {
-  if (!Array.isArray(credentials)) {
-    throw new RuntimeStateError('passkey credentials must be an array', {
-      code: 'RUNTIME_STATE_WRITE_INVALID',
-    });
-  }
-  passkeySchema().assertWritable(credentials);
-  credentials.forEach((entry, index) => assertPasskeyCredentialEntry(entry, index));
-  return credentials;
-}
+const path = require('path');
+const { RUNTIME_STATE_SCHEMAS, cloneJson } = require('./runtime-state-schemas');
+const {
+  assertWritable,
+  readRuntimeState,
+  resetWriteGuards,
+  RuntimeStateError,
+} = require('./runtime-state-store');
 
 function loadPasskeyCredentials(file) {
   if (!file || typeof file !== 'string') {
@@ -63,27 +17,18 @@ function loadPasskeyCredentials(file) {
       code: 'RUNTIME_STATE_READ_FAILED',
     });
   }
-  if (!fs.existsSync(file)) return [];
+  return readRuntimeState('passkeyCredentials', { file, semantic: false }).value;
+}
 
-  let raw;
+function validatePasskeyCredentialsForExternalWrite(credentials) {
   try {
-    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return RUNTIME_STATE_SCHEMAS.passkeyCredentials.assertWritable(cloneJson(credentials));
   } catch (cause) {
-    throw new RuntimeStateError('Passkey credential store is corrupt', {
-      code: 'RUNTIME_STATE_CORRUPT',
-      file,
+    throw cause instanceof RuntimeStateError ? cause : new RuntimeStateError(cause.message, {
+      code: cause.code || 'RUNTIME_STATE_WRITE_INVALID',
       cause,
     });
   }
-
-  const migrated = migratePasskeyCredentialsRaw(raw);
-  if (!Array.isArray(migrated.value)) {
-    throw new RuntimeStateError('Passkey credential store must normalize to an array', {
-      code: 'RUNTIME_STATE_INVALID_SHAPE',
-      file,
-    });
-  }
-  return migrated.value;
 }
 
 function savePasskeyCredentials(credentials, file) {
@@ -92,11 +37,20 @@ function savePasskeyCredentials(credentials, file) {
       code: 'RUNTIME_STATE_WRITE_INVALID',
     });
   }
+  assertWritable(file);
   const normalized = validatePasskeyCredentialsForExternalWrite(credentials);
   const tmp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 });
-  fs.chmodSync(tmp, 0o600);
-  fs.renameSync(tmp, file);
+  try {
+    fs.writeFileSync(tmp, `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 });
+    fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, file);
+  } catch (cause) {
+    throw new RuntimeStateError(`Could not write ${path.basename(file)}`, {
+      code: 'RUNTIME_STATE_WRITE_INVALID',
+      file,
+      cause,
+    });
+  }
   return normalized;
 }
 
@@ -111,9 +65,19 @@ function normalizePasskeyCredentialsFromText(text, { file } = {}) {
       cause,
     });
   }
-  const migrated = migratePasskeyCredentialsRaw(raw);
-  if (!Array.isArray(migrated.value)) {
-    throw new RuntimeStateError('Passkey credential store must normalize to an array', {
+  const schema = RUNTIME_STATE_SCHEMAS.passkeyCredentials;
+  let migrated;
+  try {
+    migrated = schema.migrate(raw);
+  } catch (cause) {
+    throw new RuntimeStateError(cause.message, {
+      code: cause.code || 'RUNTIME_STATE_MIGRATION_FAILED',
+      file,
+      cause,
+    });
+  }
+  if (!schema.validateCurrent(migrated.value)) {
+    throw new RuntimeStateError('Passkey credential store failed schema validation', {
       code: 'RUNTIME_STATE_INVALID_SHAPE',
       file,
     });
@@ -123,8 +87,8 @@ function normalizePasskeyCredentialsFromText(text, { file } = {}) {
 
 module.exports = {
   loadPasskeyCredentials,
-  migratePasskeyCredentialsRaw,
   normalizePasskeyCredentialsFromText,
+  resetWriteGuards,
   savePasskeyCredentials,
   validatePasskeyCredentialsForExternalWrite,
 };

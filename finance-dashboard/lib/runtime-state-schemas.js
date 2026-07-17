@@ -1,6 +1,7 @@
 'use strict';
 
 const { migrateAccountOverrides } = require('./account-overrides-schema');
+const { validatePasskeyCredentials } = require('./passkey-credentials-schema');
 
 class SchemaMigrationError extends Error {
   constructor(message, code) {
@@ -866,7 +867,7 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
       invalidShapeError('passkeyCredentials', 'passkeyCredentials must be an array or { credentials: [...] } wrapper');
     },
     validate(value) {
-      return Array.isArray(value);
+      return validatePasskeyCredentials(value);
     },
   }),
 });

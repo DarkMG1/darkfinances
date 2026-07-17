@@ -6,11 +6,19 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { validateSidecar } = require('../../ops/lib/backup-verify');
+const { validatePasskeyCredentials } = require('../lib/passkey-credentials-schema');
 const {
   loadPasskeyCredentials,
   normalizePasskeyCredentialsFromText,
+  resetWriteGuards,
   savePasskeyCredentials,
 } = require('../lib/passkey-credentials-store');
+const { RuntimeStateError } = require('../lib/runtime-state-store');
+
+function passkeyReadError(error, pattern) {
+  return error instanceof RuntimeStateError
+    && (pattern.test(error.message) || pattern.test(error.cause?.message || ''));
+}
 
 const SAMPLE_CRED = Object.freeze({
   credentialID: 'cred-integration-1',
@@ -95,10 +103,58 @@ test('loadPasskeyCredentials rejects JSON null and malformed wrapper', (t) => {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const nullFile = path.join(dir, 'null.json');
   fs.writeFileSync(nullFile, 'null\n', { mode: 0o600 });
-  assert.throws(() => loadPasskeyCredentials(nullFile), /JSON null is invalid/);
+  assert.throws(
+    () => loadPasskeyCredentials(nullFile),
+    (error) => passkeyReadError(error, /JSON null is invalid/),
+  );
   const badFile = path.join(dir, 'bad.json');
   fs.writeFileSync(badFile, `${JSON.stringify({ credentials: 'bad' })}\n`, { mode: 0o600 });
-  assert.throws(() => loadPasskeyCredentials(badFile), /credentials must be an array/);
+  assert.throws(
+    () => loadPasskeyCredentials(badFile),
+    (error) => passkeyReadError(error, /credentials must be an array/),
+  );
+});
+
+test('malformed passkey credential entries fail schema backup validation and production load', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-passkey-malformed-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const malformed = JSON.stringify([{}]);
+  assert.equal(validatePasskeyCredentials(JSON.parse(malformed)), false);
+  assert.throws(
+    () => validateSidecar('passkey-credentials.json', malformed),
+    /failed schema validation|invalid/i,
+  );
+  assert.throws(
+    () => normalizePasskeyCredentialsFromText(malformed),
+    RuntimeStateError,
+  );
+  resetWriteGuards();
+  const file = path.join(dir, 'passkey-credentials.json');
+  fs.writeFileSync(file, `${malformed}\n`, { mode: 0o600 });
+  assert.throws(() => loadPasskeyCredentials(file), RuntimeStateError);
+});
+
+test('corrupt passkey primary quarantines read and blocks external save', (t) => {
+  resetWriteGuards();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-passkey-guard-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'passkey-credentials.json');
+  fs.writeFileSync(file, '[{}]\n', { mode: 0o600 });
+  assert.throws(() => loadPasskeyCredentials(file), RuntimeStateError);
+  assert.throws(
+    () => savePasskeyCredentials([SAMPLE_CRED], file),
+    (error) => error.code === 'RUNTIME_STATE_WRITE_BLOCKED',
+  );
+  assert.ok(fs.readdirSync(dir).some((entry) => entry.includes('.corrupt-')));
+});
+
+test('missing passkey file allows external save', (t) => {
+  resetWriteGuards();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-passkey-missing-save-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'passkey-credentials.json');
+  assert.doesNotThrow(() => savePasskeyCredentials([SAMPLE_CRED], file));
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), [SAMPLE_CRED]);
 });
 
 test('backup-validated passkey bytes normalize to the same credentials loadPasskeyCredentials consumes', () => {
@@ -173,6 +229,16 @@ test('server auth/status fails closed for malformed credentials file', async (t)
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const credsFile = path.join(dir, 'passkey-credentials.json');
   fs.writeFileSync(credsFile, `${JSON.stringify({ credentials: 'bad' })}\n`, { mode: 0o600 });
+  const server = await startServer(t, credsFile);
+  const response = await fetch(`${server.base}/auth/status`);
+  assert.equal(response.status, 500);
+});
+
+test('server auth/status fails closed for nonfunctional credential entries', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-passkey-server-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const credsFile = path.join(dir, 'passkey-credentials.json');
+  fs.writeFileSync(credsFile, '[{}]\n', { mode: 0o600 });
   const server = await startServer(t, credsFile);
   const response = await fetch(`${server.base}/auth/status`);
   assert.equal(response.status, 500);
