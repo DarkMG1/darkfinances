@@ -34,6 +34,7 @@ const {
   routeKey,
 } = require('./lib/mutation-route-registry');
 const { parse, schemas } = require('./lib/validation');
+const { createReconnectFreshnessProbeService } = require('./lib/reconnect-freshness-probe');
 const { readReleaseIdentity } = require('./lib/release-identity');
 const {
   exportExitCode,
@@ -89,15 +90,12 @@ function releaseIdentity() {
   return readReleaseIdentity(RELEASE_MANIFEST_PATH, __dirname);
 }
 
-function buildSourceFreshness() {
-  const release = releaseIdentity();
-  return {
-    cacheGeneration: actualCoordinator.getHealth().generation,
-    sourceRevision: release?.contract || release?.lockSha256 || null,
-    financeTimeZone: FINANCE_TIME_ZONE,
-    observedAt: Date.now(),
-  };
-}
+const reconnectFreshnessProbe = createReconnectFreshnessProbeService({
+  coordinator: actualCoordinator,
+  readAccountsProbe: () => data.getAccounts(),
+  financeTimeZone: FINANCE_TIME_ZONE,
+  deployIdentity: releaseIdentity,
+});
 
 // Defense-in-depth: the Actual API occasionally rejects a batch write out-of-band
 // (a promise that escapes the awaited call). Continuing after an unknown write
@@ -1513,8 +1511,18 @@ v1.get('/ping', env(async () => {
     requestAdmission: requestAdmission.getHealth(),
     queuedMutations: mutationQueue.size,
     release: releaseIdentity(),
-    sourceFreshness: buildSourceFreshness(),
   };
+}));
+v1.get('/reconnect-freshness', env(async () => {
+  const actual = data.getHealth();
+  if (runtimeHealth.fatalErrorAt || !actual.ready) {
+    throw new AppError('Finance data is not ready', {
+      code: 'NOT_READY',
+      status: 503,
+      expose: true,
+    });
+  }
+  return reconnectFreshnessProbe.runProbe();
 }));
 v1.get('/accounts', env(resolvers.accounts));
 v1.get('/today', env(resolvers.today));

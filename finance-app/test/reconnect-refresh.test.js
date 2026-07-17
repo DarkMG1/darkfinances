@@ -41,16 +41,16 @@ const SCOPE_B = 'server-bbbb';
 const operationScope = crypto.createHash('sha256').update('reconnect-profile').digest('hex');
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
 
-function sourcePayload(generation, revision = 'contract-a') {
+function probePayload(generationAfter, revision = 'rev-a', generationBefore = generationAfter - 1) {
   return {
     ok: true,
-    ts: Date.now(),
-    sourceFreshness: {
-      cacheGeneration: generation,
-      sourceRevision: revision,
-      financeTimeZone: 'America/Los_Angeles',
-      observedAt: Date.now(),
-    },
+    probeKind: 'actual-direct-accounts',
+    cacheGenerationBefore: generationBefore,
+    cacheGenerationAfter: generationAfter,
+    sourceObservedRevision: revision,
+    sourceObservedAt: Date.now(),
+    financeTimeZone: 'America/Los_Angeles',
+    deployIdentity: 'deploy-contract-a',
   };
 }
 
@@ -118,6 +118,9 @@ function createHarness(options = {}) {
   const events = [];
 
   const serverGenerationRef = { value: options.serverGeneration ?? 1 };
+  const sourceRevisionRef = {
+    value: options.sourceObservedRevision ?? (serverGenerationRef.value >= 7 ? 'rev-b' : 'rev-a'),
+  };
   let pingError = options.pingError ?? null;
   const refreshErrorRef = { value: options.refreshError ?? null };
   const { machine, keyCreations } = operationMachine();
@@ -135,7 +138,7 @@ function createHarness(options = {}) {
     fetchSourceFreshness: async () => {
       pingCalls += 1;
       if (pingError) throw pingError;
-      return sourcePayload(serverGenerationRef.value, options.sourceRevision ?? 'contract-a');
+      return probePayload(serverGenerationRef.value, sourceRevisionRef.value, serverGenerationRef.value - 1);
     },
     reconcileOperations: async () => {
       reconcileCalls += 1;
@@ -192,6 +195,9 @@ function createHarness(options = {}) {
     },
     setServerGeneration(value) {
       serverGenerationRef.value = value;
+      if (!options.sourceObservedRevision) {
+        sourceRevisionRef.value = value >= 7 ? 'rev-b' : 'rev-a';
+      }
     },
     setRefreshError(value) {
       refreshErrorRef.value = value;
@@ -273,7 +279,7 @@ test('cache A vs server source B refreshes active current-profile queries', asyn
   const owner = createReconnectRefreshOwner({
     scope: SCOPE_A,
     profileGeneration: 1,
-    fetchSourceFreshness: async () => sourcePayload(2, 'contract-b'),
+    fetchSourceFreshness: async () => probePayload(2, 'rev-b', 1),
     reconcileOperations: async () => ({ checked: 0, completed: 0, failed: 0, unresolved: 0 }),
     refreshActiveQueries: async () => refreshActiveFinanceQueriesForScope(client, SCOPE_A),
   });
@@ -307,6 +313,7 @@ test('stale cache generation on server is detected before refetch succeeds', asy
   const confirmed = harness.events().filter((event) => event.type === 'source_identity_confirmed').at(-1);
   assert.equal(confirmed.changed, true);
   assert.equal(confirmed.identity.cacheGeneration, 7);
+  assert.equal(confirmed.identity.sourceObservedRevision, 'rev-b');
 });
 
 test('ping timeout records redacted stale warning without clearing cache', async () => {
@@ -369,7 +376,7 @@ test('profile switch during ping aborts stale work for old profile', async () =>
   runner.flushSchedules(DEFAULT_ONLINE_SETTLE_MS + DEFAULT_DEBOUNCE_MS);
   assert.equal(runner.owner.isInFlight(), true);
   runner.owner.setScope(SCOPE_B);
-  resolvePing(sourcePayload(2));
+  resolvePing(probePayload(2));
   while (runner.owner.isInFlight()) await Promise.resolve();
   assert.equal(refreshCalls, 0);
 });
@@ -379,7 +386,7 @@ test('profile generation bump during refresh aborts without applying results', a
   const runner = createReconnectRefreshOwnerRunner({
     scope: SCOPE_A,
     profileGeneration: 1,
-    fetchSourceFreshness: async () => sourcePayload(1),
+    fetchSourceFreshness: async () => probePayload(1),
     reconcileOperations: async () => ({ checked: 0, completed: 0, failed: 0, unresolved: 0 }),
     refreshActiveQueries: () => new Promise((resolve) => {
       releaseRefresh = resolve;
@@ -435,7 +442,7 @@ test('unresolved operation reconciliation uses status GET only and zero mutation
   const runner = createReconnectRefreshOwnerRunner({
     scope: SCOPE_A,
     profileGeneration: 1,
-    fetchSourceFreshness: async () => sourcePayload(1),
+    fetchSourceFreshness: async () => probePayload(1),
     reconcileOperations: async () => machine.reconcileProfile(operationScope, async () => {
       statusRequests += 1;
       return { status: 'completed', result: { transactionId: 'txn-1' } };
@@ -458,7 +465,7 @@ test('purge clears confirmed identity and stale warning for scope', () => {
   const owner = createReconnectRefreshOwner({
     scope: SCOPE_A,
     profileGeneration: 1,
-    fetchSourceFreshness: async () => sourcePayload(1),
+    fetchSourceFreshness: async () => probePayload(1),
     reconcileOperations: async () => ({}),
     refreshActiveQueries: async () => {},
   });
@@ -468,15 +475,75 @@ test('purge clears confirmed identity and stale warning for scope', () => {
   owner.dispose();
 });
 
-test('extractSourceIdentity prefers explicit sourceFreshness contract', () => {
-  const identity = extractSourceIdentity(sourcePayload(4, 'rev-4'));
+test('extractSourceIdentity uses reconnect probe evidence fields honestly', () => {
+  const identity = extractSourceIdentity(probePayload(4, 'rev-4', 3));
   assert.deepEqual(identity, {
     cacheGeneration: 4,
-    sourceRevision: 'rev-4',
-    financeTimeZone: 'America/Los_Angeles',
-    observedAt: identity.observedAt,
+    sourceObservedRevision: 'rev-4',
+    sourceObservedAt: identity.sourceObservedAt,
+    deployIdentity: 'deploy-contract-a',
+    probeKind: 'actual-direct-accounts',
   });
-  assert.equal(identitiesEqual(identity, extractSourceIdentity(sourcePayload(4, 'rev-4'))), true);
+  assert.equal(identitiesEqual(identity, extractSourceIdentity(probePayload(4, 'rev-4', 3))), true);
+  assert.doesNotMatch(JSON.stringify(identity), /sourceRevision/i);
+});
+
+test('exponential backoff doubles after repeated probe failures', async () => {
+  const harness = createHarness({
+    pingError: Object.assign(new Error('timeout'), { code: 'TIMEOUT', status: 408 }),
+    backoffBaseMs: 100,
+    backoffMaxMs: 800,
+  });
+  await harness.runReconnectCycle();
+  assert.equal(harness.owner.getBackoffMs(), 100);
+  harness.advance(150);
+  harness.owner.startRefresh('backoff');
+  while (harness.owner.isInFlight()) await Promise.resolve();
+  assert.equal(harness.owner.getBackoffMs(), 200);
+});
+
+test('purge via registry clears live owner confirmed identity', async () => {
+  const {
+    configureReconnectRefreshOwnerDeps,
+    getSharedReconnectRefreshOwner,
+    resetReconnectRefreshOwnerRuntimeForTests,
+    updateReconnectRefreshRuntimeConfig,
+  } = require('../src/lib/reconnect-refresh-owner-runtime');
+  const { purgeReconnectRefreshProfileState } = require('../src/lib/reconnect-refresh-registry');
+  resetReconnectRefreshStateForTests();
+  resetRegistry();
+  resetReconnectRefreshOwnerRuntimeForTests();
+  configureReconnectRefreshOwnerDeps({
+    fetchSourceFreshness: async () => probePayload(3, 'rev-live', 2),
+    reconcileOperations: async () => ({ checked: 0, completed: 0, failed: 0, unresolved: 0 }),
+    refreshActiveQueries: async () => {},
+  });
+  updateReconnectRefreshRuntimeConfig({
+    scope: SCOPE_A,
+    profileGeneration: 1,
+    active: true,
+    demo: false,
+  });
+  const owner = getSharedReconnectRefreshOwner();
+  owner.startRefresh('manual');
+  while (owner.isInFlight()) await Promise.resolve();
+  assert.equal(owner.getConfirmedIdentity(SCOPE_A)?.cacheGeneration, 3);
+  purgeReconnectRefreshProfileState(SCOPE_A);
+  assert.equal(owner.getConfirmedIdentity(SCOPE_A), null);
+  resetReconnectRefreshOwnerRuntimeForTests();
+});
+
+test('finance status banner routes online ping recovery through reconnect owner', () => {
+  const banner = fs.readFileSync(path.join(__dirname, '../src/components/finance-status-banner.tsx'), 'utf8');
+  assert.match(banner, /requestReconnectServerRecovery/);
+  assert.match(banner, /getReconnectConnectivityPhase/);
+  assert.doesNotMatch(banner, /invalidateQueries/);
+});
+
+test('client reconnect refresh calls reconnect-freshness endpoint contract', () => {
+  const actions = fs.readFileSync(path.join(__dirname, '../src/lib/reconnect-refresh-actions.ts'), 'utf8');
+  assert.match(actions, /reconnectFreshness\.endpoint/);
+  assert.doesNotMatch(actions, /ping\.endpoint/);
 });
 
 test('root layout mounts reconnect refresh owner exactly once', () => {

@@ -27,22 +27,24 @@ export interface ReconnectRefreshRunToken {
   id: number;
 }
 
+function staleScopeError() {
+  const error = new Error('Reconnect refresh scope changed') as Error & { code?: string };
+  error.code = 'RECONNECT_REFRESH_STALE';
+  return error;
+}
+
 export async function fetchReconnectSourceFreshness(
   config: ReconnectRefreshConfig,
   token: ReconnectRefreshRunToken,
 ) {
-  if (token.scope !== config.scope) {
-    const error = new Error('Reconnect refresh scope changed') as Error & { code?: string };
-    error.code = 'RECONNECT_REFRESH_STALE';
-    throw error;
-  }
+  if (token.scope !== config.scope) throw staleScopeError();
   return buildQuery({
     serverUrl: config.serverUrl,
     token: config.token,
     demo: config.demo,
-    endpoint: API_ENDPOINTS.ping.endpoint,
-    method: API_ENDPOINTS.ping.method,
-    timeoutMs: 10_000,
+    endpoint: API_ENDPOINTS.reconnectFreshness.endpoint,
+    method: API_ENDPOINTS.reconnectFreshness.method,
+    timeoutMs: 15_000,
   });
 }
 
@@ -50,11 +52,7 @@ export async function reconcileReconnectOperations(
   config: ReconnectRefreshConfig,
   token: ReconnectRefreshRunToken,
 ) {
-  if (token.scope !== config.scope) {
-    const error = new Error('Reconnect refresh scope changed') as Error & { code?: string };
-    error.code = 'RECONNECT_REFRESH_STALE';
-    throw error;
-  }
+  if (token.scope !== config.scope) throw staleScopeError();
   if (config.demo || !config.serverUrl || !config.token) {
     return { checked: 0, completed: 0, failed: 0, unresolved: 0 };
   }
@@ -74,11 +72,7 @@ export async function refreshReconnectActiveQueries(
   config: ReconnectRefreshConfig,
   token: ReconnectRefreshRunToken,
 ) {
-  if (token.scope !== config.scope) {
-    const error = new Error('Reconnect refresh scope changed') as Error & { code?: string };
-    error.code = 'RECONNECT_REFRESH_STALE';
-    throw error;
-  }
+  if (token.scope !== config.scope) throw staleScopeError();
   try {
     await refreshActiveFinanceQueriesForScope(queryClient, config.scope);
   } catch (error) {

@@ -5,9 +5,10 @@ const { canonicalJson } = require('./request-operation-state');
 /**
  * @typedef {{
  *   cacheGeneration: number;
- *   sourceRevision: string | null;
- *   financeTimeZone: string | null;
- *   observedAt: number;
+ *   sourceObservedRevision: string | null;
+ *   sourceObservedAt: number;
+ *   deployIdentity: string | null;
+ *   probeKind: string | null;
  * }} SourceIdentity
  */
 
@@ -17,51 +18,31 @@ function asNonNegativeInt(value) {
 }
 
 /**
- * Extracts the bounded source-freshness contract from ping/source payloads.
+ * Extracts confirmed source identity from reconnect-freshness probe evidence.
  * @param {Record<string, unknown> | null | undefined} payload
  * @returns {SourceIdentity | null}
  */
 function extractSourceIdentity(payload) {
   if (!payload || typeof payload !== 'object') return null;
 
-  const explicit = payload.sourceFreshness;
-  if (explicit && typeof explicit === 'object') {
-    const cacheGeneration = asNonNegativeInt(explicit.cacheGeneration);
-    if (cacheGeneration == null) return null;
-    return {
-      cacheGeneration,
-      sourceRevision: typeof explicit.sourceRevision === 'string' ? explicit.sourceRevision : null,
-      financeTimeZone: typeof explicit.financeTimeZone === 'string' ? explicit.financeTimeZone : null,
-      observedAt: asNonNegativeInt(explicit.observedAt) ?? Date.now(),
-    };
-  }
-
-  const coordinator = payload.actualCoordinator;
-  const release = payload.release;
-  const cacheGeneration = coordinator && typeof coordinator === 'object'
-    ? asNonNegativeInt(coordinator.generation)
-    : null;
+  const cacheGeneration = asNonNegativeInt(payload.cacheGenerationAfter);
   if (cacheGeneration == null) return null;
-
-  const sourceRevision = release && typeof release === 'object'
-    ? (typeof release.contract === 'string'
-      ? release.contract
-      : (typeof release.lockSha256 === 'string' ? release.lockSha256 : null))
-    : null;
 
   return {
     cacheGeneration,
-    sourceRevision,
-    financeTimeZone: typeof payload.financeTimeZone === 'string' ? payload.financeTimeZone : null,
-    observedAt: asNonNegativeInt(payload.ts) ?? Date.now(),
+    sourceObservedRevision: typeof payload.sourceObservedRevision === 'string'
+      ? payload.sourceObservedRevision
+      : null,
+    sourceObservedAt: asNonNegativeInt(payload.sourceObservedAt) ?? Date.now(),
+    deployIdentity: typeof payload.deployIdentity === 'string' ? payload.deployIdentity : null,
+    probeKind: typeof payload.probeKind === 'string' ? payload.probeKind : null,
   };
 }
 
 function identityDigest(identity) {
   return canonicalJson({
     cacheGeneration: identity.cacheGeneration,
-    sourceRevision: identity.sourceRevision,
-    financeTimeZone: identity.financeTimeZone,
+    sourceObservedRevision: identity.sourceObservedRevision,
   });
 }
 

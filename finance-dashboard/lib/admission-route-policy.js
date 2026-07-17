@@ -107,6 +107,9 @@ function classifyReadRoute(req) {
   if (method === 'GET' && path === '/ping') {
     return { lane: 'read', endpoint, policy: 'control', weight: 1, cacheKey: null };
   }
+  if (method === 'GET' && path === '/reconnect-freshness') {
+    return { lane: 'read', endpoint, policy: 'control', weight: 1, cacheKey: null };
+  }
   if (method === 'GET' && (path === '/reconciliation' || path === '/reconciliation/pending')) {
     return { lane: 'read', endpoint, policy: 'actual-direct', weight: 2, cacheKey: null };
   }

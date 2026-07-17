@@ -297,6 +297,10 @@ function createReconnectRefreshOwner(deps) {
     pendingReason = null;
   }
 
+  function getBackoffMs() {
+    return backoffMs;
+  }
+
   return {
     connectivity,
     staleWarning,
@@ -309,6 +313,7 @@ function createReconnectRefreshOwner(deps) {
     setProfileGeneration,
     purgeProfile,
     getConfirmedIdentity,
+    getBackoffMs,
     getInFlight: () => inFlight,
     isInFlight: () => inFlight != null,
     dispose,
@@ -327,6 +332,12 @@ function resetReconnectRefreshStateForTests() {
 
 function purgeReconnectRefreshProfileState(scope) {
   defaultStaleWarningStore.purge(scope);
+  try {
+    const { purgeReconnectRefreshOwnerProfile } = require('./reconnect-refresh-owner-runtime');
+    purgeReconnectRefreshOwnerProfile(scope);
+  } catch {
+    // Owner runtime is configured only after the React owner mounts.
+  }
 }
 
 module.exports = {

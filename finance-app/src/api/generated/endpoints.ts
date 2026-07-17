@@ -13,6 +13,7 @@ const def = (endpoint: string, method: HttpMethod, key: string): EndpointDef => 
 
 export const API_ENDPOINTS = {
   ping: def('/api/v1/ping', 'GET', 'ping'),
+  reconnectFreshness: def('/api/v1/reconnect-freshness', 'GET', 'reconnectFreshness'),
   operation: def('/api/v1/operations/:key', 'GET', 'operation'),
   today: def('/api/v1/today', 'GET', 'today'),
   accounts: def('/api/v1/accounts', 'GET', 'accounts'),

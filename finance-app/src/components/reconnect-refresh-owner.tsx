@@ -1,4 +1,4 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 import { AppState, AppStateStatus } from 'react-native';
 import {
   fetchReconnectSourceFreshness,
@@ -9,83 +9,47 @@ import {
 import { isReconnectRefreshActive } from '@/lib/reconnect-refresh-active';
 import { subscribeNativeConnectivity } from '@/lib/reconnect-connectivity-native';
 import {
-  createReconnectRefreshOwner,
-  getReconnectStaleWarningStore,
-} from '@/lib/reconnect-refresh';
+  configureReconnectRefreshOwnerDeps,
+  getSharedReconnectRefreshOwner,
+  updateReconnectRefreshRuntimeConfig,
+} from '@/lib/reconnect-refresh-owner-runtime';
 import {
   getProfileGeneration,
   subscribeProfileGeneration,
 } from '@/lib/notification-reconciliation';
 import {
+  registerReconnectConnectivityPhase,
   registerReconnectForegroundCoincidence,
   registerReconnectRefreshRetry,
+  registerReconnectServerRecovery,
 } from '@/lib/reconnect-refresh-registry';
 import { useServerConfig } from '@/state/server';
 
-function useReconnectRefreshOwner(config: {
-  active: boolean;
+const serverConfigRef: {
   scope: string;
-  profileGeneration: number;
   serverUrl: string | null;
   token: string | null;
   demo: boolean;
-}) {
-  const ownerRef = useRef<ReturnType<typeof createReconnectRefreshOwner> | null>(null);
-  const configRef = useRef(config);
-  configRef.current = config;
+} = {
+  scope: '',
+  serverUrl: null,
+  token: null,
+  demo: false,
+};
 
-  if (!ownerRef.current) {
-    ownerRef.current = createReconnectRefreshOwner({
-      scope: config.scope,
-      profileGeneration: config.profileGeneration,
-      initialActive: config.active,
-      staleWarning: getReconnectStaleWarningStore(),
-      isEnabled: () => isReconnectRefreshActive({
-        configured: !!configRef.current.scope,
-        demo: configRef.current.demo,
-      }),
-      fetchSourceFreshness: (token: ReconnectRefreshRunToken) => fetchReconnectSourceFreshness(configRef.current, token),
-      reconcileOperations: (token: ReconnectRefreshRunToken) => reconcileReconnectOperations(configRef.current, token),
-      refreshActiveQueries: (token: ReconnectRefreshRunToken) => refreshReconnectActiveQueries(configRef.current, token),
-    });
-  }
+let ownerConfigured = false;
 
-  const owner = ownerRef.current;
-
-  useEffect(() => {
-    owner.setScope(config.scope);
-    owner.setProfileGeneration(config.profileGeneration);
-    owner.setActive(config.active);
-  }, [config.active, config.demo, config.profileGeneration, config.scope, owner]);
-
-  useEffect(() => {
-    if (!config.active) return undefined;
-    return subscribeNativeConnectivity((snapshot) => {
-      owner.handleConnectivitySnapshot(snapshot);
-    });
-  }, [config.active, owner]);
-
-  useEffect(() => {
-    const updateAppState = (next: AppStateStatus) => {
-      if (next === 'active') owner.noteForegroundCoincidence();
-    };
-    updateAppState(AppState.currentState);
-    const sub = AppState.addEventListener('change', updateAppState);
-    return () => sub.remove();
-  }, [owner]);
-
-  useEffect(() => {
-    const unregisterRetry = registerReconnectRefreshRetry(() => owner.startRefresh('manual'));
-    const unregisterForeground = registerReconnectForegroundCoincidence(() => owner.noteForegroundCoincidence());
-    return () => {
-      unregisterRetry();
-      unregisterForeground();
-    };
-  }, [owner]);
-
-  useEffect(() => () => owner.dispose(), [owner]);
-
-  return owner;
+function ensureSharedOwnerConfigured() {
+  if (ownerConfigured) return;
+  configureReconnectRefreshOwnerDeps({
+    fetchSourceFreshness: (token: ReconnectRefreshRunToken) =>
+      fetchReconnectSourceFreshness(serverConfigRef, token),
+    reconcileOperations: (token: ReconnectRefreshRunToken) =>
+      reconcileReconnectOperations(serverConfigRef, token),
+    refreshActiveQueries: (token: ReconnectRefreshRunToken) =>
+      refreshReconnectActiveQueries(serverConfigRef, token),
+  });
+  ownerConfigured = true;
 }
 
 export function ReconnectRefreshOwner() {
@@ -97,14 +61,51 @@ export function ReconnectRefreshOwner() {
     getProfileGeneration,
   );
 
-  useReconnectRefreshOwner({
-    active: refreshActive,
-    scope,
-    profileGeneration,
-    serverUrl,
-    token,
-    demo,
-  });
+  useEffect(() => {
+    ensureSharedOwnerConfigured();
+    serverConfigRef.scope = scope;
+    serverConfigRef.serverUrl = serverUrl;
+    serverConfigRef.token = token;
+    serverConfigRef.demo = demo;
+    updateReconnectRefreshRuntimeConfig({
+      scope,
+      profileGeneration,
+      active: refreshActive,
+      demo,
+    });
+  }, [demo, profileGeneration, refreshActive, scope, serverUrl, token]);
+
+  useEffect(() => {
+    if (!refreshActive) return undefined;
+    const owner = getSharedReconnectRefreshOwner();
+    return subscribeNativeConnectivity((snapshot) => {
+      owner.handleConnectivitySnapshot(snapshot);
+    });
+  }, [refreshActive]);
+
+  useEffect(() => {
+    const owner = getSharedReconnectRefreshOwner();
+    const updateAppState = (next: AppStateStatus) => {
+      if (next === 'active') owner.noteForegroundCoincidence();
+    };
+    updateAppState(AppState.currentState);
+    const sub = AppState.addEventListener('change', updateAppState);
+    return () => sub.remove();
+  }, []);
+
+  useEffect(() => {
+    const owner = getSharedReconnectRefreshOwner();
+    const unregisterRetry = registerReconnectRefreshRetry(() => owner.startRefresh('manual'));
+    const unregisterForeground = registerReconnectForegroundCoincidence(() => owner.noteForegroundCoincidence());
+    const unregisterRecovery = registerReconnectServerRecovery(() => owner.startRefresh('server-recovery'));
+    const unregisterConnectivity = registerReconnectConnectivityPhase(() => owner.connectivity.getPhase());
+    return () => {
+      unregisterRetry();
+      unregisterForeground();
+      unregisterRecovery();
+      unregisterConnectivity();
+    };
+  }, []);
 
   return null;
 }

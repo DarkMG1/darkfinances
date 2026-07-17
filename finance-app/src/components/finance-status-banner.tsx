@@ -1,12 +1,31 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { usePing } from '@/api/hooks/finance.hooks';
+import {
+  getReconnectConnectivityPhase,
+  requestReconnectServerRecovery,
+} from '@/lib/reconnect-refresh-registry';
 import { colors } from '@/theme/colors';
 
 export function FinanceStatusBanner() {
   const insets = useSafeAreaInsets();
   const ping = usePing();
+  const wasUnavailable = useRef(false);
+
+  useEffect(() => {
+    if (ping.isError) {
+      wasUnavailable.current = true;
+      return;
+    }
+    if (ping.isSuccess && wasUnavailable.current) {
+      wasUnavailable.current = false;
+      if (getReconnectConnectivityPhase() === 'online') {
+        requestReconnectServerRecovery();
+      }
+    }
+  }, [ping.isError, ping.isSuccess]);
+
   const syncError = ping.data?.actual?.lastError;
   if (!ping.isError && !syncError) return null;
 
@@ -17,7 +36,12 @@ export function FinanceStatusBanner() {
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={text}
-      onPress={() => ping.refetch()}
+      onPress={() => {
+        ping.refetch();
+        if (getReconnectConnectivityPhase() === 'online') {
+          requestReconnectServerRecovery();
+        }
+      }}
       style={({ pressed }) => [
         styles.banner,
         { top: insets.top + 4 },

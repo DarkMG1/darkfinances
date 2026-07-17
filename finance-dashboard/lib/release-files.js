@@ -39,6 +39,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/private-durable-io.js',
   'lib/reimbursement-link-admission.js',
   'lib/reimbursement-link-saga.js',
+  'lib/reconnect-freshness-probe.js',
   'lib/release-files.js',
   'lib/release-identity.js',
   'lib/release-schema.js',

@@ -14,8 +14,6 @@ function staleMessage(code: string): string {
       return 'Finance data may be stale · sign in again from Settings';
     case 'RECONNECT_SOURCE_NOT_READY':
       return 'Finance data may be stale · server is still starting';
-    case 'RECONNECT_SOURCE_SERVER':
-      return 'Finance data may be stale · server error';
     case 'RECONNECT_REFETCH_FAILED':
       return 'Finance data may be stale · refresh failed';
     default:
