@@ -488,7 +488,33 @@ function forecast(days = 90) {
     points.push({ date, balance: bal, inflow: round2(todays.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)), outflow: round2(Math.abs(todays.filter((e) => e.amount < 0).reduce((s, e) => s + e.amount, 0))) });
   }
   const lowest = points.reduce((a, p) => (p.balance < a.balance ? p : a), points[0]);
-  return { generatedAt: new Date().toISOString(), range: { start, end, days }, startBalance: round2(base), endingBalance: points[points.length - 1].balance, lowest: { date: lowest.date, balance: lowest.balance }, totals: { inflow: round2(events.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)), outflow: round2(Math.abs(events.filter((e) => e.amount < 0).reduce((s, e) => s + e.amount, 0))) }, points, events, warnings: lowest.balance < 1000 ? ['Projected cash gets low this period.'] : [] };
+  const genericBudgetTarget = 950;
+  return {
+    generatedAt: new Date().toISOString(),
+    range: { start, end, days },
+    startBalance: round2(base),
+    endingBalance: points[points.length - 1].balance,
+    lowest: { date: lowest.date, balance: lowest.balance },
+    totals: {
+      inflow: round2(events.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)),
+      outflow: round2(Math.abs(events.filter((e) => e.amount < 0).reduce((s, e) => s + e.amount, 0))),
+    },
+    points,
+    events,
+    assumptions: {
+      liquidAccounts: accounts().filter((a) => !a.offbudget && a.balance > 0).map((a) => ({ id: a.id, name: a.name })),
+      genericBudgetTarget,
+      genericBudget: {
+        target: genericBudgetTarget,
+        remaining: genericBudgetTarget,
+        complete: true,
+        incompleteReasons: [],
+      },
+      billsExcludedFromGenericBudget: true,
+      reimbursementsIncluded: false,
+    },
+    warnings: lowest.balance < 1000 ? ['Projected cash gets low this period.'] : [],
+  };
 }
 function reports() {
   const sp = spending();

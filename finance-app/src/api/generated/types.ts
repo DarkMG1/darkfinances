@@ -488,7 +488,14 @@ export interface Forecast {
   events: ForecastEvent[];
   assumptions?: {
     liquidAccounts: { id: string; name: string }[];
-    genericBudgetTarget: number;
+    /** @deprecated Use assumptions.genericBudget.target */
+    genericBudgetTarget: number | null;
+    genericBudget: {
+      target: number | null;
+      remaining: number | null;
+      complete: boolean;
+      incompleteReasons: string[];
+    };
     billsExcludedFromGenericBudget: boolean;
     reimbursementsIncluded: boolean;
   };

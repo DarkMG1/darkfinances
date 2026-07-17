@@ -31,6 +31,13 @@ test('generated contract includes semimonthly cadence', () => {
   assert.match(types, /'semimonthly'/);
 });
 
+test('generated contract keeps legacy genericBudgetTarget alias and nested genericBudget', () => {
+  const types = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
+  assert.match(types, /genericBudgetTarget: number \| null;/);
+  assert.match(types, /\/\*\* @deprecated Use assumptions\.genericBudget\.target \*\//);
+  assert.match(types, /genericBudget: \{/);
+});
+
 test('app and web render incomplete Safe-to-Spend as unavailable, never zero', () => {
   assert.match(browser, /Safe to Spend/);
   assert.match(browser, /metric\?\.complete === true && Number\.isFinite\(metric\.value\)/);

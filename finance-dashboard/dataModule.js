@@ -75,7 +75,16 @@ const {
   transactionReplacementMap,
 } = require('./lib/transaction-replacement-saga');
 const { buildCategoryInfo, transactionLeaves, summarizeCents } = require('./lib/domain/classification');
-const { fromCents, toCents } = require('./lib/domain/money');
+const { fromCents, sumCents, toCents } = require('./lib/domain/money');
+const {
+  buildForecastBudgetDailyCents,
+  buildForecastGenericBudgetContext,
+} = require('./lib/domain/cent-allocation');
+const {
+  forecastBillEventCents,
+  forecastIncomeEventCents,
+  sumOperatingCashBalanceCents,
+} = require('./lib/domain/forecast-money');
 const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
 const { metricValue } = require('./lib/metric-provenance');
 const {
@@ -3083,11 +3092,12 @@ async function getForecast({ days = 90 } = {}) {
     getReimbursement({}),
   ]);
   const liquidAccounts = accountsForMetric(accounts.filter((account) => !account.hidden), 'operating_cash');
-  const startBalance = round2(liquidAccounts.reduce((sum, account) => sum + account.balance, 0));
-  const events = [];
-  const pushEvent = (date, label, amount, kind, provenance, sourceId = null) => {
-    if (!date || date < today || date > horizon || !Number.isFinite(Number(amount)) || Math.abs(Number(amount)) < 0.005) return;
-    events.push({ date, label, amount: round2(Number(amount)), kind, provenance, sourceId });
+  const startBalanceCents = sumOperatingCashBalanceCents(liquidAccounts);
+  const eventRows = [];
+  const pushEventCents = (date, label, amountCents, kind, provenance, sourceId = null) => {
+    if (!date || date < today || date > horizon) return;
+    if (!Number.isSafeInteger(amountCents) || amountCents === 0) return;
+    eventRows.push({ date, label, amountCents, kind, provenance, sourceId });
   };
 
   for (const s of income.streams || []) {
@@ -3103,11 +3113,27 @@ async function getForecast({ days = 90 } = {}) {
       windowEnd: horizon,
     });
     for (const due of payDates) {
-      pushEvent(due, s.payee || 'Income', Math.abs(s.amount), 'income', 'inferred', s.key);
+      pushEventCents(
+        due,
+        s.payee || 'Income',
+        forecastIncomeEventCents(s.amount),
+        'income',
+        'inferred',
+        s.key,
+      );
     }
   }
   for (const b of bills.bills || []) {
-    if (!b.paid) pushEvent(b.dueDate, b.payee || 'Bill', -Math.abs(b.amount), 'bill', b.matched ? 'known' : 'inferred', b.id);
+    if (!b.paid) {
+      pushEventCents(
+        b.dueDate,
+        b.payee || 'Bill',
+        forecastBillEventCents(b.amount),
+        'bill',
+        b.matched ? 'known' : 'inferred',
+        b.id,
+      );
+    }
   }
 
   const genericCategories = (budgets.groups || []).flatMap((group) =>
@@ -3115,57 +3141,76 @@ async function getForecast({ days = 90 } = {}) {
       .filter((category) => !BILL_CAT.test(`${group.name || ''} ${category.name || ''}`))
       .map((category) => category)
   );
-  const genericTarget = round2(genericCategories.reduce((sum, category) => sum + (category.target || 0), 0));
-  const currentGenericRemaining = round2(genericCategories.reduce((sum, category) => sum + (category.remaining || 0), 0));
-  const currentMonth = today.slice(0, 7);
-  const currentDaysRemaining = Math.max(1, daysInMonth(currentMonth) - Number(today.slice(8, 10)) + 1);
-  for (let i = 0; i <= horizonDays; i++) {
-    const date = addDays(today, i);
-    const month = date.slice(0, 7);
-    const dailyBudget = month === currentMonth
-      ? currentGenericRemaining / currentDaysRemaining
-      : genericTarget / Math.max(1, daysInMonth(month));
-    if (dailyBudget > 0.005) pushEvent(date, 'Planned non-bill spending', -dailyBudget, 'budget', 'planned');
+  const genericBudget = buildForecastGenericBudgetContext(genericCategories);
+  const forecastWarnings = [...genericBudget.warnings];
+  if (genericBudget.complete) {
+    const budgetEntries = buildForecastBudgetDailyCents({
+      today,
+      horizonDays,
+      currentMonthRemainingCents: genericBudget.remainingSum.cents,
+      fullMonthTargetCents: genericBudget.targetSum.cents,
+      addDays,
+      daysInMonth,
+    });
+    for (const entry of budgetEntries) {
+      pushEventCents(entry.date, 'Planned non-bill spending', -entry.centsCents, 'budget', 'planned');
+    }
   }
   const possibleReimbursement = reimb.totalOwed > 0.5
     ? { date: addDays(today, 14), amount: round2(reimb.totalOwed), includedInBalance: false }
     : null;
 
-  events.sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
+  const events = eventRows
+    .map((row) => ({ ...row, amount: fromCents(row.amountCents) }))
+    .sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
   const byDate = new Map();
-  for (const e of events) {
-    const cur = byDate.get(e.date) || { date: e.date, inflow: 0, outflow: 0, events: [] };
-    if (e.amount >= 0) cur.inflow = round2(cur.inflow + e.amount);
-    else cur.outflow = round2(cur.outflow + Math.abs(e.amount));
+  for (const e of eventRows) {
+    const cur = byDate.get(e.date) || { date: e.date, inflowCents: 0, outflowCents: 0, events: [] };
+    if (e.amountCents >= 0) cur.inflowCents = sumCents([cur.inflowCents, e.amountCents]);
+    else cur.outflowCents = sumCents([cur.outflowCents, -e.amountCents]);
     cur.events.push(e);
     byDate.set(e.date, cur);
   }
   const points = [];
-  let balance = startBalance;
-  let lowest = { date: today, balance };
+  let balanceCents = startBalanceCents;
+  let lowest = { date: today, balance: fromCents(startBalanceCents) };
   for (let i = 0; i <= horizonDays; i++) {
     const date = addDays(today, i);
     const day = byDate.get(date);
-    if (day) balance = round2(balance + day.inflow - day.outflow);
-    const p = { date, balance, inflow: day ? day.inflow : 0, outflow: day ? day.outflow : 0 };
+    if (day) balanceCents = sumCents([balanceCents, day.inflowCents, -day.outflowCents]);
+    const balance = fromCents(balanceCents);
+    const p = {
+      date,
+      balance,
+      inflow: day ? fromCents(day.inflowCents) : 0,
+      outflow: day ? fromCents(day.outflowCents) : 0,
+    };
     points.push(p);
-    if (p.balance < lowest.balance) lowest = { date, balance: p.balance };
+    if (p.balance < lowest.balance) lowest = { date, balance };
   }
+  const totalInflowCents = sumCents(eventRows.filter((e) => e.amountCents > 0).map((e) => e.amountCents));
+  const totalOutflowCents = sumCents(eventRows.filter((e) => e.amountCents < 0).map((e) => -e.amountCents));
   return {
     generatedAt: new Date().toISOString(),
     range: { start: today, end: horizon, days: horizonDays },
-    startBalance,
+    startBalance: fromCents(startBalanceCents),
     endingBalance: points[points.length - 1].balance,
     lowest,
     totals: {
-      inflow: round2(events.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)),
-      outflow: round2(events.filter((e) => e.amount < 0).reduce((s, e) => s + Math.abs(e.amount), 0)),
+      inflow: fromCents(totalInflowCents),
+      outflow: fromCents(totalOutflowCents),
     },
     points,
     events: events.slice(0, 200),
     assumptions: {
       liquidAccounts: liquidAccounts.map((account) => ({ id: account.id, name: account.name })),
-      genericBudgetTarget: genericTarget,
+      genericBudgetTarget: genericBudget.assumptions.genericBudgetTarget,
+      genericBudget: {
+        target: genericBudget.assumptions.target,
+        remaining: genericBudget.assumptions.remaining,
+        complete: genericBudget.assumptions.complete,
+        incompleteReasons: genericBudget.assumptions.incompleteReasons,
+      },
       billsExcludedFromGenericBudget: true,
       reimbursementsIncluded: false,
     },
@@ -3173,6 +3218,7 @@ async function getForecast({ days = 90 } = {}) {
     warnings: [
       ...(lowest.balance < 0 ? [`Projected cash drops below $0 on ${lowest.date}`] : []),
       ...(possibleReimbursement ? ['Possible reimbursements are shown separately and are not counted as guaranteed cash.'] : []),
+      ...forecastWarnings,
     ],
   };
 }
