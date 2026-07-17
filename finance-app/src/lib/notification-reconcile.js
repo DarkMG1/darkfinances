@@ -171,14 +171,14 @@ function createNotificationReconciler(deps) {
   }
 
   async function migrateLegacyScheduledNotifications(token) {
-    if (kv.getBool(NOTIF_KEYS.legacyMigration, false)) return;
+    if (kv.getBool(NOTIF_KEYS.legacyMigration, false)) return true;
     assertReconciliationCurrent(token);
 
     let scheduled;
     try {
       scheduled = await notifications.getAllScheduledNotificationsAsync();
     } catch {
-      return;
+      return false;
     }
     assertReconciliationCurrent(token);
 
@@ -194,12 +194,13 @@ function createNotificationReconciler(deps) {
       try {
         await notifications.cancelScheduledNotificationAsync(id);
       } catch {
-        return;
+        return false;
       }
     }
 
     assertReconciliationCurrent(token);
     kv.setBool(NOTIF_KEYS.legacyMigration, true);
+    return true;
   }
 
   async function refreshNotificationStatus(token, scope) {
@@ -345,20 +346,24 @@ function createNotificationReconciler(deps) {
     const { token, scope, settings, bills, billsReady, financeToday } = input;
     assertReconciliationCurrent(token);
 
-    await withReconciliationGuard(token, () => migrateLegacyScheduledNotifications(token));
+    const legacyMigrationComplete = await withReconciliationGuard(
+      token,
+      () => migrateLegacyScheduledNotifications(token),
+    );
     migrateLegacyBillSameDayKeys(scope);
 
     const permissionGranted = await readPermissionGranted(token);
+    const maySchedule = permissionGranted && legacyMigrationComplete;
 
     if (!settings.weekly) {
       await withReconciliationGuard(token, () => cancelTrackedCategory(token, scope, 'weekly'));
-    } else if (permissionGranted) {
+    } else if (maySchedule) {
       await withReconciliationGuard(token, () => scheduleWeeklyNotification(token, scope, settings));
     }
 
     if (!settings.bills) {
       await withReconciliationGuard(token, () => cancelTrackedCategory(token, scope, 'bills'));
-    } else if (billsReady && Array.isArray(bills) && permissionGranted) {
+    } else if (billsReady && Array.isArray(bills) && maySchedule) {
       await withReconciliationGuard(token, () => scheduleBillNotifications(token, scope, settings, bills, financeToday));
     }
 

@@ -5,8 +5,10 @@ const {
   assertScopeReconciliationAdmitted,
   bindNotificationScopeSuspensionPersistence,
   bindProfileGenerationReader,
+  hasPersistedSuspensionEvidence,
   isNotificationScopeAdmissionAllowed,
   isNotificationScopeSuspended,
+  NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED,
   readPersistedSuspensionGeneration,
   resetNotificationScopeSuspensions,
   simulateNotificationScopeSuspensionModuleReset,
@@ -178,6 +180,7 @@ function cancelActiveReconciliation() {
 
 module.exports = {
   NOTIFICATION_RECONCILIATION_STALE_CODE,
+  NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED,
   RECONCILIATION_LANES,
   activateNotificationScope,
   assertReconciliationCurrent,
@@ -192,6 +195,7 @@ module.exports = {
   endReconciliation,
   getProfileGeneration,
   getReconciliationSessionId,
+  hasPersistedSuspensionEvidence,
   isExpectedReconciliationError,
   isNotificationScopeAdmissionAllowed,
   isNotificationScopeSuspended,

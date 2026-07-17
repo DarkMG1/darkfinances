@@ -1,4 +1,8 @@
+export const NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED: 'NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED';
+
 export const SUSPENSION_KEY_PREFIX: string;
+
+export function hasPersistedSuspensionEvidence(scope: string | undefined): boolean;
 
 export function bindNotificationScopeSuspensionPersistence(persistence: {
   kv: {

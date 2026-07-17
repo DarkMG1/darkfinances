@@ -15,23 +15,32 @@ const {
   getReconciliationSessionId,
   isNotificationScopeSuspended,
   isReconciliationCurrent,
+  NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED,
   purgeProfileGeneration,
   readPersistedSuspensionGeneration,
   resetNotificationReconciliationState,
   simulateNotificationScopeSuspensionModuleReset,
+  suspendNotificationScope,
   withReconciliationGuard,
 } = require('../src/lib/notification-reconciliation');
-const { SUSPENSION_KEY_PREFIX } = require('../src/lib/notification-scope-suspension');
+const {
+  SUSPENSION_KEY_PREFIX,
+  hasPersistedSuspensionEvidence,
+} = require('../src/lib/notification-scope-suspension');
 
-function createSuspensionStore() {
+function createSuspensionStore(options = {}) {
   const values = new Map();
+  const baseSetString = (key, value) => {
+    if (options.throwOnSuspensionWrite && key.startsWith(SUSPENSION_KEY_PREFIX) && value != null) {
+      throw new Error('mmkv write failed');
+    }
+    if (value == null) values.delete(key);
+    else values.set(key, value);
+  };
   return {
     kv: {
       getString: (key) => (values.has(key) ? values.get(key) : null),
-      setString: (key, value) => {
-        if (value == null) values.delete(key);
-        else values.set(key, value);
-      },
+      setString: baseSetString,
     },
     storage: {
       getAllKeys: () => [...values.keys()],
@@ -78,6 +87,58 @@ test('activateNotificationScope clears persisted tombstone for same-scope reconn
   assert.equal(isNotificationScopeSuspended(scope), false);
   assert.equal(readPersistedSuspensionGeneration(scope), null);
   beginReconciliation('scheduled', generation, scope);
+});
+
+test('suspendNotificationScope requires persistence binding', () => {
+  resetNotificationReconciliationState();
+  bindNotificationScopeSuspensionPersistence(null);
+  assert.throws(
+    () => suspendNotificationScope('server-a'),
+    (error) => error.code === NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED,
+  );
+  assert.equal(isNotificationScopeSuspended('server-a'), false);
+});
+
+test('suspendNotificationScope fails closed when persistence write throws', () => {
+  const store = createSuspensionStore({ throwOnSuspensionWrite: true });
+  bindNotificationScopeSuspensionPersistence(store);
+  assert.throws(
+    () => suspendNotificationScope('server-a'),
+    (error) => error.message === 'mmkv write failed',
+  );
+  assert.equal(isNotificationScopeSuspended('server-a'), false);
+  assert.equal(store.kv.getString(`${SUSPENSION_KEY_PREFIX}server-a`), null);
+});
+
+test('purgeProfileGeneration does not bump generation when suspension persistence fails', () => {
+  const store = createSuspensionStore({ throwOnSuspensionWrite: true });
+  bindNotificationScopeSuspensionPersistence(store);
+  beginReconciliation('scheduled', 0, 'server-a');
+  assert.throws(
+    () => purgeProfileGeneration('server-a'),
+    (error) => error.message === 'mmkv write failed',
+  );
+  assert.equal(getProfileGeneration(), 0);
+  assert.equal(isNotificationScopeSuspended('server-a'), false);
+});
+
+test('malformed persisted tombstone keeps scope suspended until explicit activation', () => {
+  const store = createSuspensionStore();
+  bindNotificationScopeSuspensionPersistence(store);
+  store.kv.setString(`${SUSPENSION_KEY_PREFIX}server-a`, 'not-a-number');
+  simulateNotificationScopeSuspensionModuleReset();
+
+  assert.equal(readPersistedSuspensionGeneration('server-a'), null);
+  assert.equal(hasPersistedSuspensionEvidence('server-a'), true);
+  assert.equal(isNotificationScopeSuspended('server-a'), true);
+  assert.throws(
+    () => beginReconciliation('scheduled', 0, 'server-a'),
+    (error) => error.code === NOTIFICATION_RECONCILIATION_STALE_CODE,
+  );
+
+  activateNotificationScope('server-a', getProfileGeneration());
+  assert.equal(isNotificationScopeSuspended('server-a'), false);
+  beginReconciliation('scheduled', 0, 'server-a');
 });
 
 test('profile generation bumps invalidate prior reconciliation tokens in both lanes', () => {

@@ -54,7 +54,7 @@ export interface NotificationReconciler {
   purgeNotificationProfileState: (scope?: string) => Promise<void>;
   clearNotificationRoutingState: () => void;
   dismissDeliveredNotificationsForScope: (scope?: string) => Promise<void>;
-  migrateLegacyScheduledNotifications: (token: NotificationReconciliationToken) => Promise<void>;
+  migrateLegacyScheduledNotifications: (token: NotificationReconciliationToken) => Promise<boolean>;
   parseNotificationRoute: (data: unknown) => { route: string; category: string; scope: string } | null;
   readTrackedScheduledIds: (scope: string) => Record<string, unknown>;
   readCategoryScheduleState: (scope: string, category: string) => CategoryScheduleState;

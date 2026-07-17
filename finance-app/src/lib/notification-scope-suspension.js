@@ -1,6 +1,7 @@
 'use strict';
 
 const SUSPENSION_KEY_PREFIX = 'notif.purgeSuspension.v1.';
+const NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED = 'NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED';
 
 /** @type {() => number} */
 let readProfileGeneration = () => 0;
@@ -23,6 +24,11 @@ function suspensionKey(scope) {
   return `${SUSPENSION_KEY_PREFIX}${scope}`;
 }
 
+function hasPersistedSuspensionEvidence(scope) {
+  if (!persistence?.kv || !scope) return false;
+  return persistence.kv.getString(suspensionKey(scope)) != null;
+}
+
 function readPersistedSuspensionGeneration(scope) {
   if (!persistence?.kv || !scope) return null;
   const raw = persistence.kv.getString(suspensionKey(scope));
@@ -32,7 +38,12 @@ function readPersistedSuspensionGeneration(scope) {
 }
 
 function writePersistedSuspension(scope, generation) {
-  if (!persistence?.kv || !scope) return;
+  if (!scope) return;
+  if (!persistence?.kv) {
+    const error = new Error(NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED);
+    error.code = NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED;
+    throw error;
+  }
   persistence.kv.setString(suspensionKey(scope), String(generation));
 }
 
@@ -60,14 +71,14 @@ function simulateNotificationScopeSuspensionModuleReset() {
 function suspendNotificationScope(scope) {
   if (!scope) return;
   const generation = readProfileGeneration();
-  suspendedScopes.add(scope);
   writePersistedSuspension(scope, generation);
+  suspendedScopes.add(scope);
 }
 
 function isNotificationScopeSuspended(scope) {
   if (!scope) return false;
   if (suspendedScopes.has(scope)) return true;
-  return readPersistedSuspensionGeneration(scope) != null;
+  return hasPersistedSuspensionEvidence(scope);
 }
 
 function isNotificationScopeAdmissionAllowed(scope) {
@@ -92,11 +103,13 @@ function assertScopeReconciliationAdmitted(scope) {
 }
 
 module.exports = {
+  NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED,
   SUSPENSION_KEY_PREFIX,
   activateNotificationScope,
   assertScopeReconciliationAdmitted,
   bindNotificationScopeSuspensionPersistence,
   bindProfileGenerationReader,
+  hasPersistedSuspensionEvidence,
   isNotificationScopeAdmissionAllowed,
   isNotificationScopeSuspended,
   readPersistedSuspensionGeneration,

@@ -12,6 +12,7 @@ const {
   isNotificationScopeSuspended,
   isReconciliationCurrent,
   purgeProfileGeneration,
+  NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED,
   readPersistedSuspensionGeneration,
   resetNotificationReconciliationState,
   simulateNotificationScopeSuspensionModuleReset,
@@ -668,7 +669,7 @@ test('legacy finance-owned OS schedules migrate under denied permission', async 
   const reconciler = createReconciler(store, notificationsApi);
   const token = beginReconciliation('scheduled', 0, 'server-a');
 
-  await reconciler.migrateLegacyScheduledNotifications(token);
+  assert.equal(await reconciler.migrateLegacyScheduledNotifications(token), true);
   assert.deepEqual(notificationsApi.cancelled, ['legacy-finance-1']);
   assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), true);
 });
@@ -689,13 +690,95 @@ test('legacy migration defers marker when cancel fails under denied permission',
   const reconciler = createReconciler(store, notificationsApi);
   const token = beginReconciliation('scheduled', 0, 'server-a');
 
-  await reconciler.migrateLegacyScheduledNotifications(token);
+  assert.equal(await reconciler.migrateLegacyScheduledNotifications(token), false);
   assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), false);
 
   notificationsApi.clearCancelFaults();
-  await reconciler.migrateLegacyScheduledNotifications(token);
+  assert.equal(await reconciler.migrateLegacyScheduledNotifications(token), true);
   assert.deepEqual(notificationsApi.cancelled, ['legacy-finance-1']);
   assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), true);
+});
+
+test('scheduled reconcile skips scheduling when legacy enumeration fails then succeeds without duplicates', async () => {
+  const store = createStorage();
+  const notificationsApi = createNotificationsApi();
+  notificationsApi.scheduled.push({
+    id: 'legacy-finance-1',
+    request: {
+      content: {
+        data: { route: '/review', category: 'weekly', scope: 'server-a' },
+      },
+    },
+  });
+  notificationsApi.setEnumFails(true);
+  const reconciler = createReconciler(store, notificationsApi);
+  const token = beginReconciliation('scheduled', 0, 'server-a');
+
+  await reconciler.reconcileScheduledNotifications({
+    token,
+    scope: 'server-a',
+    settings: baseSettings({ weekly: true }),
+    billsReady: false,
+  });
+
+  assert.equal(notificationsApi.scheduled.some((entry) => entry.id.startsWith('scheduled-')), false);
+  assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), false);
+  assert.equal(notificationsApi.scheduled.some((entry) => entry.id === 'legacy-finance-1'), true);
+
+  notificationsApi.setEnumFails(false);
+  const retryToken = beginReconciliation('scheduled', 0, 'server-a');
+  await reconciler.reconcileScheduledNotifications({
+    token: retryToken,
+    scope: 'server-a',
+    settings: baseSettings({ weekly: true }),
+    billsReady: false,
+  });
+
+  assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), true);
+  assert.deepEqual(notificationsApi.cancelled, ['legacy-finance-1']);
+  assert.equal(notificationsApi.scheduled.filter((entry) => entry.id.startsWith('scheduled-')).length, 1);
+  assert.equal(notificationsApi.scheduled.length, 1);
+});
+
+test('scheduled reconcile skips scheduling when legacy cancel fails then succeeds without duplicates', async () => {
+  const store = createStorage();
+  const notificationsApi = createNotificationsApi();
+  notificationsApi.scheduled.push({
+    id: 'legacy-finance-1',
+    request: {
+      content: {
+        data: { route: '/review', category: 'weekly', scope: 'server-a' },
+      },
+    },
+  });
+  notificationsApi.rejectCancelFor('legacy-finance-1');
+  const reconciler = createReconciler(store, notificationsApi);
+  const token = beginReconciliation('scheduled', 0, 'server-a');
+
+  await reconciler.reconcileScheduledNotifications({
+    token,
+    scope: 'server-a',
+    settings: baseSettings({ weekly: true }),
+    billsReady: false,
+  });
+
+  assert.equal(notificationsApi.scheduled.some((entry) => entry.id.startsWith('scheduled-')), false);
+  assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), false);
+  assert.equal(notificationsApi.scheduled.some((entry) => entry.id === 'legacy-finance-1'), true);
+
+  notificationsApi.clearCancelFaults();
+  const retryToken = beginReconciliation('scheduled', 0, 'server-a');
+  await reconciler.reconcileScheduledNotifications({
+    token: retryToken,
+    scope: 'server-a',
+    settings: baseSettings({ weekly: true }),
+    billsReady: false,
+  });
+
+  assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), true);
+  assert.deepEqual(notificationsApi.cancelled, ['legacy-finance-1']);
+  assert.equal(notificationsApi.scheduled.filter((entry) => entry.id.startsWith('scheduled-')).length, 1);
+  assert.equal(notificationsApi.scheduled.length, 1);
 });
 
 test('legacy finance-owned OS schedules migrate once then stay idempotent', async () => {
@@ -722,7 +805,7 @@ test('legacy finance-owned OS schedules migrate once then stay idempotent', asyn
   const reconciler = createReconciler(store, notificationsApi);
   const token = beginReconciliation('scheduled', 0, 'server-a');
 
-  await reconciler.migrateLegacyScheduledNotifications(token);
+  assert.equal(await reconciler.migrateLegacyScheduledNotifications(token), true);
   assert.deepEqual(notificationsApi.cancelled, ['legacy-finance-1']);
   assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), true);
 
@@ -736,7 +819,7 @@ test('legacy finance-owned OS schedules migrate once then stay idempotent', asyn
     },
   });
 
-  await reconciler.migrateLegacyScheduledNotifications(token);
+  assert.equal(await reconciler.migrateLegacyScheduledNotifications(token), true);
   assert.deepEqual(notificationsApi.cancelled, []);
   assert.equal(store.kv.getBool('notif.legacyScheduleMigration.v1', false), true);
 });

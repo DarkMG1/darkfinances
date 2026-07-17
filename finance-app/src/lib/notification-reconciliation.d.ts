@@ -64,6 +64,10 @@ export function withReconciliationGuard<T>(
   fn: () => Promise<T> | T,
 ): Promise<T>;
 
+export const NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED: 'NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED';
+
+export function hasPersistedSuspensionEvidence(scope?: string): boolean;
+
 export function bindNotificationScopeSuspensionPersistence(persistence: {
   kv: {
     getString: (key: string) => string | null;
