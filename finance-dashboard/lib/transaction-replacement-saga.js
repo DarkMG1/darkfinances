@@ -355,6 +355,7 @@ function createTransactionReplacementSaga({
   referencesConverged,
   referenceSteps,
   assertExternalAvailable,
+  recoveryOwnershipGuard,
   terminalLimit = TERMINAL_LIMIT,
 }) {
   if (!sagaPath) throw new Error('transaction saga path required');
@@ -1189,6 +1190,7 @@ function createTransactionReplacementSaga({
     for (const saga of active) {
       let result;
       if (saga.phase === 'legacy_unresolved') continue;
+      if (recoveryOwnershipGuard?.(saga)) continue;
       try {
         if (saga.phase === 'legacy_reconcile_forward') {
           result = await reconcileLegacyForward(api, saga, faultInjector);

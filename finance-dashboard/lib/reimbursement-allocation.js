@@ -18,12 +18,34 @@ class ReimbursementLinkStaleError extends KnownPreApplyError {
   }
 }
 
+class ReimbursementLegacyAmbiguityBlockedError extends KnownPreApplyError {
+  constructor(message = 'legacy ambiguous links on this endpoint must be reviewed before new allocations') {
+    super(message, { code: 'REIMBURSEMENT_LEGACY_AMBIGUITY_BLOCKED', status: 409 });
+    this.name = 'ReimbursementLegacyAmbiguityBlockedError';
+  }
+}
+
+class ReimbursementAllocationFieldsError extends KnownPreApplyError {
+  constructor(message = 'allocationCents and amount must agree when both are provided') {
+    super(message, { code: 'REIMBURSEMENT_ALLOCATION_FIELDS_DISAGREE', status: 400 });
+    this.name = 'ReimbursementAllocationFieldsError';
+  }
+}
+
 function allocationInvalid(message) {
   throw new ReimbursementAllocationInvalidError(message);
 }
 
 function linkStale(message) {
   throw new ReimbursementLinkStaleError(message);
+}
+
+function legacyAmbiguityBlocked(message) {
+  throw new ReimbursementLegacyAmbiguityBlockedError(message);
+}
+
+function allocationFieldsDisagree(message) {
+  throw new ReimbursementAllocationFieldsError(message);
 }
 
 function sameTransactionId(left, right) {
@@ -39,7 +61,15 @@ function requireSafeCents(value, label) {
   return value;
 }
 
+function assertAllocationFieldsAgree(body) {
+  if (body?.allocationCents == null || body?.amount == null) return;
+  const fromCents = requireSafeCents(body.allocationCents, 'allocationCents');
+  const fromAmount = Math.abs(toCents(body.amount));
+  if (fromCents !== fromAmount) allocationFieldsDisagree();
+}
+
 function parseRequestedAllocationCents(body) {
+  assertAllocationFieldsAgree(body);
   if (body?.allocationCents != null) {
     const cents = requireSafeCents(body.allocationCents, 'allocationCents');
     if (cents <= 0) allocationInvalid('allocationCents must be positive');
@@ -51,6 +81,48 @@ function parseRequestedAllocationCents(body) {
     return cents;
   }
   allocationInvalid('explicit allocationCents or amount is required');
+}
+
+function ambiguousLegacyLinksOnEndpoint(links, txnId, excludePair = null) {
+  return (links || []).filter((link) => {
+    const classified = classifyStoredLink(link);
+    if (!classified.ambiguous) return false;
+    const touches = sameTransactionId(link?.inflow?.id, txnId)
+      || sameTransactionId(link?.expense?.id, txnId);
+    if (!touches) return false;
+    if (excludePair
+      && sameTransactionId(link?.inflow?.id, excludePair.inflowId)
+      && sameTransactionId(link?.expense?.id, excludePair.expenseId)) return false;
+    return true;
+  });
+}
+
+function assertLegacyAmbiguityAdmission({
+  links,
+  inflowId,
+  expenseId,
+  existingLink,
+  allowSamePairResolution = false,
+}) {
+  const pair = { inflowId: String(inflowId), expenseId: String(expenseId) };
+  const exclude = allowSamePairResolution ? pair : null;
+  const inflowAmbiguous = ambiguousLegacyLinksOnEndpoint(links, inflowId, exclude);
+  const expenseAmbiguous = ambiguousLegacyLinksOnEndpoint(links, expenseId, exclude);
+  if (inflowAmbiguous.length > 0 || expenseAmbiguous.length > 0) {
+    legacyAmbiguityBlocked();
+  }
+}
+
+function endpointAdmissionFingerprint(live) {
+  if (!live?.id) return '';
+  return [
+    String(live.id),
+    String(live.accountId ?? ''),
+    String(live.date ?? ''),
+    String(live.amountCents ?? ''),
+    String(live.category ?? ''),
+    live.isLeg ? String(live.parentId ?? '') : '',
+  ].join('|');
 }
 
 function classifyStoredLink(link) {
@@ -348,16 +420,22 @@ function migrateLinkToSchemaV2(link) {
 }
 
 module.exports = {
+  ReimbursementAllocationFieldsError,
   ReimbursementAllocationInvalidError,
+  ReimbursementLegacyAmbiguityBlockedError,
   ReimbursementLinkStaleError,
   absExpenseCents,
   absInflowCents,
+  ambiguousLegacyLinksOnEndpoint,
   applyLinkRecord,
+  assertAllocationFieldsAgree,
   assertExpectedVersion,
+  assertLegacyAmbiguityAdmission,
   buildExplicitLinkRecord,
   buildLegacyMigrationReport,
   classifyStoredLink,
   enrichEndpointForRead,
+  endpointAdmissionFingerprint,
   linkPairKey,
   linkRecordConverged,
   linkVersion,

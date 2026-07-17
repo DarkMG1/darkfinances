@@ -7,6 +7,7 @@ const {
   RepaymentAllocationPlanInvalidError,
   validateAllocationPlan,
 } = require('./repayment-confirmation-sidecars');
+const { ambiguousLegacyLinksOnEndpoint } = require('./reimbursement-allocation');
 
 const ACCOUNT_RANGE_START = '1900-01-01';
 const ACCOUNT_RANGE_END = '9999-12-31';
@@ -113,6 +114,20 @@ function buildAdmissionPayload({
     existingLinks,
     inflowId: suggestion.inflow.id,
   });
+
+  for (const allocation of allocations) {
+    const pair = {
+      inflowId: String(suggestion.inflow.id),
+      expenseId: allocation.expenseId,
+    };
+    const inflowAmbiguous = ambiguousLegacyLinksOnEndpoint(existingLinks, pair.inflowId, pair);
+    const expenseAmbiguous = ambiguousLegacyLinksOnEndpoint(existingLinks, pair.expenseId, pair);
+    if (inflowAmbiguous.length > 0 || expenseAmbiguous.length > 0) {
+      throw new RepaymentAllocationPlanInvalidError(
+        'legacy ambiguous reimbursement links must be resolved before repayment confirmation',
+      );
+    }
+  }
 
   return {
     accountId: resolved.accountId,

@@ -282,10 +282,18 @@ const schemas = {
     amount: money.refine((value) => value > 0, 'amount must be greater than zero').optional(),
     person: z.string().max(100).optional().nullable(),
     expectedVersion: z.number().int().min(0).optional(),
-  }).strict().refine(
-    (value) => value.allocationCents != null || value.amount != null,
-    'allocationCents or amount is required',
-  ),
+  }).strict().superRefine((value, ctx) => {
+    if (value.allocationCents == null && value.amount == null) {
+      ctx.addIssue({ code: 'custom', message: 'allocationCents or amount is required' });
+      return;
+    }
+    if (value.allocationCents != null && value.amount != null) {
+      const fromAmount = Math.round(Math.abs(Number(value.amount) * 100));
+      if (fromAmount !== value.allocationCents) {
+        ctx.addIssue({ code: 'custom', message: 'allocationCents and amount must agree when both are provided' });
+      }
+    }
+  }),
 
   deleteReimbLink: z.object({
     inflowId: identifier,

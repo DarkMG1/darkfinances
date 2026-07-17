@@ -19,8 +19,24 @@ Actual transaction ids, signs, and capacities; client snapshots are hints only.
 `allocationTrusted`, `allocationAmbiguous`, and `capacity.remainingTrustedCents` from one
 authoritative projection.
 
-## Migration
+## Legacy ambiguity
 
-`reimb-links.json` schemaVersion 2 adds `allocationCents`, `linkKey`, and `version` on explicit
-links. Null-amount legacy rows are preserved without guessed cents. Use `legacyReport` for manual
-resolution.
+Endpoints with legacy null/ambiguous links block **new** trusted allocations on any other
+pair touching that endpoint (`REIMBURSEMENT_LEGACY_AMBIGUITY_BLOCKED`, 409). Explicit
+same-pair upgrade/resolution and unlink are allowed when no other ambiguity remains on
+either endpoint.
+
+## Concurrency
+
+Manual link admission and apply run under one Actual coordinator write scope. Apply
+re-locates live endpoints, re-reads sidecar links, and revalidates sign/category/capacity
+before write so concurrent links cannot exceed shared capacity.
+
+## Field agreement
+
+When both `allocationCents` and `amount` are sent, they must agree exactly (400).
+
+## DELETE
+
+Unlink accepts `expectedVersion` and journal `operationIdentity` for stale-version and
+idempotent replay protection.

@@ -1,12 +1,13 @@
 'use strict';
 
 const { KnownPreApplyError } = require('./errors');
-const { toCents } = require('./domain/money');
-const { locateExactTransactionId } = require('./repayment-transaction-locator');
 const {
+  assertLegacyAmbiguityAdmission,
+  endpointAdmissionFingerprint,
   parseRequestedAllocationCents,
   validateLinkCapacity,
 } = require('./reimbursement-allocation');
+const { locateExactTransactionId } = require('./repayment-transaction-locator');
 
 const ACCOUNT_RANGE_START = '1900-01-01';
 const ACCOUNT_RANGE_END = '9999-12-31';
@@ -32,12 +33,12 @@ function enrichLocated(located, payeeNames = {}, hint = {}) {
     id: String(transaction.id),
     date: transaction.date || hint.date || null,
     amountCents: transaction.amount,
-    accountId: located.accountId,
-    accountName: transaction.account || hint.account || '',
+    accountId: located.accountId || hint.accountId || null,
+    accountName: transaction.account || hint.account || hint.accountName || '',
     payee: payeeName,
-    imported: Boolean(transaction.imported),
-    category: transaction.category ?? null,
-    parentId: located.isLeg ? String(located.parent.id) : null,
+    imported: Boolean(transaction.imported ?? hint.imported),
+    category: transaction.category ?? hint.category ?? null,
+    parentId: located.isLeg ? String(located.parent.id) : (hint.parentId ?? null),
     isLeg: located.isLeg,
   };
 }
@@ -89,6 +90,13 @@ function assertReimbursementEligible({ expenseLive, reimbCategoryId }) {
   }
 }
 
+function assertLiveEndpointsMatchPrepared(preparedInflow, preparedExpense, liveInflow, liveExpense) {
+  if (endpointAdmissionFingerprint(preparedInflow) !== endpointAdmissionFingerprint(liveInflow)
+    || endpointAdmissionFingerprint(preparedExpense) !== endpointAdmissionFingerprint(liveExpense)) {
+    endpointInvalid('reimbursement link endpoints changed during mutation — refresh and retry');
+  }
+}
+
 function buildManualLinkAdmission({
   request,
   resolved,
@@ -101,6 +109,15 @@ function buildManualLinkAdmission({
     (link) => String(link?.inflow?.id) === String(resolved.inflowLive.id)
       && String(link?.expense?.id) === String(resolved.expenseLive.id),
   );
+  const existingClassified = existing ? require('./reimbursement-allocation').classifyStoredLink(existing) : null;
+  const allowSamePairResolution = Boolean(existingClassified?.ambiguous);
+  assertLegacyAmbiguityAdmission({
+    links: existingLinks,
+    inflowId: resolved.inflowLive.id,
+    expenseId: resolved.expenseLive.id,
+    existingLink: existing,
+    allowSamePairResolution,
+  });
   const capacity = validateLinkCapacity({
     allocationCents,
     inflowAmountCents: resolved.inflowLive.amountCents,
@@ -117,7 +134,76 @@ function buildManualLinkAdmission({
     expectedVersion: request.expectedVersion ?? null,
     existingLink: existing || null,
     capacity,
+    allowSamePairResolution,
   };
+}
+
+async function admitManualLink(api, request, { existingLinks, reimbCategoryId, payeeNames = {} }) {
+  const resolved = await resolveManualLinkEndpoints(api, {
+    inflow: request.inflow,
+    expense: request.expense,
+    payeeNames,
+  });
+  return buildManualLinkAdmission({
+    request,
+    resolved,
+    existingLinks,
+    reimbCategoryId,
+  });
+}
+
+async function revalidateLinkApply(api, saga, { existingLinks, reimbCategoryId, payeeNames = {} }) {
+  const inflowLive = await locateEndpoint(api, saga.inflowId, payeeNames, saga.inflowLive);
+  const expenseLive = await locateEndpoint(api, saga.expenseId, payeeNames, saga.expenseLive);
+  assertReimbursementEligible({ expenseLive, reimbCategoryId });
+  assertLiveEndpointsMatchPrepared(saga.inflowLive, saga.expenseLive, inflowLive, expenseLive);
+
+  const existing = (existingLinks || []).find(
+    (link) => String(link?.inflow?.id) === String(inflowLive.id)
+      && String(link?.expense?.id) === String(expenseLive.id),
+  );
+  assertLegacyAmbiguityAdmission({
+    links: existingLinks,
+    inflowId: inflowLive.id,
+    expenseId: expenseLive.id,
+    existingLink: existing,
+    allowSamePairResolution: saga.allowSamePairResolution === true,
+  });
+  const capacity = validateLinkCapacity({
+    allocationCents: saga.allocationCents,
+    inflowAmountCents: inflowLive.amountCents,
+    expenseAmountCents: expenseLive.amountCents,
+    existingLinks,
+    inflowId: inflowLive.id,
+    expenseId: expenseLive.id,
+  });
+  return {
+    inflowLive,
+    expenseLive,
+    allocationCents: capacity.allocationCents,
+    person: saga.person,
+    expectedVersion: saga.expectedVersion ?? null,
+    existingLink: existing || null,
+    capacity,
+  };
+}
+
+async function revalidateUnlinkApply(api, saga, { existingLinks, payeeNames = {} }) {
+  await locateEndpoint(api, saga.inflowId, payeeNames, {});
+  await locateEndpoint(api, saga.expenseId, payeeNames, {});
+  const existing = (existingLinks || []).find(
+    (link) => String(link?.inflow?.id) === String(saga.inflowId)
+      && String(link?.expense?.id) === String(saga.expenseId),
+  );
+  if (!existing) return null;
+  assertLegacyAmbiguityAdmission({
+    links: existingLinks,
+    inflowId: saga.inflowId,
+    expenseId: saga.expenseId,
+    existingLink: existing,
+    allowSamePairResolution: true,
+  });
+  return existing;
 }
 
 function buildCapacityAdmission({
@@ -142,8 +228,11 @@ module.exports = {
   ACCOUNT_RANGE_END,
   ACCOUNT_RANGE_START,
   ReimbursementLinkEndpointInvalidError,
+  admitManualLink,
   buildCapacityAdmission,
   buildManualLinkAdmission,
   locateTransactionLive,
+  revalidateLinkApply,
+  revalidateUnlinkApply,
   resolveManualLinkEndpoints,
 };

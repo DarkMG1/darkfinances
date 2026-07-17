@@ -785,6 +785,7 @@ export function useAddReimbLink() {
 export interface DeleteReimbLinkVars {
   inflowId: string;
   expenseId: string;
+  expectedVersion?: number;
 }
 export function useDeleteReimbLink() {
   const qc = useQueryClient();

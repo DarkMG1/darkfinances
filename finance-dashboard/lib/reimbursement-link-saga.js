@@ -8,6 +8,7 @@ const {
   buildExplicitLinkRecord,
   linkPairKey,
   linkRecordConverged,
+  linkVersion,
   removeLinkRecord,
   sameTransactionId,
 } = require('./reimbursement-allocation');
@@ -41,6 +42,10 @@ function createReimbursementLinkSaga({
   readLinks,
   writeLinks,
   assertExternalAvailable,
+  revalidateLinkApply,
+  revalidateUnlinkApply,
+  resolveReimbCategoryId,
+  resolvePayeeNames,
 }) {
   function loadState() {
     const state = readJsonFile(sagaPath, { schemaVersion: 1, sagas: {} });
@@ -63,6 +68,15 @@ function createReimbursementLinkSaga({
     const state = loadState();
     delete state.sagas[id];
     writeState(state);
+  }
+
+  function activeOwnedIds() {
+    const ids = new Set();
+    for (const saga of Object.values(loadState().sagas || {})) {
+      if (isTerminalSaga(saga)) continue;
+      for (const id of sagaOwnedIds(saga)) ids.add(id);
+    }
+    return ids;
   }
 
   function assertAvailable({ accountId, ids } = {}) {
@@ -96,18 +110,37 @@ function createReimbursementLinkSaga({
     await invokeFault(faultInjector, `after:${name}`, saga);
   }
 
-  async function applyPreparedLink(api, saga, { faultInjector } = {}) {
-    const store = readLinks();
-    const { record } = buildExplicitLinkRecord({
-      inflowLive: saga.inflowLive,
-      expenseLive: saga.expenseLive,
+  function terminalReplay(saga) {
+    if (saga.action === 'unlink') {
+      return { ok: true, removed: saga.removed ?? 0, idempotent: saga.idempotent === true };
+    }
+    return {
+      ok: true,
+      inflowId: saga.inflowId,
+      expenseId: saga.expenseId,
       allocationCents: saga.allocationCents,
-      person: saga.person,
-      existingLink: store.links.find(
-        (link) => sameTransactionId(link?.inflow?.id, saga.inflowId)
-          && sameTransactionId(link?.expense?.id, saga.expenseId),
-      ),
-      expectedVersion: saga.expectedVersion,
+      linkKey: saga.linkKey,
+      version: saga.resultVersion ?? saga.version ?? null,
+      idempotent: saga.idempotent === true,
+    };
+  }
+
+  async function applyPreparedLink(api, saga, { faultInjector } = {}) {
+    const reimbCategoryId = await resolveReimbCategoryId(api);
+    const payeeNames = await resolvePayeeNames(api);
+    const store = readLinks();
+    const admission = await revalidateLinkApply(api, saga, {
+      existingLinks: store.links,
+      reimbCategoryId,
+      payeeNames,
+    });
+    const { record } = buildExplicitLinkRecord({
+      inflowLive: admission.inflowLive,
+      expenseLive: admission.expenseLive,
+      allocationCents: admission.allocationCents,
+      person: admission.person,
+      existingLink: admission.existingLink,
+      expectedVersion: admission.expectedVersion,
     });
     await checkpoint(saga, { phase: 'links-pending', pendingRecord: record }, 'links-pending-checkpoint', faultInjector);
     applyLinkRecord(store, record);
@@ -116,7 +149,11 @@ function createReimbursementLinkSaga({
     await invokeFault(faultInjector, 'after:links-write', saga);
     const converged = linkRecordConverged(readLinks(), record);
     if (!converged) throw new Error('reimbursement link sidecar did not converge');
-    await checkpoint(saga, { phase: 'completed', pendingRecord: null }, 'saga-terminal-write', faultInjector);
+    await checkpoint(saga, {
+      phase: 'completed',
+      pendingRecord: null,
+      resultVersion: record.version,
+    }, 'saga-terminal-write', faultInjector);
     return {
       ok: true,
       inflowId: saga.inflowId,
@@ -130,13 +167,26 @@ function createReimbursementLinkSaga({
 
   async function applyPreparedUnlink(api, saga, { faultInjector } = {}) {
     await checkpoint(saga, { phase: 'links-pending' }, 'links-pending-checkpoint', faultInjector);
+    const payeeNames = await resolvePayeeNames(api);
     const store = readLinks();
+    const existing = await revalidateUnlinkApply(api, saga, {
+      existingLinks: store.links,
+      payeeNames,
+    });
+    if (!existing) {
+      await checkpoint(saga, { phase: 'completed', removed: 0 }, 'saga-terminal-write', faultInjector);
+      return { ok: true, removed: 0, idempotent: saga.idempotent === true };
+    }
+    if (saga.expectedVersion != null && linkVersion(existing) !== Number(saga.expectedVersion)) {
+      const { ReimbursementLinkStaleError } = require('./reimbursement-allocation');
+      throw new ReimbursementLinkStaleError();
+    }
     const removed = removeLinkRecord(store, { inflowId: saga.inflowId, expenseId: saga.expenseId });
     await invokeFault(faultInjector, 'before:links-write', saga);
     if (removed > 0) writeLinks(store);
     await invokeFault(faultInjector, 'after:links-write', saga);
-    await checkpoint(saga, { phase: 'completed' }, 'saga-terminal-write', faultInjector);
-    return { ok: true, removed };
+    await checkpoint(saga, { phase: 'completed', removed }, 'saga-terminal-write', faultInjector);
+    return { ok: true, removed, idempotent: saga.idempotent === true };
   }
 
   async function drive(api, saga, { faultInjector } = {}) {
@@ -144,19 +194,7 @@ function createReimbursementLinkSaga({
       accountId: saga.accountId,
       ids: [saga.inflowId, saga.expenseId],
     });
-    if (isTerminalSaga(saga)) {
-      return saga.action === 'unlink'
-        ? { ok: true, removed: saga.removed ?? 0 }
-        : {
-          ok: true,
-          inflowId: saga.inflowId,
-          expenseId: saga.expenseId,
-          allocationCents: saga.allocationCents,
-          linkKey: saga.linkKey,
-          version: saga.resultVersion ?? saga.version ?? null,
-          idempotent: saga.idempotent === true,
-        };
-    }
+    if (isTerminalSaga(saga)) return terminalReplay(saga);
     if (saga.action === 'unlink') return applyPreparedUnlink(api, saga, { faultInjector });
     return applyPreparedLink(api, saga, { faultInjector });
   }
@@ -168,24 +206,20 @@ function createReimbursementLinkSaga({
     });
     const inflowId = String(admission.inflowLive.id);
     const expenseId = String(admission.expenseLive.id);
-    const existingTerminal = Object.values(loadState().sagas).find(
-      (saga) => isTerminalSaga(saga)
-        && saga.action === 'link'
-        && sameTransactionId(saga.inflowId, inflowId)
-        && sameTransactionId(saga.expenseId, expenseId)
-        && saga.allocationCents === admission.allocationCents
-        && saga.operationIdentity === operationIdentity,
-    );
-    if (existingTerminal) {
-      return {
-        ok: true,
-        inflowId,
-        expenseId,
-        allocationCents: admission.allocationCents,
-        linkKey: linkPairKey(inflowId, expenseId),
-        version: existingTerminal.resultVersion ?? null,
-        idempotent: true,
-      };
+    if (operationIdentity) {
+      const existingTerminal = Object.values(loadState().sagas).find(
+        (saga) => isTerminalSaga(saga)
+          && saga.operationIdentity === operationIdentity
+          && saga.action === 'link'
+          && sameTransactionId(saga.inflowId, inflowId)
+          && sameTransactionId(saga.expenseId, expenseId),
+      );
+      if (existingTerminal) {
+        return {
+          ...terminalReplay(existingTerminal),
+          idempotent: true,
+        };
+      }
     }
 
     const store = readLinks();
@@ -208,7 +242,7 @@ function createReimbursementLinkSaga({
         expenseId,
         allocationCents: admission.allocationCents,
         linkKey: linkPairKey(inflowId, expenseId),
-        version: linkVersionSafe(existingLink),
+        version: linkVersion(existingLink),
         idempotent: true,
       };
     }
@@ -230,6 +264,7 @@ function createReimbursementLinkSaga({
       expectedVersion: admission.expectedVersion ?? null,
       inflowLive: admission.inflowLive,
       expenseLive: admission.expenseLive,
+      allowSamePairResolution: admission.allowSamePairResolution === true,
       idempotent: false,
       startedAt: now,
       updatedAt: now,
@@ -237,9 +272,7 @@ function createReimbursementLinkSaga({
     await invokeFault(faultInjector, 'before:initial-saga-write', saga);
     writeSaga(saga);
     await invokeFault(faultInjector, 'after:initial-saga-write', saga);
-    const result = await drive(api, saga, { faultInjector });
-    saga.resultVersion = built.record.version;
-    return result;
+    return drive(api, saga, { faultInjector });
   }
 
   async function unlink(api, { inflowId, expenseId, accountId, expectedVersion, operationIdentity, faultInjector } = {}) {
@@ -249,11 +282,21 @@ function createReimbursementLinkSaga({
       (link) => sameTransactionId(link?.inflow?.id, inflowId)
         && sameTransactionId(link?.expense?.id, expenseId),
     );
-    if (!existing) return { ok: true, removed: 0 };
-    if (expectedVersion != null && linkVersionSafe(existing) !== Number(expectedVersion)) {
-      const { ReimbursementLinkStaleError } = require('./reimbursement-allocation');
-      throw new ReimbursementLinkStaleError();
+    if (!existing) return { ok: true, removed: 0, idempotent: true };
+
+    if (operationIdentity) {
+      const existingTerminal = Object.values(loadState().sagas).find(
+        (saga) => isTerminalSaga(saga)
+          && saga.operationIdentity === operationIdentity
+          && saga.action === 'unlink'
+          && sameTransactionId(saga.inflowId, inflowId)
+          && sameTransactionId(saga.expenseId, expenseId),
+      );
+      if (existingTerminal) {
+        return { ...terminalReplay(existingTerminal), idempotent: true };
+      }
     }
+
     const now = new Date().toISOString();
     const saga = {
       id: operationIdentity || `reimb_unlink_${crypto.randomUUID()}`,
@@ -266,6 +309,7 @@ function createReimbursementLinkSaga({
       inflowId: String(inflowId),
       expenseId: String(expenseId),
       expectedVersion: expectedVersion ?? null,
+      idempotent: false,
       startedAt: now,
       updatedAt: now,
     };
@@ -285,8 +329,7 @@ function createReimbursementLinkSaga({
         errors.push({ sagaId: saga.id, error });
       }
     }
-    if (errors.length) throw errors[0].error;
-    return { recovered: active.length };
+    return { recovered: active.length, errors };
   }
 
   function inspectState() {
@@ -298,6 +341,7 @@ function createReimbursementLinkSaga({
   }
 
   return {
+    activeOwnedIds,
     assertAvailable,
     inspectState,
     link,
@@ -305,13 +349,6 @@ function createReimbursementLinkSaga({
     recover,
     unlink,
   };
-}
-
-function linkVersionSafe(link) {
-  if (!link) return 0;
-  if (link.version != null) return Number(link.version) || 0;
-  if (link.allocationCents != null || link.amount != null) return 1;
-  return 0;
 }
 
 module.exports = {

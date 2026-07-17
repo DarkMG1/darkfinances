@@ -570,14 +570,22 @@ export interface ReimbLegacyReportRow {
   linkKey: string;
   inflowId: string | null;
   expenseId: string | null;
+  inflowDate: string | null;
+  expenseDate: string | null;
   reason: string;
+  createdAt: string | null;
+}
+export interface ReimbLegacyReport {
+  ambiguousCount: number;
+  rows: ReimbLegacyReportRow[];
+  generatedAt: string;
 }
 export interface ReimbLinks {
   links?: ReimbLinkEndpoint[];
   asInflow: ReimbLinkEndpoint[];
   asExpense: ReimbLinkEndpoint[];
   capacity?: ReimbLinkCapacity | null;
-  legacyReport?: { ambiguousCount: number; rows: ReimbLegacyReportRow[] };
+  legacyReport?: ReimbLegacyReport;
 }
 
 // Repayment auto-matcher: a suggested match of an incoming payment to what a

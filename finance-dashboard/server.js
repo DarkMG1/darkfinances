@@ -1132,10 +1132,20 @@ async function dismissRepaymentH(req, operation) {
 async function delLink(req, operation) {
   const inflowId = (req.body && req.body.inflowId) || req.query.inflowId;
   const expenseId = (req.body && req.body.expenseId) || req.query.expenseId;
-  const parsed = parse(schemas.deleteReimbLink, { inflowId, expenseId }, 'reimbursement unlink');
+  const expectedVersionRaw = (req.body && req.body.expectedVersion) ?? req.query.expectedVersion;
+  const parsed = parse(schemas.deleteReimbLink, {
+    inflowId,
+    expenseId,
+    ...(expectedVersionRaw != null && expectedVersionRaw !== ''
+      ? { expectedVersion: Number(expectedVersionRaw) }
+      : {}),
+  }, 'reimbursement unlink');
   data.assertTransactionMutationAvailable({ ids: [parsed.inflowId, parsed.expenseId] });
   return runActualProjectionMutation(
-    () => applyLocal(operation, () => data.deleteReimbLink(parsed)),
+    () => applyLocal(operation, () => data.deleteReimbLink({
+      ...parsed,
+      operationIdentity: operation?.key,
+    })),
   );
 }
 
