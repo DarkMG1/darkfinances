@@ -17,7 +17,7 @@ reverse-proxy settings, and alert delivery before installation.
 | `systemd/finance-sync-failure@.service` | `OnFailure` bridge to the alert script. |
 | `bin/backup-dashboard-runtime.sh` | Private archive of dashboard JSON sidecars and receipts. |
 | `bin/build-backup-bundle.sh` | Relocatable runtime backup bundle with embedded verification tooling. |
-| `bin/backup-coordinated.sh` | Quiesced backup with embedded manifest, checksum, and release provenance. |
+| `bin/backup-coordinated.sh` | Quiesced PR-16 bundle backup with writer inventory, run journal, generation manifest, and restore admission token. |
 | `bin/write-dashboard-release-manifest.sh` | Content-address the reviewed files in a dashboard deployment. |
 | `bin/verify-backup.sh` | Schema/checksum/receipt validation for a runtime archive. |
 | `bin/verify-backup-bundle.sh` | Read-only validation for a relocatable runtime backup bundle. |
@@ -287,22 +287,37 @@ node ops/lib/generate-backup-state-inventory.js
 PR-17 adds staged live swap/generation-bound restore; PR-18 adds writer quiescence. Do not treat
 bundle verification as evidence of a successful production restore.
 
-### Coordinated quiesced backup
+### Coordinated quiesced backup (PR-18)
 
-When systemd is available, `backup-coordinated.sh` stops `actual-sync.timer` and
-`finance-dashboard.service`, runs the runtime backup, verifies it, and records a release manifest.
-Set `BACKUP_INCLUDE_ACTUAL_DATA=1` to also archive `~/actual/data`; that additional archive is
-content-addressed in the same release manifest.
+`backup-coordinated.sh` delegates to the PR-18 coordinator (`ops/lib/coordinated-backup-cli.js`). It:
+
+- Takes an exclusive lock under `$DARKFINANCES_BACKUP_DIR/.darkfinances-coordinated/` so backup, restore, and sync cannot overlap.
+- Captures an immutable run journal with pre-mutation writer `active`/`enabled`/`running` snapshots from the authoritative inventory (`ops/lib/writer-inventory.json`).
+- Stops writers in order: timers → active jobs → dashboard (systemd `SIGTERM` graceful drain via PR-14) → Actual container when `BACKUP_INCLUDE_ACTUAL_DATA=1` → restore-lock check.
+- Verifies quiescence with bounded polling; a successful stop command alone is not proof.
+- Builds a PR-16 relocatable bundle, optional Actual data archive, release manifest, coordinated generation manifest, and short-TTL restore admission token bound to artifact/destination/generation evidence.
+- Restarts only originally active/enabled components in safe order (Actual → dashboard health → jobs/timers), then runs source-fresh health checks.
+- On failure/interrupt, cleans run-owned staging only, preserves prior backups, and leaves `recovery_required` journal state when restart or health checks fail.
+
+Dry run (`BACKUP_DRY_RUN=1` or `--dry-run`) performs discovery/preflight/stop-order planning only and exits `2` without mutating services or destination bytes.
 
 ```bash
 install -m 700 ops/bin/backup-coordinated.sh \
   "$HOME/.local/bin/backup-coordinated.sh"
 DARKFINANCES_REPO_ROOT=/path/to/darkfinances \
-  BACKUP_QUIESCE=0 "$HOME/.local/bin/backup-coordinated.sh"
+  "$HOME/.local/bin/backup-coordinated.sh"
 ```
 
-Use `BACKUP_QUIESCE=0` on hosts without user systemd or when you have already stopped services
-manually.
+Environment:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BACKUP_QUIESCE` | `1` | Stop/verify/restart writers around backup |
+| `BACKUP_INCLUDE_ACTUAL_DATA` | `0` | Also archive `ACTUAL_DATA_DIR` and bind Actual generation |
+| `BACKUP_DRY_RUN` | `0` | Discovery/plan only |
+| `FINANCE_EVENT_SYNC_CONFIGURED` | unset | Include optional event-sync writers when `1` |
+
+Use `BACKUP_QUIESCE=0` only on hosts without user systemd or when writers are already quiesced manually.
 
 ## Restore dashboard runtime state
 

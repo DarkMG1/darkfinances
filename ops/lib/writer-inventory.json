@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "kind": "darkfinances-writer-inventory",
+  "stopPhases": [
+    "timers",
+    "jobs",
+    "dashboard",
+    "actual-container",
+    "restore-lock"
+  ],
+  "restartPhases": [
+    "actual-container",
+    "dashboard",
+    "jobs-timers"
+  ],
+  "writers": [
+    {
+      "id": "backup-coordinated.timer",
+      "component": "backup-coordinated",
+      "type": "systemd-timer",
+      "unit": "backup-coordinated.timer",
+      "scope": "user",
+      "stopPhase": "timers",
+      "restartPhase": "jobs-timers",
+      "optional": true,
+      "quiescentStates": ["inactive", "dead", "not-present"]
+    },
+    {
+      "id": "actual-sync.timer",
+      "component": "actual-sync",
+      "type": "systemd-timer",
+      "unit": "actual-sync.timer",
+      "scope": "user",
+      "stopPhase": "timers",
+      "restartPhase": "jobs-timers",
+      "optional": false,
+      "quiescentStates": ["inactive", "dead"]
+    },
+    {
+      "id": "actual-sync.service",
+      "component": "actual-sync",
+      "type": "systemd-service",
+      "unit": "actual-sync.service",
+      "scope": "user",
+      "stopPhase": "jobs",
+      "restartPhase": "jobs-timers",
+      "optional": false,
+      "quiescentStates": ["inactive", "dead", "failed"]
+    },
+    {
+      "id": "finance-event-sync.timer",
+      "component": "finance-event-sync",
+      "type": "systemd-timer",
+      "unit": "finance-event-sync.timer",
+      "scope": "user",
+      "stopPhase": "timers",
+      "restartPhase": "jobs-timers",
+      "optional": true,
+      "configEnv": "FINANCE_EVENT_SYNC_CONFIGURED",
+      "quiescentStates": ["inactive", "dead", "not-present"]
+    },
+    {
+      "id": "finance-event-sync.service",
+      "component": "finance-event-sync",
+      "type": "systemd-service",
+      "unit": "finance-event-sync.service",
+      "scope": "user",
+      "stopPhase": "jobs",
+      "restartPhase": "jobs-timers",
+      "optional": true,
+      "configEnv": "FINANCE_EVENT_SYNC_CONFIGURED",
+      "quiescentStates": ["inactive", "dead", "failed", "not-present"]
+    },
+    {
+      "id": "finance-dashboard",
+      "component": "finance-dashboard",
+      "type": "systemd-service",
+      "unit": "finance-dashboard.service",
+      "scope": "user",
+      "stopPhase": "dashboard",
+      "restartPhase": "dashboard",
+      "optional": false,
+      "gracefulDrain": true,
+      "quiescentStates": ["inactive", "dead", "failed"]
+    },
+    {
+      "id": "actual-container",
+      "component": "actual-server",
+      "type": "docker-container",
+      "containerName": "actual",
+      "composeFileEnv": "ACTUAL_COMPOSE_FILE",
+      "stopPhase": "actual-container",
+      "restartPhase": "actual-container",
+      "optional": true,
+      "requireWhenEnv": "BACKUP_INCLUDE_ACTUAL_DATA",
+      "quiescentStates": ["stopped", "not-present"]
+    },
+    {
+      "id": "restore-process",
+      "component": "staged-restore",
+      "type": "restore-lock",
+      "stopPhase": "restore-lock",
+      "restartPhase": "jobs-timers",
+      "optional": false,
+      "quiescentStates": ["absent"]
+    }
+  ]
+}

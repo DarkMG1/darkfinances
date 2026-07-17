@@ -25,6 +25,16 @@ const OPS_TOOLING_FILES = Object.freeze([
   'ops/lib/restore-quiescence-admission.js',
   'ops/lib/staged-restore.js',
   'ops/lib/staged-restore-cli.js',
+  'ops/lib/writer-inventory.js',
+  'ops/lib/writer-inventory.json',
+  'ops/lib/coordinated-operation-layout.js',
+  'ops/lib/coordinated-operation-lock.js',
+  'ops/lib/coordinated-run-journal.js',
+  'ops/lib/ops-command-runners.js',
+  'ops/lib/writer-quiescence.js',
+  'ops/lib/coordinated-backup-health.js',
+  'ops/lib/coordinated-backup.js',
+  'ops/lib/coordinated-backup-cli.js',
 ]);
 
 const DASHBOARD_TOOLING_SEED = 'finance-dashboard/lib/runtime-state-store.js';
@@ -71,6 +81,9 @@ function bundleDestinationRelative(sourceRelative) {
   }
   if (sourceRelative === 'ops/lib/staged-restore-cli.js') {
     return 'tooling/ops/bin/restore-dashboard-runtime.js';
+  }
+  if (sourceRelative === 'ops/lib/coordinated-backup-cli.js') {
+    return 'tooling/ops/bin/backup-coordinated.js';
   }
   return path.posix.join('tooling', sourceRelative);
 }
