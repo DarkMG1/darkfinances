@@ -8,6 +8,8 @@ export const colors = {
   border: 'rgba(255,255,255,0.08)',
   text: '#f0f0f5',
   muted: '#6b6b80',
+  // Secondary labels (e.g. Not tracked) — matches PR-38 muted for future theme union.
+  untrackedLabel: '#9494a8',
   accent: '#7c6ef7',
   accentLight: '#a898ff',
   green: '#22c55e',
