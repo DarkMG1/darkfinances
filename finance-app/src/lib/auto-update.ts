@@ -94,8 +94,14 @@ export function getOtaUpdateSnapshot() {
   return getSharedOwner().getSnapshot();
 }
 
-export function __resetOtaUpdateOwnerForTests() {
+/** Drop persisted Later cooldown and in-memory owner work during profile purge. */
+export function purgeOtaProfileState(): void {
+  persistence.clearDeferred();
+  otaNativePendingRef.current = { pending: false, updateId: null };
   sharedOwner?.dispose();
   sharedOwner = null;
-  otaNativePendingRef.current = { pending: false, updateId: null };
+}
+
+export function __resetOtaUpdateOwnerForTests() {
+  purgeOtaProfileState();
 }
