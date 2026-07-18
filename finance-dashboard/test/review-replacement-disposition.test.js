@@ -81,6 +81,25 @@ test('replacement saga reference step rewrites reviewState store', () => {
   assert.equal(result.stores.reviewState.dispositions[after.stableKey].disposition, 'acknowledge');
 });
 
+test('deletion removes disposition matched by imported_id when txn id differs', () => {
+  const txn = { id: 'actual-txn-id', imported_id: 'bank-import-unique', amount: -10, date: '2026-07-01', accountId: 'a1', categoryId: '' };
+  const task = enrichReviewTask({ kind: 'uncategorized', date: '2026-07-01', amount: 10, transaction: txn }, ctx([txn]));
+  assert.match(task.stableKey, /imported:bank-import-unique/);
+  let state = applyReviewDisposition(normalizeReviewState({ schemaVersion: 2, contentVersion: 1, dispositions: {}, legacyDispositions: {} }), {
+    id: task.id,
+    disposition: 'acknowledge',
+    contentHash: task.contentHash,
+  }, { taskIndex: buildReviewTaskIndex([task]) }).state;
+  const deleted = rewriteReviewDispositionsForDeletion(state, {
+    snapshot: {
+      id: 'actual-txn-id',
+      imported_id: 'bank-import-unique',
+      subtransactions: [],
+    },
+  }).reviewState;
+  assert.deepEqual(deleted.dispositions, {});
+});
+
 test('deletion removes disposition for deleted anchor and imported id', () => {
   const txn = { id: 'txn-del', imported_id: 'import-del', amount: -10, date: '2026-07-01', accountId: 'a1', categoryId: '' };
   const task = enrichReviewTask({ kind: 'pending', date: '2026-07-01', amount: 10, transaction: txn }, ctx([txn]));
@@ -91,6 +110,28 @@ test('deletion removes disposition for deleted anchor and imported id', () => {
   }, { taskIndex: buildReviewTaskIndex([task]) }).state;
   const deleted = rewriteReviewDispositionsForDeletion(state, { transactions: [txn] }).reviewState;
   assert.deepEqual(deleted.dispositions, {});
+});
+
+test('replacement idMap rewrites split leg raw ids in stable keys', () => {
+  const parent = { id: 'parent-old', imported_id: 'bank-1', amount: -10, date: '2026-07-01', accountId: 'a1', categoryId: '' };
+  const leg = { id: 'leg-old', parentId: 'parent-old', isLeg: true, amount: -10, categoryId: 'c1', date: '2026-07-01', accountId: 'a1' };
+  const parentNew = { ...parent, id: 'parent-new' };
+  const legNew = { ...leg, id: 'leg-new', parentId: 'parent-new' };
+  const before = enrichReviewTask({ kind: 'uncategorized', date: '2026-07-01', amount: 10, transaction: leg }, ctx([parent, leg]));
+  const after = enrichReviewTask({ kind: 'uncategorized', date: '2026-07-01', amount: 10, transaction: legNew }, ctx([parentNew, legNew]));
+  assert.match(before.stableKey, /:leg-old$/);
+  assert.match(after.stableKey, /:leg-new$/);
+  let state = applyReviewDisposition(normalizeReviewState({ schemaVersion: 2, contentVersion: 1, dispositions: {}, legacyDispositions: {} }), {
+    id: before.id,
+    disposition: 'acknowledge',
+    contentHash: before.contentHash,
+  }, { taskIndex: buildReviewTaskIndex([before]) }).state;
+  const rewritten = rewriteReviewDispositionsForReplacement(state, {
+    'parent-old': 'parent-new',
+    'leg-old': 'leg-new',
+  }, { tasksBefore: [before], tasksAfter: [after] }).reviewState;
+  assert.equal(filterVisibleReviewTasks([after], rewritten).length, 0);
+  assert.match(Object.keys(rewritten.dispositions)[0], /:leg-new$/);
 });
 
 test('deletion reference integration removes reviewState entries', () => {

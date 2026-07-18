@@ -27,6 +27,18 @@ test('entityAnchor uses imported only when unique', () => {
   assert.equal(entityAnchor({ id: 'solo', imported_id: 'unique-1' }, ctx([{ id: 'solo', imported_id: 'unique-1' }])), 'imported:unique-1');
 });
 
+test('split leg stable identity excludes content fields', () => {
+  const parent = { id: 'p1', imported_id: 'bank-1' };
+  const legA = { id: 'leg-a', parentId: 'p1', isLeg: true, amount: -10, categoryId: 'c1', payee: 'A', imported_id: 'bank-1', date: '2026-07-01', accountId: 'a1' };
+  const legB = { ...legA, amount: -20, categoryId: 'c2', payee: 'B' };
+  const context = ctx([parent, legA, legB]);
+  const taskA = enrichReviewTask({ kind: 'uncategorized', date: '2026-07-01', amount: 10, transaction: legA }, context);
+  const taskB = enrichReviewTask({ kind: 'uncategorized', date: '2026-07-01', amount: 20, transaction: legB }, context);
+  assert.equal(taskA.stableKey, taskB.stableKey);
+  assert.notEqual(taskA.contentHash, taskB.contentHash);
+  assert.match(taskA.stableKey, /:leg-a$/);
+});
+
 test('split legs stay distinct when parent and imported overlap', () => {
   const parent = { id: 'p1', imported_id: 'bank-1' };
   const legA = { id: 'leg-a', parentId: 'p1', isLeg: true, amount: -10, categoryId: 'c1', payee: 'A', imported_id: 'bank-1' };

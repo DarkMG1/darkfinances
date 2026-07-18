@@ -3508,24 +3508,45 @@ function persistReviewStateMaintenance({ expectedRevision, expiredSnoozeKeys = [
   return { ok: true, changed: result.changed, conflict: result.conflict };
 }
 
-async function setReviewDisposition({ id, disposition, until, note, contentHash, month, expectedRevision } = {}) {
+async function prepareReviewDispositionAdmission({ id, disposition, until, note, contentHash, month, expectedRevision } = {}) {
   if (!id) throw new Error('review task id required');
+  const { ReviewDispositionStaleError } = require('./lib/review-disposition');
   const { allTasks } = await collectReviewTasks({ month });
   const taskIndex = buildReviewTaskIndex(allTasks);
   const state = readReviewState();
-  const revision = expectedRevision || reviewStateRevision(state);
-  if (expectedRevision && expectedRevision !== reviewStateRevision(state)) {
-    const { ReviewDispositionStaleError } = require('./lib/review-disposition');
+  const preWriteRevision = reviewStateRevision(state);
+  if (expectedRevision && expectedRevision !== preWriteRevision) {
     throw new ReviewDispositionStaleError('review state changed — refresh and retry');
   }
   const preflight = preflightReviewDispositionAdmission(state, { id, disposition, until, note, contentHash }, { taskIndex });
-  const { state: next, id: canonicalId } = applyReviewDisposition(state, { id, disposition, until, note, contentHash }, {
-    taskIndex,
-    preflight,
-  });
-  writeReviewState(next);
-  const task = allTasks.find((entry) => entry.id === canonicalId || entry.stableKey === canonicalId);
-  return { ok: true, id: canonicalId, disposition, contentHash: task?.contentHash || contentHash || null };
+  const applied = applyReviewDisposition(state, { id, disposition, until, note, contentHash }, { taskIndex, preflight });
+  const task = allTasks.find((entry) => entry.id === applied.id || entry.stableKey === applied.stableKey);
+  return {
+    preWriteRevision,
+    nextState: applied.state,
+    result: {
+      ok: true,
+      id: applied.id,
+      disposition: applied.disposition,
+      contentHash: task?.contentHash || contentHash || null,
+    },
+  };
+}
+
+function commitReviewDisposition(admission) {
+  if (!admission?.nextState) throw new Error('review disposition admission required');
+  const { ReviewDispositionStaleError } = require('./lib/review-disposition');
+  const currentRevision = reviewStateRevision(readReviewState());
+  if (admission.preWriteRevision != null && admission.preWriteRevision !== currentRevision) {
+    throw new ReviewDispositionStaleError('review state changed — refresh and retry');
+  }
+  writeReviewState(admission.nextState);
+  return admission.result;
+}
+
+async function setReviewDisposition(payload) {
+  const admission = await prepareReviewDispositionAdmission(payload);
+  return commitReviewDisposition(admission);
 }
 
 async function collectReviewTasks({ month, classifiedLeaves: preclassifiedLeaves } = {}) {
@@ -5610,10 +5631,10 @@ function readTransactionDeletionReferenceStores() {
   };
 }
 
-function planTransactionReferenceDeletion(targetIds) {
+function planTransactionReferenceDeletion(targetEvidence) {
   const result = rewriteTransactionDeletionReferences(
     readTransactionDeletionReferenceStores(),
-    targetIds,
+    targetEvidence,
   );
   for (const file of result.receiptFilesToDelete) safeReceiptPath(file);
   return {
@@ -5622,9 +5643,10 @@ function planTransactionReferenceDeletion(targetIds) {
   };
 }
 
-function applyTransactionDeletionReferenceStep(step, targetIds, _plan) {
+function applyTransactionDeletionReferenceStep(step, targetEvidence, plan) {
+  const evidence = plan?.targetEvidence || targetEvidence;
   const current = readTransactionDeletionReferenceStores();
-  const next = rewriteTransactionDeletionReferences(current, targetIds).stores[step];
+  const next = rewriteTransactionDeletionReferences(current, evidence).stores[step];
   const destinations = {
     receipts: RECEIPTS_PATH,
     links: REIMB_LINKS_PATH,
@@ -5640,9 +5662,10 @@ function applyTransactionDeletionReferenceStep(step, targetIds, _plan) {
   }
 }
 
-function transactionDeletionReferencesConverged(targetIds, _plan) {
+function transactionDeletionReferencesConverged(targetEvidence, plan) {
+  const evidence = plan?.targetEvidence || targetEvidence;
   const current = readTransactionDeletionReferenceStores();
-  const rewritten = rewriteTransactionDeletionReferences(current, targetIds);
+  const rewritten = rewriteTransactionDeletionReferences(current, evidence);
   return TRANSACTION_DELETION_REFERENCE_STEPS.every(
     (step) => JSON.stringify(current[step]) === JSON.stringify(rewritten.stores[step]),
   );
@@ -6607,6 +6630,8 @@ module.exports = {
   buildReimbursementExport,
   getReview,
   persistReviewStateMaintenance,
+  prepareReviewDispositionAdmission,
+  commitReviewDisposition,
   setReviewDisposition,
   suggestRepayments,
   confirmRepayment,

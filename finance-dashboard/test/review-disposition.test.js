@@ -121,6 +121,69 @@ test('snooze expiry is durably pruned on mutation write path only', () => {
   assert.equal(pruned.state.dispositions[task.stableKey], undefined);
 });
 
+test('split-leg repeated edits reuse one stable key without orphan dispositions', () => {
+  const parent = { id: 'p1', imported_id: 'bank-1', amount: -30, date: '2026-07-01', accountId: 'a1', categoryId: 'c1' };
+  const legBase = { id: 'leg-a', parentId: 'p1', isLeg: true, imported_id: 'bank-leg-a', date: '2026-07-01', accountId: 'a1' };
+  const legV1 = { ...legBase, amount: -10, categoryId: 'c1', payee: 'A' };
+  const legV2 = { ...legBase, amount: -20, categoryId: 'c2', payee: 'B' };
+  const makeTask = (leg) => enrichReviewTask({
+    kind: 'uncategorized',
+    date: '2026-07-01',
+    amount: Math.abs(leg.amount),
+    transaction: leg,
+  }, ctx([parent, leg]));
+  const taskV1 = makeTask(legV1);
+  const taskV2 = makeTask(legV2);
+  const taskV1Again = makeTask({ ...legV1 });
+  assert.equal(taskV1.stableKey, taskV2.stableKey);
+  assert.notEqual(taskV1.contentHash, taskV2.contentHash);
+  assert.equal(taskV1.contentHash, taskV1Again.contentHash);
+
+  let state = emptyState();
+  state = applyReviewDisposition(state, {
+    id: taskV1.id,
+    disposition: 'acknowledge',
+    contentHash: taskV1.contentHash,
+  }, { taskIndex: buildReviewTaskIndex([taskV1]) }).state;
+  assert.equal(Object.keys(state.dispositions).length, 1);
+  assert.equal(filterVisibleReviewTasks([taskV1], state).length, 0);
+
+  assert.equal(filterVisibleReviewTasks([taskV2], state, Date.now(), buildReviewTaskIndex([taskV2])).length, 1);
+
+  state = applyReviewDisposition(state, {
+    id: taskV2.id,
+    disposition: 'acknowledge',
+    contentHash: taskV2.contentHash,
+  }, { taskIndex: buildReviewTaskIndex([taskV2]) }).state;
+  assert.equal(Object.keys(state.dispositions).length, 1);
+  assert.equal(state.dispositions[taskV1.stableKey].contentHash, taskV2.contentHash);
+
+  state = applyReviewDisposition(state, {
+    id: taskV1Again.id,
+    disposition: 'acknowledge',
+    contentHash: taskV1Again.contentHash,
+  }, { taskIndex: buildReviewTaskIndex([taskV1Again]) }).state;
+  assert.equal(Object.keys(state.dispositions).length, 1);
+  assert.equal(filterVisibleReviewTasks([taskV1Again], state).length, 0);
+  assert.equal(state.dispositions[taskV1.stableKey].contentHash, taskV1Again.contentHash);
+});
+
+test('v1 legacy bucket preserves opaque hidden strings exactly', () => {
+  const legacyDispositions = {
+    'uncategorized:txn-1': 'hidden',
+    'large_charge:txn-2': { disposition: 'snooze', until: '2099-01-01T00:00:00.000Z', at: '2026-07-01T00:00:00.000Z' },
+  };
+  for (let i = 0; i < 5998; i += 1) {
+    legacyDispositions[`pending:txn-${i + 3}`] = i % 2 === 0 ? 'acknowledge' : 'hidden';
+  }
+  const migrated = normalizeReviewState({ schemaVersion: 1, dispositions: legacyDispositions });
+  assert.equal(Object.keys(migrated.legacyDispositions).length, 6000);
+  assert.equal(migrated.legacyDispositions['uncategorized:txn-1'], 'hidden');
+  assert.equal(migrated.legacyDispositions['pending:txn-4'], 'hidden');
+  const roundTrip = JSON.parse(JSON.stringify(migrated));
+  assert.deepEqual(roundTrip.legacyDispositions, migrated.legacyDispositions);
+});
+
 test('v1 legacy bucket preserved losslessly without truncation', () => {
   const legacyDispositions = {};
   for (let i = 0; i < 6000; i += 1) {

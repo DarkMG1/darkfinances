@@ -1131,10 +1131,10 @@ async function setAccountOverrideH(req, operation) {
 }
 async function setReviewDispositionH(req, operation) {
   const disposition = parse(schemas.reviewDisposition, req.body, 'review disposition');
-  return runActualProjectionMutation(
-    () => applyLocal(operation, () => data.setReviewDisposition(disposition)),
-    'today', 'review-current',
-  );
+  return runActualProjectionMutation(async () => {
+    const admission = await data.prepareReviewDispositionAdmission(disposition);
+    return applyLocal(operation, () => data.commitReviewDisposition(admission));
+  }, 'today', 'review-current');
 }
 async function saveManualAssetH(req, operation) {
   const asset = parse(schemas.manualAsset, req.body, 'manual asset');

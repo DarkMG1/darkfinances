@@ -477,7 +477,7 @@ for (const [name, fixtures] of Object.entries(FIXTURES)) {
       assert.deepEqual(first.value.byTxn.t2.length, 1);
     }
     if (name === 'reviewState') {
-      assert.deepEqual(first.value.legacyDispositions['fp-1'], { disposition: 'acknowledge', at: new Date(0).toISOString() });
+      assert.deepEqual(first.value.legacyDispositions['fp-1'], 'hidden');
       assert.deepEqual(first.value.legacyDispositions['task:1'], fixtures.legacy['task:1']);
       assert.equal(Object.keys(first.value.dispositions || {}).length, 0);
     }
@@ -795,7 +795,7 @@ test('reviewState flat legacy map migrates losslessly through read, write, and b
   writePrimary(env, 'reviewState', legacy);
   const loaded = readRuntimeState('reviewState', { env }).value;
   assert.equal(loaded.schemaVersion, 2);
-  assert.deepEqual(loaded.legacyDispositions['fp-1'], { disposition: 'acknowledge', at: new Date(0).toISOString() });
+  assert.deepEqual(loaded.legacyDispositions['fp-1'], 'hidden');
   assert.deepEqual(loaded.legacyDispositions['task:1'], legacy['task:1']);
   assert.deepEqual(loaded.dispositions, {});
   writeRuntimeState('reviewState', loaded, { env, enforceOwnership: false });

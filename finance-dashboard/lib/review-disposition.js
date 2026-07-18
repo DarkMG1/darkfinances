@@ -3,6 +3,7 @@
 const { KnownPreApplyError } = require('./errors');
 const {
   REVIEW_CONTENT_VERSION,
+  canonicalReviewContent,
   enrichReviewTask,
   expandTransactionTargetEvidence,
   hashPayload,
@@ -60,12 +61,22 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function normalizeDispositionRecord(raw) {
+function preserveLegacyDispositionValue(raw) {
+  if (typeof raw === 'string') return raw;
+  if (!isPlainObject(raw)) return null;
+  return cloneJson(raw);
+}
+
+function normalizeActiveDispositionRecord(raw) {
   if (typeof raw === 'string') {
     return { disposition: raw === 'hidden' ? 'acknowledge' : raw, at: new Date(0).toISOString() };
   }
   if (!isPlainObject(raw)) return null;
   return cloneJson(raw);
+}
+
+function normalizeDispositionRecord(raw) {
+  return normalizeActiveDispositionRecord(raw);
 }
 
 function emptyReviewState() {
@@ -92,8 +103,8 @@ function normalizeReviewState(raw) {
   if (isPlainObject(dispositions)) {
     for (const [key, value] of Object.entries(dispositions)) {
       if (key === 'schemaVersion' || key === 'contentVersion' || key === 'legacyDispositions') continue;
-      const normalized = normalizeDispositionRecord(value);
-      if (normalized) legacyDispositions[key] = normalized;
+      const preserved = preserveLegacyDispositionValue(value);
+      if (preserved != null) legacyDispositions[key] = preserved;
     }
   }
   return {
@@ -194,7 +205,7 @@ function dispositionRecordMatchesTask(record, task) {
 
 function lookupDispositionForTask(state, task, taskIndex) {
   const direct = state.dispositions[task.stableKey];
-  if (direct && dispositionRecordMatchesTask(direct, task)) return direct;
+  if (direct && dispositionRecordMatchesTask(direct, task)) return normalizeActiveDispositionRecord(direct);
 
   for (const [legacyKey, record] of Object.entries(state.legacyDispositions || {})) {
     let mapped = taskIndex.byLegacyKey.get(legacyKey);
@@ -206,8 +217,10 @@ function lookupDispositionForTask(state, task, taskIndex) {
       }
     }
     if (!mapped || mapped.stableKey !== task.stableKey) continue;
-    if (!dispositionRecordMatchesTask(record, task)) continue;
-    return record;
+    const normalized = typeof record === 'string' ? record : normalizeActiveDispositionRecord(record);
+    if (!normalized || typeof normalized === 'string') continue;
+    if (!dispositionRecordMatchesTask(normalized, task)) continue;
+    return normalized;
   }
 
   return null;
@@ -433,13 +446,11 @@ function invalidateReviewDispositionsForTargets(reviewState, { targetIds = [], i
   return { reviewState: next, stats };
 }
 
-function rewriteStableKeyWithIdMap(stableKey, idMap, { importedIdCounts = null } = {}) {
+function rewriteStableKeyWithIdMap(stableKey, idMap) {
   let next = String(stableKey || '');
   for (const [oldId, newId] of Object.entries(idMap || {})) {
     next = next.split(`:id:${oldId}`).join(`:id:${newId}`);
-    next = next.split(`:leg:${oldId}:`).join(`:leg:${newId}:`);
-    const legPattern = new RegExp(`:leg:([^:]+):${oldId}:`, 'g');
-    next = next.replace(legPattern, `:leg:$1:${newId}:`);
+    next = next.replace(new RegExp(`:leg:((?:[^:]+(?::[^:]+)*)):${oldId}$`, 'g'), `:leg:$1:${newId}`);
   }
   return next;
 }
@@ -465,6 +476,18 @@ function assignWithoutLoss(target, key, value, label) {
     throw new Error(`${label} reference migration would overwrite distinct evidence`);
   }
   target[key] = value;
+}
+
+function reviewTaskSemanticContentEqual(left, right) {
+  if (!left || !right || left.kind !== right.kind) return false;
+  if (left.contentHash === right.contentHash) return true;
+  const leftContent = canonicalReviewContent(left, left._fingerprintContext || {});
+  const rightContent = canonicalReviewContent(right, right._fingerprintContext || {});
+  const stripIdentity = (content) => {
+    const { anchor, contentAnchor, ...rest } = content;
+    return rest;
+  };
+  return JSON.stringify(stripIdentity(leftContent)) === JSON.stringify(stripIdentity(rightContent));
 }
 
 function rewriteReviewDispositionsForReplacement(reviewState, idMap, { tasksBefore = [], tasksAfter = [] } = {}) {
@@ -493,8 +516,9 @@ function rewriteReviewDispositionsForReplacement(reviewState, idMap, { tasksBefo
       }
 
       const explicitHashMatch = record.contentHash === afterTask.contentHash;
+      const semanticMatch = beforeTask && afterTask && reviewTaskSemanticContentEqual(beforeTask, afterTask);
 
-      if (beforeTask && afterTask && beforeTask.contentHash === afterTask.contentHash) {
+      if (beforeTask && afterTask && (beforeTask.contentHash === afterTask.contentHash || semanticMatch)) {
         nextRecord.kind = afterTask.kind;
         nextRecord.contentHash = afterTask.contentHash;
         nextRecord.contentVersion = afterTask.contentVersion;
@@ -505,12 +529,12 @@ function rewriteReviewDispositionsForReplacement(reviewState, idMap, { tasksBefo
         continue;
       }
 
-      if (!explicitHashMatch && record.contentHash && record.contentHash !== afterTask.contentHash) {
+      if (!explicitHashMatch && !semanticMatch && record.contentHash && record.contentHash !== afterTask.contentHash) {
         stats.reviewState += 1;
         continue;
       }
 
-      if (!explicitHashMatch && beforeTask && beforeTask.contentHash !== afterTask.contentHash) {
+      if (!explicitHashMatch && !semanticMatch && beforeTask && beforeTask.contentHash !== afterTask.contentHash) {
         stats.reviewState += 1;
         continue;
       }
@@ -536,8 +560,9 @@ function rewriteReviewDispositionsForReplacement(reviewState, idMap, { tasksBefo
 function dispositionRefersToEvidence(key, record, { targets, importedIds }) {
   const keyStr = String(key || '');
   for (const id of targets) {
-    if (keyStr.includes(`:id:${id}`) || keyStr.includes(`:leg:${id}:`) || keyStr.includes(`:imported:${id}`)) return true;
+    if (keyStr.includes(`:id:${id}`) || keyStr.includes(`:imported:${id}`)) return true;
     if (keyStr.endsWith(`:${id}`)) return true;
+    if (keyStr.includes(':leg:') && new RegExp(`:leg:(?:[^:]+(?::[^:]+)*)?:${id}$`).test(keyStr)) return true;
     for (const prefix of ['uncategorized', 'large_charge', 'missing_receipt', 'pending']) {
       if (keyStr === `${prefix}:${id}` || keyStr === `${prefix}:id:${id}`) return true;
     }
@@ -549,15 +574,30 @@ function dispositionRefersToEvidence(key, record, { targets, importedIds }) {
   if (record?.stableKey) {
     return dispositionRefersToEvidence(record.stableKey, null, { targets, importedIds });
   }
+  if (record?.stableId) {
+    return dispositionRefersToEvidence(record.stableId, null, { targets, importedIds });
+  }
   return false;
+}
+
+function normalizeDeletionTargetEvidence(targetEvidence) {
+  if (Array.isArray(targetEvidence)) {
+    return { targets: targetEvidence.map(String), importedIds: [], transactions: [] };
+  }
+  if (targetEvidence?.snapshot) {
+    const { expandDeletionSnapshotEvidence } = require('./review-task-fingerprint');
+    return expandDeletionSnapshotEvidence(targetEvidence.snapshot);
+  }
+  if (targetEvidence?.transactions) {
+    return expandTransactionTargetEvidence(targetEvidence.transactions);
+  }
+  return expandTransactionTargetEvidence([]);
 }
 
 function rewriteReviewDispositionsForDeletion(reviewState, targetEvidence) {
   const stats = { reviewState: 0 };
   const next = normalizeReviewState(reviewState);
-  const expanded = Array.isArray(targetEvidence)
-    ? { targets: targetEvidence.map(String), importedIds: [] }
-    : expandTransactionTargetEvidence(targetEvidence?.transactions || []);
+  const expanded = normalizeDeletionTargetEvidence(targetEvidence);
   const targets = new Set(expanded.targets || []);
   const importedIds = new Set(expanded.importedIds || []);
 
@@ -598,6 +638,8 @@ module.exports = {
   isReviewTaskVisible,
   lookupDispositionForTask,
   normalizeReviewState,
+  preserveLegacyDispositionValue,
+  normalizeActiveDispositionRecord,
   preflightReviewDispositionAdmission,
   pruneExpiredReviewSnoozes,
   resolveTaskForDispositionId,

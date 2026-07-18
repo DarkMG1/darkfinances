@@ -58,21 +58,20 @@ function importedAnchorUnique(importedId, context = {}) {
   return counts.get(importedId) === 1;
 }
 
-function entityAnchor(txn, context = {}) {
+function parentStableAnchor(parentId, context = {}) {
+  const parent = context.parentById?.get(String(parentId));
+  if (!parent) return `id:${parentId}`;
+  return stableEntityAnchor({ ...parent, parentId: null, isLeg: false }, context);
+}
+
+function stableEntityAnchor(txn, context = {}) {
   if (!txn) return 'unknown';
   const imported = txnImportedId(txn);
   const rawId = String(txn.id || 'unknown');
-  const payeeRef = payeeIdentityRef(txn);
 
   if (txn.isLeg && txn.parentId) {
-    return [
-      'leg',
-      String(txn.parentId),
-      rawId,
-      String(amountCentsFromDollars(txn.amount)),
-      String(txn.categoryId || ''),
-      `${payeeRef.kind}:${payeeRef.value}`,
-    ].join(':');
+    const parentAnchor = parentStableAnchor(txn.parentId, context);
+    return `leg:${parentAnchor}:${rawId}`;
   }
 
   if (imported && importedAnchorUnique(imported, context)) {
@@ -84,6 +83,24 @@ function entityAnchor(txn, context = {}) {
     parts.push(`ambiguousImport:${imported}`);
   }
   return parts.join(':');
+}
+
+function contentEntityAnchor(txn, context = {}) {
+  if (!txn) return 'unknown';
+  const stable = stableEntityAnchor(txn, context);
+  if (!txn.isLeg || !txn.parentId) return stable;
+  const payeeRef = payeeIdentityRef(txn);
+  return [
+    stable,
+    String(amountCentsFromDollars(txn.amount)),
+    String(txn.categoryId || ''),
+    `${payeeRef.kind}:${payeeRef.value}`,
+    String(txn.date || ''),
+  ].join(':');
+}
+
+function entityAnchor(txn, context = {}) {
+  return stableEntityAnchor(txn, context);
 }
 
 function transferIdentityContentHash(identity) {
@@ -132,7 +149,8 @@ function canonicalReviewContent(task, context = {}) {
   const kind = task.kind;
   const txn = task.transaction;
   const fingerprintContext = task._fingerprintContext || context;
-  const anchor = entityAnchor(txn, fingerprintContext);
+  const anchor = contentEntityAnchor(txn, fingerprintContext);
+  const stableAnchor = stableEntityAnchor(txn, fingerprintContext);
   const payeeRef = payeeIdentityRef(txn);
   const base = { v: REVIEW_CONTENT_VERSION, kind };
 
@@ -140,7 +158,8 @@ function canonicalReviewContent(task, context = {}) {
     case 'uncategorized':
       return {
         ...base,
-        anchor,
+        anchor: stableAnchor,
+        contentAnchor: anchor,
         date: String(task.date || txn?.date || ''),
         amountCents: amountCentsFromDollars(txn?.amount ?? task.amount),
         payee: payeeRef,
@@ -151,7 +170,8 @@ function canonicalReviewContent(task, context = {}) {
     case 'large_charge':
       return {
         ...base,
-        anchor,
+        anchor: stableAnchor,
+        contentAnchor: anchor,
         date: String(task.date || txn?.date || ''),
         amountCents: amountCentsFromDollars(txn?.amount ?? task.amount),
         payee: payeeRef,
@@ -162,7 +182,8 @@ function canonicalReviewContent(task, context = {}) {
     case 'missing_receipt':
       return {
         ...base,
-        anchor,
+        anchor: stableAnchor,
+        contentAnchor: anchor,
         date: String(task.date || txn?.date || ''),
         amountCents: amountCentsFromDollars(txn?.amount ?? task.amount),
         payee: payeeRef,
@@ -172,7 +193,8 @@ function canonicalReviewContent(task, context = {}) {
     case 'pending':
       return {
         ...base,
-        anchor,
+        anchor: stableAnchor,
+        contentAnchor: anchor,
         date: String(task.date || txn?.date || ''),
         amountCents: amountCentsFromDollars(txn?.amount ?? task.amount),
         payee: payeeRef,
@@ -209,7 +231,8 @@ function canonicalReviewContent(task, context = {}) {
       return {
         ...base,
         reason: String(task.transferReason || ''),
-        anchor,
+        anchor: stableAnchor,
+        contentAnchor: anchor,
         identityHash: transferIdentityContentHash(task.transferIdentity),
       };
     default:
@@ -229,7 +252,7 @@ function reviewTaskStableKey(task, context = {}) {
     case 'large_charge':
     case 'missing_receipt':
     case 'pending':
-      return `${kind}:${entityAnchor(task.transaction, fingerprintContext)}`;
+      return `${kind}:${stableEntityAnchor(task.transaction, fingerprintContext)}`;
     case 'repayment':
       return `repayment:${String(task.suggestionId || task.id?.replace(/^repayment:/, '').split('@')[0] || '')}`;
     case 'price_change':
@@ -237,7 +260,7 @@ function reviewTaskStableKey(task, context = {}) {
     case 'reconciliation':
       return `reconcile:${String(task.month || '')}`;
     case 'transfer_identity':
-      return `transfer_identity:${String(task.transferReason || '')}:${entityAnchor(task.transaction, fingerprintContext)}`;
+      return `transfer_identity:${String(task.transferReason || '')}:${stableEntityAnchor(task.transaction, fingerprintContext)}`;
     default:
       return String(task.id || 'unknown');
   }
@@ -290,10 +313,12 @@ function parseReviewTaskId(id, taskIndex = null) {
 }
 
 function enrichReviewTask(task, context = {}) {
-  const fingerprintContext = {
-    ...context,
-    importedIdCounts: context.importedIdCounts || buildImportedIdCounts(context.transactions || []),
-  };
+  const fingerprintContext = buildReviewFingerprintContext(context.transactions || []);
+  Object.assign(fingerprintContext, {
+    largeThreshold: context.largeThreshold,
+    receiptThreshold: context.receiptThreshold,
+    importedIdCounts: context.importedIdCounts || fingerprintContext.importedIdCounts,
+  });
   const draft = { ...task, _fingerprintContext: fingerprintContext };
   const stableKey = reviewTaskStableKey(draft, fingerprintContext);
   const contentHash = reviewTaskContentHash(draft, fingerprintContext);
@@ -315,7 +340,10 @@ function legacyTxnIdFromKey(legacyKey) {
   if (tail.includes('@') || /^[a-f0-9]{64}$/.test(tail)) return null;
   if (tail.startsWith('id:')) return tail.slice(3).split(':')[0];
   if (tail.startsWith('imported:')) return null;
-  if (tail.startsWith('leg:')) return tail.split(':')[2] || null;
+  if (tail.startsWith('leg:')) {
+    const parts = tail.split(':');
+    return parts[parts.length - 1] || null;
+  }
   return tail;
 }
 
@@ -327,14 +355,52 @@ function legacyRepaymentIdFromKey(legacyKey) {
 function expandTransactionTargetEvidence(transactions = []) {
   const targets = new Set();
   const importedIds = new Set();
+  const parentById = new Map();
   for (const txn of transactions || []) {
     if (!txn) continue;
-    if (txn.id != null) targets.add(String(txn.id));
+    if (txn.id != null) {
+      targets.add(String(txn.id));
+      parentById.set(String(txn.id), txn);
+    }
     if (txn.parentId != null) targets.add(String(txn.parentId));
     const imported = txnImportedId(txn);
     if (imported) importedIds.add(imported);
   }
-  return { targets: [...targets], importedIds: [...importedIds] };
+  return { targets: [...targets], importedIds: [...importedIds], transactions };
+}
+
+function expandDeletionSnapshotEvidence(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return { targets: [], importedIds: [], transactions: [] };
+  }
+  const transactions = [{
+    id: snapshot.id,
+    imported_id: snapshot.imported_id || null,
+    parentId: null,
+    isLeg: false,
+  }];
+  for (const leg of snapshot.subtransactions || []) {
+    transactions.push({
+      id: leg.id,
+      imported_id: leg.imported_id || null,
+      parentId: snapshot.id,
+      isLeg: true,
+    });
+    if (leg.id != null) transactions[transactions.length - 1].id = String(leg.id);
+  }
+  return expandTransactionTargetEvidence(transactions);
+}
+
+function buildReviewFingerprintContext(transactions = []) {
+  const parentById = new Map();
+  for (const txn of transactions || []) {
+    if (txn?.id != null) parentById.set(String(txn.id), txn);
+  }
+  return {
+    importedIdCounts: buildImportedIdCounts(transactions),
+    transactions,
+    parentById,
+  };
 }
 
 module.exports = {
@@ -344,6 +410,9 @@ module.exports = {
   canonicalReviewContent,
   enrichReviewTask,
   entityAnchor,
+  buildReviewFingerprintContext,
+  contentEntityAnchor,
+  expandDeletionSnapshotEvidence,
   expandTransactionTargetEvidence,
   hashPayload,
   importedAnchorUnique,
@@ -359,7 +428,8 @@ module.exports = {
   reviewTaskStableKey,
   stableKeyDigest,
   transferIdentityContentHash,
-  txnAnchor: entityAnchor,
+  stableEntityAnchor,
+  txnAnchor: stableEntityAnchor,
   txnImportedId,
   txnPayeeId,
 };

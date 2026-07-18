@@ -11,6 +11,12 @@ const types = fs.readFileSync(
   'utf8',
 );
 
+test('review disposition admission runs before applyLocal inside projection lane', () => {
+  assert.match(server, /prepareReviewDispositionAdmission/);
+  assert.match(server, /commitReviewDisposition/);
+  assert.match(server, /runActualProjectionMutation\(async \(\) => \{[\s\S]*prepareReviewDispositionAdmission[\s\S]*commitReviewDisposition/);
+});
+
 test('review GET persists snooze cleanup on write lane, not inside cached read', () => {
   assert.match(server, /loadReviewInbox/);
   assert.match(server, /persistReviewStateMaintenance/);
