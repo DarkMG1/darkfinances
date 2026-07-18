@@ -5,6 +5,10 @@ import { mapMutationApiError } from '@/lib/mutation-form-errors';
 import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
 import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
+import {
+  releaseMutationAdmission,
+  tryAcquireMutationAdmission,
+} from '@/lib/mutation-screen-admission';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 
 export interface UseMutationActionOptions<TVariables> {
@@ -15,6 +19,7 @@ export interface UseMutationActionOptions<TVariables> {
   onActivate?: () => void;
   fieldPathOverrides?: Record<string, string>;
   fieldOrder?: string[];
+  admissionRef?: React.MutableRefObject<boolean>;
 }
 
 export interface UseMutationActionResult<TVariables> {
@@ -36,6 +41,7 @@ export function useMutationAction<TVariables>({
   onActivate,
   fieldPathOverrides,
   fieldOrder,
+  admissionRef,
 }: UseMutationActionOptions<TVariables>): UseMutationActionResult<TVariables> {
   const identity = useMutationHookIdentity();
   const {
@@ -85,6 +91,7 @@ export function useMutationAction<TVariables>({
 
   const run = useCallback((variables: TVariables, options?: { onSuccess?: (data: unknown) => void; onSettled?: () => void; rollback?: () => void }) => {
     if (pendingLockRef.current) return;
+    if (!tryAcquireMutationAdmission(admissionRef)) return;
     const token = captureDispatchToken();
     pendingLockRef.current = true;
     setDispatchPending(true);
@@ -124,11 +131,13 @@ export function useMutationAction<TVariables>({
       onSettled: () => {
         if (!isDispatchTokenCurrent(token)) return;
         pendingLockRef.current = false;
+        releaseMutationAdmission(admissionRef);
         setDispatchPending(false);
         options?.onSettled?.();
       },
     });
   }, [
+    admissionRef,
     bumpActivity,
     captureDispatchToken,
     fieldOrder,

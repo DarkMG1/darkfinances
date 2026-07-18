@@ -10,9 +10,19 @@ import {
   setMutationFormDraft,
 } from '@/lib/mutation-form-draft-store';
 import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
+import {
+  beginDraftHydration,
+  createDraftHydrationState,
+  finishDraftHydration,
+  shouldPersistMutationFormDraft,
+} from '@/lib/mutation-form-hydration';
 import { hapticClientValidationRejected } from '@/lib/haptics';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
 import { resolveMutationFormBaseline } from '@/lib/mutation-form-baseline';
+import {
+  releaseMutationAdmission,
+  tryAcquireMutationAdmission,
+} from '@/lib/mutation-screen-admission';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
 
@@ -32,6 +42,7 @@ export interface UseMutationFormOptions<TFields extends Record<string, unknown>,
   onRefetch?: () => void | Promise<unknown>;
   persistDraft?: boolean;
   fieldRefs?: Partial<Record<keyof TFields, React.RefObject<{ focus?: () => void } | null>>>;
+  admissionRef?: React.MutableRefObject<boolean>;
 }
 
 export interface UseMutationFormResult<TFields extends Record<string, unknown>> {
@@ -78,6 +89,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   onRefetch,
   persistDraft = true,
   fieldRefs = {},
+  admissionRef,
 }: UseMutationFormOptions<TFields, TVariables>): UseMutationFormResult<TFields> {
   const identity = useMutationHookIdentity({ formId });
   const {
@@ -99,6 +111,8 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   const setFieldsRef = useRef(setFields);
   const closedRef = useRef(false);
   const variablesRef = useRef<TVariables | null>(null);
+  const hydrationRef = useRef(createDraftHydrationState());
+  const rebaselineAfterSuccessRef = useRef(false);
 
   const bumpActivity = useCallback(() => {
     const seq = nextMutationActivationSeq();
@@ -115,6 +129,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   }, [setFields]);
 
   useEffect(() => {
+    const hydrationGen = beginDraftHydration(hydrationRef.current);
     const draft = persistDraft ? getMutationFormDraft(scopeDigest, formId, profileGeneration) : null;
     const next = resolveMutationFormBaseline(fieldsRef.current, draft);
     setBaseline(next);
@@ -125,12 +140,23 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     setPhase('idle');
     setAnnounce('');
     variablesRef.current = null;
+    const frame = requestAnimationFrame(() => {
+      finishDraftHydration(hydrationRef.current, hydrationGen);
+    });
+    return () => cancelAnimationFrame(frame);
   }, [formId, persistDraft, profileGeneration, scopeDigest]);
 
   useEffect(() => {
+    if (!rebaselineAfterSuccessRef.current) return;
+    rebaselineAfterSuccessRef.current = false;
+    setBaseline({ ...fieldsRef.current });
+  }, [fields]);
+
+  useEffect(() => {
     if (!persistDraft) return;
+    if (!shouldPersistMutationFormDraft(hydrationRef.current, fields, baseline, fieldsEqual)) return;
     setMutationFormDraft(scopeDigest, formId, fields, profileGeneration);
-  }, [fields, formId, persistDraft, profileGeneration, scopeDigest]);
+  }, [baseline, fields, formId, persistDraft, profileGeneration, scopeDigest]);
 
   const isLocked = dispatchPending || phase === 'submitting' || phase === 'reconciling';
   const isDirty = useMemo(() => !fieldsEqual(fields, baseline), [baseline, fields]);
@@ -181,6 +207,8 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   }, [fields, formId, profileGeneration, scopeDigest]);
 
   const runMutation = useCallback((variables: TVariables) => {
+    if (pendingLockRef.current) return;
+    if (!tryAcquireMutationAdmission(admissionRef)) return;
     const token = captureDispatchToken();
     variablesRef.current = variables;
     closedRef.current = false;
@@ -199,6 +227,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
         if (!closedRef.current) {
           closedRef.current = true;
           onSuccessClose?.();
+          rebaselineAfterSuccessRef.current = true;
         }
       },
       onError: (error) => {
@@ -207,10 +236,12 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
       onSettled: () => {
         if (!isDispatchTokenCurrent(token)) return;
         pendingLockRef.current = false;
+        releaseMutationAdmission(admissionRef);
         setDispatchPending(false);
       },
     });
   }, [
+    admissionRef,
     bumpActivity,
     captureDispatchToken,
     formId,
@@ -219,8 +250,8 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     mutation,
     mutationLabel,
     onSuccessClose,
-    setDispatchPending,
     pendingLockRef,
+    setDispatchPending,
   ]);
 
   const submit = useCallback(() => {

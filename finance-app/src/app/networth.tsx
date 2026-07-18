@@ -16,6 +16,7 @@ import {
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { useMutationForm } from '@/hooks/useMutationForm';
+import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { AreaChart } from '@/components/charts';
 import { haptics } from '@/lib/haptics';
 import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
@@ -52,6 +53,7 @@ export default function NetWorthScreen() {
   const manual = useManualAssets();
   const saveManual = useSaveManualAsset();
   const delManual = useDeleteManualAsset();
+  const admissionRef = useMutationScreenAdmission();
 
   const fields = useMemo(() => ({
     id: edit?.id,
@@ -94,11 +96,13 @@ export default function NetWorthScreen() {
       value: parseStrictMoneyDollars(String(f.value))!,
       kind: f.kind as EditKind,
     }),
+    admissionRef,
   });
 
   const deleteAction = useMutationAction({
     mutation: delManual,
     mutationLabel: 'Delete asset',
+    admissionRef,
     onActivate: () => form.clearErrors(),
     onSuccess: () => {
       form.clearErrors();
@@ -334,7 +338,7 @@ export default function NetWorthScreen() {
         visible={edit !== null}
         title={`${edit?.id ? 'Edit' : 'Add'} ${edit?.kind === 'liability' ? 'liability' : 'asset'}`}
         testID="networth-manual-sheet"
-        canDismiss={form.canDismiss && !deleteAction.isLocked}
+        canDismiss={form.canDismiss && !banner.isLocked}
         onRequestClose={closeSheet}
       >
         <Text style={styles.label}>Name</Text>
@@ -379,7 +383,7 @@ export default function NetWorthScreen() {
           label="Save"
           pendingLabel="Saving…"
           onPress={() => form.submit()}
-          disabled={form.isLocked || deleteAction.isLocked}
+          disabled={banner.isLocked}
         />
         {edit?.id ? (
           <Pressable testID="networth-manual-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={remove} disabled={banner.isLocked}>

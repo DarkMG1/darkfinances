@@ -6,6 +6,10 @@ import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
 import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
 import { hapticClientValidationRejected } from '@/lib/haptics';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
+import {
+  releaseMutationAdmission,
+  tryAcquireMutationAdmission,
+} from '@/lib/mutation-screen-admission';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
 
@@ -34,6 +38,7 @@ export interface MutationScreenAction<TVariables> {
 
 export interface UseMutationScreenOptions {
   onRefetchStale?: RefetchStaleData;
+  admissionRef?: React.MutableRefObject<boolean>;
 }
 
 export interface UseMutationScreenResult {
@@ -51,6 +56,7 @@ export interface UseMutationScreenResult {
 }
 
 export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMutationScreenResult {
+  const admissionRef = options.admissionRef;
   const {
     identityKey,
     pendingLockRef,
@@ -142,6 +148,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
   ) => {
     const entry = registryRef.current.get(key);
     if (!entry || pendingLockCountRef.current > 0) return;
+    if (!tryAcquireMutationAdmission(admissionRef)) return;
 
     const token = captureDispatchToken();
     pendingLockCountRef.current += 1;
@@ -177,11 +184,14 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
         if (!isDispatchTokenCurrent(token)) return;
         pendingLockCountRef.current = Math.max(0, pendingLockCountRef.current - 1);
         markPending(key, false);
-        if (pendingLockCountRef.current === 0) setDispatchPending(false);
+        if (pendingLockCountRef.current === 0) {
+          releaseMutationAdmission(admissionRef);
+          setDispatchPending(false);
+        }
         runOptions?.onSettled?.();
       },
     });
-  }, [bumpActivity, captureDispatchToken, handleError, isDispatchTokenCurrent, markPending, pendingLockCountRef, setDispatchPending]);
+  }, [admissionRef, bumpActivity, captureDispatchToken, handleError, isDispatchTokenCurrent, markPending, pendingLockCountRef, setDispatchPending]);
 
   const bind = useCallback(<TVariables,>(actionOptions: MutationScreenActionOptions<TVariables>): MutationScreenAction<TVariables> => {
     const existing = registryRef.current.get(actionOptions.key);

@@ -7,6 +7,8 @@ const {
   captureMutationDispatchToken,
   invalidateMutationDispatch,
   isMutationDispatchTokenCurrent,
+  MAX_SAFE_DISPATCH_ID,
+  nextMutationDispatchId,
   resetMutationHookPendingLock,
 } = require('../src/lib/mutation-hook-identity');
 
@@ -88,4 +90,35 @@ test('mutation hooks use shared activation sequence module', () => {
     assert.match(source, /nextMutationActivationSeq/, `${rel} must use shared activation sequence`);
     assert.doesNotMatch(source, /activitySeqRef/, `${rel} must not keep per-hook activation counters`);
   }
+});
+
+test('dispatch id rolls epoch and resets before Number precision loss', () => {
+  const epochRef = { value: 0 };
+  const dispatchIdRef = { value: MAX_SAFE_DISPATCH_ID - 2 };
+  const penultimate = nextMutationDispatchId(dispatchIdRef, epochRef);
+  assert.equal(penultimate, MAX_SAFE_DISPATCH_ID - 1);
+  assert.equal(epochRef.value, 0);
+
+  const staleToken = {
+    epoch: epochRef.value,
+    dispatchId: penultimate,
+    scope: 'demo',
+    generation: 0,
+    formId: 'form',
+  };
+
+  const rolled = nextMutationDispatchId(dispatchIdRef, epochRef);
+  assert.equal(rolled, 1);
+  assert.equal(dispatchIdRef.value, 1);
+  assert.equal(epochRef.value, 1);
+
+  assert.equal(
+    isMutationDispatchTokenCurrent(staleToken, epochRef, dispatchIdRef, 'demo', 0, 'form'),
+    false,
+  );
+  const freshToken = captureMutationDispatchToken(epochRef, dispatchIdRef, 'demo', 0, 'form');
+  assert.equal(
+    isMutationDispatchTokenCurrent(freshToken, epochRef, dispatchIdRef, 'demo', 0, 'form'),
+    true,
+  );
 });

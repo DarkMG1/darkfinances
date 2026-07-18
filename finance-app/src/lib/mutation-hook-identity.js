@@ -2,17 +2,23 @@
  * Epoch + scope/generation/form identity + per-dispatch id guards for mutation hook async callbacks.
  */
 
-function nextMutationDispatchId(dispatchIdRef) {
+const MAX_SAFE_DISPATCH_ID = Number.MAX_SAFE_INTEGER - 1024;
+
+function nextMutationDispatchId(dispatchIdRef, epochRef) {
   dispatchIdRef.value += 1;
+  if (dispatchIdRef.value >= MAX_SAFE_DISPATCH_ID) {
+    bumpMutationHookEpoch(epochRef);
+    dispatchIdRef.value = 1;
+  }
   return dispatchIdRef.value;
 }
 
-function invalidateMutationDispatch(dispatchIdRef) {
-  return nextMutationDispatchId(dispatchIdRef);
+function invalidateMutationDispatch(dispatchIdRef, epochRef) {
+  return nextMutationDispatchId(dispatchIdRef, epochRef);
 }
 
 function captureMutationDispatchToken(epochRef, dispatchIdRef, scope, generation, formId) {
-  const dispatchId = nextMutationDispatchId(dispatchIdRef);
+  const dispatchId = nextMutationDispatchId(dispatchIdRef, epochRef);
   return {
     epoch: epochRef.value,
     dispatchId,
@@ -42,6 +48,7 @@ function resetMutationHookPendingLock(pendingLockRef, kind = 'boolean') {
 }
 
 module.exports = {
+  MAX_SAFE_DISPATCH_ID,
   bumpMutationHookEpoch,
   captureMutationDispatchToken,
   invalidateMutationDispatch,

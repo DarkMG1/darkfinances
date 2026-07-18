@@ -9,6 +9,7 @@ import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-fo
 import { SkeletonList } from '@/components/skeleton';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
+import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { useMutationScreen } from '@/hooks/useMutationScreen';
 import { ReconItem } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
@@ -37,10 +38,12 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
   const recon = useReconciliation(month);
   const setItem = useSetReconcileItem();
   const closeMonth = useSetReconcileMonth();
-  const screen = useMutationScreen({ onRefetchStale: () => recon.refetch() });
+  const admissionRef = useMutationScreenAdmission();
+  const screen = useMutationScreen({ onRefetchStale: () => recon.refetch(), admissionRef });
   const closeAction = useMutationAction({
     mutation: closeMonth,
     mutationLabel: 'Close month',
+    admissionRef,
     onActivate: () => screen.clear(),
     onRefetch: () => recon.refetch(),
     onSuccess: () => screen.clear(),
@@ -55,7 +58,7 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
   ]));
 
   const toggle = (it: ReconItem) => {
-    if (screen.isLocked || closeAction.isLocked) return;
+    if (banner.isLocked) return;
     haptics.tap();
     toggleAction.run({ month, id: it.id, reconciled: !it.reconciled });
   };
@@ -77,7 +80,7 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
     });
   };
   const doClose = () => {
-    if (!allDone || monthClosed || closeAction.isLocked) return;
+    if (!allDone || monthClosed || banner.isLocked) return;
     closeAction.run({ month, done: true });
   };
 
@@ -125,7 +128,7 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
           <Card style={styles.list}>
             {items.map((it, i) => (
               <View key={it.id} testID={`reconcile-item-${i}`} style={[styles.row, i > 0 && styles.rowDiv]}>
-                <Pressable testID={`reconcile-item-toggle-${i}`} onPress={() => toggle(it)} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+                <Pressable testID={`reconcile-item-toggle-${i}`} onPress={() => toggle(it)} hitSlop={8} disabled={banner.isLocked} style={({ pressed }) => [pressed && !banner.isLocked && { opacity: 0.6 }, banner.isLocked && { opacity: 0.5 }]}>
                   <SymbolView name={it.reconciled ? 'checkmark.circle.fill' : 'circle'} tintColor={it.reconciled ? colors.green : colors.muted} size={26} resizeMode="scaleAspectFit" />
                 </Pressable>
                 <Pressable testID={`reconcile-item-row-${i}`} style={styles.rowBody} onPress={() => openTxn(it)}>
@@ -140,7 +143,7 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
           </Card>
 
           {!monthClosed ? (
-            <Pressable testID="reconcile-close-month-button" onPress={doClose} disabled={!allDone || closeAction.isLocked} style={({ pressed }) => [styles.closeBtn, (!allDone || closeAction.isLocked) && styles.closeBtnOff, pressed && allDone && { opacity: 0.8 }]}>
+            <Pressable testID="reconcile-close-month-button" onPress={doClose} disabled={!allDone || banner.isLocked} style={({ pressed }) => [styles.closeBtn, (!allDone || banner.isLocked) && styles.closeBtnOff, pressed && allDone && !banner.isLocked && { opacity: 0.8 }]}>
               {closeAction.isLocked ? (
                 <ActivityIndicator color="#fff" />
               ) : (

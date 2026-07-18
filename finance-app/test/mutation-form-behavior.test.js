@@ -54,10 +54,12 @@ test('mutation hooks unlock on settled and guard stale profile callbacks', () =>
   assert.match(screen, /isPending: pendingKeys\.has/);
 });
 
-test('goals sheet blocks dismiss while locked and uses one live region', () => {
+test('goals sheet blocks dismiss while locked and uses combined coordinator lock', () => {
   const source = fs.readFileSync(path.join(root, 'src/app/goals.tsx'), 'utf8');
   assert.match(source, /canDismiss={form\.canDismiss/);
+  assert.match(source, /banner\.isLocked/);
   assert.match(source, /requestDismiss/);
+  assert.match(source, /admissionRef/);
   assert.equal((source.match(/<MutationLiveRegion/g) || []).length, 1);
 });
 
@@ -126,10 +128,11 @@ test('mutation hooks expose synchronous pending guards for UI lock', () => {
   assert.match(action, /pendingLockRef/);
 });
 
-test('transaction receipt viewer guards delete and close while locked or deleting', () => {
+test('transaction receipt viewer guards open/close/delete with modal lock and deleting state', () => {
   const source = fs.readFileSync(path.join(root, 'src/app/transaction/[id].tsx'), 'utf8');
   assert.match(source, /removeReceipt/);
-  assert.match(source, /modalLocked \|\| deleteReceiptAction\.isPending/);
+  assert.match(source, /receiptViewerLocked = modalLocked \|\| receiptDeleting/);
+  assert.match(source, /openReceiptViewer/);
   assert.match(source, /closeReceiptViewer/);
   assert.match(source, /receiptDeleting/);
   assert.match(source, /modalLocked \|\| unlinkAction\.isPending/);

@@ -14,6 +14,7 @@ import { SkeletonList } from '@/components/skeleton';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { useMutationForm } from '@/hooks/useMutationForm';
+import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { haptics } from '@/lib/haptics';
 import { collectFieldErrors } from '@/lib/mutation-form-validation';
 import { colors } from '@/theme/colors';
@@ -31,6 +32,7 @@ export default function Rules() {
   const [catName, setCatName] = useState('');
   const [picking, setPicking] = useState(false);
   const matchRef = useRef<TextInput>(null);
+  const admissionRef = useMutationScreenAdmission();
 
   const fields = useMemo(() => ({ match, categoryId: catId }), [catId, match]);
 
@@ -50,6 +52,7 @@ export default function Rules() {
     mutationLabel: 'Add rule',
     fieldOrder: ['match', 'categoryId'],
     fieldRefs: { match: matchRef },
+    admissionRef,
     onRefetch: () => rules.refetch(),
     validate: (f) => collectFieldErrors({
       match: String(f.match).trim().length >= 2 ? null : 'Enter at least two characters to match.',
@@ -67,8 +70,8 @@ export default function Rules() {
     },
   });
 
-  const deleteAction = useMutationAction({ mutation: deleteRule, mutationLabel: 'Delete rule', onActivate: () => addForm.clearErrors(), onSuccess: () => rules.refetch() });
-  const applyAction = useMutationAction({ mutation: applyRules, mutationLabel: 'Apply rules', onActivate: () => addForm.clearErrors(), onSuccess: () => rules.refetch() });
+  const deleteAction = useMutationAction({ mutation: deleteRule, mutationLabel: 'Delete rule', admissionRef, onActivate: () => addForm.clearErrors(), onSuccess: () => rules.refetch() });
+  const applyAction = useMutationAction({ mutation: applyRules, mutationLabel: 'Apply rules', admissionRef, onActivate: () => addForm.clearErrors(), onSuccess: () => rules.refetch() });
 
   const banner = useMutationBannerCoordinator(useMemo(() => [
     { key: 'add', outcome: addForm.outcome, retry: addForm.retry, announce: addForm.announce, isLocked: addForm.isLocked, activitySeq: addForm.activitySeq },
@@ -80,7 +83,10 @@ export default function Rules() {
     deleteAction.activitySeq, deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry,
   ]));
 
-  const remove = (id: string) => deleteAction.run({ id });
+  const remove = (id: string) => {
+    if (banner.isLocked) return;
+    deleteAction.run({ id });
+  };
 
   const list = rules.data?.rules ?? [];
   const catalog = rules.data?.catalog ?? [];
@@ -124,14 +130,14 @@ export default function Rules() {
           label="Add rule"
           pendingLabel="Saving…"
           onPress={addForm.submit}
-          disabled={addForm.isLocked}
+          disabled={banner.isLocked}
         />
       </Card>
 
       <View style={styles.listHeader}>
         <CardTitle style={{ marginTop: 0 }}>Your rules{list.length ? ` (${list.length})` : ''}</CardTitle>
         {list.length ? (
-          <Pressable testID="rules-apply-button" onPress={() => { haptics.tap(); applyAction.run(undefined); }} disabled={applyAction.isLocked} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+          <Pressable testID="rules-apply-button" onPress={() => { if (banner.isLocked) return; haptics.tap(); applyAction.run(undefined); }} disabled={banner.isLocked} hitSlop={8} style={({ pressed }) => [pressed && !banner.isLocked && { opacity: 0.6 }, banner.isLocked && { opacity: 0.5 }]}>
             <Text style={styles.applyLink}>{applyAction.isLocked ? 'Applying…' : 'Apply now'}</Text>
           </Pressable>
         ) : null}
@@ -147,7 +153,7 @@ export default function Rules() {
                 <Text style={styles.ruleMatch} numberOfLines={1}>“{r.match}”</Text>
                 <Text style={styles.ruleCat} numberOfLines={1}>→ {r.categoryName || 'category'}</Text>
               </View>
-              <Pressable testID={`rules-delete-${r.id}`} hitSlop={8} onPress={() => remove(r.id)} disabled={deleteAction.isLocked} style={({ pressed }) => pressed && { opacity: 0.5 }}>
+              <Pressable testID={`rules-delete-${r.id}`} hitSlop={8} onPress={() => remove(r.id)} disabled={banner.isLocked} style={({ pressed }) => [pressed && !banner.isLocked && { opacity: 0.5 }, banner.isLocked && { opacity: 0.4 }]}>
                 <Text style={styles.del}>Delete</Text>
               </Pressable>
             </View>

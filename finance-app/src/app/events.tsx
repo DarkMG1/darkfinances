@@ -14,6 +14,7 @@ import { SkeletonList } from '@/components/skeleton';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { useMutationForm } from '@/hooks/useMutationForm';
+import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { useEditableFinanceDate } from '@/lib/date-only';
 import { haptics } from '@/lib/haptics';
 import { collectFieldErrors, validateDateOnlyField, validateRequiredText } from '@/lib/mutation-form-validation';
@@ -34,6 +35,7 @@ export default function Events() {
   const startRef = useRef<TextInput>(null);
   const membersRef = useRef<TextInput>(null);
   const groupRef = useRef<TextInput>(null);
+  const admissionRef = useMutationScreenAdmission();
 
   const fields = useMemo(() => ({ name, start, members, group }), [group, members, name, start]);
 
@@ -55,6 +57,7 @@ export default function Events() {
     mutationLabel: 'Create trip',
     fieldOrder: ['name', 'start', 'members', 'group'],
     fieldRefs: { name: nameRef, start: startRef, members: membersRef, group: groupRef },
+    admissionRef,
     onRefetch: () => events.refetch(),
     validate: (f) => collectFieldErrors({
       name: validateRequiredText(f.name, 'Trip name'),
@@ -77,6 +80,7 @@ export default function Events() {
   const deleteAction = useMutationAction({
     mutation: deleteEvent,
     mutationLabel: 'Delete trip',
+    admissionRef,
     onActivate: () => form.clearErrors(),
     onSuccess: () => {
       form.clearErrors();
@@ -89,15 +93,17 @@ export default function Events() {
     { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked, activitySeq: deleteAction.activitySeq },
   ], [deleteAction.activitySeq, deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry, form.activitySeq, form.announce, form.isLocked, form.outcome, form.retry]));
 
-  const remove = (slug: string, label: string) =>
+  const remove = (slug: string, label: string) => {
+    if (banner.isLocked) return;
     Alert.alert('Delete trip?', `Remove “${label}”? Tagged transactions keep their #ev-${slug} tag but the trip disappears from this list.`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
-        onPress: () => { haptics.tap(); deleteAction.run({ slug }); },
+        onPress: () => { if (banner.isLocked) return; haptics.tap(); deleteAction.run({ slug }); },
       },
     ]);
+  };
 
   const list = events.data?.events ?? [];
 
@@ -179,7 +185,7 @@ export default function Events() {
           label="Create trip"
           pendingLabel="Saving…"
           onPress={form.submit}
-          disabled={form.isLocked}
+          disabled={banner.isLocked}
         />
       </Card>
 

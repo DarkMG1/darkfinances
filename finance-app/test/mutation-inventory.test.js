@@ -90,6 +90,8 @@ test('multi-action screens coordinate banner retry through useMutationBannerCoor
     assert.match(source, /useMutationBannerCoordinator/, `${rel} must use banner coordinator`);
     assert.match(source, /activitySeq:/, `${rel} must pass activitySeq for latest-source authority`);
     assert.match(source, /onRetry={banner\.retry}/, `${rel} must retry only the active action`);
+    assert.match(source, /useMutationScreenAdmission/, `${rel} must use shared admission ref`);
+    assert.match(source, /banner\.isLocked/, `${rel} must use combined coordinator lock in UI/handlers`);
     assert.doesNotMatch(source, /onRetry=\{\(\)\s*=>\s*\{[^}]*\.retry\(\);[^}]*\.retry\(\)/, `${rel} must not fan out retry to every action`);
     assert.doesNotMatch(source, /form\.retry\(\);\s*deleteAction\.retry\(\)/, `${rel} must not fan out form/delete retry`);
     assert.doesNotMatch(source, /closeAction\.retry\(\);\s*screen\.retry\(\)/, `${rel} must not fan out reconcile retry`);

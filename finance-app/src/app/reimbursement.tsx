@@ -8,6 +8,7 @@ import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-fo
 import { SkeletonList } from '@/components/skeleton';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
+import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { OwesPerson, ReimbLeg, RepaymentSuggestion } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { colors, fmtDate, fmtPos, fmtSignedMoney } from '@/theme/colors';
@@ -62,14 +63,17 @@ export default function Reimbursement() {
   const suggestions = useRepaymentSuggestions();
   const confirm = useConfirmRepayment();
   const dismiss = useDismissRepayment();
+  const admissionRef = useMutationScreenAdmission();
   const dismissAction = useMutationAction({
     mutation: dismiss,
     mutationLabel: 'Dismiss suggestion',
+    admissionRef,
     onRefetch: () => suggestions.refetch(),
   });
   const confirmAction = useMutationAction({
     mutation: confirm,
     mutationLabel: 'Confirm repayment',
+    admissionRef,
     onActivate: () => dismissAction.clear(),
     onRefetch: () => { suggestions.refetch(); reimb.refetch(); },
   });
@@ -109,7 +113,7 @@ export default function Reimbursement() {
   }, [reimb.data]);
 
   const onConfirm = (s: RepaymentSuggestion) => {
-    if (confirmAction.isLocked) return;
+    if (banner.isLocked) return;
     setActing(s.id);
     haptics.tap();
     confirmAction.run({ id: s.id }, {
@@ -117,7 +121,7 @@ export default function Reimbursement() {
     });
   };
   const onDismiss = (s: RepaymentSuggestion) => {
-    if (dismissAction.isLocked) return;
+    if (banner.isLocked) return;
     setActing(s.id);
     haptics.tap();
     dismissAction.run({ id: s.id, inflowId: s.inflow.id }, { onSettled: () => setActing(null) });
@@ -233,7 +237,7 @@ export default function Reimbursement() {
               <CardTitle>Suggested repayments</CardTitle>
               <Card style={{ marginBottom: 16 }}>
                 {sugg.map((s, i) => {
-                  const busy = acting === s.id;
+                  const busy = acting === s.id || banner.isLocked;
                   return (
                     <View key={s.id} testID={`reimbursement-suggestion-${i}`} style={[styles.suggest, i > 0 && styles.suggestDivider]}>
                       <View style={styles.suggestHead}>
@@ -255,8 +259,8 @@ export default function Reimbursement() {
                         </View>
                       ) : null}
                       <View style={styles.suggestActions}>
-                        <Pressable testID={`reimbursement-suggestion-confirm-${i}`} onPress={() => onConfirm(s)} disabled={busy} style={({ pressed }) => [styles.confirmBtn, pressed && { opacity: 0.7 }, busy && { opacity: 0.5 }]}>
-                          {busy && confirm.isPending ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.confirmText}>Confirm</Text>}
+                        <Pressable testID={`reimbursement-suggestion-confirm-${i}`} onPress={() => onConfirm(s)} disabled={busy} style={({ pressed }) => [styles.confirmBtn, pressed && !busy && { opacity: 0.7 }, busy && { opacity: 0.5 }]}>
+                          {acting === s.id && confirmAction.isLocked ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.confirmText}>Confirm</Text>}
                         </Pressable>
                         <Pressable testID={`reimbursement-suggestion-dismiss-${i}`} onPress={() => onDismiss(s)} disabled={busy} style={({ pressed }) => [styles.dismissBtn, pressed && { opacity: 0.7 }, busy && { opacity: 0.5 }]}>
                           <Text style={styles.dismissText}>Dismiss</Text>

@@ -380,7 +380,7 @@ export default function TransactionDetail() {
     ]);
   };
   const startScan = () => {
-    if (scanning) return;
+    if (scanning || modalLocked) return;
     haptics.tap();
     Alert.alert('Add receipt', 'The image is resized and text is read on-device, then the receipt is uploaded to your server.', [
       { text: 'Take Photo', onPress: async () => { setScanning(true); try { reviewCapture(await scanReceiptFromCamera()); } catch (e: any) { setScanning(false); Alert.alert('Camera unavailable', e?.message || 'Please try again.'); } } },
@@ -400,8 +400,14 @@ export default function TransactionDetail() {
     ]);
   };
   const receiptDeleting = deleteReceiptAction.isPending;
+  const receiptViewerLocked = modalLocked || receiptDeleting;
+  const openReceiptViewer = (id: string) => {
+    if (receiptViewerLocked) return;
+    haptics.tap();
+    setViewerId(id);
+  };
   const closeReceiptViewer = () => {
-    if (receiptDeleting) return;
+    if (receiptViewerLocked) return;
     setViewerId(null);
   };
 
@@ -937,12 +943,12 @@ export default function TransactionDetail() {
             vertical ScrollView caused scroll/layout jank on New Arch. */}
         <View style={styles.receiptRow}>
           {receiptList.map((r) => (
-            <Pressable testID={`transaction-receipt-${r.id}`} key={r.id} onPress={() => { haptics.tap(); setViewerId(r.id); }} style={({ pressed }) => [styles.thumb, pressed && { opacity: 0.7 }]}>
+            <Pressable testID={`transaction-receipt-${r.id}`} key={r.id} onPress={() => openReceiptViewer(r.id)} disabled={receiptViewerLocked} style={({ pressed }) => [styles.thumb, pressed && { opacity: 0.7 }, receiptViewerLocked && { opacity: 0.5 }]}>
               <Image source={receiptSource(r.id)} style={styles.thumbImg} contentFit="cover" transition={120} cachePolicy="memory-disk" />
               {r.amount != null ? <Text style={styles.thumbAmt}>{fmtPos(r.amount)}</Text> : null}
             </Pressable>
           ))}
-          <Pressable testID="transaction-receipt-scan-button" onPress={startScan} disabled={scanning} style={({ pressed }) => [styles.thumbAdd, pressed && { opacity: 0.7 }, scanning && { opacity: 0.5 }]}>
+          <Pressable testID="transaction-receipt-scan-button" onPress={startScan} disabled={scanning || modalLocked} style={({ pressed }) => [styles.thumbAdd, pressed && { opacity: 0.7 }, (scanning || modalLocked) && { opacity: 0.5 }]}>
             {scanning ? <ActivityIndicator color={colors.accentLight} /> : (
               <>
                 <Text style={styles.thumbAddPlus}>+</Text>
@@ -1228,8 +1234,8 @@ export default function TransactionDetail() {
 
       <Modal visible={!!viewerId} animationType="fade" transparent onRequestClose={closeReceiptViewer}>
         <Pressable style={styles.viewerBg} onPress={closeReceiptViewer}>
-          <Pressable style={[styles.viewerClose, { top: insets.top + 12 }]} onPress={closeReceiptViewer} disabled={receiptDeleting}>
-            <Text style={styles.viewerCloseText}>Done</Text>
+          <Pressable style={[styles.viewerClose, { top: insets.top + 12 }]} onPress={closeReceiptViewer} disabled={receiptViewerLocked}>
+            <Text style={[styles.viewerCloseText, receiptViewerLocked && { opacity: 0.4 }]}>Done</Text>
           </Pressable>
           {viewerId ? (
             <Image source={receiptSource(viewerId)} style={styles.viewerImg} contentFit="contain" transition={150} cachePolicy="memory-disk" />
@@ -1244,7 +1250,7 @@ export default function TransactionDetail() {
                     {r.amount != null ? fmtPos(r.amount) : ''}{r.amount != null && r.date ? ' · ' : ''}{r.date || ''}
                   </Text>
                 ) : null}
-                <Pressable testID="transaction-receipt-delete-button" onPress={() => removeReceipt(r.id)} disabled={modalLocked || deleteReceiptAction.isPending} style={({ pressed }) => [styles.viewerDelete, pressed && { opacity: 0.7 }]}>
+                <Pressable testID="transaction-receipt-delete-button" onPress={() => removeReceipt(r.id)} disabled={receiptViewerLocked} style={({ pressed }) => [styles.viewerDelete, pressed && !receiptViewerLocked && { opacity: 0.7 }, receiptViewerLocked && { opacity: 0.5 }]}>
                   <Text style={styles.viewerDeleteText}>{deleteReceiptAction.isPending ? 'Deleting…' : 'Delete receipt'}</Text>
                 </Pressable>
               </View>

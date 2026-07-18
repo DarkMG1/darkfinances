@@ -29,7 +29,7 @@ export function useMutationHookIdentity(options: UseMutationHookIdentityOptions 
 
   useEffect(() => {
     bumpMutationHookEpoch(epochRef);
-    invalidateMutationDispatch(dispatchIdRef);
+    invalidateMutationDispatch(dispatchIdRef, epochRef);
     resetMutationHookPendingLock(pendingLockRef, pendingLockKind);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional lock reset on identity change
     setDispatchPending(false);
@@ -37,7 +37,7 @@ export function useMutationHookIdentity(options: UseMutationHookIdentityOptions 
 
   useEffect(() => () => {
     bumpMutationHookEpoch(epochRef);
-    invalidateMutationDispatch(dispatchIdRef);
+    invalidateMutationDispatch(dispatchIdRef, epochRef);
   }, []);
 
   const captureDispatchToken = useCallback(

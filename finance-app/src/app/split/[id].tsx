@@ -7,6 +7,7 @@ import { Avatar } from '@/components/ui';
 import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
+import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { haptics } from '@/lib/haptics';
 import { isSplitEditorDirty, seedSplitEditorBaseline } from '@/lib/split-editor-dirty';
 import { colors, fmtPos } from '@/theme/colors';
@@ -66,16 +67,19 @@ export default function SplitEditor() {
   const inited = useRef(false);
   const [baselineSnapshot, setBaselineSnapshot] = useState<string | null>(null);
   const allowExitRef = useRef(false);
+  const admissionRef = useMutationScreenAdmission();
 
   const legFieldOrder = useMemo(() => legs.map((_, i) => `leg-${i}`), [legs]);
   const unsplitAction = useMutationAction({
     mutation: unsplit,
     mutationLabel: 'Remove split',
+    admissionRef,
     onRefetch: () => detail.refetch(),
   });
   const splitAction = useMutationAction({
     mutation: split,
     mutationLabel: 'Save split',
+    admissionRef,
     onActivate: () => unsplitAction.clear(),
     onRefetch: () => detail.refetch(),
     fieldOrder: legFieldOrder,
@@ -225,7 +229,7 @@ export default function SplitEditor() {
   };
 
   const doSave = () => {
-    if (!d || !canSave) return;
+    if (!d || !canSave || mutationLocked) return;
     const payload = legs.map((l, i) => ({
       id: l.id,
       amount: sign * (amounts[i] ?? 0),
@@ -247,7 +251,7 @@ export default function SplitEditor() {
   };
 
   const doUnsplit = () => {
-    if (!d) return;
+    if (!d || mutationLocked) return;
     Alert.alert('Remove split?', 'This merges the legs back into a single transaction.', [
       { text: 'Cancel', style: 'cancel' },
       {

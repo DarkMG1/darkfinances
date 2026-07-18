@@ -17,6 +17,7 @@ import { ProgressBar } from '@/components/charts';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { useMutationForm } from '@/hooks/useMutationForm';
+import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { haptics } from '@/lib/haptics';
 import {
   collectFieldErrors,
@@ -45,6 +46,7 @@ export default function Goals() {
   const nameRef = useRef<TextInput>(null);
   const targetRef = useRef<TextInput>(null);
   const deadlineRef = useRef<TextInput>(null);
+  const admissionRef = useMutationScreenAdmission();
 
   const fields = useMemo(() => ({ name, target, current, deadline, accountId, editingId: editing?.id }), [accountId, current, deadline, editing?.id, name, target]);
 
@@ -67,6 +69,7 @@ export default function Goals() {
     mutationLabel: 'Save goal',
     fieldOrder: ['name', 'target', 'current', 'deadline'],
     fieldRefs: { name: nameRef, target: targetRef, deadline: deadlineRef },
+    admissionRef,
     onSuccessClose: () => setEditing(null),
     onRefetch: () => goals.refetch(),
     validate: (f) => {
@@ -95,6 +98,7 @@ export default function Goals() {
   const deleteAction = useMutationAction({
     mutation: deleteGoal,
     mutationLabel: 'Delete goal',
+    admissionRef,
     onActivate: () => form.clearErrors(),
     onSuccess: () => {
       form.clearErrors();
@@ -131,7 +135,7 @@ export default function Goals() {
   };
 
   const remove = () => {
-    if (!editing?.id || deleteAction.isLocked) return;
+    if (!editing?.id || banner.isLocked) return;
     haptics.warning();
     Alert.alert('Delete goal?', `Remove “${editing.name || 'this goal'}”?`, [
       { text: 'Cancel', style: 'cancel' },
@@ -187,7 +191,7 @@ export default function Goals() {
         title={editing?.isNew ? 'New goal' : 'Edit goal'}
         testID="goals-edit-sheet"
         bottomInset={insets.bottom}
-        canDismiss={form.canDismiss && !deleteAction.isLocked}
+        canDismiss={form.canDismiss && !banner.isLocked}
         onRequestClose={closeSheet}
       >
         <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => goals.refetch()} />
@@ -265,10 +269,10 @@ export default function Goals() {
           label="Save"
           pendingLabel="Saving…"
           onPress={form.submit}
-          disabled={form.isLocked}
+          disabled={banner.isLocked}
         />
         {!editing?.isNew ? (
-          <Pressable testID="goals-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={remove} disabled={deleteAction.isLocked}>
+          <Pressable testID="goals-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={remove} disabled={banner.isLocked}>
             <Text style={styles.deleteText}>{deleteAction.isLocked ? 'Deleting…' : 'Delete goal'}</Text>
           </Pressable>
         ) : null}
