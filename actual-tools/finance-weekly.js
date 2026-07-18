@@ -11,6 +11,11 @@
 const api = require('@actual-app/api');
 const { addDays, FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { buildToolCategoryInfo, classifiedLeavesForAccounts, incompleteTransferLeaves } = require('./lib/transfer-classification');
+const {
+  fetchAccountTransactionsBounded,
+  loadLedgerReadContext,
+  validateCanonicalDateRange,
+} = require('./lib/bounded-ledger-access');
 
 const c2 = (cents) => (Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (cents) => (cents < 0 ? '-$' : '$') + c2(cents);
@@ -32,10 +37,17 @@ const REIMB_CAT = /^reimbursement$/i;
   const nameOf = (id) => (id && catInfo[id] ? catInfo[id].name : '(uncategorized)');
   const payees = await api.getPayees();
   const pn = {}; for (const p of payees) pn[p.id] = p.name || '';
-  const accounts = await api.getAccounts();
+  const ctx = await loadLedgerReadContext(api);
+  validateCanonicalDateRange(lastStart, today, { purpose: 'finance weekly' });
+  const accounts = ctx.accountsRaw;
   const transactionsByAccountId = new Map();
-  for (const a of accounts) {
-    transactionsByAccountId.set(a.id, await api.getTransactions(a.id, lastStart, today));
+  const batches = await fetchAccountTransactionsBounded(api, {
+    accounts,
+    start: lastStart,
+    end: today,
+  });
+  for (const { account: a, transactions: tx } of batches) {
+    transactionsByAccountId.set(a.id, tx);
   }
   const classified = classifiedLeavesForAccounts(accounts, transactionsByAccountId, catInfo, (t) => pn[t.payee] || '');
   const leaves = classified.map((lf) => ({

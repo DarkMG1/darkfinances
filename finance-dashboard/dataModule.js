@@ -167,11 +167,33 @@ const { verifyCyclePartitionInvariants } = require('./lib/domain/liability-cycle
 const {
   AccountNotFoundError,
   TransactionNotFoundError,
+  QueryAbortedError,
+  QueryResultLimitExceededError,
+  QueryRangeExceededError,
+  isQueryAbortedError,
 } = require('./lib/errors');
 const { statePath } = require('./lib/state-registry');
 const { myShareExpenseCents, loadSplitwiseMirrorResolutions, owesSnapshotMaxAgeMs, preflightSplitwiseMirrorAdmission, SplitwiseMirrorSnapshotError } = require('./lib/splitwise-mirror');
 const { BulkOperationOutcomeUnknownError } = require('./lib/bulk-operation-saga');
 const { getActualCoordinator } = require('./lib/actual-coordinator');
+const {
+  LEDGER_EPOCH,
+  fetchAccountTransactionsBounded,
+  getActiveQueryAbortSignal,
+  loadLedgerReadContext,
+  resolveBoundedLedgerStart,
+  resolveNetWorthQueryStart,
+  resolveSearchWindow,
+  validateCanonicalDateRange,
+  encodeSearchCursor,
+  decodeSearchCursor,
+  compareSearchRowsDesc,
+  rowBeforeSearchAnchor,
+  buildClearedSupersederIndex,
+  findSupersedingCleared,
+} = require('./lib/bounded-ledger-access');
+const { loadQueryScalingConfig } = require('./lib/query-scaling-config');
+const { boundedLifetimeMetric, QUERY_INCOMPLETE_REASON } = require('./lib/query-completeness');
 const ACTUAL_API_PATH = process.env.ACTUAL_API_PATH || '@actual-app/api';
 const api = require(ACTUAL_API_PATH);
 
@@ -745,13 +767,25 @@ function classifyLeavesInDateRange(rows, catInfo, start, end, transferIndex) {
   return out;
 }
 
-async function fetchOnBudgetRows(api, start, end, { accountFilter } = {}) {
-  const accounts = (await api.getAccounts()).filter((a) => !a.closed && !a.offbudget);
+async function fetchOnBudgetRows(api, start, end, { accountFilter, config } = {}) {
+  const effectiveConfig = config || loadQueryScalingConfig();
+  validateCanonicalDateRange(start, end, {
+    config: effectiveConfig,
+    purpose: 'on-budget ledger rows',
+  });
+  const ctx = await loadLedgerReadContext(api, {
+    accountFilter: (a) => !a.closed && !a.offbudget && (!accountFilter || accountFilter(a)),
+    includeClosed: false,
+  });
   const rows = [];
-  for (const acct of accounts) {
-    if (accountFilter && !accountFilter(acct)) continue;
-    const txns = await api.getTransactions(acct.id, start, end);
-    for (const t of txns) rows.push({ transaction: t, accountId: acct.id });
+  const batches = await fetchAccountTransactionsBounded(api, {
+    accounts: ctx.accounts,
+    start,
+    end,
+    config: effectiveConfig,
+  });
+  for (const { account: acct, transactions: txns } of batches) {
+    for (const t of txns) rows.push({ transaction: t, accountId: acct.id, account: acct });
   }
   return rows;
 }
@@ -996,32 +1030,45 @@ function spendBucketFor(info) {
 }
 
 async function getTransactions({ accountId, start, end, category, bucket, budgetOnly, collapse } = {}) {
+  const config = loadQueryScalingConfig();
+  const startDate = start || firstOfThisMonth();
+  const endDate = end || todayYMD();
+  validateCanonicalDateRange(startDate, endDate, {
+    config,
+    purpose: 'transaction list',
+    maxSpanDays: config.maxLedgerQueryDays,
+  });
   return withApi(async (api) => {
-    const startDate = start || firstOfThisMonth();
-    const endDate = end || todayYMD();
     const wantCat = category ? String(category).toLowerCase() : null;
     const wantBucket = bucket ? String(bucket).toLowerCase() : null;
-    const accountsFull = await api.getAccounts();
-    const acctMap = Object.fromEntries(accountsFull.map((a) => [a.id, a.name]));
-    const targetAccts = accountId
-      ? accountsFull.filter((a) => a.id === accountId)
-      : accountsFull.filter((a) => !a.closed && ((!wantBucket && !budgetOnly) || !a.offbudget));
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (a) => {
+        if (accountId && a.id !== accountId) return false;
+        if (a.closed) return false;
+        if ((wantBucket || budgetOnly) && a.offbudget) return false;
+        return true;
+      },
+      includeClosed: false,
+    });
+    const { accounts, catInfo, payeeMap, accountMap } = ctx;
     const catMap = Object.fromEntries(Object.entries(catInfo).map(([id, info]) => [id, info.name]));
-    const payees = await api.getPayees();
-    const payeeMap = Object.fromEntries(payees.map((p) => [p.id, p.name]));
 
     let all = [];
-    for (const acct of targetAccts) {
-      const txns = await api.getTransactions(acct.id, startDate, endDate);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: startDate,
+      end: endDate,
+      maxRows: config.maxLedgerRowsPerRead,
+      config,
+    });
+    for (const { account: acct, transactions: txns } of batches) {
       for (const t of txns) {
         const rawParentPayee = payeeMap[t.payee] || t.imported_payee || '';
         const parentPayee = displayPayeeName(rawParentPayee, t.notes, '');
         const base = {
           date: t.date,
           payee: parentPayee,
-          account: acctMap[acct.id] || acct.id,
+          account: accountMap[acct.id] || acct.id,
           accountId: acct.id,
           cleared: t.cleared,
           imported: !!t.imported_id, // bank-imported rows aren't user-deletable (see delete guard)
@@ -1092,6 +1139,11 @@ async function getTransactions({ accountId, start, end, category, bucket, budget
         return spendBucketFor(info) === wantBucket;
       });
     }
+    if (all.length > config.maxTransactionListRows) {
+      throw new QueryResultLimitExceededError(
+        `Transaction list returned ${all.length} rows, exceeding the maximum of ${config.maxTransactionListRows}`,
+      );
+    }
     all.sort((a, b) => b.date.localeCompare(a.date));
     return all;
   });
@@ -1136,6 +1188,27 @@ async function onBudgetLeaves(api, start, end, catInfo) {
   return classifiedOnBudgetLeaves(api, start, end, catInfo);
 }
 
+async function onBudgetLeavesPartitioned(api, {
+  scanStart: _scanStart,
+  scanEnd: _scanEnd,
+  curStart,
+  curEnd,
+  prevStart,
+  prevEnd,
+  catInfo,
+  ctx,
+}) {
+  const [current, previous] = await classifiedOnBudgetLeavesForWindows(api, [
+    { start: curStart, end: curEnd },
+    { start: prevStart, end: prevEnd },
+  ], catInfo);
+  const context = ctx || await loadLedgerReadContext(api, {
+    accountFilter: (a) => !a.closed && !a.offbudget,
+    includeClosed: false,
+  });
+  return { current, previous, context };
+}
+
 async function getSpending({ month, start, end } = {}) {
   return withApi(async (api) => {
     const financeToday = todayYMD();
@@ -1171,10 +1244,15 @@ async function getSpending({ month, start, end } = {}) {
 
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
-    const [currentLeaves, previousLeaves] = await classifiedOnBudgetLeavesForWindows(api, [
-      { start: cur.start, end: curEnd },
-      { start: prev.start, end: prev.end },
-    ], catInfo);
+    const { current: currentLeaves, previous: previousLeaves } = await onBudgetLeavesPartitioned(api, {
+      scanStart: prev.start,
+      scanEnd: curEnd,
+      curStart: cur.start,
+      curEnd,
+      prevStart: prev.start,
+      prevEnd: prev.end,
+      catInfo,
+    });
     const current = summarize(currentLeaves);
     const previous = summarize(previousLeaves);
     return {
@@ -1190,32 +1268,49 @@ async function getSpending({ month, start, end } = {}) {
 // Trends — net worth / spend / income by month
 // ---------------------------------------------------------------------------
 async function getTrends({ months = 12, endMonth } = {}) {
+  const config = loadQueryScalingConfig();
+  const boundedMonths = Math.max(3, Math.min(config.maxTrendsMonths, Number(months) || 12));
   return withApi(async (api) => {
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
     const accountOverrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
-    const accounts = (await api.getAccounts()).filter((account) => !accountOverrides[account.id]?.hidden);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (account) => !accountOverrides[account.id]?.hidden,
+    });
+    const { catInfo, accounts } = ctx;
     const [financeYear, financeMonth] = String(endMonth || todayYMD().slice(0, 7)).split('-').map(Number);
 
     const buckets = [];
-    for (let i = months - 1; i >= 0; i--) {
+    for (let i = boundedMonths - 1; i >= 0; i--) {
       const r = monthRange(financeYear, financeMonth - 1 - i);
       buckets.push({ ...r, income: 0, expense: 0, knownIncome: 0, knownExpense: 0, transferIncompleteCount: 0, transferIncompleteLeaves: [] });
     }
     const byKey = Object.fromEntries(buckets.map((b) => [b.key, b]));
     const lastEnd = buckets[buckets.length - 1].end;
+    const windowStart = buckets[0].start;
+    validateCanonicalDateRange(windowStart, lastEnd, {
+      config,
+      purpose: 'trends window',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
+    const netWorthWindow = resolveNetWorthQueryStart({ windowStart, end: lastEnd, config });
+    validateCanonicalDateRange(netWorthWindow.start, lastEnd, {
+      config,
+      purpose: 'trends net worth',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
 
     const contributions = []; // {date, amount} parent totals across ALL accounts (net worth)
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: netWorthWindow.start,
+      end: lastEnd,
+      config,
+    });
     const trendRows = [];
-    const accountTransactions = await Promise.all(accounts.map(async (account) => ({
-      account,
-      transactions: await api.getTransactions(account.id, '2000-01-01', lastEnd),
-    })));
-    for (const { account: a, transactions: txns } of accountTransactions) {
+    for (const { account: a, transactions: txns } of batches) {
       for (const t of txns) trendRows.push({ transaction: t, accountId: a.id });
     }
     const trendTransferIndex = buildTransferIndex(trendRows);
-    for (const { account: a, transactions: txns } of accountTransactions) {
+    for (const { account: a, transactions: txns } of batches) {
       // The "Splitwise" account is a spend-attribution ledger (my share of items a
       // friend paid), not real cash — count its expenses toward monthly spend but
       // keep it out of net worth so a growing share balance can't sink it.
@@ -1257,7 +1352,7 @@ async function getTrends({ months = 12, endMonth } = {}) {
       const monthCompleteness = projectionCompletenessFromLeaves(b.transferIncompleteLeaves);
       return {
         month: b.key,
-        netWorth: d2(run),
+        netWorth: netWorthWindow.complete ? d2(run) : null,
         complete,
         spend: complete ? d2(b.expense) : null,
         income: complete ? d2(b.income) : null,
@@ -1274,6 +1369,10 @@ async function getTrends({ months = 12, endMonth } = {}) {
         includesClosedAccountHistory: true,
         includesManualAssets: false,
         excludedHiddenAccounts: true,
+        queriedFrom: netWorthWindow.start,
+        queriedTo: lastEnd,
+        netWorthHistoryComplete: netWorthWindow.complete,
+        months: boundedMonths,
       },
     };
   });
@@ -1596,16 +1695,33 @@ function readEvents() {
   return { events: s && Array.isArray(s.events) ? s.events : [] };
 }
 async function getEvents() {
+  const config = loadQueryScalingConfig();
   const { events } = readEvents();
   // Enrich each event with its tagged-charge count + total from the ledger window.
   let tagCounts = {};
   try {
     tagCounts = await withApi(async (api) => {
-      const accts = (await api.getAccounts()).filter((a) => !a.closed);
-      const from = addDays(todayYMD(), -400);
+      const activeSignal = getActiveQueryAbortSignal();
+      if (activeSignal?.aborted) {
+        throw new QueryAbortedError('Ledger query was aborted (before event tag enrichment)');
+      }
+      const from = addDays(todayYMD(), -(config.maxEventsTagLookbackDays - 1));
+      const to = todayYMD();
+      validateCanonicalDateRange(from, to, {
+        config,
+        purpose: 'event tag enrichment',
+        maxSpanDays: config.maxEventsTagLookbackDays,
+      });
+      const ctx = await loadLedgerReadContext(api, { includeClosed: false });
       const counts = {};
-      for (const a of accts) {
-        const tx = await api.getTransactions(a.id, from, todayYMD());
+      const batches = await fetchAccountTransactionsBounded(api, {
+        accounts: ctx.accounts.filter((a) => !a.closed),
+        start: from,
+        end: to,
+        config,
+        signal: activeSignal || undefined,
+      });
+      for (const { transactions: tx } of batches) {
         for (const t of tx) {
           const scan = (notes) => { const m = (notes || '').match(/#ev-([a-z0-9-]+)/gi) || []; for (const tag of m) { const slug = tag.slice(4).toLowerCase(); counts[slug] = counts[slug] || { count: 0, spent: 0 }; counts[slug].count++; } };
           scan(t.notes);
@@ -1614,7 +1730,10 @@ async function getEvents() {
       }
       return counts;
     });
-  } catch (_) { /* best-effort enrichment */ }
+  } catch (error) {
+    if (isQueryAbortedError(error)) throw error;
+    /* best-effort enrichment */
+  }
   return {
     events: events
       .slice()
@@ -2007,26 +2126,43 @@ async function suggestRepayments({ from, to } = {}) {
   return withApi(async (api) => {
     from = from || REIMB_SUGGEST_FROM;
     to = to || todayYMD();
+    validateCanonicalDateRange(from, to, {
+      purpose: 'repayment suggestions',
+      maxSpanDays: loadQueryScalingConfig().maxLedgerQueryDays,
+    });
 
     // Who currently owes (authoritative net from the tuned engine).
     const reimb = await getReimbursement({ from, to });
+    if (!reimb.ledgerScan?.complete) {
+      return {
+        suggestions: [],
+        count: 0,
+        complete: false,
+        incompleteReasons: [
+          QUERY_INCOMPLETE_REASON.repaymentSuggestionsUnavailable,
+          QUERY_INCOMPLETE_REASON.ledgerScanIncomplete,
+        ],
+        generatedAt: new Date().toISOString(),
+        range: { from, to },
+      };
+    }
     const owedBySlug = {};
     for (const o of reimb.owes || []) owedBySlug[o.slug] = o.owed;
 
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
+    const ctx = await loadLedgerReadContext(api, { includeClosed: false });
+    const { catInfo, payeeMap: pn, groups } = ctx;
     let reimbId = null;
     for (const g of groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) reimbId = c.id;
     if (!reimbId) throw new Error('Reimbursement category not found');
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accts = (await api.getAccounts()).filter((a) => !a.closed);
 
     const inflows = [];        // candidate repayments
     const expByPerson = {};    // slug -> [{id,date,payee,amount<0,person}]
-    for (const a of accts) {
-      const tx = await api.getTransactions(a.id, from, to);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts: ctx.accounts.filter((a) => !a.closed),
+      start: from,
+      end: to,
+    });
+    for (const { transactions: tx } of batches) {
       for (const t of tx) {
         const parentPayee = pn[t.payee] || t.imported_payee || '';
         const isSplit = t.is_parent && Array.isArray(t.subtransactions) && t.subtransactions.length;
@@ -2085,8 +2221,9 @@ async function suggestRepayments({ from, to } = {}) {
       const tooLargeForCurrentDebt = inf.amount > owed + Math.max(10, owed * 0.2);
       if (alloc.kind === 'over' && tooLargeForCurrentDebt) continue;
       // Reserve the allocated remaining so a later inflow doesn't double-book it.
+      const expIndex = new Map((expByPerson[inf.person] || []).map((entry) => [entry.id, entry]));
       for (const a of alloc.allocations) {
-        const e = (expByPerson[inf.person] || []).find((x) => x.id === a.expense.id);
+        const e = expIndex.get(a.expense.id);
         if (e) e.remaining = round2(Math.max(0, e.remaining - a.amount));
       }
       suggestions.push({
@@ -2104,7 +2241,14 @@ async function suggestRepayments({ from, to } = {}) {
       });
     }
     suggestions.sort((a, b) => b.score - a.score || (a.inflow.date < b.inflow.date ? 1 : -1));
-    return { suggestions, count: suggestions.length, generatedAt: new Date().toISOString(), range: { from, to } };
+    return {
+      suggestions,
+      count: suggestions.length,
+      complete: true,
+      incompleteReasons: [],
+      generatedAt: new Date().toISOString(),
+      range: { from, to },
+    };
   });
 }
 
@@ -2196,24 +2340,43 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
     // Who-owes-you and the People roster are stable across UI windows, but direct
     // ledger debts before the cutoff are historical/settled outside this system.
     // `from`/`to` only scope the headline summary below.
-    const legFrom = REIMB_LEDGER_FROM;
+    const config = loadQueryScalingConfig();
     const legTo = todayYMD();
-    const winFrom = from || legFrom;
+    const ledgerWindow = resolveBoundedLedgerStart({
+      configuredStart: REIMB_LEDGER_FROM,
+      end: legTo,
+      config,
+    });
+    const legFrom = ledgerWindow.start;
+    validateCanonicalDateRange(legFrom, legTo, {
+      config,
+      purpose: 'reimbursement ledger scan',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
+    const winFrom = from || REIMB_LEDGER_FROM;
     const winTo = to || legTo;
-    const groups = await api.getCategoryGroups();
+    if (from != null || to != null) {
+      validateCanonicalDateRange(winFrom, winTo, {
+        config,
+        purpose: 'reimbursement summary window',
+        maxSpanDays: config.maxLedgerQueryDays,
+      });
+    }
+    const ctx = await loadLedgerReadContext(api);
+    const { groups, payeeMap: pn } = ctx;
     let reimbId = null;
     for (const g of groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) reimbId = c.id;
     if (!reimbId) throw new Error('Reimbursement category not found');
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name;
-    const accts = await api.getAccounts();
+    const accts = ctx.accountsRaw;
 
     const legs = [];
     const inflows = [];
-    for (const a of accts) {
-      if (a.offbudget) continue;
-      const tx = await api.getTransactions(a.id, legFrom, legTo);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts: accts.filter((a) => !a.offbudget),
+      start: legFrom,
+      end: legTo,
+    });
+    for (const { account: a, transactions: tx } of batches) {
       for (const t of tx) {
         const parentPayee = pn[t.payee] || t.imported_payee || '';
         const push = (amount, notes, meta = {}) => {
@@ -2444,24 +2607,57 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
     const inWin = (d) => { const x = d || ''; return x >= winFrom && x <= winTo; };
     const frontedWin = round2(legs.filter((l) => l.amount < 0 && inWin(l.date)).reduce((s, l) => s + -l.amount, 0) / 100);
     const paidBackWin = round2(legs.filter((l) => l.amount > 0 && inWin(l.date)).reduce((s, l) => s + l.amount, 0) / 100);
-    const isLifetimeWin = winFrom <= legFrom && winTo >= legTo;
+    const isLifetimeWin = winFrom <= REIMB_LEDGER_FROM && winTo >= legTo;
+    const ledgerComplete = ledgerWindow.complete;
+    const financeDate = todayYMD();
+    const totalOwedMetric = boundedLifetimeMetric({
+      metric: 'reimbursement.total_owed',
+      value: ledgerComplete ? totalOwedCombined : null,
+      valueCents: ledgerComplete ? toCents(totalOwedCombined) : null,
+      complete: ledgerComplete,
+      incompleteReasons: ledgerComplete ? [] : [QUERY_INCOMPLETE_REASON.ledgerScanIncomplete],
+      lowerBound: ledgerComplete ? null : totalOwedCombined,
+      lowerBoundLabel: 'at least (partial ledger scan)',
+      financeDate,
+      method: 'reimbursement_ledger_scan',
+      sources: [{ type: 'ledger', role: 'reimbursement' }],
+    });
     const summary = {
       fronted: frontedWin,
       paidBack: paidBackWin,
-      // Over the lifetime window the meaningful "outstanding" is the real balance
-      // still owed; for a bounded window it's that window's net flow.
-      outstanding: isLifetimeWin ? totalOwedCombined : round2(frontedWin - paidBackWin),
+      outstanding: isLifetimeWin
+        ? (ledgerComplete ? totalOwedCombined : null)
+        : round2(frontedWin - paidBackWin),
+      outstandingMetric: isLifetimeWin
+        ? boundedLifetimeMetric({
+          metric: 'reimbursement.summary_outstanding',
+          value: ledgerComplete ? totalOwedCombined : null,
+          valueCents: ledgerComplete ? toCents(totalOwedCombined) : null,
+          complete: ledgerComplete,
+          incompleteReasons: ledgerComplete ? [] : [QUERY_INCOMPLETE_REASON.ledgerScanIncomplete],
+          lowerBound: ledgerComplete ? null : totalOwedCombined,
+          lowerBoundLabel: 'at least (partial ledger scan)',
+          financeDate,
+          method: 'reimbursement_ledger_scan',
+        })
+        : null,
       window: { from: winFrom, to: winTo },
       lifetime: isLifetimeWin,
     };
 
     return {
       range: { from: winFrom, to: winTo },
-      totalOwed: totalOwedCombined,
+      totalOwed: totalOwedMetric,
       summary,
       ledgerCutoff: REIMB_LEDGER_CUTOFF_ACTIVE ? REIMB_LEDGER_FROM : null,
-      debtorCount: owes.length,
-      owes,
+      ledgerScan: {
+        queriedFrom: legFrom,
+        configuredFrom: REIMB_LEDGER_FROM,
+        to: legTo,
+        complete: ledgerWindow.complete,
+      },
+      debtorCount: ledgerComplete ? owes.length : null,
+      owes: ledgerComplete ? owes : [],
       owesSource,
       owesGeneratedAt,
       owesWarning,
@@ -2502,20 +2698,25 @@ async function getReimbursementLedger({ month } = {}) {
     const windowStart = monthRange(curY, curM - 11).start;
     const windowEnd = todayYMD();
 
-    const groups = await api.getCategoryGroups();
+    const ctx = await loadLedgerReadContext(api, { accountFilter: (a) => !a.offbudget });
+    const { groups, payeeMap: pn } = ctx;
     let reimbId = null;
     for (const g of groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) reimbId = c.id;
     if (!reimbId) throw new Error('Reimbursement category not found');
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accts = (await api.getAccounts()).filter((a) => !a.offbudget);
+    validateCanonicalDateRange(windowStart, windowEnd, {
+      purpose: 'reimbursement ledger',
+      maxSpanDays: loadQueryScalingConfig().maxLedgerQueryDays,
+    });
 
     // All reimbursement charges (fronted, amount<0) over the 12-month window.
     const charges = []; // { id, date, payee, notes, amount(dollars<0), person, event }
     const frontedByMonth = {};
-    for (const a of accts) {
-      const tx = await api.getTransactions(a.id, windowStart, windowEnd);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts: ctx.accounts,
+      start: windowStart,
+      end: windowEnd,
+    });
+    for (const { account: a, transactions: tx } of batches) {
       for (const t of tx) {
         const parentPayee = pn[t.payee] || t.imported_payee || '';
         const isSplit = t.subtransactions && t.subtransactions.length;
@@ -2648,15 +2849,16 @@ async function reconItemsFor(api, month) {
   const current = currentFinanceYearMonth();
   const isCurrent = Y === current.year && M - 1 === current.monthIndex;
   const to = isCurrent ? todayYMD() : end;
-  const groups = await api.getCategoryGroups();
-  const catInfo = buildCatInfo(groups);
-  const payees = await api.getPayees();
-  const pn = {};
-  for (const p of payees) pn[p.id] = p.name || '';
-  const accts = (await api.getAccounts()).filter((a) => !a.offbudget);
+  const ctx = await loadLedgerReadContext(api, { accountFilter: (a) => !a.offbudget });
+  const { catInfo, payeeMap: pn } = ctx;
+  const accts = ctx.accounts;
   const rows = [];
-  for (const a of accts) {
-    const tx = await api.getTransactions(a.id, start, to);
+  const batches = await fetchAccountTransactionsBounded(api, {
+    accounts: accts,
+    start,
+    end: to,
+  });
+  for (const { account: a, transactions: tx } of batches) {
     for (const t of tx) rows.push({ transaction: t, accountId: a.id, account: a });
   }
   const transferIndex = buildTransferIndex(rows);
@@ -2804,16 +3006,19 @@ async function getInsights({ month } = {}) {
     const isCurrent = year === current.year && mIdx === current.monthIndex;
     const targetEnd = isCurrent ? todayYMD() : target.end;
 
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed && !a.offbudget);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (a) => !a.closed && !a.offbudget,
+      includeClosed: false,
+    });
+    const { catInfo, payeeMap: pn, accounts } = ctx;
 
     const insightRows = [];
-    for (const a of accounts) {
-      const txns = await api.getTransactions(a.id, windowStart, targetEnd);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: windowStart,
+      end: targetEnd,
+    });
+    for (const { account: a, transactions: txns } of batches) {
       for (const t of txns) insightRows.push({ transaction: t, accountId: a.id });
     }
     const transferIndex = buildTransferIndex(insightRows);
@@ -2971,20 +3176,24 @@ async function getMerchantHistory({ payee, months = 12 } = {}) {
     const current = currentFinanceYearMonth();
     const year = current.year;
     const mIdx = current.monthIndex;
-    const span = Math.max(1, Math.min(60, Number(months) || 12));
+    const config = loadQueryScalingConfig();
+    const span = Math.max(1, Math.min(config.maxMerchantHistoryMonths, Number(months) || 12));
     const windowStart = monthRange(year, mIdx - (span - 1)).start;
     const end = todayYMD();
 
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed && !a.offbudget);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (a) => !a.closed && !a.offbudget,
+      includeClosed: false,
+    });
+    const { catInfo, payeeMap: pn, accounts } = ctx;
 
     const merchantRows = [];
-    for (const a of accounts) {
-      const txns = await api.getTransactions(a.id, windowStart, end);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: windowStart,
+      end,
+    });
+    for (const { account: a, transactions: txns } of batches) {
       for (const t of txns) merchantRows.push({ transaction: t, accountId: a.id });
     }
     const transferIndex = buildTransferIndex(merchantRows);
@@ -3324,21 +3533,32 @@ async function getCategories() {
 // Recurring & subscriptions engine (cadence, next renewal, price hikes, status)
 // ---------------------------------------------------------------------------
 async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
+  const config = loadQueryScalingConfig();
+  const boundedWindow = Math.max(6, Math.min(config.maxRecurringWindowMonths, Number(window) || 18));
   return withApi(async (api) => {
     const current = currentFinanceYearMonth();
-    const startKey = monthRange(current.year, current.monthIndex - (window - 1)).start;
+    const startKey = monthRange(current.year, current.monthIndex - (boundedWindow - 1)).start;
     const today = todayYMD();
+    validateCanonicalDateRange(startKey, today, {
+      config,
+      purpose: 'recurring scan',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
 
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed && !a.offbudget);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (a) => !a.closed && !a.offbudget,
+      includeClosed: false,
+    });
+    const { catInfo, payeeMap: pn, accounts } = ctx;
 
     const recurringRows = [];
-    for (const a of accounts) {
-      const txns = await api.getTransactions(a.id, startKey, today);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: startKey,
+      end: today,
+      config,
+    });
+    for (const { account: a, transactions: txns } of batches) {
       for (const t of txns) recurringRows.push({ transaction: t, accountId: a.id });
     }
     const transferIndex = buildTransferIndex(recurringRows);
@@ -3566,21 +3786,32 @@ function setRecurringOverride({ key, status, hidden, forced, isBill, categoryId,
 // Mirrors getRecurring but for income-category inflows.
 // ---------------------------------------------------------------------------
 async function getIncome({ window = 12 } = {}) {
+  const config = loadQueryScalingConfig();
+  const boundedWindow = Math.max(6, Math.min(config.maxRecurringWindowMonths, Number(window) || 12));
   return withApi(async (api) => {
     const current = currentFinanceYearMonth();
-    const startKey = monthRange(current.year, current.monthIndex - (window - 1)).start;
+    const startKey = monthRange(current.year, current.monthIndex - (boundedWindow - 1)).start;
     const today = todayYMD();
+    validateCanonicalDateRange(startKey, today, {
+      config,
+      purpose: 'income scan',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
 
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed && !a.offbudget);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (a) => !a.closed && !a.offbudget,
+      includeClosed: false,
+    });
+    const { catInfo, payeeMap: pn, accounts } = ctx;
 
     const incomeRows = [];
-    for (const a of accounts) {
-      const txns = await api.getTransactions(a.id, startKey, today);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: startKey,
+      end: today,
+      config,
+    });
+    for (const { account: a, transactions: txns } of batches) {
       for (const t of txns) incomeRows.push({ transaction: t, accountId: a.id });
     }
     const transferIndex = buildTransferIndex(incomeRows);
@@ -3900,8 +4131,8 @@ async function getForecast({ days = 90 } = {}) {
       pushEventCents(entry.date, 'Planned non-bill spending', -entry.centsCents, 'budget', 'planned');
     }
   }
-  const possibleReimbursement = reimb.totalOwed > 0.5
-    ? { date: addDays(today, 14), amount: round2(reimb.totalOwed), includedInBalance: false }
+  const possibleReimbursement = reimb.totalOwed?.complete && reimb.totalOwed.value != null && reimb.totalOwed.value > 0.5
+    ? { date: addDays(today, 14), amount: round2(reimb.totalOwed.value), includedInBalance: false }
     : null;
 
   const events = eventRows
@@ -4771,6 +5002,7 @@ async function cleanupPhantoms({
       const txns = await api.getTransactions(acct.id, start, today);
       const pendings = txns.filter((t) => t.imported_id && t.cleared === false && !t.is_parent && !t.parent_id);
       const cleared = txns.filter((t) => t.cleared === true && !t.is_parent);
+      const clearedIndex = buildClearedSupersederIndex(new Map([[acct.id, cleared]]), nameOf);
 
       for (const p of pendings) {
         const id = String(p.id);
@@ -4785,12 +5017,12 @@ async function cleanupPhantoms({
 
         // Rule A — superseded: a cleared charge for the same merchant, similar
         // amount, dated on/after the hold => the auth actually posted.
-        const magP = Math.abs(amt);
-        const superseder = cleared.find((q) => {
-          if (q.id === p.id) return false;
-          const magQ = Math.abs(d2(q.amount));
-          const near = Math.abs(magQ - magP) <= Math.max(2, magP * 0.30);
-          return near && q.date >= addDays(p.date, -1) && payeeAlike(payee, nameOf(q));
+        const superseder = findSupersedingCleared({
+          pending: { ...p, accountId: acct.id },
+          clearedIndex,
+          nameOf,
+          payeeName: payee,
+          amountCents: p.amount,
         });
 
         let reason = null;
@@ -5359,20 +5591,33 @@ function deleteRule({ id } = {}) {
 // category over to Reimbursement, so a friend paying you back never counts as
 // real income. Only ever touches income-filed inflows whose payee/notes match a
 // settle-up service — manual categorizations elsewhere are left alone.
-async function refileSettleUps({ sync = true } = {}) {
+async function refileSettleUps({ sync = true, from, to } = {}) {
   return withApi(async (api) => {
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
+    const config = loadQueryScalingConfig();
+    const end = to || todayYMD();
+    const configuredStart = from || REIMB_LEDGER_FROM;
+    const scanWindow = from
+      ? { start: configuredStart, complete: true }
+      : resolveBoundedLedgerStart({ configuredStart, end, config });
+    const start = scanWindow.start;
+    validateCanonicalDateRange(start, end, {
+      config,
+      purpose: 'settle-up refile scan',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
+    const ctx = await loadLedgerReadContext(api, { accountFilter: (a) => !a.offbudget && !a.closed });
+    const { catInfo, payeeMap: pn, accounts: accts } = ctx;
     let reimbId = null;
-    for (const g of groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) reimbId = c.id;
+    for (const g of ctx.groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) reimbId = c.id;
     if (!reimbId) return { ok: false, moved: 0, reason: 'no Reimbursement category' };
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accts = (await api.getAccounts()).filter((a) => !a.offbudget && !a.closed);
     let moved = 0;
-    for (const a of accts) {
-      const tx = await api.getTransactions(a.id, '2000-01-01', todayYMD());
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts: accts,
+      start,
+      end,
+      config,
+    });
+    for (const { account: a, transactions: tx } of batches) {
       for (const t of tx) {
         if (t.is_parent || t.parent_id) continue;
         if (!(t.amount > 0)) continue; // paybacks are inflows
@@ -5386,7 +5631,7 @@ async function refileSettleUps({ sync = true } = {}) {
       }
     }
     if (moved && sync) await syncNow();
-    return { ok: true, moved };
+    return { ok: true, moved, range: { start, end } };
   }, { mode: 'write' });
 }
 
@@ -5769,24 +6014,59 @@ function deleteGoal(id) {
 // ---------------------------------------------------------------------------
 // All-time transaction search + CSV report data.
 // ---------------------------------------------------------------------------
-async function searchTransactions({ q, start, end, limit = 200 } = {}) {
-  const today = todayYMD();
-  const startDate = start || '2000-01-01';
-  const endDate = end || today;
-  const all = await getTransactions({ start: startDate, end: endDate });
-  const needle = (q || '').toLowerCase().trim();
-  const res = needle
+async function searchTransactions({ q, start, end, limit = 200, cursor } = {}) {
+  const config = loadQueryScalingConfig();
+  const generation = getActualCoordinator().generation;
+  const decoded = cursor
+    ? decodeSearchCursor(cursor, { config, expectedGeneration: generation })
+    : null;
+  const range = decoded
+    ? { start: decoded.start, end: decoded.end }
+    : resolveSearchWindow({ start, end, config });
+  const effectiveLimit = Math.min(config.maxSearchLimit, Math.max(1, Number(decoded?.limit ?? limit) || 200));
+  const needle = (decoded?.q ?? q ?? '').toLowerCase().trim();
+  if (decoded) {
+    if (start && start !== decoded.start) throw new QueryRangeExceededError('search cursor start mismatch');
+    if (end && end !== decoded.end) throw new QueryRangeExceededError('search cursor end mismatch');
+    if (q != null && String(q).trim() !== '' && needle !== String(decoded.q || '').toLowerCase().trim()) {
+      throw new QueryRangeExceededError('search cursor query mismatch');
+    }
+  }
+  const all = await getTransactions({ start: range.start, end: range.end, collapse: true });
+  let res = needle
     ? all.filter((t) =>
         (t.payee || '').toLowerCase().includes(needle) ||
         (t.category || '').toLowerCase().includes(needle) ||
         (t.account || '').toLowerCase().includes(needle) ||
         (t.notes || '').toLowerCase().includes(needle))
     : all;
+  if (decoded?.anchorDate && decoded?.anchorId) {
+    res = res.filter((t) => rowBeforeSearchAnchor(t, decoded.anchorDate, decoded.anchorId));
+  }
+  res.sort(compareSearchRowsDesc);
+  const page = res.slice(0, effectiveLimit);
+  const hasMore = res.length > effectiveLimit;
+  const last = page[page.length - 1];
   return {
-    transactions: res.slice(0, limit),
-    total: res.length,
-    truncated: res.length > limit,
-    range: { start: startDate, end: endDate },
+    transactions: page,
+    truncated: hasMore,
+    range: { start: range.start, end: range.end },
+    pagination: {
+      limit: effectiveLimit,
+      nextCursor: hasMore && last
+        ? encodeSearchCursor({
+          start: range.start,
+          end: range.end,
+          q: needle,
+          limit: effectiveLimit,
+          anchorDate: last.date,
+          anchorId: last.id,
+          generation,
+        })
+        : null,
+      complete: !hasMore,
+      consistency: { generation, semantics: 'coordinator_generation_bound' },
+    },
   };
 }
 
@@ -5794,9 +6074,15 @@ async function searchTransactions({ q, start, end, limit = 200 } = {}) {
 // Tags live inline in transaction notes (e.g. "#ev-trip #alex"); this aggregates
 // them with usage counts so the app can offer reuse instead of duplicates.
 async function getTags({ start, end } = {}) {
+  const config = loadQueryScalingConfig();
   const today = todayYMD();
-  const startDate = start || addDays(today, -365 * 3);
+  const startDate = start || addDays(today, -config.maxTagsRangeDays + 1);
   const endDate = end || today;
+  validateCanonicalDateRange(startDate, endDate, {
+    config,
+    purpose: 'tag aggregation',
+    maxSpanDays: config.maxTagsRangeDays,
+  });
   const all = await getTransactions({ start: startDate, end: endDate });
   const counts = new Map(); // lowercased raw -> { raw, count }
   for (const t of all) {
@@ -5837,23 +6123,30 @@ async function getMonthlyReport({ month } = {}) {
 function buildReportsPayload({ month, monthly, trends, insights, tags, generatedAt = new Date().toISOString() }) {
   const summaryComplete = monthly.summary?.completeness?.complete !== false;
   const merchants = {};
-  for (const t of monthly.transactions || []) {
-    if (t.amount >= 0) continue;
-    const key = t.payee || 'Unknown';
-    const cur = merchants[key] || { payee: key, spend: 0, count: 0 };
-    cur.spend = round2(cur.spend + Math.abs(t.amount));
-    cur.count++;
-    merchants[key] = cur;
+  if (summaryComplete) {
+    for (const t of monthly.transactions || []) {
+      if (t.amount >= 0) continue;
+      if (t.transfer) continue;
+      const key = t.payee || 'Unknown';
+      const cur = merchants[key] || { payee: key, spend: 0, count: 0 };
+      cur.spend = round2(cur.spend + Math.abs(t.amount));
+      cur.count++;
+      merchants[key] = cur;
+    }
   }
-  const topMerchants = Object.values(merchants).sort((a, b) => b.spend - a.spend).slice(0, 12);
+  const topMerchants = summaryComplete
+    ? Object.values(merchants).sort((a, b) => b.spend - a.spend).slice(0, 12)
+    : [];
   const totalSpend = summaryComplete ? (monthly.summary?.totalSpend ?? 0) : null;
-  const categories = Object.entries(monthly.summary?.spending || {})
-    .map(([name, spend]) => ({
-      name,
-      spend: round2(Number(spend) || 0),
-      pct: summaryComplete && totalSpend > 0 ? round2(((Number(spend) || 0) / totalSpend) * 100) : null,
-    }))
-    .sort((a, b) => b.spend - a.spend);
+  const categories = summaryComplete
+    ? Object.entries(monthly.summary?.spending || {})
+      .map(([name, spend]) => ({
+        name,
+        spend: round2(Number(spend) || 0),
+        pct: totalSpend > 0 ? round2(((Number(spend) || 0) / totalSpend) * 100) : null,
+      }))
+      .sort((a, b) => b.spend - a.spend)
+    : [];
   return {
     generatedAt,
     month,
@@ -5882,6 +6175,8 @@ function buildReportsPayload({ month, monthly, trends, insights, tags, generated
     },
     categoryTrends: categories,
     merchantTrends: topMerchants,
+    categoryTrendsComplete: summaryComplete,
+    merchantTrendsComplete: summaryComplete,
     tagSummary: tags.tags || [],
     cashFlow: trends.months || [],
   };

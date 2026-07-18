@@ -21,6 +21,7 @@ const {
   resetRequestAdmissionController,
 } = require('./lib/request-admission');
 const {
+  createClientAbortSignal,
   withMutationAdmission,
   withOperationStatusAdmission,
   withReadAdmission,
@@ -45,6 +46,13 @@ const {
   stableStringify,
 } = require('./lib/reimbursement-export-ledger');
 const { boundedJsonMiddleware } = require('./lib/bounded-json');
+const {
+  attachQueryStatsHeaders,
+  assertCursorSigningConfigured,
+  buildQueryCacheFingerprint,
+  runWithQueryInstrumentation,
+} = require('./lib/bounded-ledger-access');
+const { loadQueryScalingConfig } = require('./lib/query-scaling-config');
 const {
   DEFAULT_MAX_JSON_BYTES,
   RECEIPT_MAX_JSON_BYTES,
@@ -82,6 +90,19 @@ const mutationQueue = new SerialQueue('finance-mutations', {
 });
 const operationJournal = new OperationJournal();
 const RELEASE_MANIFEST_PATH = process.env.RELEASE_MANIFEST_PATH || path.join(__dirname, 'release-manifest.json');
+
+function queryFingerprintBase() {
+  const c = loadQueryScalingConfig();
+  return {
+    maxLedgerDays: c.maxLedgerQueryDays,
+    maxLedgerRows: c.maxLedgerRowsPerRead,
+    maxTxnList: c.maxTransactionListRows,
+    maxSearchLimit: c.maxSearchLimit,
+    maxSearchRange: c.maxSearchRangeDays,
+    maxMerchantMonths: c.maxMerchantHistoryMonths,
+    ledgerChunkDays: c.ledgerChunkDays,
+  };
+}
 const runtimeHealth = {
   startedAt: new Date().toISOString(),
   fatalErrorAt: null,
@@ -137,6 +158,9 @@ const localOrigin = publicHostname === 'localhost' || publicHostname === '127.0.
 
 if (!process.env.SESSION_SECRET && !localOrigin) {
   throw new Error('SESSION_SECRET is required for a non-local deployment');
+}
+if (!localOrigin && process.env.DEMO_ONLY !== '1') {
+  assertCursorSigningConfigured();
 }
 if (SELFTEST && !localOrigin) {
   throw new Error('SELFTEST may only be used with a loopback PUBLIC_ORIGIN');
@@ -634,13 +658,13 @@ function cachedActual(key, fn, ttl = 300) {
 // request to recompute the heavy 18-month aggregations from scratch.
 const WARM_TARGETS = [
   { key: 'accounts', ttl: 300, fn: () => data.getAccounts() },
-  { key: 'spending-current', ttl: 180, fn: () => data.getSpending({ month: undefined }) },
-  { key: 'trends-12', ttl: 600, fn: () => data.getTrends({ months: 12 }) },
-  { key: 'trends-60', ttl: 600, fn: () => data.getTrends({ months: 60 }) },
-  { key: 'recurring-18', ttl: 600, fn: () => data.getRecurring({ window: 18 }) },
-  { key: 'income-12', ttl: 600, fn: () => data.getIncome({ window: 12 }) },
-  { key: 'bills-45', ttl: 600, fn: () => data.getBills({ days: 45 }) },
-  { key: 'reimb-d-d-false', ttl: 300, fn: () => data.getReimbursement({}) },
+  { key: buildQueryCacheFingerprint({ kind: 'spending', month: 'current', start: '', end: '', ...queryFingerprintBase() }), ttl: 180, fn: () => data.getSpending({ month: undefined }) },
+  { key: buildQueryCacheFingerprint({ kind: 'trends', months: 12, endMonth: 'current', ...queryFingerprintBase() }), ttl: 600, fn: () => data.getTrends({ months: 12 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'trends', months: 60, endMonth: 'current', ...queryFingerprintBase() }), ttl: 600, fn: () => data.getTrends({ months: 60 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'recurring', window: 18, ...queryFingerprintBase() }), ttl: 600, fn: () => data.getRecurring({ window: 18 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'income', window: 12, ...queryFingerprintBase() }), ttl: 600, fn: () => data.getIncome({ window: 12 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'bills', days: 45, ...queryFingerprintBase() }), ttl: 600, fn: () => data.getBills({ days: 45 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'reimb', from: 'd', to: 'd', openOnly: false, ...queryFingerprintBase() }), ttl: 300, fn: () => data.getReimbursement({}) },
   { key: 'categories', ttl: 300, fn: () => data.getCategories() },
 ];
 
@@ -682,7 +706,17 @@ const resolvers = {
     const today = todayYMD();
     const startDate = start || `${today.slice(0, 7)}-01`;
     const endDate = end || today;
-    const key = `txns-${accountId || 'all'}-${startDate}-${endDate}-${category || 'all'}-${bucket || 'none'}-${budgetOnly ? 'budget' : 'all'}-${collapse ? 'c' : 'x'}`;
+    const key = buildQueryCacheFingerprint({
+      kind: 'txns',
+      accountId: accountId || 'all',
+      startDate,
+      endDate,
+      category: category || 'all',
+      bucket: bucket || 'none',
+      budgetOnly: budgetOnly ? 'budget' : 'all',
+      collapse: collapse ? 'c' : 'x',
+      ...queryFingerprintBase(),
+    });
     return cachedActual(key, () => data.getTransactions({ accountId, start: startDate, end: endDate, category, bucket, budgetOnly, collapse }), 120);
   },
   txnById: (req) => {
@@ -692,57 +726,93 @@ const resolvers = {
   },
   merchantHistory: (req) => {
     const { payee, months } = req.query;
-    return cachedActual(`mhist-${(payee || '').toLowerCase()}-${months || 12}`, () => data.getMerchantHistory({ payee, months: months ? Number(months) : 12 }), 180);
+    const span = months ? Number(months) : 12;
+    const key = buildQueryCacheFingerprint({ kind: 'mhist', payee: (payee || '').toLowerCase(), months: span, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getMerchantHistory({ payee, months: span }), 180);
   },
   spending: (req) => {
     const start = req.query.start ? String(req.query.start) : undefined;
     const end = req.query.end ? String(req.query.end) : undefined;
-    const key = start && end ? `spending-${start}-${end}` : `spending-${monthOf(req) || 'current'}`;
+    const key = buildQueryCacheFingerprint({
+      kind: 'spending',
+      month: monthOf(req) || 'current',
+      start: start || '',
+      end: end || '',
+      ...queryFingerprintBase(),
+    });
     return cachedActual(key, () => data.getSpending({ month: monthOf(req), start, end }), 180);
   },
   trends: (req) => {
     const months = Math.min(60, Math.max(3, parseInt(req.query.months, 10) || 12));
-    return cachedActual(`trends-${months}`, () => data.getTrends({ months }), 600);
+    const endMonth = req.query.endMonth ? String(req.query.endMonth) : '';
+    const key = buildQueryCacheFingerprint({ kind: 'trends', months, endMonth: endMonth || 'current', ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getTrends({ months, endMonth: endMonth || undefined }), 600);
   },
   budgets: (req) => cachedActual(`budgets-${monthOf(req) || 'current'}`, () => data.getBudgets({ month: monthOf(req) }), 300),
   reimbursement: (req) => {
     const { from, to } = req.query;
     const openOnly = req.query.openOnly === '1' || req.query.openOnly === 'true';
-    return cachedActual(`reimb-${from || 'd'}-${to || 'd'}-${openOnly}`, () => data.getReimbursement({ from, to, openOnly }), 300);
+    const key = buildQueryCacheFingerprint({ kind: 'reimb', from: from || 'd', to: to || 'd', openOnly, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getReimbursement({ from, to, openOnly }), 300);
   },
   review: (req) => cachedActual(`review-${monthOf(req) || 'current'}`, () => data.getReview({ month: monthOf(req) }), 120),
   reimbursementLedger: (req) => cachedActual(`reimb-ledger-${monthOf(req) || 'current'}`, () => data.getReimbursementLedger({ month: monthOf(req) }), 180),
   repaymentSuggestions: (req) => {
     const { from, to } = req.query;
-    return cachedActual(`reimb-suggest-${from || 'd'}-${to || 'd'}`, () => data.suggestRepayments({ from, to }), 120);
+    const key = buildQueryCacheFingerprint({
+      kind: 'reimb-suggest',
+      from: from || 'd',
+      to: to || 'd',
+      ...queryFingerprintBase(),
+    });
+    return cachedActual(key, () => data.suggestRepayments({ from, to }), 120);
   },
   insights: (req) => cachedActual(`insights-${monthOf(req) || 'current'}`, () => data.getInsights({ month: monthOf(req) }), 300),
   categories: () => cachedActual('categories', () => data.getCategories()),
   recurring: (req) => {
     const window = Math.min(36, Math.max(6, parseInt(req.query.window, 10) || 18));
     if (req.query.debug === '1') return data.getRecurring({ window, debug: true, minDates: Math.max(1, parseInt(req.query.minDates, 10) || 3) });
-    return cachedActual(`recurring-${window}`, () => data.getRecurring({ window }), 600);
+    const key = buildQueryCacheFingerprint({ kind: 'recurring', window, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getRecurring({ window }), 600);
   },
   bills: (req) => {
     const days = Math.min(120, Math.max(7, parseInt(req.query.days, 10) || 45));
-    return cachedActual(`bills-${days}`, () => data.getBills({ days }), 600);
+    const key = buildQueryCacheFingerprint({ kind: 'bills', days, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getBills({ days }), 600);
   },
   forecast: (req) => {
     const days = Math.min(180, Math.max(30, parseInt(req.query.days, 10) || 90));
-    return cachedActual(`forecast-${days}`, () => data.getForecast({ days }), 300);
+    const key = buildQueryCacheFingerprint({ kind: 'forecast', days, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getForecast({ days }), 300);
   },
   income: (req) => {
     const window = Math.min(24, Math.max(6, parseInt(req.query.window, 10) || 12));
-    return cachedActual(`income-${window}`, () => data.getIncome({ window }), 600);
+    const key = buildQueryCacheFingerprint({ kind: 'income', window, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getIncome({ window }), 600);
   },
   search: (req) => {
     const q = (req.query.q || '').toString();
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
-    const { start, end } = req.query;
-    return cachedActual(`search-${q}-${start || ''}-${end || ''}-${limit}`, () => data.searchTransactions({ q, start, end, limit }), 120);
+    const { start, end, cursor } = req.query;
+    const key = buildQueryCacheFingerprint({
+      kind: 'search',
+      q,
+      start: start || '',
+      end: end || '',
+      limit,
+      cursor: cursor || '',
+      generation: actualCoordinator.generation,
+      ...queryFingerprintBase(),
+    });
+    return cachedActual(key, () => data.searchTransactions({ q, start, end, limit, cursor }), 120);
   },
   goals: () => cachedActual('goals', () => data.getGoals(), 120),
-  tags: () => cachedActual('tags', () => data.getTags(), 120),
+  tags: (req) => {
+    const start = req.query.start ? String(req.query.start) : '';
+    const end = req.query.end ? String(req.query.end) : '';
+    const key = buildQueryCacheFingerprint({ kind: 'tags', start, end, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getTags({ start: start || undefined, end: end || undefined }), 120);
+  },
   rules: () => cachedLocal('rules', () => Promise.resolve({ ...data.getRules(), catalog: data.getCatalogDisplay() }), 120),
   manualAssets: () => cachedLocal('manual-assets', () => Promise.resolve(data.getManualAssets()), 120),
   investments: () => cachedLocal('investments', () => Promise.resolve(data.getInvestments()), 120),
@@ -916,7 +986,7 @@ async function deleteReceiptH(req, operation) {
 // token via headers, so this just serves the file bytes with the right type.
 async function receiptImageH(req, res) {
   try {
-    await withReadAdmission(req, actualCoordinator, async () => {
+    await withReadAdmission(req, res, actualCoordinator, async () => {
       const f = await Promise.resolve(data.getReceiptFile({ id: req.params.id }));
       if (!f) {
         sendApiErrorCode(req, res, 'NOT_FOUND');
@@ -1238,7 +1308,7 @@ const setReconEnabledH = (req, operation) => {
 
 async function reimbursementExport(req, res) {
   try {
-    await withReadAdmission(req, actualCoordinator, async () => {
+    await withReadAdmission(req, res, actualCoordinator, async () => {
       const { from, to } = req.query;
       const strict = req.query.strict === '1' || req.query.strict === 'true';
       const format = String(req.query.format || 'json').toLowerCase();
@@ -1280,41 +1350,70 @@ function csvEscape(v) {
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 async function reportCsv(req, res) {
+  const abort = createClientAbortSignal(req, res);
   try {
-    await withReadAdmission(req, actualCoordinator, async () => {
-      const rep = await data.getMonthlyReport({ month: req.query.month });
-      const net = Math.round((rep.summary.totalIncome - rep.summary.totalSpend) * 100) / 100;
-      const lines = [
-        `Monthly report,${rep.month}`,
-        `Total income,${rep.summary.totalIncome}`,
-        `Total spend,${rep.summary.totalSpend}`,
-        `Net,${net}`,
-        '',
-        'Date,Payee,Account,Category,Amount,Notes',
-      ];
-      for (const t of rep.transactions) {
-        lines.push([t.date, csvEscape(t.payee), csvEscape(t.account), csvEscape(t.category || ''), t.amount, csvEscape(t.notes || '')].join(','));
-      }
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="finance-${rep.month}.csv"`);
-      res.send(lines.join('\n'));
-    }, { admission: requestAdmission });
-  } catch (e) { sendApiError(req, res, e); }
+    let stats;
+    await runWithQueryInstrumentation(async (activeStats) => {
+      stats = activeStats;
+      await withReadAdmission(req, res, actualCoordinator, async () => {
+        const rep = await data.getMonthlyReport({ month: req.query.month });
+        const net = Math.round((rep.summary.totalIncome - rep.summary.totalSpend) * 100) / 100;
+        const lines = [
+          `Monthly report,${rep.month}`,
+          `Total income,${rep.summary.totalIncome}`,
+          `Total spend,${rep.summary.totalSpend}`,
+          `Net,${net}`,
+          '',
+          'Date,Payee,Account,Category,Amount,Notes',
+        ];
+        for (const t of rep.transactions) {
+          lines.push([t.date, csvEscape(t.payee), csvEscape(t.account), csvEscape(t.category || ''), t.amount, csvEscape(t.notes || '')].join(','));
+        }
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="finance-${rep.month}.csv"`);
+        res.send(lines.join('\n'));
+      }, { admission: requestAdmission, signal: abort.signal });
+    }, { signal: abort.signal });
+    attachQueryStatsHeaders(res, stats);
+  } catch (e) {
+    if (!res.headersSent) sendApiError(req, res, e);
+  } finally {
+    abort.dispose();
+  }
 }
 
 // Raw responders for the legacy web API; enveloped {data}/{error} responders for v1.
-const runHandler = (req, fn, operation) => {
+const runHandler = (req, res, fn, operation, { signal } = {}) => {
   if (operation) return fn(req, operation);
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
-    return withMutationAdmission(req, operationJournal, mutationQueue, () => fn(req), {
+    return withMutationAdmission(req, res, operationJournal, mutationQueue, () => fn(req), {
       isDemo,
       admission: requestAdmission,
     });
   }
-  return withReadAdmission(req, actualCoordinator, () => fn(req), { admission: requestAdmission });
+  return withReadAdmission(req, res, actualCoordinator, () => fn(req), { admission: requestAdmission, signal });
 };
+async function executeReadWithQueryStats(req, res, fn) {
+  const abort = createClientAbortSignal(req, res);
+  let stats;
+  try {
+    const payload = await runWithQueryInstrumentation(async (activeStats) => {
+      stats = activeStats;
+      return runHandler(req, res, fn, undefined, { signal: abort.signal });
+    }, { signal: abort.signal });
+    return { payload, stats };
+  } finally {
+    abort.dispose();
+  }
+}
 const raw = (fn) => async (req, res) => {
-  try { res.json(await runHandler(req, fn)); } catch (e) { sendApiError(req, res, e); }
+  try {
+    const { payload, stats } = await executeReadWithQueryStats(req, res, fn);
+    attachQueryStatsHeaders(res, stats);
+    res.json(payload);
+  } catch (e) {
+    if (!res.headersSent) sendApiError(req, res, e);
+  }
 };
 function operationJournalError(error, phase) {
   runtimeHealth.fatalErrorAt = new Date().toISOString();
@@ -1343,8 +1442,8 @@ async function bulkTerminalProofResolver({ key, operation }) {
   };
 }
 
-async function readOperationStatus(req, key) {
-  return withOperationStatusAdmission(req, mutationQueue, () => reconcileOperationJournalFromProof(operationJournal, key, {
+async function readOperationStatus(req, res, key) {
+  return withOperationStatusAdmission(req, res, mutationQueue, () => reconcileOperationJournalFromProof(operationJournal, key, {
     proofResolver: bulkTerminalProofResolver,
     onJournalError: operationJournalError,
   }), { admission: requestAdmission });
@@ -1382,6 +1481,7 @@ const env = (fn, mutationRoute = null) => async (req, res) => {
       }
       const execution = await withMutationAdmission(
         req,
+        res,
         operationJournal,
         mutationQueue,
         () => executeVersionedMutation(req, fn, mutationRoute),
@@ -1389,10 +1489,20 @@ const env = (fn, mutationRoute = null) => async (req, res) => {
       );
       return res.json({ data: execution.result, operation: execution.operation });
     }
-    const result = await runHandler(req, fn);
-    return res.json({ data: result });
+    let stats;
+    const abort = createClientAbortSignal(req, res);
+    try {
+      const result = await runWithQueryInstrumentation(async (activeStats) => {
+        stats = activeStats;
+        return runHandler(req, res, fn, undefined, { signal: abort.signal });
+      }, { signal: abort.signal });
+      attachQueryStatsHeaders(res, stats);
+      return res.json({ data: result });
+    } finally {
+      abort.dispose();
+    }
   } catch (e) {
-    return sendApiError(req, res, e);
+    if (!res.headersSent) return sendApiError(req, res, e);
   }
 };
 
@@ -1508,8 +1618,8 @@ function registerV1Mutation(method, route, handler) {
   registeredV1MutationRoutes.add(key);
   v1[method.toLowerCase()](route, env(handler, definition));
 }
-v1.get('/operations/:key', env(async (req) => {
-  const operation = await readOperationStatus(req, req.params.key);
+v1.get('/operations/:key', env(async (req, res) => {
+  const operation = await readOperationStatus(req, res, req.params.key);
   if (!operation) {
     throw new AppError('Operation not found', {
       code: 'OPERATION_NOT_FOUND',
@@ -1628,6 +1738,54 @@ registerV1Mutation('POST', '/reconciliation/enabled', setReconEnabledH);
 registerV1Mutation('POST', '/goals', saveGoal);
 registerV1Mutation('DELETE', '/goals/:id', deleteGoal);
 registerV1Mutation('POST', '/refresh', (_req, operation) => doRefresh(operation));
+if (process.env.NODE_ENV === 'test') {
+  const {
+    getQueryAbortSentinelSnapshot,
+    resetQueryAbortSentinel,
+  } = require('./lib/query-abort-sentinel');
+  v1.get('/test/query-scaling-state', env(async () => {
+    let callLog = [];
+    try {
+      const fixturePath = process.env.ACTUAL_API_PATH;
+      if (fixturePath) {
+        const fixture = require(fixturePath);
+        if (Array.isArray(fixture.state?.callLog)) {
+          callLog = fixture.state.callLog.map((entry) => ({ ...entry }));
+        }
+      }
+    } catch (_) { /* fixture unavailable */ }
+    return {
+      callLog,
+      abortSentinel: getQueryAbortSentinelSnapshot(),
+    };
+  }));
+  v1.get('/test/query-scaling-events', env(async () => data.getEvents()));
+  v1.get('/test/query-scaling-reset', env(async () => {
+    try {
+      const fixturePath = process.env.ACTUAL_API_PATH;
+      if (fixturePath) {
+        const fixture = require(fixturePath);
+        if (typeof fixture.reset === 'function') {
+          fixture.reset({
+            accountCount: Number(process.env.FINANCE_QUERY_TEST_ACCOUNT_COUNT || 6),
+            rowsPerAccount: Number(process.env.FINANCE_QUERY_TEST_ROWS_PER_ACCOUNT || 40),
+            anchorMonth: '2024-06',
+            yearSpan: 1,
+          });
+        }
+      }
+    } catch (_) { /* fixture unavailable */ }
+    resetQueryAbortSentinel();
+    return { ok: true };
+  }));
+  v1.get('/test/query-scaling-throw', env(async () => {
+    throw new AppError('Intentional handler failure', {
+      code: 'TEST_HANDLER_ERROR',
+      status: 500,
+      expose: true,
+    });
+  }));
+}
 const missingV1MutationRoutes = MUTATION_ROUTES
   .filter(({ method, path: route }) => !registeredV1MutationRoutes.has(routeKey(method, route)));
 if (missingV1MutationRoutes.length) {

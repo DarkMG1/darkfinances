@@ -100,6 +100,57 @@ class TransactionNotFoundError extends AppError {
   }
 }
 
+class QueryRangeExceededError extends AppError {
+  constructor(message = 'Requested ledger window exceeds supported bounds') {
+    super(message, {
+      code: 'QUERY_RANGE_EXCEEDED',
+      status: 400,
+      expose: true,
+    });
+    this.name = 'QueryRangeExceededError';
+  }
+}
+
+class QueryResultLimitExceededError extends AppError {
+  constructor(message = 'Requested ledger result exceeds supported bounds') {
+    super(message, {
+      code: 'QUERY_RESULT_LIMIT_EXCEEDED',
+      status: 413,
+      expose: true,
+    });
+    this.name = 'QueryResultLimitExceededError';
+  }
+}
+
+class QueryCursorSecretError extends AppError {
+  constructor(message = 'Query cursor signing secret is not configured') {
+    super(message, {
+      code: 'QUERY_CURSOR_SECRET_UNAVAILABLE',
+      status: 500,
+      expose: false,
+    });
+    this.name = 'QueryCursorSecretError';
+  }
+}
+
+class QueryAbortedError extends AppError {
+  constructor(message = 'Ledger query was aborted') {
+    super(message, {
+      code: 'QUERY_ABORTED',
+      status: 503,
+      expose: true,
+    });
+    this.name = 'QueryAbortedError';
+    this.requiresIdempotencyKeyReuse = false;
+  }
+}
+
+function isQueryAbortedError(error) {
+  if (!error) return false;
+  if (error instanceof QueryAbortedError) return true;
+  return error.code === 'QUERY_ABORTED' || error.name === 'QueryAbortedError';
+}
+
 class ForecastMoneyValidationError extends AppError {
   constructor(cause) {
     super('Forecast money input is invalid', {
@@ -166,6 +217,11 @@ module.exports = {
   AppError,
   ForecastMoneyValidationError,
   KnownPreApplyError,
+  QueryAbortedError,
+  isQueryAbortedError,
+  QueryCursorSecretError,
+  QueryRangeExceededError,
+  QueryResultLimitExceededError,
   RequestValidationError,
   TransactionNotFoundError,
   classifyError,

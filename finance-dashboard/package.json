@@ -5,11 +5,13 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check dataModule.js && node --check demoData.js && node --check server.js && node --check scripts/actual-clone-smoke.js && node --check scripts/chart-js-vendor.js && node --check scripts/verify-chart-js-asset.js && node --check scripts/pin-chart-js-asset.js && node --check scripts/check-dashboard-install-contract.js && for file in lib/*.js lib/domain/*.js; do node --check \"$file\"; done",
+    "check": "node --check dataModule.js && node --check demoData.js && node --check server.js && node --check scripts/actual-clone-smoke.js && node --check scripts/chart-js-vendor.js && node --check scripts/verify-chart-js-asset.js && node --check scripts/pin-chart-js-asset.js && node --check scripts/check-dashboard-install-contract.js && node --check scripts/sync-bounded-ledger-vendor.js && for file in lib/*.js lib/domain/*.js; do node --check \"$file\"; done",
     "lint": "eslint .",
     "vendor:chart-js:verify": "node scripts/verify-chart-js-asset.js",
     "vendor:chart-js:pin": "node scripts/pin-chart-js-asset.js",
-    "test": "npm run vendor:chart-js:verify && node scripts/check-dashboard-install-contract.js && npm run check && ALLOW_RAW_ACTUAL_API=1 node --test test/*.test.js"
+    "vendor:bounded-ledger:sync": "node scripts/sync-bounded-ledger-vendor.js",
+    "vendor:bounded-ledger:check": "node scripts/sync-bounded-ledger-vendor.js --check",
+    "test": "npm run vendor:chart-js:verify && node scripts/check-dashboard-install-contract.js && npm run check && npm run vendor:bounded-ledger:check && ALLOW_RAW_ACTUAL_API=1 node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",

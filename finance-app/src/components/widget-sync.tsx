@@ -34,11 +34,11 @@ export function WidgetSync() {
     const syncedNetWorth = visible.reduce((sum, account) => sum + account.balance, 0);
     const netWorth = syncedNetWorth + (manual.data?.assets ?? 0) - (manual.data?.liabilities ?? 0);
 
-    const months = trends.data?.months ?? [];
+    const months = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
     let change = '';
     let changeUp = true;
-    if (months.length >= 2) {
-      const prevNW = months[months.length - 2].netWorth;
+    if (months.length >= 2 && months[months.length - 2].netWorth != null) {
+      const prevNW = months[months.length - 2].netWorth as number;
       const diff = syncedNetWorth - prevNW;
       changeUp = diff >= 0;
       change = `${diff >= 0 ? '+' : '-'}${fmtPos(diff)} this mo`;

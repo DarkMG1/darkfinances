@@ -713,6 +713,19 @@
       }
     }
 
+    function renderMetricPos(metric, fallback = 'Unavailable') {
+      if (metric?.complete === true && Number.isFinite(metric.value)) return fmtPos(metric.value);
+      if (
+        metric?.complete === false
+        && metric?.lowerBound != null
+        && Number.isFinite(metric.lowerBound)
+        && metric.lowerBound > 0
+      ) {
+        return `${metric.lowerBoundLabel || 'at least'} ${fmtPos(metric.lowerBound)}`;
+      }
+      return fallback;
+    }
+
     async function loadToday() {
       try {
         const response = await fetch('/api/v1/today');
@@ -783,13 +796,14 @@
       const months = document.getElementById('trendRange').value;
       const data = await (await fetch('/api/trends?months=' + months)).json();
       const labels = data.months.map(m => monthLabel(m.month));
-      const nw = data.months.map(m => m.netWorth);
+      const nwComplete = data.scope?.netWorthHistoryComplete !== false;
+      const nw = data.months.map((m) => (m.netWorth == null ? null : m.netWorth));
       const monthTrendComplete = (m) => m.completeness?.complete !== false && m.complete !== false;
       const inc = data.months.map(m => monthTrendComplete(m) && m.income != null ? m.income : null);
       const spd = data.months.map(m => monthTrendComplete(m) && m.spend != null ? m.spend : null);
       const net = data.months.map(m => monthTrendComplete(m) && m.net != null ? m.net : null);
 
-      state.trendFirstNW = nw.length ? nw[0] : null;
+      state.trendFirstNW = nwComplete && nw.length ? nw.find((v) => v != null) ?? null : null;
       state.trendMonths = months;
       renderNetWorthChange();
 
@@ -797,12 +811,16 @@
       const ticks = { color: '#6b6b80', font: { size: 10 } };
 
       if (netWorthChart) netWorthChart.destroy();
-      netWorthChart = new Chart(document.getElementById('netWorthChart'), {
-        type: 'line',
-        data: { labels, datasets: [{ data: nw, borderColor: '#7c6ef7', backgroundColor: 'rgba(124,110,247,0.12)', fill: true, tension: 0.3, pointRadius: 2, borderWidth: 2 }] },
-        options: { maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => ' ' + fmt(c.raw) } } },
-          scales: { x: { grid, ticks }, y: { grid, ticks: { ...ticks, callback: (v) => fmtK(v) } } } }
-      });
+      if (nwComplete && nw.some((v) => v != null)) {
+        netWorthChart = new Chart(document.getElementById('netWorthChart'), {
+          type: 'line',
+          data: { labels, datasets: [{ data: nw, borderColor: '#7c6ef7', backgroundColor: 'rgba(124,110,247,0.12)', fill: true, tension: 0.3, pointRadius: 2, borderWidth: 2, spanGaps: false }] },
+          options: { maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => (c.raw == null ? ' unavailable' : ' ' + fmt(c.raw)) } } },
+            scales: { x: { grid, ticks }, y: { grid, ticks: { ...ticks, callback: (v) => fmtK(v) } } } }
+        });
+      } else if (document.getElementById('netWorthBreakdown')) {
+        document.getElementById('netWorthBreakdown').textContent = 'Net worth history incomplete for this range';
+      }
 
       // Income (green) + Spending (red) bars with a Net line overlaid. This single
       // chart replaces the old separate "Cash Flow · Monthly Net" table.
@@ -854,7 +872,7 @@
     // ---- Reimbursement --------------------------------------------------------
     async function loadReimbursement() {
       const data = await (await fetch('/api/reimbursement')).json();
-      document.getElementById('oweTotal').textContent = fmtPos(data.totalOwed);
+      document.getElementById('oweTotal').textContent = renderMetricPos(data.totalOwed);
       const owers = data.owes || [];
       const oweList = document.getElementById('oweList');
       if (!owers.length) oweList.innerHTML = '<div class="empty-state">All settled up 🎉</div>';

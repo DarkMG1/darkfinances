@@ -103,17 +103,23 @@ export interface Investments {
 export interface Reports {
   generatedAt: string;
   month: string;
+  completeness?: ProjectionCompleteness;
   saved: { id: string; title: string; subtitle: string }[];
   monthlyReview: {
-    income: number;
-    spend: number;
-    net: number;
+    income: number | null;
+    spend: number | null;
+    net: number | null;
+    knownSpendSubtotal?: number;
+    knownIncomeSubtotal?: number;
+    completeness?: ProjectionCompleteness;
     transactionCount: number;
     largest: Transaction[];
     uncategorized: Transaction[];
   };
-  categoryTrends: { name: string; spend: number; pct: number }[];
+  categoryTrends: { name: string; spend: number; pct: number | null }[];
   merchantTrends: { payee: string; spend: number; count: number }[];
+  categoryTrendsComplete?: boolean;
+  merchantTrendsComplete?: boolean;
   tagSummary: Tag[];
   cashFlow: TrendMonth[];
 }
@@ -222,7 +228,7 @@ export interface Spending {
 
 export interface TrendMonth {
   month: string;
-  netWorth: number;
+  netWorth: number | null;
   spend: number | null;
   income: number | null;
   net: number | null;
@@ -238,6 +244,10 @@ export interface Trends {
     includesClosedAccountHistory: boolean;
     includesManualAssets: boolean;
     excludedHiddenAccounts: boolean;
+    queriedFrom?: string;
+    queriedTo?: string;
+    netWorthHistoryComplete?: boolean;
+    months?: number;
   };
 }
 
@@ -346,9 +356,16 @@ export interface OwesPerson {
 }
 export interface Reimbursement {
   range: { from: string; to: string };
-  totalOwed: number;
-  debtorCount: number;
-  summary?: { fronted: number; paidBack: number; outstanding: number; window?: { from: string; to: string }; lifetime?: boolean };
+  totalOwed: MetricValue;
+  debtorCount: number | null;
+  summary?: {
+    fronted: number;
+    paidBack: number;
+    outstanding: number | null;
+    outstandingMetric?: MetricValue | null;
+    window?: { from: string; to: string };
+    lifetime?: boolean;
+  };
   owes: OwesPerson[];
   owesSource?: string;
   owesGeneratedAt?: string | null;
@@ -360,6 +377,12 @@ export interface Reimbursement {
     source: string;
   } | null;
   ledgerCutoff?: string | null;
+  ledgerScan?: {
+    queriedFrom: string;
+    configuredFrom: string;
+    to: string;
+    complete: boolean;
+  };
   people: ReimbPerson[];
   events: ReimbEvent[];
   expected: ExpectedEvent[];
@@ -689,6 +712,8 @@ export interface RepaymentSuggestion {
 export interface RepaymentSuggestions {
   suggestions: RepaymentSuggestion[];
   count: number;
+  complete?: boolean;
+  incompleteReasons?: string[];
   generatedAt: string;
   range: { from: string; to: string };
 }
@@ -1051,6 +1076,8 @@ export interface MetricValue {
   complete: boolean;
   incompleteReasons: string[];
   provenance: MetricProvenance;
+  lowerBound?: number | null;
+  lowerBoundLabel?: string | null;
 }
 export interface Today {
   asOf: string;

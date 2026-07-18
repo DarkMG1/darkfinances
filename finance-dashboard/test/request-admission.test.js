@@ -68,10 +68,22 @@ function mockReq(overrides = {}) {
     session: { authenticated: true },
     sessionID: 'sess-test-1',
     complete: false,
+    aborted: false,
     get(name) {
       const headers = overrides.headers || {};
       return headers[name] ?? null;
     },
+    on() {},
+    off() {},
+    ...overrides,
+  };
+}
+
+function mockRes(overrides = {}) {
+  return {
+    writableFinished: false,
+    finished: false,
+    headersSent: false,
     on() {},
     off() {},
     ...overrides,
@@ -554,7 +566,7 @@ test('missing Idempotency-Key fails before admission or queue work', async () =>
     (error) => error instanceof AppError && error.code === 'IDEMPOTENCY_KEY_REQUIRED',
   );
   await assert.rejects(
-    () => withMutationAdmission(req, new OperationJournal(), queue, async () => 'never', {
+    () => withMutationAdmission(req, mockRes(), new OperationJournal(), queue, async () => 'never', {
       isDemo: () => false,
       isVersioned: true,
       admission,
@@ -710,7 +722,7 @@ test('cache hit acquires bounded cheap lane instead of bypassing capacity', asyn
   };
   const req = mockReq({ path: '/api/v1/accounts' });
   let invoked = false;
-  const value = await withReadAdmission(req, coordinator, async () => {
+  const value = await withReadAdmission(req, mockRes(), coordinator, async () => {
     invoked = true;
     return [{ id: 'live' }];
   }, { admission });
@@ -731,7 +743,7 @@ test('withMutationAdmission executes under admitted slot and releases after hand
     headers: { 'Idempotency-Key': 'fresh-key-12345678' },
   });
   let ran = false;
-  await withMutationAdmission(req, journal, queue, async () => {
+  await withMutationAdmission(req, mockRes(), journal, queue, async () => {
     ran = true;
     assert.equal(admission.getHealth().lanes.mutation.globalRunning, 1);
   }, { isDemo: () => false, isVersioned: true, admission });

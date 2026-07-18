@@ -49,12 +49,12 @@ export default function NetWorthScreen() {
   const liabilities = acctLiab - manualLiabTotal; // negative
   const netWorth = assets + liabilities;
 
-  const nwHist = trends.data?.months ?? [];
+  const nwHist = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
   // Manual assets have no history, so base "this month" on synced accounts only.
   const acctNetWorth = acctAssets + acctLiab;
   const nwDelta = prevNW != null ? acctNetWorth - prevNW : null;
-  const nwPoints = nwHist.map((m) => ({ value: m.netWorth, label: m.month }));
+  const nwPoints = nwHist.map((m) => ({ value: m.netWorth as number, label: m.month }));
   const totalAbs = assets + Math.abs(liabilities);
   const assetPct = totalAbs > 0 ? (assets / totalAbs) * 100 : 100;
 

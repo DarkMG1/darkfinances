@@ -21,7 +21,7 @@
     "check:fixtures": "node scripts/check-finance-fixtures.js",
     "check:dashboard": "npm --prefix finance-dashboard test && npm --prefix finance-dashboard run lint",
     "check:app": "npm --prefix finance-app test && npm --prefix finance-app run lint && node finance-app/scripts/verify-release-variant.js",
-    "check:tools": "npm --prefix actual-tools test",
+    "check:tools": "node finance-dashboard/scripts/sync-bounded-ledger-vendor.js --check && npm --prefix actual-tools test",
     "check:ops": "for file in ops/bin/*.sh; do bash -n \"$file\"; done && node --test ops/test/*.test.js",
     "check:parity": "node --test test/finance-date-parity.test.js",
     "check:release": "node scripts/release-manifest.js --stdout >/dev/null",

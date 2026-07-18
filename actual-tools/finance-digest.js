@@ -25,6 +25,11 @@ const {
   classifiedLeavesForAccounts,
   incompleteTransferLeaves,
 } = require('./lib/transfer-classification');
+const {
+  fetchAccountTransactionsBounded,
+  loadLedgerReadContext,
+  validateCanonicalDateRange,
+} = require('./lib/bounded-ledger-access');
 
 const c2 = (cents) => (Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (cents) => (cents < 0 ? '-$' : '$') + c2(cents);
@@ -46,23 +51,28 @@ const REIMB_CAT = /^reimbursement$/i;
 
   const payees = await api.getPayees();
   const pn = {}; for (const p of payees) pn[p.id] = p.name || '';
-  const accounts = await api.getAccounts();
+  const ctx = await loadLedgerReadContext(api);
+  validateCanonicalDateRange(monthStart, today, { purpose: 'finance digest' });
+  const accounts = ctx.accountsRaw;
 
   const balances = [];
-  const transactionsByAccountId = new Map();
   for (const a of accounts) {
-    transactionsByAccountId.set(a.id, await api.getTransactions(a.id, '2000-01-01', today));
+    balances.push({ name: a.name, offbudget: !!a.offbudget, bal: await api.getAccountBalance(a.id) });
+  }
+
+  const transactionsByAccountId = new Map();
+  const batches = await fetchAccountTransactionsBounded(api, {
+    accounts,
+    start: monthStart,
+    end: today,
+  });
+  for (const { account: a, transactions: tx } of batches) {
+    transactionsByAccountId.set(a.id, tx);
   }
   const payeeNameFor = (t) => pn[t.payee] || '';
   const allLeaves = classifiedLeavesForAccounts(accounts, transactionsByAccountId, catInfo, payeeNameFor);
   const yLeaves = allLeaves.filter((entry) => entry.date === yesterday);
   const mLeaves = allLeaves.filter((entry) => entry.date >= monthStart && entry.date <= today);
-  for (const a of accounts) {
-    const tx = transactionsByAccountId.get(a.id) || [];
-    let bal = 0;
-    for (const t of tx) bal += t.amount;
-    balances.push({ name: a.name, offbudget: !!a.offbudget, bal });
-  }
 
   const isReal = (e) => e.onbudget && (e.kind === 'spend' || (e.kind === 'uncat' && e.amount < 0));
   const catKey = (e) => (e.kind === 'uncat' ? 'Uncategorized' : (e.kind === 'transfer' ? 'Transfer' : (e.catId ? nameOf(e.catId) : '(uncategorized)')));

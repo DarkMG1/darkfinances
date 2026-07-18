@@ -63,10 +63,17 @@ function addDays(value, count) {
   return formatUTCDate(date);
 }
 
+function daysBetween(start, end) {
+  const a = parseYMD(start).date.getTime();
+  const b = parseYMD(end).date.getTime();
+  return Math.round((b - a) / 86_400_000);
+}
+
 module.exports = {
   DEFAULT_FINANCE_TIME_ZONE,
   FINANCE_TIME_ZONE,
   addDays,
+  daysBetween,
   isValidIanaTimeZone,
   parseYMD,
   resolveFinanceTimeZone,
