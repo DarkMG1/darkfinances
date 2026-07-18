@@ -1,4 +1,4 @@
-appId: dev.darkmg1.finances
+appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true

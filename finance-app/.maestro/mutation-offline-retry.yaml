@@ -1,4 +1,4 @@
-appId: com.darkfinances.app
+appId: ${MAESTRO_APP_ID}
 ---
 - launchApp
 - tapOn:

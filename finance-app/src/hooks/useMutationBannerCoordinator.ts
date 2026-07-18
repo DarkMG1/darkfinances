@@ -13,6 +13,8 @@ export interface MutationBannerSource {
   retry: () => void;
   announce?: string;
   isLocked?: boolean;
+  /** Monotonic activation sequence; latest source suppresses stale sibling outcomes. */
+  activitySeq?: number;
 }
 
 export interface UseMutationBannerCoordinatorResult {

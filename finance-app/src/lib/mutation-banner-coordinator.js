@@ -1,21 +1,28 @@
 /**
  * Picks which multi-action mutation source owns the visible banner outcome and retry.
- * Retry must dispatch only the action that produced the displayed error — never every
- * source that still has retained lastVars from an earlier success.
+ * Latest activation (monotonic activitySeq) is authoritative: when the newest source
+ * cleared its outcome after success, older sibling errors must not resurface.
  */
 
 function pickActiveMutationSource(sources) {
-  let active = null;
-  for (const source of sources) {
-    if (source.outcome) active = source;
-  }
-  if (!active) {
+  if (!sources.length) {
     return { activeKey: null, outcome: null };
   }
-  return {
-    activeKey: active.key,
-    outcome: active.outcome,
-  };
+  const maxSeq = Math.max(0, ...sources.map((s) => s.activitySeq ?? 0));
+  if (maxSeq === 0) {
+    let active = null;
+    for (const source of sources) {
+      if (source.outcome) active = source;
+    }
+    if (!active) return { activeKey: null, outcome: null };
+    return { activeKey: active.key, outcome: active.outcome };
+  }
+  const latestSources = sources.filter((s) => (s.activitySeq ?? 0) === maxSeq);
+  const latest = latestSources[latestSources.length - 1];
+  if (latest?.outcome) {
+    return { activeKey: latest.key, outcome: latest.outcome };
+  }
+  return { activeKey: null, outcome: null };
 }
 
 function retryActiveMutationSource(sources, activeKey) {
@@ -27,9 +34,18 @@ function retryActiveMutationSource(sources, activeKey) {
 }
 
 function pickMutationAnnounce(sources) {
+  const maxSeq = Math.max(0, ...sources.map((s) => s.activitySeq ?? 0));
+  if (maxSeq === 0) {
+    for (let i = sources.length - 1; i >= 0; i -= 1) {
+      const message = sources[i].announce;
+      if (message) return message;
+    }
+    return '';
+  }
   for (let i = sources.length - 1; i >= 0; i -= 1) {
-    const message = sources[i].announce;
-    if (message) return message;
+    const source = sources[i];
+    if ((source.activitySeq ?? 0) !== maxSeq) continue;
+    if (source.announce) return source.announce;
   }
   return '';
 }

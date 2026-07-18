@@ -37,6 +37,7 @@ export interface UseMutationScreenResult {
   summary: string | null;
   announce: string;
   isLocked: boolean;
+  activitySeq: number;
   activeKey: string | null;
   bind: <TVariables>(options: MutationScreenActionOptions<TVariables>) => MutationScreenAction<TVariables>;
   retry: () => void;
@@ -50,9 +51,11 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
   const [announce, setAnnounce] = useState('');
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [pendingKeys, setPendingKeys] = useState<Set<string>>(() => new Set());
+  const [activitySeq, setActivitySeq] = useState(0);
 
-  /** Synchronous guard — React pending state updates are too late for double-tap prevention. */
   const pendingLockRef = useRef(0);
+  const activitySeqRef = useRef(0);
+  const generationRef = useRef(0);
 
   const registryRef = useRef(new Map<string, {
     mutation: UseMutationResult<unknown, FinanceError, unknown>;
@@ -65,6 +68,12 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     fieldPathOverrides?: Record<string, string>;
     fieldOrder?: string[];
   }>());
+
+  const bumpActivity = useCallback(() => {
+    activitySeqRef.current += 1;
+    setActivitySeq(activitySeqRef.current);
+    return activitySeqRef.current;
+  }, []);
 
   const markPending = useCallback((key: string, pending: boolean) => {
     setPendingKeys((prev) => {
@@ -79,7 +88,9 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     key: string,
     error: FinanceError,
     entry: NonNullable<ReturnType<typeof registryRef.current.get>>,
+    capturedGeneration: number,
   ) => {
+    if (capturedGeneration !== generationRef.current) return;
     entry.lastError?.(error);
     entry.rollback?.();
     const mapped = mapMutationApiError(error, {
@@ -92,6 +103,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     setAnnounce(mapped.announce);
     if (mapped.requiresRefetch) {
       const ok = await runStaleRefetch(options.onRefetchStale);
+      if (capturedGeneration !== generationRef.current) return;
       if (ok && (mapped.kind === 'conflict_stale' || mapped.kind === 'conflict_saga' || mapped.kind === 'conflict_ownership')) {
         setOutcome({ ...mapped, summary: staleConflictNotice(mapped.summary) });
       }
@@ -106,7 +118,9 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     const entry = registryRef.current.get(key);
     if (!entry || pendingLockRef.current > 0) return;
 
+    const capturedGeneration = generationRef.current;
     pendingLockRef.current += 1;
+    bumpActivity();
     entry.lastVars = variables;
     entry.lastSuccess = runOptions?.onSuccess;
     entry.lastSettled = runOptions?.onSettled;
@@ -119,6 +133,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
 
     entry.mutation.mutate(variables, {
       onSuccess: (data) => {
+        if (capturedGeneration !== generationRef.current) return;
         entry.lastVars = null;
         entry.lastSuccess = undefined;
         entry.lastSettled = undefined;
@@ -130,15 +145,17 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
         runOptions?.onSuccess?.(data);
       },
       onError: (error) => {
-        void handleError(key, error, entry);
+        void handleError(key, error, entry, capturedGeneration);
       },
       onSettled: () => {
         pendingLockRef.current = Math.max(0, pendingLockRef.current - 1);
         markPending(key, false);
-        runOptions?.onSettled?.();
+        if (capturedGeneration === generationRef.current) {
+          runOptions?.onSettled?.();
+        }
       },
     });
-  }, [handleError, markPending]);
+  }, [bumpActivity, handleError, markPending]);
 
   const bind = useCallback(<TVariables,>(actionOptions: MutationScreenActionOptions<TVariables>): MutationScreenAction<TVariables> => {
     const existing = registryRef.current.get(actionOptions.key);
@@ -177,6 +194,14 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
   const clear = useCallback(() => {
     setOutcome(null);
     setAnnounce('');
+    setActiveKey(null);
+    for (const entry of registryRef.current.values()) {
+      entry.lastVars = null;
+      entry.lastSuccess = undefined;
+      entry.lastSettled = undefined;
+      entry.lastError = undefined;
+      entry.rollback = undefined;
+    }
   }, []);
 
   const refetchStale = useCallback(async () => {
@@ -185,22 +210,24 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
   }, [clear, options]);
 
   const reportClientValidation = useCallback((summary: string, fieldErrors: Record<string, string> = {}, fieldOrder: string[] = []) => {
+    bumpActivity();
     const mapped = mapClientValidationOutcome(fieldErrors, fieldOrder);
     setActiveKey(null);
     setOutcome({ ...mapped, summary });
     setAnnounce(summary);
-  }, []);
+  }, [bumpActivity]);
 
   return useMemo(() => ({
     outcome,
     summary: outcome?.summary ?? null,
     announce,
     isLocked,
+    activitySeq,
     activeKey,
     bind,
     retry,
     clear,
     refetchStale,
     reportClientValidation,
-  }), [activeKey, announce, bind, clear, isLocked, outcome, refetchStale, reportClientValidation, retry]);
+  }), [activeKey, activitySeq, announce, bind, clear, isLocked, outcome, refetchStale, reportClientValidation, retry]);
 }

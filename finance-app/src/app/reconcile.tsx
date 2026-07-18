@@ -37,19 +37,21 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
   const recon = useReconciliation(month);
   const setItem = useSetReconcileItem();
   const closeMonth = useSetReconcileMonth();
+  const screen = useMutationScreen({ onRefetchStale: () => recon.refetch() });
   const closeAction = useMutationAction({
     mutation: closeMonth,
     mutationLabel: 'Close month',
+    onActivate: () => screen.clear(),
     onRefetch: () => recon.refetch(),
+    onSuccess: () => screen.clear(),
   });
-  const screen = useMutationScreen({ onRefetchStale: () => recon.refetch() });
   const toggleAction = screen.bind({ key: 'toggle', mutation: setItem, mutationLabel: 'Update reconciliation' });
   const banner = useMutationBannerCoordinator(useMemo(() => [
-    { key: 'toggle', outcome: screen.outcome, retry: screen.retry, announce: screen.announce, isLocked: screen.isLocked },
-    { key: 'close', outcome: closeAction.outcome, retry: closeAction.retry, announce: closeAction.announce, isLocked: closeAction.isLocked },
+    { key: 'toggle', outcome: screen.outcome, retry: screen.retry, announce: screen.announce, isLocked: screen.isLocked, activitySeq: screen.activitySeq },
+    { key: 'close', outcome: closeAction.outcome, retry: closeAction.retry, announce: closeAction.announce, isLocked: closeAction.isLocked, activitySeq: closeAction.activitySeq },
   ], [
-    closeAction.announce, closeAction.isLocked, closeAction.outcome, closeAction.retry,
-    screen.announce, screen.isLocked, screen.outcome, screen.retry,
+    closeAction.activitySeq, closeAction.announce, closeAction.isLocked, closeAction.outcome, closeAction.retry,
+    screen.activitySeq, screen.announce, screen.isLocked, screen.outcome, screen.retry,
   ]));
 
   const toggle = (it: ReconItem) => {

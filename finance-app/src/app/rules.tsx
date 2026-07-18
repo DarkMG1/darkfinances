@@ -60,17 +60,17 @@ export default function Rules() {
     },
   });
 
-  const deleteAction = useMutationAction({ mutation: deleteRule, mutationLabel: 'Delete rule', onSuccess: () => rules.refetch() });
-  const applyAction = useMutationAction({ mutation: applyRules, mutationLabel: 'Apply rules', onSuccess: () => rules.refetch() });
+  const deleteAction = useMutationAction({ mutation: deleteRule, mutationLabel: 'Delete rule', onActivate: () => addForm.clearErrors(), onSuccess: () => rules.refetch() });
+  const applyAction = useMutationAction({ mutation: applyRules, mutationLabel: 'Apply rules', onActivate: () => addForm.clearErrors(), onSuccess: () => rules.refetch() });
 
   const banner = useMutationBannerCoordinator(useMemo(() => [
-    { key: 'add', outcome: addForm.outcome, retry: addForm.retry, announce: addForm.announce, isLocked: addForm.isLocked },
-    { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked },
-    { key: 'apply', outcome: applyAction.outcome, retry: applyAction.retry, announce: applyAction.announce, isLocked: applyAction.isLocked },
+    { key: 'add', outcome: addForm.outcome, retry: addForm.retry, announce: addForm.announce, isLocked: addForm.isLocked, activitySeq: addForm.activitySeq },
+    { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked, activitySeq: deleteAction.activitySeq },
+    { key: 'apply', outcome: applyAction.outcome, retry: applyAction.retry, announce: applyAction.announce, isLocked: applyAction.isLocked, activitySeq: applyAction.activitySeq },
   ], [
-    addForm.announce, addForm.isLocked, addForm.outcome, addForm.retry,
-    applyAction.announce, applyAction.isLocked, applyAction.outcome, applyAction.retry,
-    deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry,
+    addForm.activitySeq, addForm.announce, addForm.isLocked, addForm.outcome, addForm.retry,
+    applyAction.activitySeq, applyAction.announce, applyAction.isLocked, applyAction.outcome, applyAction.retry,
+    deleteAction.activitySeq, deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry,
   ]));
 
   const remove = (id: string) => deleteAction.run({ id });

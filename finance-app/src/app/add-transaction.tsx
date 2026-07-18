@@ -107,11 +107,16 @@ export default function AddTransaction() {
 
   useEffect(() => {
     const unsub = navigation.addListener('beforeRemove', (e) => {
-      if (!form.isLocked) return;
+      if (form.isLocked) {
+        e.preventDefault();
+        return;
+      }
+      if (!form.isDirty) return;
       e.preventDefault();
+      form.requestDismiss(() => navigation.dispatch(e.data.action));
     });
     return unsub;
-  }, [form.isLocked, navigation]);
+  }, [form, navigation]);
 
   return (
     <KeyboardAvoidingView testID="add-transaction-screen" style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>

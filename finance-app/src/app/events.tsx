@@ -77,13 +77,17 @@ export default function Events() {
   const deleteAction = useMutationAction({
     mutation: deleteEvent,
     mutationLabel: 'Delete trip',
-    onSuccess: () => events.refetch(),
+    onActivate: () => form.clearErrors(),
+    onSuccess: () => {
+      form.clearErrors();
+      events.refetch();
+    },
   });
 
   const banner = useMutationBannerCoordinator(useMemo(() => [
-    { key: 'form', outcome: form.outcome, retry: form.retry, announce: form.announce, isLocked: form.isLocked },
-    { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked },
-  ], [deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry, form.announce, form.isLocked, form.outcome, form.retry]));
+    { key: 'form', outcome: form.outcome, retry: form.retry, announce: form.announce, isLocked: form.isLocked, activitySeq: form.activitySeq },
+    { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked, activitySeq: deleteAction.activitySeq },
+  ], [deleteAction.activitySeq, deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry, form.activitySeq, form.announce, form.isLocked, form.outcome, form.retry]));
 
   const remove = (slug: string, label: string) =>
     Alert.alert('Delete trip?', `Remove “${label}”? Tagged transactions keep their #ev-${slug} tag but the trip disappears from this list.`, [

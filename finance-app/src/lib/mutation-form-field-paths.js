@@ -32,6 +32,12 @@ const DEFAULT_PATH_MAP = Object.freeze({
   request: 'request',
 });
 
+/** Screen-specific contract path → form field aliases (inventory for tests). */
+const FORM_SCREEN_PATH_OVERRIDES = Object.freeze({
+  budgets: Object.freeze({ amount: 'targetText' }),
+  'transaction-link': Object.freeze({ allocationCents: 'allocationCents' }),
+});
+
 const SENSITIVE_PATH = /base64|secret|token|password|authorization|image/i;
 
 function normalizeContractPath(path) {
@@ -77,6 +83,7 @@ function firstInvalidField(fieldErrors, fieldOrder = []) {
 
 module.exports = {
   DEFAULT_PATH_MAP,
+  FORM_SCREEN_PATH_OVERRIDES,
   firstInvalidField,
   mapContractIssuesToFieldErrors,
   mapContractPathToField,

@@ -65,23 +65,24 @@ export default function SplitEditor() {
   const inited = useRef(false);
 
   const legFieldOrder = useMemo(() => legs.map((_, i) => `leg-${i}`), [legs]);
-  const splitAction = useMutationAction({
-    mutation: split,
-    mutationLabel: 'Save split',
-    onRefetch: () => detail.refetch(),
-    fieldOrder: legFieldOrder,
-  });
   const unsplitAction = useMutationAction({
     mutation: unsplit,
     mutationLabel: 'Remove split',
     onRefetch: () => detail.refetch(),
   });
+  const splitAction = useMutationAction({
+    mutation: split,
+    mutationLabel: 'Save split',
+    onActivate: () => unsplitAction.clear(),
+    onRefetch: () => detail.refetch(),
+    fieldOrder: legFieldOrder,
+  });
   const banner = useMutationBannerCoordinator(useMemo(() => [
-    { key: 'split', outcome: splitAction.outcome, retry: splitAction.retry, announce: splitAction.announce, isLocked: splitAction.isLocked },
-    { key: 'unsplit', outcome: unsplitAction.outcome, retry: unsplitAction.retry, announce: unsplitAction.announce, isLocked: unsplitAction.isLocked },
+    { key: 'split', outcome: splitAction.outcome, retry: splitAction.retry, announce: splitAction.announce, isLocked: splitAction.isLocked, activitySeq: splitAction.activitySeq },
+    { key: 'unsplit', outcome: unsplitAction.outcome, retry: unsplitAction.retry, announce: unsplitAction.announce, isLocked: unsplitAction.isLocked, activitySeq: unsplitAction.activitySeq },
   ], [
-    splitAction.announce, splitAction.isLocked, splitAction.outcome, splitAction.retry,
-    unsplitAction.announce, unsplitAction.isLocked, unsplitAction.outcome, unsplitAction.retry,
+    splitAction.activitySeq, splitAction.announce, splitAction.isLocked, splitAction.outcome, splitAction.retry,
+    unsplitAction.activitySeq, unsplitAction.announce, unsplitAction.isLocked, unsplitAction.outcome, unsplitAction.retry,
   ]));
   const mutationLocked = banner.isLocked;
   const legFieldError = (i: number) => splitAction.outcome?.fieldErrors?.[`leg-${i}`];

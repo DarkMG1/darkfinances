@@ -95,13 +95,17 @@ export default function Goals() {
   const deleteAction = useMutationAction({
     mutation: deleteGoal,
     mutationLabel: 'Delete goal',
-    onSuccess: () => setEditing(null),
+    onActivate: () => form.clearErrors(),
+    onSuccess: () => {
+      form.clearErrors();
+      setEditing(null);
+    },
   });
 
   const banner = useMutationBannerCoordinator(useMemo(() => [
-    { key: 'form', outcome: form.outcome, retry: form.retry, announce: form.announce, isLocked: form.isLocked },
-    { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked },
-  ], [deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry, form.announce, form.isLocked, form.outcome, form.retry]));
+    { key: 'form', outcome: form.outcome, retry: form.retry, announce: form.announce, isLocked: form.isLocked, activitySeq: form.activitySeq },
+    { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked, activitySeq: deleteAction.activitySeq },
+  ], [deleteAction.activitySeq, deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry, form.activitySeq, form.announce, form.isLocked, form.outcome, form.retry]));
 
   const openNew = () => {
     form.clearErrors();
@@ -123,8 +127,7 @@ export default function Goals() {
   };
 
   const closeSheet = () => {
-    if (!form.requestDismiss()) return;
-    setEditing(null);
+    form.requestDismiss(() => setEditing(null));
   };
 
   const remove = () => {
@@ -187,7 +190,6 @@ export default function Goals() {
         canDismiss={form.canDismiss && !deleteAction.isLocked}
         onRequestClose={closeSheet}
       >
-        <MutationLiveRegion message={banner.announce} />
         <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => goals.refetch()} />
 
         <Text style={[styles.field, form.getFieldError('name') && styles.fieldErrorLabel]}>Name</Text>

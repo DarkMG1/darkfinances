@@ -6,6 +6,7 @@ const {
   purgeMutationFormDrafts,
   sanitizeDraftValues,
   setMutationFormDraft,
+  MAX_DRAFTS_PER_SCOPE,
 } = require('../src/lib/mutation-form-draft-store');
 
 test('draft store is scoped by profile generation and purged per profile', () => {
@@ -31,6 +32,30 @@ test('draft store strips sensitive receipt and token fields', () => {
     imageBase64: 'abc',
   }, 3);
   assert.deepEqual(getMutationFormDraft('scope-a', 'receipt-form', 3), { notes: 'hello' });
+});
+
+test('sanitize recursively strips nested sensitive keys and base64-like values', () => {
+  const sanitized = sanitizeDraftValues({
+    payee: 'Coffee',
+    meta: {
+      receipt: { image: 'abc' },
+      note: 'ok',
+    },
+    payload: 'data:image/png;base64,abc123',
+    blob: `${'A'.repeat(300)}`,
+  });
+  assert.deepEqual(sanitized, { payee: 'Coffee', meta: { note: 'ok' } });
+});
+
+test('draft store enforces per-scope LRU bound deterministically', () => {
+  purgeMutationFormDrafts('scope-lru');
+  for (let i = 0; i < MAX_DRAFTS_PER_SCOPE + 5; i += 1) {
+    setMutationFormDraft('scope-lru', `form-${i}`, { n: i }, 1);
+  }
+  assert.equal(getMutationFormDraft('scope-lru', 'form-0', 1), null);
+  assert.equal(getMutationFormDraft('scope-lru', 'form-4', 1), null);
+  assert.deepEqual(getMutationFormDraft('scope-lru', `form-${MAX_DRAFTS_PER_SCOPE + 4}`, 1), { n: MAX_DRAFTS_PER_SCOPE + 4 });
+  purgeMutationFormDrafts('scope-lru');
 });
 
 test('purge all clears every scope when scope omitted', () => {

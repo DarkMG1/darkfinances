@@ -62,22 +62,23 @@ export default function Reimbursement() {
   const suggestions = useRepaymentSuggestions();
   const confirm = useConfirmRepayment();
   const dismiss = useDismissRepayment();
-  const confirmAction = useMutationAction({
-    mutation: confirm,
-    mutationLabel: 'Confirm repayment',
-    onRefetch: () => { suggestions.refetch(); reimb.refetch(); },
-  });
   const dismissAction = useMutationAction({
     mutation: dismiss,
     mutationLabel: 'Dismiss suggestion',
     onRefetch: () => suggestions.refetch(),
   });
+  const confirmAction = useMutationAction({
+    mutation: confirm,
+    mutationLabel: 'Confirm repayment',
+    onActivate: () => dismissAction.clear(),
+    onRefetch: () => { suggestions.refetch(); reimb.refetch(); },
+  });
   const banner = useMutationBannerCoordinator(useMemo(() => [
-    { key: 'confirm', outcome: confirmAction.outcome, retry: confirmAction.retry, announce: confirmAction.announce, isLocked: confirmAction.isLocked },
-    { key: 'dismiss', outcome: dismissAction.outcome, retry: dismissAction.retry, announce: dismissAction.announce, isLocked: dismissAction.isLocked },
+    { key: 'confirm', outcome: confirmAction.outcome, retry: confirmAction.retry, announce: confirmAction.announce, isLocked: confirmAction.isLocked, activitySeq: confirmAction.activitySeq },
+    { key: 'dismiss', outcome: dismissAction.outcome, retry: dismissAction.retry, announce: dismissAction.announce, isLocked: dismissAction.isLocked, activitySeq: dismissAction.activitySeq },
   ], [
-    confirmAction.announce, confirmAction.isLocked, confirmAction.outcome, confirmAction.retry,
-    dismissAction.announce, dismissAction.isLocked, dismissAction.outcome, dismissAction.retry,
+    confirmAction.activitySeq, confirmAction.announce, confirmAction.isLocked, confirmAction.outcome, confirmAction.retry,
+    dismissAction.activitySeq, dismissAction.announce, dismissAction.isLocked, dismissAction.outcome, dismissAction.retry,
   ]));
   const [acting, setActing] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});

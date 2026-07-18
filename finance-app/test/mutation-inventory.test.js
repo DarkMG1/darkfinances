@@ -69,6 +69,7 @@ test('multi-action screens coordinate banner retry through useMutationBannerCoor
   for (const rel of multiActionScreens) {
     const source = fs.readFileSync(path.join(appRoot, rel), 'utf8');
     assert.match(source, /useMutationBannerCoordinator/, `${rel} must use banner coordinator`);
+    assert.match(source, /activitySeq:/, `${rel} must pass activitySeq for latest-source authority`);
     assert.match(source, /onRetry={banner\.retry}/, `${rel} must retry only the active action`);
     assert.doesNotMatch(source, /onRetry=\{\(\)\s*=>\s*\{[^}]*\.retry\(\);[^}]*\.retry\(\)/, `${rel} must not fan out retry to every action`);
     assert.doesNotMatch(source, /form\.retry\(\);\s*deleteAction\.retry\(\)/, `${rel} must not fan out form/delete retry`);

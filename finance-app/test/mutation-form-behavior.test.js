@@ -39,10 +39,28 @@ test('mutation hooks clear retry variables after success', () => {
   assert.match(screen, /entry\.lastVars = null/);
 });
 
-test('goals sheet blocks dismiss while locked', () => {
+test('mutation hooks unlock on settled and guard stale profile callbacks', () => {
+  for (const rel of ['useMutationForm.ts', 'useMutationAction.ts', 'useMutationScreen.ts']) {
+    const source = fs.readFileSync(path.join(root, 'src/hooks', rel), 'utf8');
+    assert.match(source, /onSettled/, `${rel} must unlock in onSettled`);
+  }
+  const form = fs.readFileSync(path.join(root, 'src/hooks/useMutationForm.ts'), 'utf8');
+  assert.match(form, /capturedScope !== scopeDigest/);
+  const screen = fs.readFileSync(path.join(root, 'src/hooks/useMutationScreen.ts'), 'utf8');
+  assert.match(screen, /capturedGeneration !== generationRef\.current/);
+});
+
+test('goals sheet blocks dismiss while locked and uses one live region', () => {
   const source = fs.readFileSync(path.join(root, 'src/app/goals.tsx'), 'utf8');
   assert.match(source, /canDismiss={form\.canDismiss/);
   assert.match(source, /requestDismiss/);
+  assert.equal((source.match(/<MutationLiveRegion/g) || []).length, 1);
+});
+
+test('mutation forms confirm discard when dirty', () => {
+  const form = fs.readFileSync(path.join(root, 'src/hooks/useMutationForm.ts'), 'utf8');
+  assert.match(form, /Discard unsaved changes\?/);
+  assert.match(form, /isDirty/);
 });
 
 test('add transaction and split editor block hardware back while submitting', () => {
@@ -53,11 +71,25 @@ test('add transaction and split editor block hardware back while submitting', ()
   }
 });
 
+test('transaction detail blocks route back while mutation screen locked', () => {
+  const source = fs.readFileSync(path.join(root, 'src/app/transaction/[id].tsx'), 'utf8');
+  assert.match(source, /beforeRemove/);
+  assert.match(source, /screen\.isLocked/);
+});
+
 test('transaction link allocation surfaces inline field errors', () => {
   const source = fs.readFileSync(path.join(root, 'src/app/transaction/[id].tsx'), 'utf8');
   assert.match(source, /allocationFieldError/);
   assert.match(source, /transaction-link-allocation-error/);
   assert.match(source, /fieldOrder: \['allocationCents'\]/);
+});
+
+test('budgets maps server amount validation to targetText with focus path', () => {
+  const source = fs.readFileSync(path.join(root, 'src/app/budgets.tsx'), 'utf8');
+  assert.match(source, /FORM_SCREEN_PATH_OVERRIDES\.budgets/);
+  assert.match(source, /fieldOrder: \['targetText'\]/);
+  assert.match(source, /form\.getFieldError\('targetText'\)/);
+  assert.match(source, /budgets-target-error/);
 });
 
 test('mutation hooks expose synchronous pending guards for UI lock', () => {
@@ -67,4 +99,11 @@ test('mutation hooks expose synchronous pending guards for UI lock', () => {
   assert.match(action, /dispatchPending/);
   assert.match(form, /pendingLockRef/);
   assert.match(action, /pendingLockRef/);
+});
+
+test('multi-action screens pass activitySeq into banner coordinator', () => {
+  for (const rel of ['goals.tsx', 'events.tsx', 'rules.tsx', 'reconcile.tsx', 'split/[id].tsx', 'reimbursement.tsx']) {
+    const source = fs.readFileSync(path.join(root, 'src/app', rel), 'utf8');
+    assert.match(source, /activitySeq:/, `${rel} must pass activitySeq to coordinator`);
+  }
 });

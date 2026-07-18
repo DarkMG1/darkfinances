@@ -16,6 +16,7 @@ import { SkeletonList } from '@/components/skeleton';
 import { GroupedBars, MonthNavigator, ProgressBar, trendPeriodComplete } from '@/components/charts';
 import { categoryEnvelopeDebtDisplay, categoryReserveDisplay } from '@/lib/budget-category-display';
 import { useMutationForm } from '@/hooks/useMutationForm';
+import { FORM_SCREEN_PATH_OVERRIDES } from '@/lib/mutation-form-field-paths';
 import { haptics } from '@/lib/haptics';
 import { collectFieldErrors, parseStrictMoneyDollars, validateMoneyField } from '@/lib/mutation-form-validation';
 import { useCurrentMonthKey, useSelectedMonth } from '@/lib/selectedMonth';
@@ -59,7 +60,7 @@ export default function Budgets() {
       spend: monthComplete(m) ? m.spend! : null,
     }));
     return trimmed.length ? trimmed : [{ month: curKey, spend: 0 }];
-  }, [allMonths, curKey]);
+  }, [allMonths, curKey, monthComplete]);
 
   // Income vs spending chart keeps the most recent 12 months.
   const chart = allMonths.slice(-12);
@@ -92,6 +93,7 @@ export default function Budgets() {
     mutation: setBudget,
     mutationLabel: 'Save budget',
     fieldOrder: ['targetText'],
+    fieldPathOverrides: FORM_SCREEN_PATH_OVERRIDES.budgets,
     onSuccessClose: () => setEditing(null),
     onRefetch: () => budgets.refetch(),
     validate: (f) => collectFieldErrors({
@@ -106,8 +108,7 @@ export default function Budgets() {
 
   const save = () => form.submit();
   const closeSheet = () => {
-    if (!form.requestDismiss()) return;
-    setEditing(null);
+    form.requestDismiss(() => setEditing(null));
   };
 
   return (

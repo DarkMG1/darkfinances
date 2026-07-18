@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { Image } from 'expo-image';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   useAddReceipt,
@@ -61,6 +61,7 @@ export default function TransactionDetail() {
     isSplit?: string; splitCount?: string; imported?: string;
   }>();
   const router = useRouter();
+  const navigation = useNavigation();
   const financeTodayValue = useFinanceToday();
   const insets = useSafeAreaInsets();
 
@@ -178,6 +179,13 @@ export default function TransactionDetail() {
   const payeeAction = screen.bind({ key: 'payee', mutation: setPayee, mutationLabel: 'Rename payee' });
   const notesAction = screen.bind({ key: 'notes', mutation: setNotes, mutationLabel: 'Save notes', fieldOrder: ['notes'] });
   const modalLocked = screen.isLocked;
+  useEffect(() => {
+    const unsub = navigation.addListener('beforeRemove', (e) => {
+      if (!screen.isLocked) return;
+      e.preventDefault();
+    });
+    return unsub;
+  }, [navigation, screen.isLocked]);
   const requestModalClose = (close: () => void) => {
     if (modalLocked) return;
     close();
