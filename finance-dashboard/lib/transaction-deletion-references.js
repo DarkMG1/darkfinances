@@ -1,19 +1,39 @@
 'use strict';
 
+const {
+  expandDeletionSnapshotEvidence,
+  expandTransactionTargetEvidence,
+} = require('./review-task-fingerprint');
+const { rewriteReviewDispositionsForDeletion } = require('./review-disposition');
+
 const REFERENCE_STEPS = Object.freeze([
   'receipts',
   'links',
   'suggestions',
   'reconciliation',
   'phantomSeen',
+  'reviewState',
 ]);
 
 function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function targetSet(targetIds) {
-  const targets = new Set((targetIds || []).filter((id) => id != null).map(String));
+function normalizeDeletionTargetEvidence(targetEvidence) {
+  if (targetEvidence?.snapshot) return expandDeletionSnapshotEvidence(targetEvidence.snapshot);
+  if (Array.isArray(targetEvidence)) {
+    return expandTransactionTargetEvidence(targetEvidence.map((id) => ({ id: String(id) })));
+  }
+  if (targetEvidence?.transactions) return expandTransactionTargetEvidence(targetEvidence.transactions);
+  if (targetEvidence?.ids) {
+    return expandTransactionTargetEvidence(targetEvidence.ids.map((id) => ({ id: String(id) })));
+  }
+  throw new Error('transaction deletion reference evidence required');
+}
+
+function targetSet(targetEvidence) {
+  const expanded = normalizeDeletionTargetEvidence(targetEvidence);
+  const targets = new Set(expanded.targets.map(String));
   if (!targets.size) throw new Error('transaction deletion reference targets required');
   return targets;
 }
@@ -43,6 +63,12 @@ function assertStores(stores) {
   }
   if (!isObject(stores.phantomSeen) || !isObject(stores.phantomSeen.seen)) {
     throw new Error('invalid phantom-seen reference store');
+  }
+  if (stores.reviewState != null
+    && (!isObject(stores.reviewState)
+      || !isObject(stores.reviewState.dispositions)
+      || !isObject(stores.reviewState.legacyDispositions))) {
+    throw new Error('invalid review-state reference store');
   }
 }
 
@@ -171,15 +197,22 @@ function rewritePhantomSeen(store, targets, stats) {
   return changed ? { ...store, seen } : store;
 }
 
-function rewriteTransactionDeletionReferences(stores, targetIds) {
+function rewriteReviewState(store, targetEvidence, stats) {
+  const { reviewState, stats: reviewStats } = rewriteReviewDispositionsForDeletion(store, targetEvidence);
+  stats.reviewState += reviewStats.reviewState;
+  return reviewState;
+}
+
+function rewriteTransactionDeletionReferences(stores, targetEvidence) {
   assertStores(stores);
-  const targets = targetSet(targetIds);
+  const targets = targetSet(targetEvidence);
   const stats = {
     receipts: 0,
     links: 0,
     suggestions: 0,
     reconciliation: 0,
     phantomSeen: 0,
+    reviewState: 0,
   };
   const receipts = rewriteReceipts(stores.receipts, targets, stats);
   return {
@@ -189,6 +222,7 @@ function rewriteTransactionDeletionReferences(stores, targetIds) {
       suggestions: rewriteSuggestions(stores.suggestions, targets, stats),
       reconciliation: rewriteReconciliation(stores.reconciliation, targets, stats),
       phantomSeen: rewritePhantomSeen(stores.phantomSeen, targets, stats),
+      reviewState: rewriteReviewState(stores.reviewState, targetEvidence, stats),
     },
     receiptFilesToDelete: receipts.receiptFilesToDelete,
     stats,
@@ -197,5 +231,6 @@ function rewriteTransactionDeletionReferences(stores, targetIds) {
 
 module.exports = {
   REFERENCE_STEPS,
+  normalizeDeletionTargetEvidence,
   rewriteTransactionDeletionReferences,
 };

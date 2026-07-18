@@ -474,6 +474,9 @@ export interface ReviewTask {
   action: ReviewTaskAction;
   amount: number;
   date: string | null;
+  stableKey: string;
+  contentHash: string;
+  contentVersion: number;
   transaction?: ReviewTransactionRef;
   person?: string;
   key?: string;
@@ -485,6 +488,7 @@ export interface ReviewInbox {
   month: string;
   count: number;
   hiddenCount?: number;
+  migrationRequired?: number;
   counts: Partial<Record<ReviewTaskKind, number>>;
   tasks: ReviewTask[];
 }

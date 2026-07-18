@@ -82,6 +82,7 @@ function makeHarness({ applyThenThrowDelete = false } = {}) {
     suggestions: path.join(dir, 'suggestions.json'),
     reconciliation: path.join(dir, 'reconciliation.json'),
     phantomSeen: path.join(dir, 'phantom-seen.json'),
+    reviewState: path.join(dir, 'review-state.json'),
   };
   fs.mkdirSync(paths.receiptDir);
   writeJson(paths.actual, {
@@ -171,6 +172,19 @@ function makeHarness({ applyThenThrowDelete = false } = {}) {
       [unrelated.id]: { firstSeen: 'keep', legacy: null },
     },
   });
+  writeJson(paths.reviewState, {
+    schemaVersion: 2,
+    contentVersion: 1,
+    dispositions: {
+      [`uncategorized:id:${original.id}`]: {
+        disposition: 'acknowledge',
+        at: '2026-07-01T00:00:00.000Z',
+        contentHash: 'a'.repeat(64),
+        kind: 'uncategorized',
+      },
+    },
+    legacyDispositions: {},
+  });
   return { dir, paths };
 }
 
@@ -182,6 +196,7 @@ function readStores(harness) {
     suggestions: readJson(paths.suggestions),
     reconciliation: readJson(paths.reconciliation),
     phantomSeen: readJson(paths.phantomSeen),
+    reviewState: readJson(paths.reviewState),
   };
 }
 
@@ -221,9 +236,10 @@ function makeManager(harness, options = {}) {
     suggestions: paths.suggestions,
     reconciliation: paths.reconciliation,
     phantomSeen: paths.phantomSeen,
+    reviewState: paths.reviewState,
   };
-  const plan = (targetIds) => {
-    const result = rewriteTransactionDeletionReferences(readStores(harness), targetIds);
+  const plan = (targetEvidence) => {
+    const result = rewriteTransactionDeletionReferences(readStores(harness), targetEvidence);
     for (const file of result.receiptFilesToDelete) {
       if (!file || path.basename(file) !== file) throw new Error('invalid receipt file reference');
     }
@@ -236,14 +252,14 @@ function makeManager(harness, options = {}) {
     sagaPath: paths.sagas,
     referenceSteps: REFERENCE_STEPS,
     planReferences: plan,
-    applyReferenceStep(step, targetIds) {
+    applyReferenceStep(step, targetEvidence) {
       const current = readStores(harness);
-      const next = rewriteTransactionDeletionReferences(current, targetIds).stores[step];
+      const next = rewriteTransactionDeletionReferences(current, targetEvidence).stores[step];
       if (JSON.stringify(current[step]) !== JSON.stringify(next)) writeJson(storePath[step], next);
     },
-    referencesConverged(targetIds) {
+    referencesConverged(targetEvidence) {
       const current = readStores(harness);
-      const next = rewriteTransactionDeletionReferences(current, targetIds);
+      const next = rewriteTransactionDeletionReferences(current, targetEvidence);
       return REFERENCE_STEPS.every(
         (step) => JSON.stringify(current[step]) === JSON.stringify(next.stores[step]),
       );
@@ -314,10 +330,9 @@ function fileState(harness) {
 
 function assertNoDeletedReferences(harness) {
   const current = readStores(harness);
-  const rewritten = rewriteTransactionDeletionReferences(current, [
-    original.id,
-    ...original.subtransactions.map((leg) => leg.id),
-  ]);
+  const rewritten = rewriteTransactionDeletionReferences(current, {
+    snapshot: canonicalTransactionSnapshot(original),
+  });
   for (const step of REFERENCE_STEPS) assert.deepEqual(current[step], rewritten.stores[step]);
 }
 
@@ -612,6 +627,7 @@ test('post-sync terminalization continues past an independent invalid saga', asy
         suggestions: 0,
         reconciliation: 0,
         phantomSeen: 0,
+        reviewState: 0,
       },
       receiptFiles: [],
     },

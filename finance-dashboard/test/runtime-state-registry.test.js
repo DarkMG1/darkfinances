@@ -223,13 +223,25 @@ const FIXTURES = {
     future: { schemaVersion: 9 },
   },
   reviewState: {
-    current: { schemaVersion: 1, dispositions: { 'task:1': { disposition: 'snooze', at: '2026-07-13T00:00:00.000Z' } } },
+    current: {
+      schemaVersion: 2,
+      contentVersion: 1,
+      dispositions: {
+        'uncategorized:imported:abc@v1': {
+          disposition: 'acknowledge',
+          at: '2026-07-13T00:00:00.000Z',
+          contentHash: 'a'.repeat(64),
+          kind: 'uncategorized',
+        },
+      },
+      legacyDispositions: {},
+    },
     legacy: {
       'fp-1': 'hidden',
       'task:1': { disposition: 'snooze', at: '2026-07-13T00:00:00.000Z' },
     },
     malformed: 42,
-    future: { schemaVersion: 9, dispositions: {} },
+    future: { schemaVersion: 9, dispositions: {}, legacyDispositions: {} },
   },
   rules: {
     current: { rules: [{ id: 'r1', payee: 'Coffee', category: 'c1' }] },
@@ -465,8 +477,9 @@ for (const [name, fixtures] of Object.entries(FIXTURES)) {
       assert.deepEqual(first.value.byTxn.t2.length, 1);
     }
     if (name === 'reviewState') {
-      assert.equal(first.value.dispositions['fp-1'], 'hidden');
-      assert.deepEqual(first.value.dispositions['task:1'], fixtures.legacy['task:1']);
+      assert.deepEqual(first.value.legacyDispositions['fp-1'], 'hidden');
+      assert.deepEqual(first.value.legacyDispositions['task:1'], fixtures.legacy['task:1']);
+      assert.equal(Object.keys(first.value.dispositions || {}).length, 0);
     }
     if (name === 'accountOverrides' && fixtures.legacyMixed) {
       resetWriteGuards();
@@ -781,12 +794,13 @@ test('reviewState flat legacy map migrates losslessly through read, write, and b
   const legacy = FIXTURES.reviewState.legacy;
   writePrimary(env, 'reviewState', legacy);
   const loaded = readRuntimeState('reviewState', { env }).value;
-  assert.equal(loaded.schemaVersion, 1);
-  assert.equal(loaded.dispositions['fp-1'], 'hidden');
-  assert.deepEqual(loaded.dispositions['task:1'], legacy['task:1']);
+  assert.equal(loaded.schemaVersion, 2);
+  assert.deepEqual(loaded.legacyDispositions['fp-1'], 'hidden');
+  assert.deepEqual(loaded.legacyDispositions['task:1'], legacy['task:1']);
+  assert.deepEqual(loaded.dispositions, {});
   writeRuntimeState('reviewState', loaded, { env, enforceOwnership: false });
   const roundTrip = readRuntimeState('reviewState', { env }).value;
-  assert.deepEqual(roundTrip.dispositions, loaded.dispositions);
+  assert.deepEqual(roundTrip.legacyDispositions, loaded.legacyDispositions);
   assert.doesNotThrow(() => validateBackupSidecar('review-state.json', legacy));
   const migrated = RUNTIME_STATE_SCHEMAS.reviewState.migrate(legacy).value;
   assert.doesNotThrow(() => validateBackupSidecar('review-state.json', migrated));

@@ -31,7 +31,7 @@ const STATE_REGISTRY = Object.freeze({
   }),
   reconciliation: entry('RECON_PATH', 'reconciliation.json', 1, true, 'transaction ids'),
   recurringOverrides: entry('RECURRING_OVERRIDES_PATH', 'recurring-overrides.json', 1, true, 'recurring keys'),
-  reviewState: entry('REVIEW_STATE_PATH', 'review-state.json', 1, true, 'stable review fingerprints'),
+  reviewState: entry('REVIEW_STATE_PATH', 'review-state.json', 2, true, 'stable review fingerprints'),
   rules: entry('RULES_PATH', 'rules.json', 1, true, 'rule ids'),
   transactionDeletionSagas: entry('TRANSACTION_DELETION_SAGAS_PATH', 'transaction-deletion-sagas.json', 1, true, 'deleted Actual and sidecar transaction ids', { sagaSemantics: true }),
   bulkOperationSagas: entry('BULK_OPERATION_SAGAS_PATH', 'bulk-operation-sagas.json', 1, true, 'bulk rule, phantom, and splitwise mirror Actual transaction ids plus Splitwise source ids', { sagaSemantics: true }),

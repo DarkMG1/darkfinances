@@ -71,6 +71,21 @@ function stores() {
         other: { firstSeen: 'keep', legacy: null },
       },
     },
+    reviewState: {
+      schemaVersion: 2,
+      contentVersion: 1,
+      dispositions: {
+        'uncategorized:imported:parent': {
+          disposition: 'acknowledge',
+          at: '2026-07-01T00:00:00.000Z',
+          contentHash: 'a'.repeat(64),
+          kind: 'uncategorized',
+        },
+      },
+      legacyDispositions: {
+        'uncategorized:leg': { disposition: 'dismiss', at: '2026-07-01T00:00:00.000Z' },
+      },
+    },
   };
 }
 
@@ -119,6 +134,8 @@ test('deletion removes exact-ID evidence while preserving unrelated legacy rows'
     other: { firstSeen: 'keep', legacy: null },
   });
   assert.equal(result.stores.phantomSeen.unknown, 42);
+  assert.deepEqual(result.stores.reviewState.dispositions, {});
+  assert.deepEqual(result.stores.reviewState.legacyDispositions, {});
   assert.deepEqual(before, stores(), 'the input stores are not mutated');
 });
 
@@ -133,6 +150,7 @@ test('deletion reference rewriting is idempotent', () => {
     suggestions: 0,
     reconciliation: 0,
     phantomSeen: 0,
+    reviewState: 0,
   });
 });
 

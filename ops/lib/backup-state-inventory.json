@@ -259,7 +259,7 @@
     {
       "name": "reviewState",
       "filename": "review-state.json",
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "durability": "atomic-json-last-good",
       "optionalMissing": false,
       "unknownFieldPolicy": "reject",

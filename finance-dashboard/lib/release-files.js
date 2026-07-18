@@ -66,6 +66,8 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/request-contract.js',
   'lib/request-envelope.js',
   'lib/request-issues.js',
+  'lib/review-disposition.js',
+  'lib/review-task-fingerprint.js',
   'lib/safe-to-spend.js',
   'lib/serial-queue.js',
   'lib/runtime-state-field-policy.js',

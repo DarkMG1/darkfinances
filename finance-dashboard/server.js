@@ -652,6 +652,32 @@ function cachedActual(key, fn, ttl = 300) {
   return actualCoordinator.cachedRead(key, fn, ttl);
 }
 
+function publicReviewInbox(inbox) {
+  if (!inbox || typeof inbox !== 'object') return inbox;
+  const { _allTasks, _maintenance, ...rest } = inbox;
+  return rest;
+}
+
+async function loadReviewInbox(req) {
+  const month = monthOf(req);
+  const inbox = await cachedActual(
+    `review-${month || 'current'}`,
+    () => data.getReview({ month }),
+    120,
+  );
+  const maintenance = inbox._maintenance;
+  if (maintenance?.expiredSnoozeKeys?.length) {
+    await actualCoordinator.runWrite(
+      () => data.persistReviewStateMaintenance({
+        expectedRevision: maintenance.expectedRevision,
+        expiredSnoozeKeys: maintenance.expiredSnoozeKeys,
+      }),
+      { label: 'review:maintenance' },
+    );
+  }
+  return publicReviewInbox(inbox);
+}
+
 // Hot cache keys the app + dashboard hit on load. Keys MUST match the strings the
 // resolvers compute for their default params so a warmed entry is actually reused.
 // Keeping these warm means a sync/refresh (or process start) never forces the next
@@ -755,7 +781,7 @@ const resolvers = {
     const key = buildQueryCacheFingerprint({ kind: 'reimb', from: from || 'd', to: to || 'd', openOnly, ...queryFingerprintBase() });
     return cachedActual(key, () => data.getReimbursement({ from, to, openOnly }), 300);
   },
-  review: (req) => cachedActual(`review-${monthOf(req) || 'current'}`, () => data.getReview({ month: monthOf(req) }), 120),
+  review: (req) => loadReviewInbox(req),
   reimbursementLedger: (req) => cachedActual(`reimb-ledger-${monthOf(req) || 'current'}`, () => data.getReimbursementLedger({ month: monthOf(req) }), 180),
   repaymentSuggestions: (req) => {
     const { from, to } = req.query;
@@ -1105,10 +1131,10 @@ async function setAccountOverrideH(req, operation) {
 }
 async function setReviewDispositionH(req, operation) {
   const disposition = parse(schemas.reviewDisposition, req.body, 'review disposition');
-  return runActualProjectionMutation(
-    () => applyLocal(operation, () => data.setReviewDisposition(disposition)),
-    'today', 'review-current',
-  );
+  return runActualProjectionMutation(async () => {
+    const admission = await data.prepareReviewDispositionAdmission(disposition);
+    return applyLocal(operation, () => data.commitReviewDisposition(admission));
+  }, 'today', 'review-current');
 }
 async function saveManualAssetH(req, operation) {
   const asset = parse(schemas.manualAsset, req.body, 'manual asset');

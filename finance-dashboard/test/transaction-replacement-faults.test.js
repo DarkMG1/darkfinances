@@ -507,6 +507,7 @@ const forwardBoundaries = [
   'reference-suggestions-write',
   'reference-reconciliation-write',
   'reference-phantomSeen-write',
+  'reference-reviewState-write',
 ];
 
 test('forward replacement converges across every durable fault boundary', async (t) => {
@@ -973,6 +974,7 @@ const rollbackBoundaries = [
   'reference-suggestions-write',
   'reference-reconciliation-write',
   'reference-phantomSeen-write',
+  'reference-reviewState-write',
   'sync',
   'saga-terminal-write',
 ];

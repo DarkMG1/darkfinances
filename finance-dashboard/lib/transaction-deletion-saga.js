@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { KnownPreApplyError } = require('./errors');
 const { readJsonFile, writeJsonFile } = require('./json-store');
+const { normalizeDeletionTargetEvidence } = require('./transaction-deletion-references');
 
 function runtimeStateStore() {
   return require('./runtime-state-store');
@@ -46,6 +47,7 @@ function canonicalLeg(leg) {
     notes: normalized(leg?.notes),
     payee: normalized(leg?.payee),
     transfer_id: normalized(leg?.transfer_id),
+    imported_id: normalized(leg?.imported_id),
   };
 }
 
@@ -162,6 +164,18 @@ function boundedError(error, stage) {
 
 function sameError(left, right) {
   return JSON.stringify(left || null) === JSON.stringify(right || null);
+}
+
+function resolveReferenceTargetEvidence(planOrEvidence) {
+  if (planOrEvidence?.snapshot || planOrEvidence?.transactions) return planOrEvidence;
+  if (planOrEvidence?.targetEvidence) return planOrEvidence.targetEvidence;
+  if (Array.isArray(planOrEvidence)) {
+    return { transactions: planOrEvidence.map((id) => ({ id: String(id) })) };
+  }
+  if (planOrEvidence?.targetIds?.length) {
+    return { transactions: planOrEvidence.targetIds.map((id) => ({ id: String(id) })) };
+  }
+  throw new Error('transaction deletion target evidence required');
 }
 
 function createTransactionDeletionSaga({
@@ -347,17 +361,20 @@ function createTransactionDeletionSaga({
     return rows;
   }
 
-  function referencePlan(targetIds, previous = null) {
-    const planned = planReferences(targetIds);
+  function referencePlan(targetEvidence, previous = null) {
+    const evidence = resolveReferenceTargetEvidence(targetEvidence);
+    const planned = planReferences(evidence);
     const receiptFiles = [...new Set([
       ...(previous?.receiptFiles || []),
       ...(planned.receiptFilesToDelete || []),
     ])].sort();
+    const expanded = normalizeDeletionTargetEvidence(evidence);
     return {
-      version: 1,
-      targetIds: targetIds.map(String),
+      version: 2,
+      targetEvidence: evidence,
+      targetIds: expanded.targets.map(String),
       steps: [...referenceSteps],
-      completedSteps: [],
+      completedSteps: [...(previous?.completedSteps || [])],
       stats: planned.stats,
       receiptFiles,
     };
@@ -383,7 +400,7 @@ function createTransactionDeletionSaga({
         faultInjector,
       );
       await boundary(faultInjector, `reference-${step}-write`, saga, async () => {
-        applyReferenceStep(step, plan.targetIds, plan);
+        applyReferenceStep(step, resolveReferenceTargetEvidence(plan), plan);
       });
       const completedSteps = [...plan.completedSteps, step];
       plan.completedSteps = completedSteps;
@@ -392,7 +409,7 @@ function createTransactionDeletionSaga({
         referenceStep: null,
       }, `reference-${step}-checkpoint`, faultInjector);
     }
-    if (!referencesConverged(plan.targetIds, plan)) {
+    if (!referencesConverged(resolveReferenceTargetEvidence(plan), plan)) {
       throw new Error('transaction deletion references did not converge');
     }
     await checkpoint(
@@ -523,7 +540,7 @@ function createTransactionDeletionSaga({
 
       if (saga.phase === 'actual_deleted') {
         await assertTargetAbsent(api, saga, 'post-delete-verification', faultInjector);
-        const plan = referencePlan(saga.target.ids, saga.referencePlan);
+        const plan = referencePlan({ snapshot: saga.target.snapshot }, saga.referencePlan);
         await checkpoint(saga, {
           phase: 'references_pending',
           referencePlan: plan,
@@ -539,7 +556,7 @@ function createTransactionDeletionSaga({
 
       if (saga.phase === 'references_deleted') {
         await assertTargetAbsent(api, saga, 'pre-sync-verification', faultInjector);
-        if (!referencesConverged(saga.referencePlan.targetIds, saga.referencePlan)) {
+        if (!referencesConverged(resolveReferenceTargetEvidence(saga.referencePlan), saga.referencePlan)) {
           throw new Error('transaction deletion references changed before sync');
         }
         await checkpoint(
@@ -575,7 +592,7 @@ function createTransactionDeletionSaga({
     for (const saga of sagas) {
       try {
         await assertTargetAbsent(api, saga, 'post-sync-verification', faultInjector);
-        if (!referencesConverged(saga.referencePlan.targetIds, saga.referencePlan)) {
+        if (!referencesConverged(resolveReferenceTargetEvidence(saga.referencePlan), saga.referencePlan)) {
           await unresolved(saga, 'transaction deletion references changed before receipt cleanup', faultInjector);
         }
         const syncedAt = new Date().toISOString();
@@ -622,7 +639,7 @@ function createTransactionDeletionSaga({
     if (assertExternalAvailable) {
       assertExternalAvailable({ accountId, original: transaction, bulkDelegation });
     }
-    const plan = referencePlan(target.ids);
+    const plan = referencePlan({ snapshot: target.snapshot });
     const now = new Date().toISOString();
     const saga = {
       id: `delete_${crypto.randomUUID()}`,

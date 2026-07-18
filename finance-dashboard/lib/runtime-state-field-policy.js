@@ -22,7 +22,7 @@ const ENVELOPE_KEYS = Object.freeze({
   reimbursementLinkSagas: new Set(['sagas', 'schemaVersion']),
   reimbursementSuggestions: new Set(['confirmed', 'dismissed', 'schemaVersion']),
   reconciliation: new Set(['enabled', 'months', 'schemaVersion']),
-  reviewState: new Set(['schemaVersion', 'dispositions']),
+  reviewState: new Set(['schemaVersion', 'contentVersion', 'dispositions', 'legacyDispositions']),
   rules: new Set(['rules', 'schemaVersion']),
   transactionDeletionSagas: new Set(['schemaVersion', 'sagas']),
   bulkOperationSagas: new Set(['schemaVersion', 'sagas']),
@@ -168,11 +168,11 @@ const LEGACY_MIGRATION_SHAPES = Object.freeze({
   reviewState: [{
     legacyShape: 'flat disposition map (no schemaVersion/dispositions envelope)',
     consumed: 'every top-level disposition key',
-    preservedAs: 'dispositions.<key> with exact values',
+    preservedAs: 'legacyDispositions.<key> with exact values',
   }, {
     legacyShape: 'schemaVersion 1 envelope { dispositions: {...} }',
-    consumed: 'none beyond declared envelope keys',
-    preservedAs: 'schemaVersion, dispositions',
+    consumed: 'dispositions keys moved to legacyDispositions on v2 upgrade',
+    preservedAs: 'legacyDispositions with exact values; schemaVersion/contentVersion/dispositions/legacyDispositions envelope',
   }],
   rules: [{
     legacyShape: 'bare rules array',

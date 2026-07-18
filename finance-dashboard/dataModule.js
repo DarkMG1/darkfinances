@@ -105,6 +105,19 @@ const {
   rewriteTransactionReplacementReferences,
 } = require('./lib/transaction-replacement-references');
 const {
+  applyReviewDisposition,
+  buildReviewTaskIndex,
+  collectExpiredSnoozeKeys,
+  compareAndSwapReviewStateMaintenance,
+  countMigrationRequired,
+  filterVisibleReviewTasks,
+  invalidateReviewDispositionsForTargets,
+  normalizeReviewState,
+  preflightReviewDispositionAdmission,
+  reviewStateRevision,
+} = require('./lib/review-disposition');
+const { buildImportedIdCounts, enrichReviewTask, reviewTaskStableKey } = require('./lib/review-task-fingerprint');
+const {
   SagaInterruption,
   addableTransaction,
   assertReconstructableTransaction,
@@ -3436,6 +3449,7 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
     if (!isLeg) {
       // Simple, safe path for non-split transactions.
       await api.updateTransaction(id, { category: categoryId || null });
+      invalidateReviewStateForTransactionEvidence({ targetIds: [id] });
       return { ok: true, mode: 'update' };
     }
     // Split leg: rebuild the parent, preserve every field, then migrate all IDs.
@@ -3457,6 +3471,7 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
       requestedLegs: retainedReplacementLegs(parent),
     });
     const { idMap, references } = replacementSagaResult(added);
+    invalidateReviewStateForTransactionEvidence({ targetIds: [id, parentId, added.id, idMap[String(id)]].filter(Boolean) });
     return {
       ok: true,
       mode: 'rebuild-split',
@@ -3472,27 +3487,69 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
 // Review inbox — one prioritized daily queue for the app home screen.
 // ---------------------------------------------------------------------------
 function readReviewState() {
-  return readRuntimeStateByPath(REVIEW_STATE_PATH).value;
+  return normalizeReviewState(readRuntimeStateByPath(REVIEW_STATE_PATH).value);
 }
 
-function setReviewDisposition({ id, disposition, until, note } = {}) {
-  if (!id) throw new Error('review task id required');
+function writeReviewState(state) {
+  writeJsonSafe(REVIEW_STATE_PATH, normalizeReviewState(state));
+}
+
+function invalidateReviewStateForTransactionEvidence(evidence) {
   const state = readReviewState();
-  if (disposition === 'clear') {
-    delete state.dispositions[id];
-  } else {
-    state.dispositions[id] = {
-      disposition,
-      at: new Date().toISOString(),
-      ...(until ? { until } : {}),
-      ...(note ? { note } : {}),
-    };
-  }
-  writeJsonSafe(REVIEW_STATE_PATH, state);
-  return { ok: true, id, disposition };
+  const { reviewState, stats } = invalidateReviewDispositionsForTargets(state, evidence);
+  if (stats.reviewState) writeReviewState(reviewState);
+  return stats;
 }
 
-async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) {
+function persistReviewStateMaintenance({ expectedRevision, expiredSnoozeKeys = [] } = {}) {
+  const state = readReviewState();
+  const result = compareAndSwapReviewStateMaintenance(state, { expectedRevision, expiredSnoozeKeys });
+  if (result.changed && !result.conflict) writeReviewState(result.state);
+  return { ok: true, changed: result.changed, conflict: result.conflict };
+}
+
+async function prepareReviewDispositionAdmission({ id, disposition, until, note, contentHash, month, expectedRevision } = {}) {
+  if (!id) throw new Error('review task id required');
+  const { ReviewDispositionStaleError } = require('./lib/review-disposition');
+  const { allTasks } = await collectReviewTasks({ month });
+  const taskIndex = buildReviewTaskIndex(allTasks);
+  const state = readReviewState();
+  const preWriteRevision = reviewStateRevision(state);
+  if (expectedRevision && expectedRevision !== preWriteRevision) {
+    throw new ReviewDispositionStaleError('review state changed — refresh and retry');
+  }
+  const preflight = preflightReviewDispositionAdmission(state, { id, disposition, until, note, contentHash }, { taskIndex });
+  const applied = applyReviewDisposition(state, { id, disposition, until, note, contentHash }, { taskIndex, preflight });
+  const task = allTasks.find((entry) => entry.id === applied.id || entry.stableKey === applied.stableKey);
+  return {
+    preWriteRevision,
+    nextState: applied.state,
+    result: {
+      ok: true,
+      id: applied.id,
+      disposition: applied.disposition,
+      contentHash: task?.contentHash || contentHash || null,
+    },
+  };
+}
+
+function commitReviewDisposition(admission) {
+  if (!admission?.nextState) throw new Error('review disposition admission required');
+  const { ReviewDispositionStaleError } = require('./lib/review-disposition');
+  const currentRevision = reviewStateRevision(readReviewState());
+  if (admission.preWriteRevision != null && admission.preWriteRevision !== currentRevision) {
+    throw new ReviewDispositionStaleError('review state changed — refresh and retry');
+  }
+  writeReviewState(admission.nextState);
+  return admission.result;
+}
+
+async function setReviewDisposition(payload) {
+  const admission = await prepareReviewDispositionAdmission(payload);
+  return commitReviewDisposition(admission);
+}
+
+async function collectReviewTasks({ month, classifiedLeaves: preclassifiedLeaves } = {}) {
   // When `classifiedLeaves` is supplied (e.g. from getToday spending), skip a second
   // on-budget leaf fetch/classification pass for the same month window.
   const m = month || todayYMD().slice(0, 7);
@@ -3524,13 +3581,32 @@ async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) 
   ]);
   const txns = txnsRaw.filter((txn) => !reviewExcludedAccountIds.has(txn.accountId));
 
+  const largeThreshold = Number(process.env.REVIEW_LARGE_CHARGE_THRESHOLD || 200);
+  const receiptThreshold = Number(process.env.REVIEW_RECEIPT_THRESHOLD || 75);
+
   const tasks = [];
   const seen = new Set();
+  const reviewTxnRef = (txn) => ({
+    id: txn.id,
+    parentId: txn.parentId || null,
+    isLeg: !!txn.isLeg,
+    accountId: txn.accountId || '',
+    account: txn.account || '',
+    payee: txn.payee || '',
+    payeeId: txn.payeeId || txn.payee_id || null,
+    amount: round2(Number(txn.amount) || 0),
+    date: txn.date || '',
+    category: txn.category || null,
+    categoryId: txn.categoryId || null,
+    notes: txn.notes || '',
+    cleared: txn.cleared !== false,
+    imported: !!txn.imported,
+    imported_id: txn.imported_id || null,
+  });
   const addTxn = (kind, priority, title, subtitle, txn, action = 'open_transaction') => {
     if (!txn || !txn.id || seen.has(`${kind}:${txn.id}`)) return;
     seen.add(`${kind}:${txn.id}`);
     tasks.push({
-      id: `${kind}:${txn.id}`,
       kind,
       priority,
       title,
@@ -3538,21 +3614,7 @@ async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) 
       action,
       amount: round2(Math.abs(Number(txn.amount) || 0)),
       date: txn.date || null,
-      transaction: {
-        id: txn.id,
-        parentId: txn.parentId || null,
-        isLeg: !!txn.isLeg,
-        accountId: txn.accountId || '',
-        account: txn.account || '',
-        payee: txn.payee || '',
-        amount: round2(Number(txn.amount) || 0),
-        date: txn.date || '',
-        category: txn.category || null,
-        categoryId: txn.categoryId || null,
-        notes: txn.notes || '',
-        cleared: txn.cleared !== false,
-        imported: !!txn.imported,
-      },
+      transaction: reviewTxnRef(txn),
     });
   };
 
@@ -3567,11 +3629,7 @@ async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) 
     const txnId = String(leaf.parentId || leaf.id);
     const txn = txnById.get(txnId);
     if (!txn) continue;
-    const fingerprint = leaf.reviewFingerprint || incompleteTransferReviewFingerprint(leaf, leaf);
-    if (seen.has(fingerprint)) continue;
-    seen.add(fingerprint);
-    tasks.push({
-      id: fingerprint,
+    const draft = {
       kind: 'transfer_identity',
       priority: 93,
       title: 'Review transfer identity',
@@ -3580,26 +3638,15 @@ async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) 
       amount: round2(Math.abs(Number(txn.amount) || 0)),
       date: txn.date || null,
       transferReason: leaf.reason || TRANSFER_REASON.IDENTITY_MALFORMED,
-      transaction: {
-        id: txn.id,
-        parentId: txn.parentId || null,
-        isLeg: !!txn.isLeg,
-        accountId: txn.accountId || '',
-        account: txn.account || '',
-        payee: txn.payee || '',
-        amount: round2(Number(txn.amount) || 0),
-        date: txn.date || '',
-        category: txn.category || null,
-        categoryId: txn.categoryId || null,
-        notes: txn.notes || '',
-        cleared: txn.cleared !== false,
-        imported: !!txn.imported,
-      },
-    });
+      transferIdentity: leaf.transferIdentity || null,
+      transaction: reviewTxnRef(txn),
+    };
+    const stableKey = reviewTaskStableKey(draft);
+    if (seen.has(stableKey)) continue;
+    seen.add(stableKey);
+    tasks.push(draft);
   }
 
-  const largeThreshold = Number(process.env.REVIEW_LARGE_CHARGE_THRESHOLD || 200);
-  const receiptThreshold = Number(process.env.REVIEW_RECEIPT_THRESHOLD || 75);
   const receiptTxnIds = new Set((receipts.receipts || []).map((r) => String(r.txnId)));
   for (const t of txns) {
     const catName = String(t.category || '');
@@ -3620,10 +3667,10 @@ async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) 
 
   for (const s of repayments.suggestions || []) {
     const inflow = s.inflow || {};
-    if (!inflow.id || seen.has(`repayment:${inflow.id}`)) continue;
-    seen.add(`repayment:${inflow.id}`);
+    if (!inflow.id || seen.has(`repayment:${s.id}`)) continue;
+    seen.add(`repayment:${s.id}`);
     tasks.push({
-      id: `repayment:${s.id}`,
+      suggestionId: s.id,
       kind: 'repayment',
       priority: 90,
       title: 'Confirm repayment',
@@ -3632,13 +3679,15 @@ async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) 
       amount: round2(inflow.amount || 0),
       date: inflow.date || null,
       person: s.person,
+      inflow: { ...inflow, imported_id: inflow.imported_id || null },
+      allocations: s.allocations || [],
+      allocationKind: s.kind,
     });
   }
 
   for (const item of recurring.items || []) {
     if (item.priceChange && item.status === 'active') {
       tasks.push({
-        id: `price:${item.key}`,
         kind: 'price_change',
         priority: item.priceChange.pct > 0 ? 80 : 45,
         title: item.priceChange.pct > 0 ? 'Subscription price increased' : 'Subscription price dropped',
@@ -3647,13 +3696,22 @@ async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) 
         amount: round2(item.amount),
         date: item.lastCharged || null,
         key: item.key,
+        priceChange: item.priceChange,
       });
     }
   }
 
   if (recon && recon.pending) {
+    const reconState = reconMonthState(readRecon(), recon.pending);
+    const reconItemRows = await withApi((api) => reconItemsFor(api, recon.pending));
+    const unresolvedItems = reconItemRows
+      .filter((item) => !reconState.items[item.id])
+      .map((item) => ({
+        id: item.id,
+        imported_id: item.imported_id || null,
+        amount: item.amount,
+      }));
     tasks.push({
-      id: `reconcile:${recon.pending}`,
       kind: 'reconciliation',
       priority: 85,
       title: `Reconcile ${recon.pending}`,
@@ -3662,32 +3720,51 @@ async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) 
       amount: recon.remaining || 0,
       date: null,
       month: recon.pending,
+      remaining: recon.remaining || 0,
+      total: recon.total || 0,
+      unresolvedItems,
     });
   }
 
-  tasks.sort((a, b) => b.priority - a.priority || String(b.date || '').localeCompare(String(a.date || '')));
+  const importedIdCounts = buildImportedIdCounts(txns);
+  const reviewContext = { largeThreshold, receiptThreshold, importedIdCounts, transactions: txns };
+  const enrichedTasks = tasks.map((task) => enrichReviewTask(task, reviewContext));
+  enrichedTasks.sort((a, b) => b.priority - a.priority || String(b.date || '').localeCompare(String(a.date || '')));
   const state = readReviewState();
   const now = Date.now();
-  const visibleTasks = tasks.filter((task) => {
-    const saved = state.dispositions[task.id];
-    if (!saved) return true;
-    if (saved.disposition === 'snooze') {
-      const until = Date.parse(saved.until || '');
-      if (Number.isFinite(until) && until > now) return false;
-      delete state.dispositions[task.id];
-      return true;
-    }
-    return !['acknowledge', 'dismiss', 'resolved'].includes(saved.disposition);
-  });
+  const visibleTasks = filterVisibleReviewTasks(enrichedTasks, state, now);
   const counts = {};
   for (const t of visibleTasks) counts[t.kind] = (counts[t.kind] || 0) + 1;
+  const expiredSnoozeKeys = collectExpiredSnoozeKeys(state, now);
+  const migrationRequired = countMigrationRequired(state, buildReviewTaskIndex(enrichedTasks));
   return {
     generatedAt: new Date().toISOString(),
     month: m,
     count: visibleTasks.length,
-    hiddenCount: tasks.length - visibleTasks.length,
+    hiddenCount: enrichedTasks.length - visibleTasks.length,
+    migrationRequired,
     counts,
     tasks: visibleTasks.slice(0, 50),
+    allTasks: enrichedTasks,
+    _maintenance: {
+      expectedRevision: reviewStateRevision(state),
+      expiredSnoozeKeys,
+    },
+  };
+}
+
+async function getReview(options = {}) {
+  const inbox = await collectReviewTasks(options);
+  return {
+    generatedAt: inbox.generatedAt,
+    month: inbox.month,
+    count: inbox.count,
+    hiddenCount: inbox.hiddenCount,
+    migrationRequired: inbox.migrationRequired,
+    counts: inbox.counts,
+    tasks: inbox.tasks,
+    _allTasks: inbox.allTasks,
+    _maintenance: inbox._maintenance,
   };
 }
 
@@ -5441,6 +5518,7 @@ function addReceipt({
     try { fs.unlinkSync(finalPath); } catch (_) {}
     throw error;
   }
+  invalidateReviewStateForTransactionEvidence({ targetIds: [txnId] });
   return publicReceipt(rec);
 }
 // Strip server-only fields for API responses (the file name stays internal).
@@ -5502,6 +5580,7 @@ function deleteReceipt({ id } = {}) {
       try { if (fs.existsSync(trash)) fs.renameSync(trash, file); } catch (_) {}
       throw error;
     }
+    invalidateReviewStateForTransactionEvidence({ targetIds: [removed.txnId] });
   }
   return { ok: true, removed: !!removed };
 }
@@ -5548,13 +5627,14 @@ function readTransactionDeletionReferenceStores() {
       { seen: {} },
       (value) => isStateObject(value) && isStateObject(value.seen),
     ),
+    reviewState: readReviewState(),
   };
 }
 
-function planTransactionReferenceDeletion(targetIds) {
+function planTransactionReferenceDeletion(targetEvidence) {
   const result = rewriteTransactionDeletionReferences(
     readTransactionDeletionReferenceStores(),
-    targetIds,
+    targetEvidence,
   );
   for (const file of result.receiptFilesToDelete) safeReceiptPath(file);
   return {
@@ -5563,15 +5643,17 @@ function planTransactionReferenceDeletion(targetIds) {
   };
 }
 
-function applyTransactionDeletionReferenceStep(step, targetIds, _plan) {
+function applyTransactionDeletionReferenceStep(step, targetEvidence, plan) {
+  const evidence = plan?.targetEvidence || targetEvidence;
   const current = readTransactionDeletionReferenceStores();
-  const next = rewriteTransactionDeletionReferences(current, targetIds).stores[step];
+  const next = rewriteTransactionDeletionReferences(current, evidence).stores[step];
   const destinations = {
     receipts: RECEIPTS_PATH,
     links: REIMB_LINKS_PATH,
     suggestions: REIMB_SUGGEST_PATH,
     reconciliation: RECON_PATH,
     phantomSeen: PHANTOM_SEEN_PATH,
+    reviewState: REVIEW_STATE_PATH,
   };
   if (!destinations[step]) throw new Error(`unknown transaction deletion reference step: ${step}`);
   if (JSON.stringify(current[step]) !== JSON.stringify(next)) {
@@ -5580,9 +5662,10 @@ function applyTransactionDeletionReferenceStep(step, targetIds, _plan) {
   }
 }
 
-function transactionDeletionReferencesConverged(targetIds, _plan) {
+function transactionDeletionReferencesConverged(targetEvidence, plan) {
+  const evidence = plan?.targetEvidence || targetEvidence;
   const current = readTransactionDeletionReferenceStores();
-  const rewritten = rewriteTransactionDeletionReferences(current, targetIds);
+  const rewritten = rewriteTransactionDeletionReferences(current, evidence);
   return TRANSACTION_DELETION_REFERENCE_STEPS.every(
     (step) => JSON.stringify(current[step]) === JSON.stringify(rewritten.stores[step]),
   );
@@ -5610,6 +5693,7 @@ function readTransactionReferenceStores() {
     suggestions: readReimbSuggest(),
     reconciliation: readRecon(),
     phantomSeen: readPhantomSeen(),
+    reviewState: readReviewState(),
   };
 }
 
@@ -5619,6 +5703,7 @@ const TRANSACTION_REFERENCE_STEPS = Object.freeze([
   'suggestions',
   'reconciliation',
   'phantomSeen',
+  'reviewState',
 ]);
 
 function planTransactionReferenceMigration(idMap) {
@@ -5637,6 +5722,7 @@ function applyTransactionReferenceStep(step, idMap, _plan) {
     suggestions: REIMB_SUGGEST_PATH,
     reconciliation: RECON_PATH,
     phantomSeen: PHANTOM_SEEN_PATH,
+    reviewState: REVIEW_STATE_PATH,
   };
   if (!destinations[step]) throw new Error(`unknown transaction reference step: ${step}`);
   if (JSON.stringify(current[step]) !== JSON.stringify(next)) {
@@ -6543,6 +6629,9 @@ module.exports = {
   exportReimbursementLegacyReport,
   buildReimbursementExport,
   getReview,
+  persistReviewStateMaintenance,
+  prepareReviewDispositionAdmission,
+  commitReviewDisposition,
   setReviewDisposition,
   suggestRepayments,
   confirmRepayment,
