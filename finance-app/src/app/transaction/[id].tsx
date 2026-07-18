@@ -127,6 +127,7 @@ export default function TransactionDetail() {
   const [linkQuery, setLinkQuery] = useState('');
   const [linkTarget, setLinkTarget] = useState<Transaction | null>(null);
   const [allocationText, setAllocationText] = useState('');
+  const allocationInputRef = useRef<TextInput>(null);
   const loadedIdentity = useRef<string | null>(null);
   useEffect(() => {
     if (!canonical) return;
@@ -165,7 +166,7 @@ export default function TransactionDetail() {
       return result.isError !== true;
     },
   });
-  const linkAction = screen.bind({ key: 'link', mutation: addLink, mutationLabel: 'Link reimbursement' });
+  const linkAction = screen.bind({ key: 'link', mutation: addLink, mutationLabel: 'Link reimbursement', fieldOrder: ['allocationCents'] });
   const unlinkAction = screen.bind({ key: 'unlink', mutation: delLink, mutationLabel: 'Unlink reimbursement' });
   const receiptAction = screen.bind({ key: 'receipt', mutation: addReceipt, mutationLabel: 'Upload receipt' });
   const deleteReceiptAction = screen.bind({ key: 'deleteReceipt', mutation: delReceipt, mutationLabel: 'Delete receipt' });
@@ -497,6 +498,15 @@ export default function TransactionDetail() {
       },
     );
   const notesFieldError = screen.outcome?.fieldErrors?.notes as string | undefined;
+  const allocationFieldError = screen.activeKey === 'link'
+    ? (screen.outcome?.fieldErrors?.allocationCents as string | undefined)
+    : undefined;
+
+  useEffect(() => {
+    if (screen.activeKey !== 'link' || screen.outcome?.firstField !== 'allocationCents') return;
+    const frame = requestAnimationFrame(() => allocationInputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [screen.activeKey, screen.outcome]);
 
   const addTag = (input: string) => {
     const token = toTagToken(input);
@@ -955,7 +965,8 @@ export default function TransactionDetail() {
                   </Text>
                   <TextInput
                     testID="transaction-link-allocation-input"
-                    style={styles.searchInput}
+                    ref={allocationInputRef}
+                    style={[styles.searchInput, allocationFieldError && { borderWidth: 1, borderColor: '#ff6b6b' }]}
                     value={allocationText}
                     onChangeText={setAllocationText}
                     placeholder={suggestedAllocationCents != null && suggestedAllocationCents > 0
@@ -965,13 +976,14 @@ export default function TransactionDetail() {
                     keyboardType="decimal-pad"
                     autoFocus
                     accessibilityLabel="Reimbursement link allocation amount in dollars"
-                    accessibilityHint="Enter a positive amount with at most two decimal places"
+                    accessibilityHint={allocationFieldError ? `Error: ${allocationFieldError}` : 'Enter a positive amount with at most two decimal places'}
                   />
+                  <MutationFieldError error={allocationFieldError} testID="transaction-link-allocation-error" />
                   <Pressable testID="transaction-link-confirm-button" style={styles.renameSave} onPress={submitLink} disabled={linkAction.isPending || suggestedAllocationCents == null || modalLocked} accessibilityRole="button" accessibilityLabel="Confirm reimbursement link">
                     <Text style={styles.renameSaveText}>{linkAction.isPending ? 'Linking…' : 'Link'}</Text>
                   </Pressable>
-                  <Pressable testID="transaction-link-back-button" style={styles.linkBtn} onPress={() => setLinkTarget(null)}>
-                    <Text style={styles.linkBtnText}>Back to search</Text>
+                  <Pressable testID="transaction-link-back-button" style={styles.linkBtn} onPress={() => setLinkTarget(null)} disabled={linkAction.isPending || modalLocked}>
+                    <Text style={[styles.linkBtnText, (linkAction.isPending || modalLocked) && { opacity: 0.35 }]}>Back to search</Text>
                   </Pressable>
                 </>
               ) : (

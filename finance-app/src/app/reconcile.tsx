@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
@@ -8,6 +8,7 @@ import { Card, EmptyState, ErrorState } from '@/components/ui';
 import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { SkeletonList } from '@/components/skeleton';
 import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { useMutationScreen } from '@/hooks/useMutationScreen';
 import { ReconItem } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
@@ -43,6 +44,13 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
   });
   const screen = useMutationScreen({ onRefetchStale: () => recon.refetch() });
   const toggleAction = screen.bind({ key: 'toggle', mutation: setItem, mutationLabel: 'Update reconciliation' });
+  const banner = useMutationBannerCoordinator(useMemo(() => [
+    { key: 'toggle', outcome: screen.outcome, retry: screen.retry, announce: screen.announce, isLocked: screen.isLocked },
+    { key: 'close', outcome: closeAction.outcome, retry: closeAction.retry, announce: closeAction.announce, isLocked: closeAction.isLocked },
+  ], [
+    closeAction.announce, closeAction.isLocked, closeAction.outcome, closeAction.retry,
+    screen.announce, screen.isLocked, screen.outcome, screen.retry,
+  ]));
 
   const toggle = (it: ReconItem) => {
     if (screen.isLocked || closeAction.isLocked) return;
@@ -73,10 +81,10 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
 
   return (
     <PushScreen testID="reconcile-screen" onRefresh={recon.refetch}>
-      <MutationLiveRegion message={closeAction.announce || screen.announce} />
+      <MutationLiveRegion message={banner.announce} />
       <MutationFormBanner
-        outcome={closeAction.outcome ?? screen.outcome}
-        onRetry={() => { closeAction.retry(); screen.retry(); }}
+        outcome={banner.outcome}
+        onRetry={banner.retry}
         onRefetch={() => { void screen.refetchStale(); recon.refetch(); }}
       />
       <View style={styles.nav}>

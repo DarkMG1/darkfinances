@@ -15,6 +15,7 @@ import { Card, EmptyState, ErrorState } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { ProgressBar } from '@/components/charts';
 import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { useMutationForm } from '@/hooks/useMutationForm';
 import { haptics } from '@/lib/haptics';
 import {
@@ -97,6 +98,11 @@ export default function Goals() {
     onSuccess: () => setEditing(null),
   });
 
+  const banner = useMutationBannerCoordinator(useMemo(() => [
+    { key: 'form', outcome: form.outcome, retry: form.retry, announce: form.announce, isLocked: form.isLocked },
+    { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked },
+  ], [deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry, form.announce, form.isLocked, form.outcome, form.retry]));
+
   const openNew = () => {
     form.clearErrors();
     setName('');
@@ -136,7 +142,7 @@ export default function Goals() {
 
   return (
     <PushScreen testID="goals-screen" onRefresh={goals.refetch}>
-      <MutationLiveRegion message={form.announce || deleteAction.announce} />
+      <MutationLiveRegion message={banner.announce} />
       {goals.isLoading ? (
         <SkeletonList rows={4} />
       ) : goals.isError && !goals.data ? (
@@ -181,7 +187,8 @@ export default function Goals() {
         canDismiss={form.canDismiss && !deleteAction.isLocked}
         onRequestClose={closeSheet}
       >
-        <MutationFormBanner outcome={form.outcome ?? deleteAction.outcome} onRetry={() => { form.retry(); deleteAction.retry(); }} onRefetch={() => goals.refetch()} />
+        <MutationLiveRegion message={banner.announce} />
+        <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => goals.refetch()} />
 
         <Text style={[styles.field, form.getFieldError('name') && styles.fieldErrorLabel]}>Name</Text>
         <TextInput

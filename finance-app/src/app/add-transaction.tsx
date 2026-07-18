@@ -105,6 +105,14 @@ export default function AddTransaction() {
     };
   }, [navigation]);
 
+  useEffect(() => {
+    const unsub = navigation.addListener('beforeRemove', (e) => {
+      if (!form.isLocked) return;
+      e.preventDefault();
+    });
+    return unsub;
+  }, [form.isLocked, navigation]);
+
   return (
     <KeyboardAvoidingView testID="add-transaction-screen" style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
     <ScrollView style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">

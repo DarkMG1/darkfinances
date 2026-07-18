@@ -12,6 +12,7 @@ import {
 import { Card, CardTitle } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { useMutationForm } from '@/hooks/useMutationForm';
 import { haptics } from '@/lib/haptics';
 import { collectFieldErrors } from '@/lib/mutation-form-validation';
@@ -62,6 +63,16 @@ export default function Rules() {
   const deleteAction = useMutationAction({ mutation: deleteRule, mutationLabel: 'Delete rule', onSuccess: () => rules.refetch() });
   const applyAction = useMutationAction({ mutation: applyRules, mutationLabel: 'Apply rules', onSuccess: () => rules.refetch() });
 
+  const banner = useMutationBannerCoordinator(useMemo(() => [
+    { key: 'add', outcome: addForm.outcome, retry: addForm.retry, announce: addForm.announce, isLocked: addForm.isLocked },
+    { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked },
+    { key: 'apply', outcome: applyAction.outcome, retry: applyAction.retry, announce: applyAction.announce, isLocked: applyAction.isLocked },
+  ], [
+    addForm.announce, addForm.isLocked, addForm.outcome, addForm.retry,
+    applyAction.announce, applyAction.isLocked, applyAction.outcome, applyAction.retry,
+    deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry,
+  ]));
+
   const remove = (id: string) => deleteAction.run({ id });
 
   const list = rules.data?.rules ?? [];
@@ -70,10 +81,10 @@ export default function Rules() {
   return (
     <ScrollView testID="rules-screen" style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
       <Stack.Screen options={{ title: 'Rules' }} />
-      <MutationLiveRegion message={addForm.announce || deleteAction.announce || applyAction.announce} />
+      <MutationLiveRegion message={banner.announce} />
       <MutationFormBanner
-        outcome={addForm.outcome ?? deleteAction.outcome ?? applyAction.outcome}
-        onRetry={() => { addForm.retry(); deleteAction.retry(); applyAction.retry(); }}
+        outcome={banner.outcome}
+        onRetry={banner.retry}
         onRefetch={() => rules.refetch()}
       />
 

@@ -55,3 +55,28 @@ test('goals and events rehydrate drafts through setFields', () => {
     assert.match(source, /setFields:\s*applyFields/, `${rel} must apply draft fields`);
   }
 });
+
+const multiActionScreens = [
+  'goals.tsx',
+  'events.tsx',
+  'rules.tsx',
+  'split/[id].tsx',
+  'reimbursement.tsx',
+  'reconcile.tsx',
+];
+
+test('multi-action screens coordinate banner retry through useMutationBannerCoordinator', () => {
+  for (const rel of multiActionScreens) {
+    const source = fs.readFileSync(path.join(appRoot, rel), 'utf8');
+    assert.match(source, /useMutationBannerCoordinator/, `${rel} must use banner coordinator`);
+    assert.match(source, /onRetry={banner\.retry}/, `${rel} must retry only the active action`);
+    assert.doesNotMatch(source, /onRetry=\{\(\)\s*=>\s*\{[^}]*\.retry\(\);[^}]*\.retry\(\)/, `${rel} must not fan out retry to every action`);
+    assert.doesNotMatch(source, /form\.retry\(\);\s*deleteAction\.retry\(\)/, `${rel} must not fan out form/delete retry`);
+    assert.doesNotMatch(source, /closeAction\.retry\(\);\s*screen\.retry\(\)/, `${rel} must not fan out reconcile retry`);
+  }
+});
+
+test('dead useScreenMutationFeedback hook is removed', () => {
+  const hookPath = path.resolve(__dirname, '../src/hooks/useScreenMutationFeedback.ts');
+  assert.equal(fs.existsSync(hookPath), false);
+});

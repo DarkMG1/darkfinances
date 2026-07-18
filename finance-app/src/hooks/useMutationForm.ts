@@ -76,8 +76,11 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   const [phase, setPhase] = useState<MutationFormPhase>('idle');
   const [outcome, setOutcome] = useState<MappedMutationOutcome | null>(null);
   const [announce, setAnnounce] = useState('');
+  const [dispatchPending, setDispatchPending] = useState(false);
   const closedRef = useRef(false);
   const variablesRef = useRef<TVariables | null>(null);
+  /** Synchronous guard before React Query marks the mutation pending. */
+  const pendingLockRef = useRef(false);
 
   useEffect(() => {
     if (!persistDraft) return;
@@ -90,7 +93,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     setMutationFormDraft(scopeDigest, formId, fields, profileGeneration);
   }, [fields, formId, persistDraft, profileGeneration, scopeDigest]);
 
-  const isLocked = mutation.isPending || phase === 'submitting' || phase === 'reconciling';
+  const isLocked = mutation.isPending || dispatchPending || phase === 'submitting' || phase === 'reconciling';
 
   const fieldErrors = useMemo(() => {
     if (!outcome?.fieldErrors) return {} as Partial<Record<keyof TFields, string>>;
@@ -128,10 +131,15 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   const runMutation = useCallback((variables: TVariables) => {
     variablesRef.current = variables;
     closedRef.current = false;
+    pendingLockRef.current = true;
+    setDispatchPending(true);
     setPhase(mutation.isPending ? 'submitting' : 'reconciling');
     setOutcome(null);
     mutation.mutate(variables, {
       onSuccess: () => {
+        variablesRef.current = null;
+        pendingLockRef.current = false;
+        setDispatchPending(false);
         setPhase('success');
         setAnnounce(`${mutationLabel} succeeded.`);
         clearMutationFormDraft(scopeDigest, formId, profileGeneration);
@@ -140,12 +148,16 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
           onSuccessClose?.();
         }
       },
-      onError: (error) => handleError(error),
+      onError: (error) => {
+        pendingLockRef.current = false;
+        setDispatchPending(false);
+        handleError(error);
+      },
     });
   }, [formId, handleError, mutation, mutationLabel, onSuccessClose, profileGeneration, scopeDigest]);
 
   const submit = useCallback(() => {
-    if (isLocked) return;
+    if (pendingLockRef.current || mutation.isPending || phase === 'submitting' || phase === 'reconciling') return;
     if (validate) {
       const clientErrors = validate(fields);
       if (Object.keys(clientErrors).length) {
@@ -159,16 +171,16 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
       }
     }
     runMutation(buildVariables(fields));
-  }, [buildVariables, fieldOrder, fields, focusFirstInvalid, isLocked, runMutation, validate]);
+  }, [buildVariables, fieldOrder, fields, focusFirstInvalid, mutation.isPending, phase, runMutation, validate]);
 
   const retry = useCallback(() => {
-    if (isLocked) return;
+    if (pendingLockRef.current || mutation.isPending || phase === 'submitting' || phase === 'reconciling') return;
     if (variablesRef.current != null) {
       runMutation(variablesRef.current);
       return;
     }
     submit();
-  }, [isLocked, runMutation, submit]);
+  }, [mutation.isPending, phase, runMutation, submit]);
 
   const clearErrors = useCallback(() => {
     setOutcome(null);

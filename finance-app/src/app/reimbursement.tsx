@@ -7,6 +7,7 @@ import { Avatar, Card, CardTitle, EmptyState, ErrorState, Pill } from '@/compone
 import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { SkeletonList } from '@/components/skeleton';
 import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { OwesPerson, ReimbLeg, RepaymentSuggestion } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { colors, fmtDate, fmtPos, fmtSignedMoney } from '@/theme/colors';
@@ -71,6 +72,13 @@ export default function Reimbursement() {
     mutationLabel: 'Dismiss suggestion',
     onRefetch: () => suggestions.refetch(),
   });
+  const banner = useMutationBannerCoordinator(useMemo(() => [
+    { key: 'confirm', outcome: confirmAction.outcome, retry: confirmAction.retry, announce: confirmAction.announce, isLocked: confirmAction.isLocked },
+    { key: 'dismiss', outcome: dismissAction.outcome, retry: dismissAction.retry, announce: dismissAction.announce, isLocked: dismissAction.isLocked },
+  ], [
+    confirmAction.announce, confirmAction.isLocked, confirmAction.outcome, confirmAction.retry,
+    dismissAction.announce, dismissAction.isLocked, dismissAction.outcome, dismissAction.retry,
+  ]));
   const [acting, setActing] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
@@ -149,10 +157,10 @@ export default function Reimbursement() {
 
   return (
     <PushScreen testID="reimbursement-screen" onRefresh={() => Promise.all([reimb.refetch(), suggestions.refetch()])}>
-      <MutationLiveRegion message={confirmAction.announce || dismissAction.announce} />
+      <MutationLiveRegion message={banner.announce} />
       <MutationFormBanner
-        outcome={confirmAction.outcome ?? dismissAction.outcome}
-        onRetry={() => { confirmAction.retry(); dismissAction.retry(); }}
+        outcome={banner.outcome}
+        onRetry={banner.retry}
         onRefetch={() => { suggestions.refetch(); reimb.refetch(); }}
       />
       {loading ? (

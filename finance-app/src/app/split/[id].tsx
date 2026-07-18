@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCategories, useSplitTransaction, useTransaction, useUnsplitTransaction } from '@/api/hooks/finance.hooks';
 import { Avatar } from '@/components/ui';
-import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
 import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { haptics } from '@/lib/haptics';
 import { colors, fmtPos } from '@/theme/colors';
 
@@ -48,24 +49,13 @@ function computeAmounts(legs: Leg[], mode: Mode, total: number): number[] {
 export default function SplitEditor() {
   const p = useLocalSearchParams<{ id: string; accountId: string; date: string }>();
   const router = useRouter();
+  const navigation = useNavigation();
   const insets = useSafeAreaInsets();
 
   const detail = useTransaction(p.id, p.accountId, p.date);
   const categories = useCategories();
   const split = useSplitTransaction();
   const unsplit = useUnsplitTransaction();
-  const splitAction = useMutationAction({
-    mutation: split,
-    mutationLabel: 'Save split',
-    onRefetch: () => detail.refetch(),
-  });
-  const unsplitAction = useMutationAction({
-    mutation: unsplit,
-    mutationLabel: 'Remove split',
-    onRefetch: () => detail.refetch(),
-  });
-  const activeOutcome = splitAction.outcome ?? unsplitAction.outcome;
-  const mutationLocked = splitAction.isLocked || unsplitAction.isLocked;
 
   const [mode, setMode] = useState<Mode>('equal');
   const [legs, setLegs] = useState<Leg[]>([]);
@@ -73,6 +63,28 @@ export default function SplitEditor() {
   const [catPick, setCatPick] = useState<number | null>(null);
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const inited = useRef(false);
+
+  const legFieldOrder = useMemo(() => legs.map((_, i) => `leg-${i}`), [legs]);
+  const splitAction = useMutationAction({
+    mutation: split,
+    mutationLabel: 'Save split',
+    onRefetch: () => detail.refetch(),
+    fieldOrder: legFieldOrder,
+  });
+  const unsplitAction = useMutationAction({
+    mutation: unsplit,
+    mutationLabel: 'Remove split',
+    onRefetch: () => detail.refetch(),
+  });
+  const banner = useMutationBannerCoordinator(useMemo(() => [
+    { key: 'split', outcome: splitAction.outcome, retry: splitAction.retry, announce: splitAction.announce, isLocked: splitAction.isLocked },
+    { key: 'unsplit', outcome: unsplitAction.outcome, retry: unsplitAction.retry, announce: unsplitAction.announce, isLocked: unsplitAction.isLocked },
+  ], [
+    splitAction.announce, splitAction.isLocked, splitAction.outcome, splitAction.retry,
+    unsplitAction.announce, unsplitAction.isLocked, unsplitAction.outcome, unsplitAction.retry,
+  ]));
+  const mutationLocked = banner.isLocked;
+  const legFieldError = (i: number) => splitAction.outcome?.fieldErrors?.[`leg-${i}`];
 
   const d = detail.data;
   const total = d ? Math.abs(d.amount) : 0;
@@ -105,6 +117,24 @@ export default function SplitEditor() {
     }, 0);
     return () => clearTimeout(timer);
   }, [d, mode, total]);
+
+  useEffect(() => {
+    const first = splitAction.outcome?.firstField;
+    if (!first || !first.startsWith('leg-')) return;
+    const idx = Number(first.replace('leg-', ''));
+    if (!Number.isFinite(idx) || !legs[idx]) return;
+    const key = legs[idx].key;
+    const frame = requestAnimationFrame(() => setFocusKey(key));
+    return () => cancelAnimationFrame(frame);
+  }, [legs, splitAction.outcome]);
+
+  useEffect(() => {
+    const unsub = navigation.addListener('beforeRemove', (e) => {
+      if (!mutationLocked) return;
+      e.preventDefault();
+    });
+    return unsub;
+  }, [mutationLocked, navigation]);
 
   const amounts = useMemo(() => computeAmounts(legs, mode, total), [legs, mode, total]);
   const master = amounts[0] ?? 0;
@@ -196,7 +226,7 @@ export default function SplitEditor() {
           light "glass" capsules on iOS 26; this keeps the app's dark styling. */}
       <Stack.Screen options={{ headerShown: false }} />
       <View style={[styles.topBar, { paddingTop: Math.max(insets.top, 8) + 6 }]}>
-        <Pressable testID="split-cancel-button" onPress={() => router.back()} hitSlop={12} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+        <Pressable testID="split-cancel-button" onPress={() => { if (!mutationLocked) router.back(); }} disabled={mutationLocked} hitSlop={12} style={({ pressed }) => [pressed && !mutationLocked && { opacity: 0.6 }, mutationLocked && { opacity: 0.35 }]}>
           <Text style={styles.topCancel}>Cancel</Text>
         </Pressable>
         <Text style={styles.topTitle}>Split</Text>
@@ -205,12 +235,12 @@ export default function SplitEditor() {
         </Pressable>
       </View>
 
-      <MutationLiveRegion message={splitAction.announce || unsplitAction.announce} />
+      <MutationLiveRegion message={banner.announce} />
 
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 40 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
         <MutationFormBanner
-          outcome={activeOutcome}
-          onRetry={() => { splitAction.retry(); unsplitAction.retry(); }}
+          outcome={banner.outcome}
+          onRetry={banner.retry}
           onRefetch={() => detail.refetch()}
         />
         {!d ? (
@@ -241,7 +271,7 @@ export default function SplitEditor() {
             </Pressable>
 
             {legs.map((l, i) => (
-              <View key={l.key} testID={`split-leg-${i}`} style={styles.legCard}>
+              <View key={l.key} testID={`split-leg-${i}`} style={[styles.legCard, legFieldError(i) && styles.legCardError]}>
                 <View style={styles.legTop}>
                   <View style={styles.amtWrap}>
                     {mode === 'percent' ? (
@@ -284,8 +314,9 @@ export default function SplitEditor() {
                     </Pressable>
                   )}
                 </View>
+                <MutationFieldError error={legFieldError(i)} testID={`split-leg-${i}-error`} />
 
-                <Pressable testID={`split-leg-${i}-category-picker`} style={styles.legField} onPress={() => setCatPick(i)}>
+                <Pressable testID={`split-leg-${i}-category-picker`} style={[styles.legField, legFieldError(i) && styles.legFieldError]} onPress={() => setCatPick(i)}>
                   <Text style={styles.legFieldLabel}>Category</Text>
                   <Text style={[styles.legFieldValue, !l.catName && { color: colors.muted }]} numberOfLines={1}>{l.catName || 'Choose'}</Text>
                 </Pressable>
@@ -389,6 +420,7 @@ const styles = StyleSheet.create({
   modePillText: { color: colors.accentLight, fontSize: 14, fontWeight: '700' },
   modeCaret: { color: colors.accentLight, fontSize: 12, fontWeight: '700' },
   legCard: { backgroundColor: colors.surface, borderRadius: 14, padding: 14, marginBottom: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  legCardError: { borderColor: '#ff6b6b' },
   legTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   amtWrap: { flexDirection: 'row', alignItems: 'center', flex: 1 },
   amtDollar: { color: colors.text, fontSize: 22, fontWeight: '700', marginRight: 2 },
@@ -398,6 +430,7 @@ const styles = StyleSheet.create({
   masterBadgeText: { color: colors.muted, fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
   legRemove: { color: colors.red, fontSize: 16, fontWeight: '700', paddingHorizontal: 4 },
   legField: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingVertical: 9, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  legFieldError: { backgroundColor: 'rgba(255, 107, 107, 0.08)' },
   legFieldLabel: { color: colors.muted, fontSize: 13 },
   legFieldValue: { color: colors.accentLight, fontSize: 14, fontWeight: '600', flexShrink: 1, textAlign: 'right' },
   legFieldInput: { color: colors.text, fontSize: 14, flex: 1, textAlign: 'right', paddingVertical: 2 },

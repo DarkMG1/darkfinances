@@ -191,7 +191,9 @@ Shared helpers live under `src/lib/mutation-form-*.js`, `src/hooks/useMutationFo
   new keys. PR-07 retains the same key across 429/503 admission retries.
 - Multi-action screens (transaction detail, reconcile toggles) use
   `useMutationScreen` for a single global lock, banner retry/dismiss, and stale
-  refetch on 409 conflicts.
+  refetch on 409 conflicts. Screens with separate form/delete/apply actions use
+  `useMutationBannerCoordinator` so **Retry** replays only the action that owns
+  the displayed outcome.
 - Stale/conflict responses trigger targeted refetch; saga-owned 409s stay open
   with retry guidance.
 - Submit buttons lock while `useFinanceMutation` is pending (including status
@@ -200,6 +202,7 @@ Shared helpers live under `src/lib/mutation-form-*.js`, `src/hooks/useMutationFo
 - Outcome haptics remain owned exclusively by `useFinanceMutation` (PR-40).
 
 Tests: `test/mutation-form-*.test.js`, `test/mutation-inventory.test.js`,
+`test/mutation-banner-coordinator.test.js`,
 `test/request-operation-state.test.js`, `test/request-operation-fake-server.test.js`.
 Maestro: `.maestro/mutation-validation-errors.yaml`, `.maestro/mutation-retry-dismiss.yaml`,
 `.maestro/mutation-offline-retry.yaml`.

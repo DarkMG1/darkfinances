@@ -119,8 +119,14 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
 
     entry.mutation.mutate(variables, {
       onSuccess: (data) => {
+        entry.lastVars = null;
+        entry.lastSuccess = undefined;
+        entry.lastSettled = undefined;
+        entry.lastError = undefined;
+        entry.rollback = undefined;
         setOutcome(null);
         setAnnounce(`${entry.label} succeeded.`);
+        setActiveKey(null);
         runOptions?.onSuccess?.(data);
       },
       onError: (error) => {
@@ -159,7 +165,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
   const retry = useCallback(() => {
     if (isLocked || !activeKey) return;
     const entry = registryRef.current.get(activeKey);
-    if (!entry?.lastVars) return;
+    if (entry?.lastVars == null) return;
     dispatch(activeKey, entry.lastVars, {
       onSuccess: entry.lastSuccess,
       onSettled: entry.lastSettled,

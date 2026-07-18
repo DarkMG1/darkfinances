@@ -11,6 +11,7 @@ export interface UseMutationActionOptions<TVariables> {
   onSuccess?: () => void;
   onRefetch?: () => void | Promise<unknown>;
   fieldPathOverrides?: Record<string, string>;
+  fieldOrder?: string[];
 }
 
 export interface UseMutationActionResult<TVariables> {
@@ -29,24 +30,32 @@ export function useMutationAction<TVariables>({
   onSuccess,
   onRefetch,
   fieldPathOverrides,
+  fieldOrder,
 }: UseMutationActionOptions<TVariables>): UseMutationActionResult<TVariables> {
   const [outcome, setOutcome] = useState<MappedMutationOutcome | null>(null);
   const [announce, setAnnounce] = useState('');
+  const [dispatchPending, setDispatchPending] = useState(false);
   const lastVars = useRef<TVariables | null>(null);
   const lastSuccess = useRef<((data: unknown) => void) | undefined>(undefined);
-
   const lastRollback = useRef<(() => void) | undefined>(undefined);
+  /** Synchronous guard before React Query marks the mutation pending. */
+  const pendingLockRef = useRef(false);
 
-  const isLocked = mutation.isPending;
+  const isLocked = mutation.isPending || dispatchPending;
 
   const run = useCallback((variables: TVariables, options?: { onSuccess?: (data: unknown) => void; onSettled?: () => void; rollback?: () => void }) => {
-    if (isLocked) return;
+    if (pendingLockRef.current || mutation.isPending) return;
+    pendingLockRef.current = true;
+    setDispatchPending(true);
     lastVars.current = variables;
     lastSuccess.current = options?.onSuccess;
     lastRollback.current = options?.rollback;
     setOutcome(null);
     mutation.mutate(variables, {
       onSuccess: (data) => {
+        lastVars.current = null;
+        lastSuccess.current = undefined;
+        lastRollback.current = undefined;
         setOutcome(null);
         setAnnounce(`${mutationLabel} succeeded.`);
         options?.onSuccess?.(data);
@@ -54,7 +63,7 @@ export function useMutationAction<TVariables>({
       },
       onError: async (error) => {
         lastRollback.current?.();
-        const mapped = mapMutationApiError(error, { fieldPathOverrides, mutationLabel });
+        const mapped = mapMutationApiError(error, { fieldPathOverrides, fieldOrder, mutationLabel });
         setOutcome(mapped);
         setAnnounce(mapped.announce);
         if (mapped.requiresRefetch) {
@@ -65,15 +74,17 @@ export function useMutationAction<TVariables>({
         }
       },
       onSettled: () => {
+        pendingLockRef.current = false;
+        setDispatchPending(false);
         options?.onSettled?.();
       },
     });
-  }, [fieldPathOverrides, isLocked, mutation, mutationLabel, onRefetch, onSuccess]);
+  }, [fieldOrder, fieldPathOverrides, mutation, mutationLabel, onRefetch, onSuccess]);
 
   const retry = useCallback(() => {
-    if (isLocked || lastVars.current == null) return;
+    if (pendingLockRef.current || mutation.isPending || lastVars.current == null) return;
     run(lastVars.current, { onSuccess: lastSuccess.current, rollback: lastRollback.current });
-  }, [isLocked, run]);
+  }, [mutation.isPending, run]);
 
   const clear = useCallback(() => {
     setOutcome(null);

@@ -12,6 +12,7 @@ import {
 import { Card, CardTitle } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { useMutationForm } from '@/hooks/useMutationForm';
 import { useEditableFinanceDate } from '@/lib/date-only';
 import { haptics } from '@/lib/haptics';
@@ -31,6 +32,8 @@ export default function Events() {
   const [group, setGroup] = useState('');
   const nameRef = useRef<TextInput>(null);
   const startRef = useRef<TextInput>(null);
+  const membersRef = useRef<TextInput>(null);
+  const groupRef = useRef<TextInput>(null);
 
   const fields = useMemo(() => ({ name, start, members, group }), [group, members, name, start]);
 
@@ -50,8 +53,8 @@ export default function Events() {
     persistDraft: true,
     mutation: saveEvent,
     mutationLabel: 'Create trip',
-    fieldOrder: ['name', 'start'],
-    fieldRefs: { name: nameRef, start: startRef },
+    fieldOrder: ['name', 'start', 'members', 'group'],
+    fieldRefs: { name: nameRef, start: startRef, members: membersRef, group: groupRef },
     onRefetch: () => events.refetch(),
     validate: (f) => collectFieldErrors({
       name: validateRequiredText(f.name, 'Trip name'),
@@ -77,6 +80,11 @@ export default function Events() {
     onSuccess: () => events.refetch(),
   });
 
+  const banner = useMutationBannerCoordinator(useMemo(() => [
+    { key: 'form', outcome: form.outcome, retry: form.retry, announce: form.announce, isLocked: form.isLocked },
+    { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked },
+  ], [deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry, form.announce, form.isLocked, form.outcome, form.retry]));
+
   const remove = (slug: string, label: string) =>
     Alert.alert('Delete trip?', `Remove “${label}”? Tagged transactions keep their #ev-${slug} tag but the trip disappears from this list.`, [
       { text: 'Cancel', style: 'cancel' },
@@ -92,8 +100,8 @@ export default function Events() {
   return (
     <ScrollView testID="events-screen" style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
       <Stack.Screen options={{ title: 'Trips & Events' }} />
-      <MutationLiveRegion message={form.announce || deleteAction.announce} />
-      <MutationFormBanner outcome={form.outcome ?? deleteAction.outcome} onRetry={() => { form.retry(); deleteAction.retry(); }} onRefetch={() => events.refetch()} />
+      <MutationLiveRegion message={banner.announce} />
+      <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => events.refetch()} />
 
       <Text style={styles.intro}>
         Create a trip or event, then tag its charges with <Text style={styles.mono}>#ev-slug</Text> from any transaction’s notes. If you link a Splitwise
@@ -131,11 +139,36 @@ export default function Events() {
         />
         <MutationFieldError error={form.getFieldError('start')} testID="events-start-error" />
 
-        <Text style={[styles.label, { marginTop: 12 }]}>People (comma-separated)</Text>
-        <TextInput testID="events-members-input" style={styles.input} value={members} onChangeText={setMembers} placeholder="e.g. alex, sam, jordan" placeholderTextColor={colors.muted} autoCapitalize="none" autoCorrect={false} accessibilityLabel="People" />
+        <Text style={[styles.label, { marginTop: 12 }, form.getFieldError('members') && styles.fieldErrorLabel]}>People (comma-separated)</Text>
+        <TextInput
+          testID="events-members-input"
+          ref={membersRef}
+          style={[styles.input, form.getFieldError('members') && styles.inputError]}
+          value={members}
+          onChangeText={setMembers}
+          placeholder="e.g. alex, sam, jordan"
+          placeholderTextColor={colors.muted}
+          autoCapitalize="none"
+          autoCorrect={false}
+          accessibilityLabel="People"
+          accessibilityHint={form.getFieldError('members') ? `Error: ${form.getFieldError('members')}` : undefined}
+        />
+        <MutationFieldError error={form.getFieldError('members')} testID="events-members-error" />
 
-        <Text style={[styles.label, { marginTop: 12 }]}>Splitwise group (optional)</Text>
-        <TextInput testID="events-group-input" style={styles.input} value={group} onChangeText={setGroup} placeholder="Exact Splitwise group name" placeholderTextColor={colors.muted} autoCorrect={false} accessibilityLabel="Splitwise group" />
+        <Text style={[styles.label, { marginTop: 12 }, form.getFieldError('group') && styles.fieldErrorLabel]}>Splitwise group (optional)</Text>
+        <TextInput
+          testID="events-group-input"
+          ref={groupRef}
+          style={[styles.input, form.getFieldError('group') && styles.inputError]}
+          value={group}
+          onChangeText={setGroup}
+          placeholder="Exact Splitwise group name"
+          placeholderTextColor={colors.muted}
+          autoCorrect={false}
+          accessibilityLabel="Splitwise group"
+          accessibilityHint={form.getFieldError('group') ? `Error: ${form.getFieldError('group')}` : undefined}
+        />
+        <MutationFieldError error={form.getFieldError('group')} testID="events-group-error" />
 
         <MutationSubmitButton
           testID="events-create-button"
@@ -179,6 +212,7 @@ const styles = StyleSheet.create({
   intro: { color: colors.muted, fontSize: 13, lineHeight: 19, marginBottom: 4 },
   mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', color: colors.accentLight },
   label: { color: colors.muted, fontSize: 12, fontWeight: '600', marginBottom: 6 },
+  fieldErrorLabel: { color: '#ff6b6b' },
   input: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, minHeight: 44 },
   inputError: { borderColor: '#ff6b6b' },
   list: { paddingVertical: 2 },
