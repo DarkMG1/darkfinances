@@ -43,9 +43,16 @@ function normalizeContractPath(path) {
 }
 
 function mapContractPathToField(path, overrides = {}) {
+  const raw = String(path || '').trim();
+  if (overrides[path]) return overrides[path];
+  const legMatch = /^legs(?:\.|\[)(\d+)/.exec(raw);
+  if (legMatch) {
+    const idx = Number(legMatch[1]);
+    if (overrides[`leg-${idx}`]) return overrides[`leg-${idx}`];
+    return `leg-${idx}`;
+  }
   const top = normalizeContractPath(path);
   if (overrides[top]) return overrides[top];
-  if (overrides[path]) return overrides[path];
   return DEFAULT_PATH_MAP[top] || top;
 }
 

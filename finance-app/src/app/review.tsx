@@ -6,6 +6,8 @@ import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { useReview, useSetReviewDisposition } from '@/api/hooks/finance.hooks';
 import { ReviewTask, ReviewTransactionRef } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationAction } from '@/hooks/useMutationAction';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, Pill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
@@ -73,6 +75,11 @@ export default function ReviewScreen() {
   const router = useRouter();
   const review = useReview();
   const setDisposition = useSetReviewDisposition();
+  const acknowledgeAction = useMutationAction({
+    mutation: setDisposition,
+    mutationLabel: 'Acknowledge task',
+    onRefetch: () => review.refetch(),
+  });
   const tasks = review.data?.tasks ?? [];
   const high = tasks.filter((t) => t.priority >= 80);
   const normal = tasks.filter((t) => t.priority < 80);
@@ -87,7 +94,8 @@ export default function ReviewScreen() {
   };
 
   const markReviewed = (id: string) => {
-    setDisposition.mutate({ id, disposition: 'acknowledge' });
+    if (acknowledgeAction.isLocked) return;
+    acknowledgeAction.run({ id, disposition: 'acknowledge' });
   };
 
   const renderActions = (task: ReviewTask) => (
@@ -132,6 +140,8 @@ export default function ReviewScreen() {
 
   return (
     <PushScreen testID="review-screen" onRefresh={review.refetch}>
+      <MutationLiveRegion message={acknowledgeAction.announce} />
+      <MutationFormBanner outcome={acknowledgeAction.outcome} onRetry={acknowledgeAction.retry} onRefetch={() => review.refetch()} />
       {loading ? (
         <SkeletonList rows={6} />
       ) : review.isError && !review.data ? (

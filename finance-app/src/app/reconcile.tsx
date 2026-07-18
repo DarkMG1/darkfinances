@@ -8,6 +8,7 @@ import { Card, EmptyState, ErrorState } from '@/components/ui';
 import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { SkeletonList } from '@/components/skeleton';
 import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationScreen } from '@/hooks/useMutationScreen';
 import { ReconItem } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { useCurrentMonthKey } from '@/lib/selectedMonth';
@@ -40,6 +41,14 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
     mutationLabel: 'Close month',
     onRefetch: () => recon.refetch(),
   });
+  const screen = useMutationScreen({ onRefetchStale: () => recon.refetch() });
+  const toggleAction = screen.bind({ key: 'toggle', mutation: setItem, mutationLabel: 'Update reconciliation' });
+
+  const toggle = (it: ReconItem) => {
+    if (screen.isLocked || closeAction.isLocked) return;
+    haptics.tap();
+    toggleAction.run({ month, id: it.id, reconciled: !it.reconciled });
+  };
 
   const data = recon.data;
   const items = data?.items ?? [];
@@ -50,7 +59,6 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
   const pct = total > 0 ? (done / total) * 100 : 0;
   const canNext = month < curKey;
 
-  const toggle = (it: ReconItem) => { haptics.tap(); setItem.mutate({ month, id: it.id, reconciled: !it.reconciled }); };
   const openTxn = (it: ReconItem) => {
     haptics.tap();
     router.push({
@@ -65,8 +73,12 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
 
   return (
     <PushScreen testID="reconcile-screen" onRefresh={recon.refetch}>
-      <MutationLiveRegion message={closeAction.announce} />
-      <MutationFormBanner outcome={closeAction.outcome} onRetry={closeAction.retry} onRefetch={() => recon.refetch()} />
+      <MutationLiveRegion message={closeAction.announce || screen.announce} />
+      <MutationFormBanner
+        outcome={closeAction.outcome ?? screen.outcome}
+        onRetry={() => { closeAction.retry(); screen.retry(); }}
+        onRefetch={() => { void screen.refetchStale(); recon.refetch(); }}
+      />
       <View style={styles.nav}>
         <Pressable testID="reconcile-prev-month" onPress={() => { haptics.tap(); setMonth(stepMonth(month, -1)); }} hitSlop={12} style={({ pressed }) => [styles.navBtn, pressed && { opacity: 0.5 }]}>
           <Text style={styles.navArrow}>‹</Text>

@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import type { FinanceError } from '@/api/client/requests';
 import { mapMutationApiError } from '@/lib/mutation-form-errors';
 import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
+import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
 
 export function useScreenMutationFeedback(options?: {
   mutationLabel?: string;
@@ -12,7 +13,7 @@ export function useScreenMutationFeedback(options?: {
   const [outcome, setOutcome] = useState<MappedMutationOutcome | null>(null);
   const [announce, setAnnounce] = useState('');
 
-  const reportError = useCallback((error: FinanceError, label?: string) => {
+  const reportError = useCallback(async (error: FinanceError, label?: string) => {
     const mapped = mapMutationApiError(error, {
       mutationLabel: label ?? options?.mutationLabel ?? 'Update',
       fieldPathOverrides: options?.fieldPathOverrides,
@@ -20,7 +21,12 @@ export function useScreenMutationFeedback(options?: {
     });
     setOutcome(mapped);
     setAnnounce(mapped.announce);
-    if (mapped.requiresRefetch) void options?.onRefetch?.();
+    if (mapped.requiresRefetch) {
+      const ok = await runStaleRefetch(options?.onRefetch);
+      if (ok && (mapped.kind === 'conflict_stale' || mapped.kind === 'conflict_saga' || mapped.kind === 'conflict_ownership')) {
+        setOutcome({ ...mapped, summary: staleConflictNotice(mapped.summary) });
+      }
+    }
     return mapped;
   }, [options]);
 

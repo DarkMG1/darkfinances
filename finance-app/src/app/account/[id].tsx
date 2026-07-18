@@ -1,9 +1,11 @@
 import React, { useMemo, useState } from 'react';
-import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, SectionList, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { KeyboardAvoidingView, Modal, Platform, Pressable, SectionList, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAccounts, useSetAccountOverride, useTransactions } from '@/api/hooks/finance.hooks';
 import { DemoRibbon } from '@/components/screen';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationAction } from '@/hooks/useMutationAction';
 import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
@@ -34,6 +36,11 @@ export default function AccountDetail() {
   const accounts = useAccounts();
   const txns = useTransactions({ accountId: p.id, start: windowStart, collapse: true });
   const override = useSetAccountOverride();
+  const saveAction = useMutationAction({
+    mutation: override,
+    mutationLabel: 'Save account',
+    onRefetch: () => accounts.refetch(),
+  });
   const account = (accounts.data ?? []).find((item) => item.id === p.id);
   const balance = account?.balance ?? (p.balance != null && p.balance !== '' ? Number(p.balance) : null);
 
@@ -45,15 +52,15 @@ export default function AccountDetail() {
   const [role, setRole] = useState<AccountRole>(p.role || 'unknown');
 
   const saveOverride = () => {
-    override.mutate(
+    if (saveAction.isLocked) return;
+    saveAction.run(
       { id: p.id, name: nameText, hidden, role },
       {
         onSuccess: () => {
           setNameOverride(nameText.trim() || account?.name || p.name || 'Account');
           setEditing(false);
         },
-        onError: (e) => Alert.alert('Could not save', e.error || 'Please try again.'),
-      }
+      },
     );
   };
 
@@ -110,6 +117,8 @@ export default function AccountDetail() {
         }}
       />
       <DemoRibbon />
+      <MutationLiveRegion message={saveAction.announce} />
+      <MutationFormBanner outcome={saveAction.outcome} onRetry={saveAction.retry} onRefetch={() => accounts.refetch()} />
       {txns.isLoading && !txns.data ? (
         <View style={{ padding: 16 }}>
           <SkeletonList hero rows={7} />
@@ -138,9 +147,9 @@ export default function AccountDetail() {
         />
       )}
 
-      <Modal visible={editing} animationType="slide" transparent onRequestClose={() => setEditing(false)}>
+      <Modal visible={editing} animationType="slide" transparent onRequestClose={() => { if (!saveAction.isLocked) setEditing(false); }}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-          <Pressable style={styles.modalBg} onPress={() => setEditing(false)}>
+          <Pressable style={styles.modalBg} onPress={() => { if (!saveAction.isLocked) setEditing(false); }} disabled={saveAction.isLocked}>
             <Pressable testID="account-edit-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 24 }]} onPress={() => {}}>
               <Text style={styles.sheetTitle}>Edit account</Text>
               <Text style={styles.label}>Display name</Text>
@@ -177,8 +186,9 @@ export default function AccountDetail() {
                 </View>
                 <Switch testID="account-hidden-switch" value={hidden} onValueChange={setHidden} trackColor={{ true: colors.accent }} />
               </View>
-              <Pressable testID="account-save-button" style={({ pressed }) => [styles.saveBtn, override.isPending && { opacity: 0.5 }, pressed && { opacity: 0.85 }]} onPress={saveOverride} disabled={override.isPending}>
-                <Text style={styles.saveText}>{override.isPending ? 'Saving…' : 'Save'}</Text>
+              <MutationFormBanner outcome={saveAction.outcome} onRetry={saveAction.retry} onRefetch={() => accounts.refetch()} />
+              <Pressable testID="account-save-button" style={({ pressed }) => [styles.saveBtn, saveAction.isLocked && { opacity: 0.5 }, pressed && { opacity: 0.85 }]} onPress={saveOverride} disabled={saveAction.isLocked}>
+                <Text style={styles.saveText}>{saveAction.isLocked ? 'Saving…' : 'Save'}</Text>
               </Pressable>
             </Pressable>
           </Pressable>

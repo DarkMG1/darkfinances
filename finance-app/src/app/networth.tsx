@@ -6,6 +6,8 @@ import { Account, ManualAsset } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
 import { Avatar, Card, ErrorState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationScreen } from '@/hooks/useMutationScreen';
 import { AreaChart } from '@/components/charts';
 import { haptics } from '@/lib/haptics';
 import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
@@ -34,6 +36,9 @@ export default function NetWorthScreen() {
   const manual = useManualAssets();
   const saveManual = useSaveManualAsset();
   const delManual = useDeleteManualAsset();
+  const screen = useMutationScreen({ onRefetchStale: () => manual.refetch() });
+  const saveAction = screen.bind({ key: 'saveManual', mutation: saveManual, mutationLabel: 'Save asset', fieldOrder: ['name', 'value', 'kind'] });
+  const deleteAction = screen.bind({ key: 'deleteManual', mutation: delManual, mutationLabel: 'Delete asset' });
 
   const accts = accounts.data ?? [];
   const visible = accts.filter((a) => !a.hidden);
@@ -79,19 +84,19 @@ export default function NetWorthScreen() {
 
   const openNew = (kind: 'asset' | 'liability') => { haptics.tap(); setEdit({ name: '', value: '', kind }); };
   const openEdit = (m: ManualAsset) => { haptics.tap(); setEdit({ id: m.id, name: m.name, value: String(m.value), kind: m.kind }); };
-  const canSave = !!edit && edit.name.trim().length > 0 && (parseFloat(edit.value) || 0) > 0 && !saveManual.isPending;
+  const canSave = !!edit && edit.name.trim().length > 0 && (parseFloat(edit.value) || 0) > 0 && !screen.isLocked;
   const doSave = () => {
     if (!edit || !canSave) return;
-    saveManual.mutate(
+    saveAction.run(
       { id: edit.id, name: edit.name.trim(), value: parseFloat(edit.value) || 0, kind: edit.kind },
-      { onSuccess: () => setEdit(null), onError: (e) => Alert.alert('Could not save', e.error || 'Please try again.') }
+      { onSuccess: () => setEdit(null) },
     );
   };
   const doDelete = () => {
-    if (!edit?.id) return;
-    Alert.alert('Delete?', `Remove “${edit.name}” from net worth?`, [
+    if (!edit?.id || screen.isLocked) return;
+    Alert.alert('Delete?', `Remove "${edit.name}" from net worth?`, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => delManual.mutate({ id: edit.id! }, { onSuccess: () => setEdit(null) }) },
+      { text: 'Delete', style: 'destructive', onPress: () => deleteAction.run({ id: edit.id! }, { onSuccess: () => setEdit(null) }) },
     ]);
   };
 
@@ -129,6 +134,8 @@ export default function NetWorthScreen() {
   return (
     <PushScreen testID="networth-screen" onRefresh={onRefresh}>
       <Stack.Screen options={{ title: 'Net Worth' }} />
+      <MutationLiveRegion message={screen.announce} />
+      <MutationFormBanner outcome={screen.outcome} onRetry={screen.retry} onRefetch={() => { void screen.refetchStale(); manual.refetch(); }} />
       {accounts.isLoading && !accounts.data ? (
         <SkeletonList hero rows={6} />
       ) : accounts.isError && !accounts.data ? (
@@ -238,9 +245,9 @@ export default function NetWorthScreen() {
         </>
       )}
 
-      <Modal visible={edit !== null} animationType="slide" transparent onRequestClose={() => setEdit(null)}>
+      <Modal visible={edit !== null} animationType="slide" transparent onRequestClose={() => { if (!screen.isLocked) setEdit(null); }}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-          <Pressable style={styles.modalBg} onPress={() => setEdit(null)}>
+          <Pressable style={styles.modalBg} onPress={() => { if (!screen.isLocked) setEdit(null); }} disabled={screen.isLocked}>
             <Pressable testID="networth-manual-sheet" style={styles.sheet} onPress={() => {}}>
               <Text style={styles.sheetTitle}>{edit?.id ? 'Edit' : 'Add'} {edit?.kind === 'liability' ? 'liability' : 'asset'}</Text>
               <Text style={styles.label}>Name</Text>
@@ -275,10 +282,10 @@ export default function NetWorthScreen() {
                 </Pressable>
               </View>
               <Pressable testID="networth-manual-save-button" style={({ pressed }) => [styles.saveBtn, !canSave && { opacity: 0.4 }, pressed && { opacity: 0.85 }]} onPress={doSave} disabled={!canSave}>
-                <Text style={styles.saveText}>{saveManual.isPending ? 'Saving…' : 'Save'}</Text>
+                <Text style={styles.saveText}>{screen.isLocked ? 'Saving…' : 'Save'}</Text>
               </Pressable>
               {edit?.id ? (
-                <Pressable testID="networth-manual-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={doDelete} disabled={delManual.isPending}>
+                <Pressable testID="networth-manual-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={doDelete} disabled={screen.isLocked}>
                   <Text style={styles.deleteText}>Delete</Text>
                 </Pressable>
               ) : null}

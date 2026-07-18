@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -34,10 +34,19 @@ export default function Events() {
 
   const fields = useMemo(() => ({ name, start, members, group }), [group, members, name, start]);
 
+  const applyFields = useCallback((updater: React.SetStateAction<typeof fields>) => {
+    const prev = { name, start, members, group };
+    const next = typeof updater === 'function' ? updater(prev) : updater;
+    if (next.name !== undefined) setName(String(next.name));
+    if (next.start !== undefined) setStart(String(next.start));
+    if (next.members !== undefined) setMembers(String(next.members));
+    if (next.group !== undefined) setGroup(String(next.group));
+  }, [group, members, name, setStart, start]);
+
   const form = useMutationForm({
     formId: 'events-create',
     fields,
-    setFields: () => {},
+    setFields: applyFields,
     persistDraft: true,
     mutation: saveEvent,
     mutationLabel: 'Create trip',

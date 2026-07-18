@@ -4,6 +4,8 @@ import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
 import * as Updates from 'expo-updates';
 import { Screen } from '@/components/screen';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationAction } from '@/hooks/useMutationAction';
 import { Card, CardTitle } from '@/components/ui';
 import { useReconcilePending, useSetReconcileEnabled } from '@/api/hooks/finance.hooks';
 import { useServerConfig } from '@/state/server';
@@ -35,6 +37,11 @@ export default function Settings() {
   const [lowText, setLowText] = useState(String(getNotifSettings().lowBalanceThreshold || DEFAULT_LOW_BALANCE));
   const reconPending = useReconcilePending();
   const setReconcileEnabled = useSetReconcileEnabled();
+  const reconcileToggleAction = useMutationAction({
+    mutation: setReconcileEnabled,
+    mutationLabel: 'Update reconciliation setting',
+    onRefetch: () => reconPending.refetch(),
+  });
   const [reconEnabled, setReconEnabled] = useState<boolean | null>(null);
   const dashboard = useDashboardWidgets();
   const capabilities = getFinanceCapabilities();
@@ -185,6 +192,8 @@ export default function Settings() {
 
   return (
     <Screen title="Settings" testID="settings-screen">
+      <MutationLiveRegion message={reconcileToggleAction.announce} />
+      <MutationFormBanner outcome={reconcileToggleAction.outcome} onRetry={reconcileToggleAction.retry} onRefetch={() => reconPending.refetch()} />
       <CardTitle>Connection</CardTitle>
       <Card style={{ marginBottom: 16 }}>
         <Text style={styles.label}>Server URL</Text>
@@ -263,7 +272,12 @@ export default function Settings() {
           <Switch
             testID="settings-reconciliation-switch"
             value={reconEnabledValue}
-            onValueChange={(v) => { setReconEnabled(v); setReconcileEnabled.mutate({ enabled: v }); }}
+            onValueChange={(v) => {
+              const prev = reconEnabledValue;
+              setReconEnabled(v);
+              reconcileToggleAction.run({ enabled: v }, { rollback: () => setReconEnabled(prev) });
+            }}
+            disabled={reconcileToggleAction.isLocked}
             trackColor={{ true: colors.accent }}
           />
         </View>

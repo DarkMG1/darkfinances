@@ -3,6 +3,7 @@ import type { UseMutationResult } from '@tanstack/react-query';
 import type { FinanceError } from '@/api/client/requests';
 import { mapMutationApiError } from '@/lib/mutation-form-errors';
 import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
+import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
 
 export interface UseMutationActionOptions<TVariables> {
   mutation: UseMutationResult<unknown, FinanceError, TVariables>;
@@ -17,7 +18,7 @@ export interface UseMutationActionResult<TVariables> {
   summary: string | null;
   isLocked: boolean;
   announce: string;
-  run: (variables: TVariables, options?: { onSuccess?: (data: unknown) => void; onSettled?: () => void }) => void;
+  run: (variables: TVariables, options?: { onSuccess?: (data: unknown) => void; onSettled?: () => void; rollback?: () => void }) => void;
   retry: () => void;
   clear: () => void;
 }
@@ -34,12 +35,15 @@ export function useMutationAction<TVariables>({
   const lastVars = useRef<TVariables | null>(null);
   const lastSuccess = useRef<((data: unknown) => void) | undefined>(undefined);
 
+  const lastRollback = useRef<(() => void) | undefined>(undefined);
+
   const isLocked = mutation.isPending;
 
-  const run = useCallback((variables: TVariables, options?: { onSuccess?: (data: unknown) => void; onSettled?: () => void }) => {
+  const run = useCallback((variables: TVariables, options?: { onSuccess?: (data: unknown) => void; onSettled?: () => void; rollback?: () => void }) => {
     if (isLocked) return;
     lastVars.current = variables;
     lastSuccess.current = options?.onSuccess;
+    lastRollback.current = options?.rollback;
     setOutcome(null);
     mutation.mutate(variables, {
       onSuccess: (data) => {
@@ -48,11 +52,17 @@ export function useMutationAction<TVariables>({
         options?.onSuccess?.(data);
         onSuccess?.();
       },
-      onError: (error) => {
+      onError: async (error) => {
+        lastRollback.current?.();
         const mapped = mapMutationApiError(error, { fieldPathOverrides, mutationLabel });
         setOutcome(mapped);
         setAnnounce(mapped.announce);
-        if (mapped.requiresRefetch) void onRefetch?.();
+        if (mapped.requiresRefetch) {
+          const ok = await runStaleRefetch(onRefetch);
+          if (ok && (mapped.kind === 'conflict_stale' || mapped.kind === 'conflict_saga' || mapped.kind === 'conflict_ownership')) {
+            setOutcome({ ...mapped, summary: staleConflictNotice(mapped.summary) });
+          }
+        }
       },
       onSettled: () => {
         options?.onSettled?.();
@@ -62,7 +72,7 @@ export function useMutationAction<TVariables>({
 
   const retry = useCallback(() => {
     if (isLocked || lastVars.current == null) return;
-    run(lastVars.current, { onSuccess: lastSuccess.current });
+    run(lastVars.current, { onSuccess: lastSuccess.current, rollback: lastRollback.current });
   }, [isLocked, run]);
 
   const clear = useCallback(() => {

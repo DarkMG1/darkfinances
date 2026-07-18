@@ -9,6 +9,8 @@ import { buildQuery } from '@/api/client/requests';
 import { useServerConfig } from '@/state/server';
 import { Transaction } from '@/api/generated/types';
 import { Avatar, ErrorState, PendingPill, SplitPill } from '@/components/ui';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationAction } from '@/hooks/useMutationAction';
 import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
@@ -71,6 +73,11 @@ export default function Transactions() {
   const loading = searching ? searchRes.isLoading : txns.isLoading;
   const errored = searching ? searchRes.isError : txns.isError;
   const onRefresh = () => searching ? searchRes.refetch() : txns.refetch();
+  const categorizeAction = useMutationAction({
+    mutation: setCategory,
+    mutationLabel: 'Change category',
+    onRefetch: onRefresh,
+  });
 
   const sections = useMemo(() => {
     const q = search.toLowerCase();
@@ -175,8 +182,8 @@ export default function Transactions() {
   };
 
   const applyCategory = (categoryId: string) => {
-    if (!categorizing) return;
-    setCategory.mutate(
+    if (!categorizing || categorizeAction.isLocked) return;
+    categorizeAction.run(
       {
         id: categorizing.id,
         categoryId,
@@ -185,7 +192,7 @@ export default function Transactions() {
         accountId: categorizing.accountId,
         date: categorizing.date,
       },
-      { onSuccess: () => setCategorizing(null) }
+      { onSuccess: () => setCategorizing(null) },
     );
   };
 
@@ -257,6 +264,8 @@ export default function Transactions() {
 
   return (
     <View style={styles.root} testID="activity-screen">
+      <MutationLiveRegion message={categorizeAction.announce} />
+      <MutationFormBanner outcome={categorizeAction.outcome} onRetry={categorizeAction.retry} onRefetch={onRefresh} />
       <View style={[styles.header, { paddingTop: insets.top + 6 }]}>
         <Text style={styles.title}>Activity</Text>
         <Pressable testID="activity-export-button" onPress={exportCsv} disabled={exporting} style={({ pressed }) => [styles.exportBtn, pressed && { opacity: 0.7 }]}>
@@ -349,8 +358,8 @@ export default function Transactions() {
         <Text style={styles.fabPlus}>+</Text>
       </Pressable>
 
-      <Modal visible={!!categorizing} animationType="slide" transparent onRequestClose={() => setCategorizing(null)}>
-        <Pressable style={styles.modalBg} onPress={() => setCategorizing(null)}>
+      <Modal visible={!!categorizing} animationType="slide" transparent onRequestClose={() => { if (!categorizeAction.isLocked) setCategorizing(null); }}>
+        <Pressable style={styles.modalBg} onPress={() => { if (!categorizeAction.isLocked) setCategorizing(null); }} disabled={categorizeAction.isLocked}>
           <View testID="activity-category-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Categorize</Text>
             <Text style={styles.sheetSub} numberOfLines={1}>{categorizing?.payee || '—'} · {categorizing ? fmtMoney(categorizing.amount) : ''}</Text>
@@ -360,7 +369,7 @@ export default function Transactions() {
               style={{ maxHeight: 420 }}
               keyboardShouldPersistTaps="handled"
               renderItem={({ item }) => (
-                <Pressable testID={`activity-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => applyCategory(item.id)} disabled={setCategory.isPending}>
+                <Pressable testID={`activity-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => applyCategory(item.id)} disabled={categorizeAction.isLocked}>
                   <Text style={styles.catOptionText}>{item.name}</Text>
                   <Text style={styles.catOptionGroup}>{item.group}</Text>
                 </Pressable>

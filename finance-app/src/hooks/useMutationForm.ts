@@ -9,6 +9,8 @@ import {
   setMutationFormDraft,
 } from '@/lib/mutation-form-draft-store';
 import { hapticClientValidationRejected } from '@/lib/haptics';
+import { getProfileGeneration } from '@/lib/notification-reconciliation';
+import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
 import { useServerConfig } from '@/state/server';
 
 export type MutationFormPhase = 'idle' | 'submitting' | 'reconciling' | 'success' | 'error';
@@ -70,6 +72,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
 }: UseMutationFormOptions<TFields, TVariables>): UseMutationFormResult<TFields> {
   const { scope, demo } = useServerConfig();
   const scopeDigest = demo ? 'demo' : scope;
+  const profileGeneration = demo ? 0 : getProfileGeneration();
   const [phase, setPhase] = useState<MutationFormPhase>('idle');
   const [outcome, setOutcome] = useState<MappedMutationOutcome | null>(null);
   const [announce, setAnnounce] = useState('');
@@ -78,14 +81,14 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
 
   useEffect(() => {
     if (!persistDraft) return;
-    const draft = getMutationFormDraft(scopeDigest, formId);
+    const draft = getMutationFormDraft(scopeDigest, formId, profileGeneration);
     if (draft) setFields((prev) => ({ ...prev, ...draft }));
-  }, [formId, persistDraft, scopeDigest, setFields]);
+  }, [formId, persistDraft, profileGeneration, scopeDigest, setFields]);
 
   useEffect(() => {
     if (!persistDraft) return;
-    setMutationFormDraft(scopeDigest, formId, fields);
-  }, [fields, formId, persistDraft, scopeDigest]);
+    setMutationFormDraft(scopeDigest, formId, fields, profileGeneration);
+  }, [fields, formId, persistDraft, profileGeneration, scopeDigest]);
 
   const isLocked = mutation.isPending || phase === 'submitting' || phase === 'reconciling';
 
@@ -108,12 +111,17 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     }
   }, [fieldOrder, fieldRefs, outcome]);
 
-  const handleError = useCallback((error: FinanceError) => {
+  const handleError = useCallback(async (error: FinanceError) => {
     const mapped = mapMutationApiError(error, { fieldPathOverrides, fieldOrder, mutationLabel });
     setOutcome(mapped);
     setPhase('error');
     setAnnounce(mapped.announce);
-    if (mapped.requiresRefetch) void onRefetch?.();
+    if (mapped.requiresRefetch) {
+      const ok = await runStaleRefetch(onRefetch);
+      if (ok && (mapped.kind === 'conflict_stale' || mapped.kind === 'conflict_saga' || mapped.kind === 'conflict_ownership')) {
+        setOutcome({ ...mapped, summary: staleConflictNotice(mapped.summary) });
+      }
+    }
     requestAnimationFrame(() => focusFirstInvalid());
   }, [fieldOrder, fieldPathOverrides, focusFirstInvalid, mutationLabel, onRefetch]);
 
@@ -126,7 +134,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
       onSuccess: () => {
         setPhase('success');
         setAnnounce(`${mutationLabel} succeeded.`);
-        clearMutationFormDraft(scopeDigest, formId);
+        clearMutationFormDraft(scopeDigest, formId, profileGeneration);
         if (!closedRef.current) {
           closedRef.current = true;
           onSuccessClose?.();
@@ -134,7 +142,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
       },
       onError: (error) => handleError(error),
     });
-  }, [formId, handleError, mutation, mutationLabel, onSuccessClose, scopeDigest]);
+  }, [formId, handleError, mutation, mutationLabel, onSuccessClose, profileGeneration, scopeDigest]);
 
   const submit = useCallback(() => {
     if (isLocked) return;
@@ -170,10 +178,10 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
 
   const requestDismiss = useCallback(() => {
     if (isLocked) return false;
-    clearMutationFormDraft(scopeDigest, formId);
+    clearMutationFormDraft(scopeDigest, formId, profileGeneration);
     clearErrors();
     return true;
-  }, [clearErrors, formId, isLocked, scopeDigest]);
+  }, [clearErrors, formId, isLocked, profileGeneration, scopeDigest]);
 
   const getFieldError = useCallback((field: keyof TFields) => fieldErrors[field], [fieldErrors]);
 

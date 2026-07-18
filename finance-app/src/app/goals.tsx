@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAccounts, useDeleteGoal, useGoals, useSaveGoal } from '@/api/hooks/finance.hooks';
@@ -47,10 +47,20 @@ export default function Goals() {
 
   const fields = useMemo(() => ({ name, target, current, deadline, accountId, editingId: editing?.id }), [accountId, current, deadline, editing?.id, name, target]);
 
+  const applyFields = useCallback((updater: React.SetStateAction<typeof fields>) => {
+    const prev = { name, target, current, deadline, accountId, editingId: editing?.id };
+    const next = typeof updater === 'function' ? updater(prev) : updater;
+    if (next.name !== undefined) setName(String(next.name));
+    if (next.target !== undefined) setTarget(String(next.target));
+    if (next.current !== undefined) setCurrent(String(next.current));
+    if (next.deadline !== undefined) setDeadline(String(next.deadline));
+    if (next.accountId !== undefined) setAccountId(next.accountId as string | null);
+  }, [accountId, current, deadline, editing?.id, name, target]);
+
   const form = useMutationForm({
     formId: editing?.isNew ? 'goals-new' : `goals-edit-${editing?.id ?? 'none'}`,
     fields,
-    setFields: () => {},
+    setFields: applyFields,
     persistDraft: true,
     mutation: saveGoal,
     mutationLabel: 'Save goal',

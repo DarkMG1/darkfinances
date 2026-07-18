@@ -4,7 +4,9 @@ import { useRouter } from 'expo-router';
 import { useRecurring, useSetRecurringOverride } from '@/api/hooks/finance.hooks';
 import { RecurringItem } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
+import { useMutationAction } from '@/hooks/useMutationAction';
 import { SkeletonList } from '@/components/skeleton';
 import { useFinanceToday } from '@/lib/date-only';
 import { cadenceLabel, colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
@@ -19,6 +21,11 @@ export default function Subscriptions() {
   const router = useRouter();
   const recurring = useRecurring();
   const override = useSetRecurringOverride();
+  const restoreAction = useMutationAction({
+    mutation: override,
+    mutationLabel: 'Restore subscription',
+    onRefetch: () => recurring.refetch(),
+  });
   const data = recurring.data;
 
   const { active, inactive, hidden, monthly, annual } = useMemo(() => {
@@ -62,6 +69,8 @@ export default function Subscriptions() {
 
   return (
     <PushScreen testID="subscriptions-screen" onRefresh={recurring.refetch}>
+      <MutationLiveRegion message={restoreAction.announce} />
+      <MutationFormBanner outcome={restoreAction.outcome} onRetry={restoreAction.retry} onRefetch={() => recurring.refetch()} />
       {recurring.isLoading && !data ? (
         <SkeletonList hero rows={6} />
       ) : recurring.isError && !data ? (
@@ -112,8 +121,8 @@ export default function Subscriptions() {
                     </View>
                     <Pressable
                       accessibilityRole="button"
-                      disabled={override.isPending}
-                      onPress={() => override.mutate({ key: item.key, hidden: false })}
+                      disabled={restoreAction.isLocked}
+                      onPress={() => restoreAction.run({ key: item.key, hidden: false })}
                       style={({ pressed }) => [styles.restoreButton, pressed && { opacity: 0.7 }]}
                     >
                       <Text style={styles.restoreText}>Restore</Text>

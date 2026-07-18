@@ -17,17 +17,20 @@ const TERMINAL_ERROR_STATUS_MAX = 499;
 const OUTCOME_UNKNOWN_MESSAGE = 'Request outcome is unknown. Check the operation before retrying.';
 
 class RequestOperationError extends Error {
-  constructor(message, status, code) {
+  constructor(message, status, code, extras = {}) {
     super(message);
     this.name = 'RequestOperationError';
     this.error = message;
     this.status = status;
     this.code = code;
+    if (extras.requiresIdempotencyKeyReuse === true) {
+      this.requiresIdempotencyKeyReuse = true;
+    }
   }
 }
 
-function operationError(message, status, code) {
-  return new RequestOperationError(message, status, code);
+function operationError(message, status, code, extras = {}) {
+  return new RequestOperationError(message, status, code, extras);
 }
 
 function outcomeUnknownError() {
@@ -130,6 +133,15 @@ function normalizeTerminalError(value) {
   return { status, code, message };
 }
 
+function isRetryableAdmissionError(error) {
+  if (error?.requiresIdempotencyKeyReuse === true) return true;
+  const status = Number(error?.status);
+  const code = typeof error?.code === 'string' ? error.code : '';
+  if (status === 429 || status === 503) return true;
+  if (code === 'ADMISSION_OVERLOADED' || code === 'ADMISSION_UNAVAILABLE') return true;
+  return false;
+}
+
 function classifyDirectMutationError(error) {
   const status = Number(error?.status);
   const code = typeof error?.code === 'string' ? error.code : '';
@@ -138,6 +150,16 @@ function classifyDirectMutationError(error) {
     : typeof error?.message === 'string'
       ? error.message
       : 'Operation failed';
+  if (isRetryableAdmissionError(error)) {
+    return {
+      kind: 'retry_same_key',
+      error: {
+        status: Number.isInteger(status) ? status : 429,
+        code: code || 'ADMISSION_OVERLOADED',
+        message,
+      },
+    };
+  }
   const terminal = Number.isInteger(status)
     && status >= TERMINAL_ERROR_STATUS_MIN
     && status <= TERMINAL_ERROR_STATUS_MAX
@@ -395,6 +417,25 @@ function createRequestOperationMachine({ store, hash, keyFactory, now = Date.now
     return clone(next);
   }
 
+  function markPrepared(requestDigest) {
+    const snapshot = readSnapshot();
+    const record = snapshot.operations[requestDigest];
+    if (!record) return null;
+    const updatedAt = timestampAfter(record);
+    const next = {
+      version: RECORD_VERSION,
+      requestDigest: record.requestDigest,
+      scopeDigest: record.scopeDigest,
+      idempotencyKey: record.idempotencyKey,
+      state: OPERATION_STATES.PREPARED,
+      createdAt: record.createdAt,
+      updatedAt,
+    };
+    snapshot.operations[requestDigest] = next;
+    writeSnapshot(snapshot);
+    return clone(next);
+  }
+
   function clear(requestDigest) {
     const snapshot = readSnapshot();
     if (!snapshot.operations[requestDigest]) return;
@@ -464,6 +505,16 @@ function createRequestOperationMachine({ store, hash, keyFactory, now = Date.now
     if (isObject(outcome) && outcome.kind === 'completed' && own(outcome, 'result')) {
       clear(record.requestDigest);
       return outcome.result;
+    }
+    if (isObject(outcome) && outcome.kind === 'retry_same_key') {
+      markPrepared(record.requestDigest);
+      const retryError = normalizeTerminalError(outcome.error) || outcome.error;
+      throw operationError(
+        retryError.message || 'The server is busy. Retry shortly.',
+        retryError.status || 429,
+        retryError.code || 'ADMISSION_OVERLOADED',
+        { requiresIdempotencyKeyReuse: true },
+      );
     }
     if (isObject(outcome) && outcome.kind === 'failed') {
       const terminalError = normalizeTerminalError(outcome.error);
@@ -573,4 +624,5 @@ module.exports = {
   createRequestOperationMachine,
   deriveRequestDigest,
   executeMutationWithIdempotency,
+  isRetryableAdmissionError,
 };

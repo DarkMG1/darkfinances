@@ -8,7 +8,8 @@ const {
 
 test('contract paths map to form field keys', () => {
   assert.equal(mapContractPathToField('amount'), 'amount');
-  assert.equal(mapContractPathToField('legs.0.categoryId'), 'legs');
+  assert.equal(mapContractPathToField('legs.0.categoryId'), 'leg-0');
+  assert.equal(mapContractPathToField('legs[1].amount'), 'leg-1');
   assert.equal(mapContractPathToField('body'), 'request');
   assert.equal(mapContractPathToField('imageBase64'), 'request');
 });

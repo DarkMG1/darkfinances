@@ -29,9 +29,8 @@ import {
 } from '@/api/hooks/finance.hooks';
 import { ReimbLinkEndpoint, ReimbTxnRef, Transaction } from '@/api/generated/types';
 import { Card, CardTitle, TagChips } from '@/components/ui';
-import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
-import { useMutationAction } from '@/hooks/useMutationAction';
-import { useScreenMutationFeedback } from '@/hooks/useScreenMutationFeedback';
+import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationScreen } from '@/hooks/useMutationScreen';
 import { haptics, hapticClientValidationRejected } from '@/lib/haptics';
 import { formatAllocationDollars, parseStrictAllocationDollars } from '@/lib/allocation-parse';
 import { CapturedReceipt, pickReceiptFromLibrary, scanReceiptFromCamera } from '@/lib/receipts';
@@ -160,47 +159,28 @@ export default function TransactionDetail() {
   const delReceipt = useDeleteReceipt();
   const addLink = useAddReimbLink();
   const delLink = useDeleteReimbLink();
-  const linkAction = useMutationAction({
-    mutation: addLink,
-    mutationLabel: 'Link reimbursement',
-    onRefetch: () => { links.refetch(); counterpartyLinks.refetch(); detail.refetch(); },
+  const screen = useMutationScreen({
+    onRefetchStale: async () => {
+      const result = await detail.refetch();
+      return result.isError !== true;
+    },
   });
-  const unlinkAction = useMutationAction({
-    mutation: delLink,
-    mutationLabel: 'Unlink reimbursement',
-    onRefetch: () => { links.refetch(); counterpartyLinks.refetch(); detail.refetch(); },
-  });
-  const receiptAction = useMutationAction({
-    mutation: addReceipt,
-    mutationLabel: 'Upload receipt',
-    onRefetch: () => receipts.refetch(),
-  });
-  const deleteReceiptAction = useMutationAction({
-    mutation: delReceipt,
-    mutationLabel: 'Delete receipt',
-    onRefetch: () => receipts.refetch(),
-  });
-  const deleteTxnAction = useMutationAction({
-    mutation: del,
-    mutationLabel: 'Delete transaction',
-  });
-  const screenFeedback = useScreenMutationFeedback({
-    mutationLabel: 'Update transaction',
-    onRefetch: () => detail.refetch(),
-    fieldOrder: ['date', 'payee', 'allocationCents'],
-  });
-  const activeMutationOutcome = linkAction.outcome
-    ?? unlinkAction.outcome
-    ?? receiptAction.outcome
-    ?? deleteReceiptAction.outcome
-    ?? deleteTxnAction.outcome
-    ?? screenFeedback.outcome;
-  const activeAnnounce = linkAction.announce
-    || unlinkAction.announce
-    || receiptAction.announce
-    || deleteReceiptAction.announce
-    || deleteTxnAction.announce
-    || screenFeedback.announce;
+  const linkAction = screen.bind({ key: 'link', mutation: addLink, mutationLabel: 'Link reimbursement' });
+  const unlinkAction = screen.bind({ key: 'unlink', mutation: delLink, mutationLabel: 'Unlink reimbursement' });
+  const receiptAction = screen.bind({ key: 'receipt', mutation: addReceipt, mutationLabel: 'Upload receipt' });
+  const deleteReceiptAction = screen.bind({ key: 'deleteReceipt', mutation: delReceipt, mutationLabel: 'Delete receipt' });
+  const deleteTxnAction = screen.bind({ key: 'deleteTxn', mutation: del, mutationLabel: 'Delete transaction' });
+  const categoryAction = screen.bind({ key: 'category', mutation: setCategory, mutationLabel: 'Change category' });
+  const saveRuleAction = screen.bind({ key: 'saveRule', mutation: saveRule, mutationLabel: 'Save rule' });
+  const markRecAction = screen.bind({ key: 'markRec', mutation: markRec, mutationLabel: 'Mark recurring' });
+  const dateAction = screen.bind({ key: 'date', mutation: setDate, mutationLabel: 'Change date', fieldOrder: ['date'] });
+  const payeeAction = screen.bind({ key: 'payee', mutation: setPayee, mutationLabel: 'Rename payee' });
+  const notesAction = screen.bind({ key: 'notes', mutation: setNotes, mutationLabel: 'Save notes', fieldOrder: ['notes'] });
+  const modalLocked = screen.isLocked;
+  const requestModalClose = (close: () => void) => {
+    if (modalLocked) return;
+    close();
+  };
   const search = useSearch(linkQuery);
 
   const thisRef: ReimbTxnRef = {
@@ -235,19 +215,19 @@ export default function TransactionDetail() {
   };
 
   const submitLink = () => {
-    if (!linkTarget || linkAction.isLocked) return;
+    if (!linkTarget || screen.isLocked) return;
     const cents = parseStrictAllocationDollars(allocationText);
     if (cents == null || cents <= 0) {
-      screenFeedback.reportClientValidation('Enter a positive dollar amount with at most two decimal places (e.g. 20.00).', { allocationCents: 'Invalid allocation amount.' });
+      screen.reportClientValidation('Enter a positive dollar amount with at most two decimal places (e.g. 20.00).', { allocationCents: 'Invalid allocation amount.' }, ['allocationCents']);
       hapticClientValidationRejected();
       return;
     }
     if (suggestedAllocationCents == null) {
-      screenFeedback.reportClientValidation('Link capacity is still loading or needs legacy review. Refresh and try again.');
+      screen.reportClientValidation('Link capacity is still loading or needs legacy review. Refresh and try again.');
       return;
     }
     if (cents > suggestedAllocationCents) {
-      screenFeedback.reportClientValidation(`This link can allocate at most ${fmtPos(suggestedAllocationCents / 100)} based on remaining capacity on both sides.`, { allocationCents: 'Allocation exceeds remaining capacity.' });
+      screen.reportClientValidation(`This link can allocate at most ${fmtPos(suggestedAllocationCents / 100)} based on remaining capacity on both sides.`, { allocationCents: 'Allocation exceeds remaining capacity.' }, ['allocationCents']);
       hapticClientValidationRejected();
       return;
     }
@@ -286,7 +266,7 @@ export default function TransactionDetail() {
 
   const createLink = (t: Transaction) => openAllocationFor(t);
   const removeLink = (other: ReimbLinkEndpoint) => {
-    if (unlinkAction.isLocked) return;
+    if (screen.isLocked) return;
     haptics.tap();
     unlinkAction.run(
       income
@@ -311,14 +291,13 @@ export default function TransactionDetail() {
     setCategoryName(categoryName);
     setCategoryId(cid);
     setPicking(false);
-    setCategory.mutate(
+    categoryAction.run(
       { id: txnId, categoryId: cid, isLeg, parentId, accountId, date: currentDate },
       {
-        onSuccess: followReplacement,
-        onError: (error) => {
+        onSuccess: (data) => followReplacement(data as { id?: string } | undefined),
+        rollback: () => {
           setCategoryName(previous.category);
           setCategoryId(previous.categoryId);
-          screenFeedback.reportError(error, 'Change category');
         },
       },
     );
@@ -330,26 +309,26 @@ export default function TransactionDetail() {
 
   const applyRuleForPayee = () => {
     if (!categoryId) return;
-    saveRule.mutate(
+    saveRuleAction.run(
       { match: payeeName, categoryId, categoryName: category },
       {
-        onSuccess: (r) =>
+        onSuccess: (r) => {
+          const result = r as { applied?: number } | undefined;
           Alert.alert(
             'Rule saved',
-            `“${payeeName}” will always be categorized as ${category}.` +
-              (r?.applied ? `\n\nApplied to ${r.applied} past transaction${r.applied === 1 ? '' : 's'}.` : ''),
-          ),
-        onError: (e) => screenFeedback.reportError(e, 'Save rule'),
-      }
+            `"${payeeName}" will always be categorized as ${category}.` +
+              (result?.applied ? `\n\nApplied to ${result.applied} past transaction${result.applied === 1 ? '' : 's'}.` : ''),
+          );
+        },
+      },
     );
   };
   const doMarkRecurring = () => {
-    markRec.mutate(
+    markRecAction.run(
       { payee: payeeName },
       {
-        onSuccess: () => Alert.alert('Marked as recurring', `“${payeeName}” will appear in Subscriptions once it has at least two charges.`),
-        onError: (e) => screenFeedback.reportError(e, 'Mark recurring'),
-      }
+        onSuccess: () => Alert.alert('Marked as recurring', `"${payeeName}" will appear in Subscriptions once it has at least two charges.`),
+      },
     );
   };
   const doDelete = () => {
@@ -381,7 +360,7 @@ export default function TransactionDetail() {
 
   const uploadCapture = (cap: CapturedReceipt | null) => {
     if (!cap) { setScanning(false); return; }
-    if (!cap.base64) { setScanning(false); screenFeedback.reportClientValidation('Could not read image. Please try again.'); return; }
+    if (!cap.base64) { setScanning(false); screen.reportClientValidation('Could not read image. Please try again.'); return; }
     receiptAction.run(
       { txnId, accountId, transactionDate: currentDate, imageBase64: cap.base64, mime: cap.mime, ocrText: cap.ocrText, ocrLines: cap.ocrLines, amount: cap.amount, date: cap.date, source: cap.source ?? 'camera' },
       { onSettled: () => setScanning(false) },
@@ -432,16 +411,15 @@ export default function TransactionDetail() {
     const previous = { category, categoryId };
     setCategoryName(reimbCat.name);
     setCategoryId(reimbCat.id);
-    setCategory.mutate(
+    categoryAction.run(
       { id: txnId, categoryId: reimbCat.id, isLeg, parentId, accountId, date: currentDate },
       {
-        onSuccess: followReplacement,
-        onError: (e) => {
+        onSuccess: (data) => followReplacement(data as { id?: string } | undefined),
+        rollback: () => {
           setCategoryName(previous.category);
           setCategoryId(previous.categoryId);
-          screenFeedback.reportError(e, 'Move transaction');
         },
-      }
+      },
     );
   };
 
@@ -465,12 +443,12 @@ export default function TransactionDetail() {
   const doSetDate = (picked?: string) => {
     const next = (picked || dateText || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(next)) {
-      screenFeedback.reportClientValidation('Use the format YYYY-MM-DD, e.g. 2026-06-30.', { date: 'Invalid date format.' });
+      screen.reportClientValidation('Use the format YYYY-MM-DD, e.g. 2026-06-30.', { date: 'Invalid date format.' }, ['date']);
       hapticClientValidationRejected();
       return;
     }
     if (next === currentDate) { setDating(false); return; }
-    setDate.mutate(
+    dateAction.run(
       { id: txnId, date: next, isLeg },
       {
         onSuccess: () => {
@@ -479,8 +457,8 @@ export default function TransactionDetail() {
           setDating(false);
           router.replace({ pathname: '/transaction/[id]', params: { id: txnId, accountId, date: next } });
         },
-        onError: (e) => { setDateText(currentDate || financeTodayValue); screenFeedback.reportError(e, 'Change date'); },
-      }
+        rollback: () => { setDateText(currentDate || financeTodayValue); },
+      },
     );
   };
 
@@ -491,13 +469,13 @@ export default function TransactionDetail() {
     setRenaming(false);
     if (next === payeeName) return;
     const prev = payeeName;
-    setPayeeNameLocal(next); // optimistic
-    setPayee.mutate(
+    setPayeeNameLocal(next);
+    payeeAction.run(
       { id: txnId, payee: next, isLeg, parentId, accountId, date: currentDate },
       {
-        onSuccess: followReplacement,
-        onError: (e) => { setPayeeNameLocal(prev); screenFeedback.reportError(e, 'Rename payee'); },
-      }
+        onSuccess: (data) => followReplacement(data as { id?: string } | undefined),
+        rollback: () => { setPayeeNameLocal(prev); },
+      },
     );
   };
 
@@ -508,16 +486,17 @@ export default function TransactionDetail() {
   const dirty = noteText.trim() !== baseText || !sameRaws(rawsOf(tags), baseRaws);
   const recombineNotes = () => [noteText.trim(), ...tags.map((t) => t.raw)].join(' ').replace(/\s{2,}/g, ' ').trim();
   const save = () =>
-    setNotes.mutate(
+    notesAction.run(
       { id: txnId, notes: recombineNotes(), isLeg, parentId, accountId, date: currentDate },
       {
         onSuccess: (result) => {
           setBaseText(noteText.trim());
           setBaseRaws(rawsOf(tags));
-          followReplacement(result);
+          followReplacement(result as { id?: string } | undefined);
         },
-      }
+      },
     );
+  const notesFieldError = screen.outcome?.fieldErrors?.notes as string | undefined;
 
   const addTag = (input: string) => {
     const token = toTagToken(input);
@@ -610,23 +589,17 @@ export default function TransactionDetail() {
         }}
       />
 
-      <MutationLiveRegion message={activeAnnounce} />
+      <MutationLiveRegion message={screen.announce} />
       <MutationFormBanner
-        outcome={activeMutationOutcome}
-        onRetry={() => {
-          linkAction.retry();
-          unlinkAction.retry();
-          receiptAction.retry();
-          deleteReceiptAction.retry();
-          deleteTxnAction.retry();
-        }}
-        onRefetch={() => { detail.refetch(); links.refetch(); receipts.refetch(); }}
+        outcome={screen.outcome}
+        onRetry={screen.retry}
+        onRefetch={() => { void screen.refetchStale(); detail.refetch(); links.refetch(); receipts.refetch(); }}
       />
 
       <View style={[styles.menuHero, { paddingTop: insets.top + 14 }]}>
         <View style={styles.menuTopBar}>
-          <Pressable onPress={save} disabled={!dirty || setNotes.isPending} hitSlop={8} style={styles.topSide}>
-            {dirty ? <Text style={styles.headerSave}>{setNotes.isPending ? 'Saving…' : 'Save'}</Text> : null}
+          <Pressable onPress={save} disabled={!dirty || notesAction.isPending || modalLocked} hitSlop={8} style={styles.topSide}>
+            {dirty ? <Text style={styles.headerSave}>{notesAction.isPending ? 'Saving…' : 'Save'}</Text> : null}
           </Pressable>
           {canEditDate ? (
             <Pressable testID="transaction-date-button" onPress={openDate} hitSlop={8} style={({ pressed }) => [styles.topDateBtn, pressed && { opacity: 0.65 }]}>
@@ -636,7 +609,7 @@ export default function TransactionDetail() {
           ) : (
             <Text style={styles.topDate}>{fmtMenuDay(currentDate)}</Text>
           )}
-          <Pressable onPress={() => router.back()} hitSlop={10} style={({ pressed }) => [styles.topSide, styles.closeBtn, pressed && { opacity: 0.65 }]}>
+          <Pressable onPress={() => requestModalClose(() => router.back())} disabled={modalLocked} hitSlop={10} style={({ pressed }) => [styles.topSide, styles.closeBtn, pressed && { opacity: 0.65 }, modalLocked && { opacity: 0.35 }]}>
             <SymbolView name="xmark" tintColor={colors.text} size={18} resizeMode="scaleAspectFit" />
           </Pressable>
         </View>
@@ -693,7 +666,7 @@ export default function TransactionDetail() {
           icon="arrow.clockwise.circle"
           label="Is Recurring?"
           value={!!sub}
-          disabled={!!sub || !canMarkRecurring || markRec.isPending}
+          disabled={!!sub || !canMarkRecurring || markRecAction.isPending || modalLocked}
           onValueChange={() => {
             if (sub) router.push(`/recurring/${encodeURIComponent(sub.key)}`);
             else if (canMarkRecurring) doMarkRecurring();
@@ -704,9 +677,9 @@ export default function TransactionDetail() {
             testID="transaction-move-reimbursement-row"
             icon="person.2.fill"
             label="Move to Reimbursements"
-            right={setCategory.isPending ? 'Moving…' : 'Not personal spend'}
+            right={categoryAction.isPending ? 'Moving…' : 'Not personal spend'}
             onPress={moveToReimb}
-            disabled={setCategory.isPending}
+            disabled={categoryAction.isPending || modalLocked}
             last
           />
         ) : (
@@ -732,9 +705,9 @@ export default function TransactionDetail() {
             testID="transaction-create-rule-row"
             icon="bolt.circle"
             label="Create Rule"
-            right={saveRule.isPending ? 'Saving…' : category}
+            right={saveRuleAction.isPending ? 'Saving…' : category}
             onPress={applyRuleForPayee}
-            disabled={saveRule.isPending}
+            disabled={saveRuleAction.isPending || modalLocked}
           />
         ) : null}
         {canSplit ? (
@@ -869,13 +842,16 @@ export default function TransactionDetail() {
       <Card>
         <TextInput
           testID="transaction-notes-input"
-          style={styles.notes}
+          style={[styles.notes, notesFieldError && { borderWidth: 1, borderColor: '#ff6b6b' }]}
           value={noteText}
           onChangeText={setNoteText}
           placeholder="Add a note…"
           placeholderTextColor={colors.muted}
           multiline
+          accessibilityLabel="Transaction notes"
+          accessibilityHint={notesFieldError ? `Error: ${notesFieldError}` : undefined}
         />
+        <MutationFieldError error={notesFieldError} testID="transaction-notes-error" />
       </Card>
       </>
       ) : null}
@@ -933,17 +909,17 @@ export default function TransactionDetail() {
         <Pressable
           testID="transaction-delete-button"
           onPress={doDelete}
-          disabled={del.isPending}
-          style={({ pressed }) => [styles.deleteBtn, del.isPending && { opacity: 0.5 }, pressed && { opacity: 0.7 }]}
+          disabled={deleteTxnAction.isPending || modalLocked}
+          style={({ pressed }) => [styles.deleteBtn, (deleteTxnAction.isPending || modalLocked) && { opacity: 0.5 }, pressed && { opacity: 0.7 }]}
         >
-          <Text style={styles.deleteText}>{del.isPending ? 'Deleting…' : 'Delete transaction'}</Text>
+          <Text style={styles.deleteText}>{deleteTxnAction.isPending ? 'Deleting…' : 'Delete transaction'}</Text>
         </Pressable>
       ) : null}
 
       </View>
 
-      <Modal visible={picking} animationType="slide" transparent onRequestClose={() => setPicking(false)}>
-        <Pressable style={styles.modalBg} onPress={() => setPicking(false)}>
+      <Modal visible={picking} animationType="slide" transparent onRequestClose={() => requestModalClose(() => setPicking(false))}>
+        <Pressable style={styles.modalBg} onPress={() => requestModalClose(() => setPicking(false))} disabled={modalLocked}>
           <View testID="transaction-category-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Set category</Text>
             <FlatList
@@ -961,9 +937,9 @@ export default function TransactionDetail() {
         </Pressable>
       </Modal>
 
-      <Modal visible={linking} animationType="slide" transparent onRequestClose={() => { setLinking(false); setLinkTarget(null); }}>
+      <Modal visible={linking} animationType="slide" transparent onRequestClose={() => requestModalClose(() => { setLinking(false); setLinkTarget(null); })}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-          <Pressable style={styles.modalBg} onPress={() => { setLinking(false); setLinkTarget(null); }}>
+          <Pressable style={styles.modalBg} onPress={() => requestModalClose(() => { setLinking(false); setLinkTarget(null); })} disabled={modalLocked}>
             <Pressable testID="transaction-link-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
               {linkTarget ? (
                 <>
@@ -991,8 +967,8 @@ export default function TransactionDetail() {
                     accessibilityLabel="Reimbursement link allocation amount in dollars"
                     accessibilityHint="Enter a positive amount with at most two decimal places"
                   />
-                  <Pressable testID="transaction-link-confirm-button" style={styles.renameSave} onPress={submitLink} disabled={addLink.isPending || suggestedAllocationCents == null} accessibilityRole="button" accessibilityLabel="Confirm reimbursement link">
-                    <Text style={styles.renameSaveText}>{addLink.isPending ? 'Linking…' : 'Link'}</Text>
+                  <Pressable testID="transaction-link-confirm-button" style={styles.renameSave} onPress={submitLink} disabled={linkAction.isPending || suggestedAllocationCents == null || modalLocked} accessibilityRole="button" accessibilityLabel="Confirm reimbursement link">
+                    <Text style={styles.renameSaveText}>{linkAction.isPending ? 'Linking…' : 'Link'}</Text>
                   </Pressable>
                   <Pressable testID="transaction-link-back-button" style={styles.linkBtn} onPress={() => setLinkTarget(null)}>
                     <Text style={styles.linkBtnText}>Back to search</Text>
@@ -1021,7 +997,7 @@ export default function TransactionDetail() {
                   <Text style={styles.linkEmpty}>{linkQuery.trim().length < 2 ? 'Type at least 2 characters to search.' : 'No matching transactions.'}</Text>
                 }
                 renderItem={({ item }) => (
-                  <Pressable testID={`transaction-link-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => createLink(item)} disabled={addLink.isPending}>
+                  <Pressable testID={`transaction-link-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => createLink(item)} disabled={linkAction.isPending || modalLocked}>
                     <View style={{ flex: 1, minWidth: 0 }}>
                       <Text style={styles.catOptionText} numberOfLines={1}>{item.payee || '(no payee)'}</Text>
                       <Text style={styles.catOptionGroup}>{fmtDay(item.date)} · {item.account}</Text>
@@ -1037,9 +1013,9 @@ export default function TransactionDetail() {
       </KeyboardAvoidingView>
       </Modal>
 
-      <Modal visible={renaming} animationType="slide" transparent onRequestClose={() => setRenaming(false)}>
+      <Modal visible={renaming} animationType="slide" transparent onRequestClose={() => requestModalClose(() => setRenaming(false))}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-          <Pressable style={styles.modalBg} onPress={() => setRenaming(false)}>
+          <Pressable style={styles.modalBg} onPress={() => requestModalClose(() => setRenaming(false))} disabled={modalLocked}>
             <Pressable testID="transaction-rename-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
               <Text style={styles.sheetTitle}>Rename transaction</Text>
               <TextInput
@@ -1054,8 +1030,8 @@ export default function TransactionDetail() {
                 returnKeyType="done"
                 onSubmitEditing={doRename}
               />
-              <Pressable testID="transaction-rename-save-button" style={styles.renameSave} onPress={doRename} disabled={setPayee.isPending}>
-                <Text style={styles.renameSaveText}>{setPayee.isPending ? 'Saving…' : 'Save'}</Text>
+              <Pressable testID="transaction-rename-save-button" style={styles.renameSave} onPress={doRename} disabled={payeeAction.isPending || modalLocked}>
+                <Text style={styles.renameSaveText}>{payeeAction.isPending ? 'Saving…' : 'Save'}</Text>
               </Pressable>
               <Text style={styles.tagHint}>The original bank description is kept for matching future charges.</Text>
             </Pressable>
@@ -1063,15 +1039,15 @@ export default function TransactionDetail() {
         </KeyboardAvoidingView>
       </Modal>
 
-      <Modal visible={dating} animationType="slide" transparent onRequestClose={() => setDating(false)}>
-        <Pressable style={styles.modalBg} onPress={() => setDating(false)}>
+      <Modal visible={dating} animationType="slide" transparent onRequestClose={() => requestModalClose(() => setDating(false))}>
+        <Pressable style={styles.modalBg} onPress={() => requestModalClose(() => setDating(false))} disabled={modalLocked}>
           <Pressable testID="transaction-date-sheet" style={[styles.sheet, styles.calendarSheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
             <View style={styles.calendarSheetHeader}>
               <View>
                 <Text style={styles.sheetTitle}>Transaction date</Text>
                 <Text style={styles.calendarSub}>{selectedDay ? fmtDay(selectedDay) : 'Pick a date'}</Text>
               </View>
-              <Pressable testID="transaction-date-done-button" onPress={() => setDating(false)} hitSlop={10}>
+              <Pressable testID="transaction-date-done-button" onPress={() => requestModalClose(() => setDating(false))} hitSlop={10} disabled={modalLocked}>
                 <Text style={styles.calendarDone}>Done</Text>
               </Pressable>
             </View>
@@ -1140,7 +1116,7 @@ export default function TransactionDetail() {
                       <Pressable
                         testID={day ? `transaction-date-day-${Number(day.slice(8))}${active ? '-selected' : ''}` : undefined}
                         key={day ?? `blank-${idx}`}
-                        disabled={!day || setDate.isPending}
+                        disabled={!day || dateAction.isPending || modalLocked}
                         onPress={() => day && doSetDate(day)}
                         style={({ pressed }) => [
                           styles.dayCell,
@@ -1165,7 +1141,7 @@ export default function TransactionDetail() {
                 <Text style={styles.suggestText}>End of last month</Text>
               </Pressable>
             </View>
-            {setDate.isPending ? <Text style={styles.calendarSaving}>Saving…</Text> : null}
+            {dateAction.isPending ? <Text style={styles.calendarSaving}>Saving…</Text> : null}
             <Text style={styles.tagHint}>
               {income
                 ? 'A refund dated in the month you made the purchase subtracts from that month’s spending instead of this one.'

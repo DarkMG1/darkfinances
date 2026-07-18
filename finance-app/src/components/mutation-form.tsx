@@ -183,7 +183,12 @@ export function MutationSheet({
       onRequestClose={handleClose}
       accessibilityViewIsModal
     >
-      <Pressable style={styles.modalBg} onPress={handleClose} accessibilityLabel="Dismiss sheet">
+      <Pressable
+        style={styles.modalBg}
+        onPress={handleClose}
+        accessibilityLabel="Dismiss sheet"
+        disabled={canDismiss === false}
+      >
         <Pressable
           testID={testID}
           style={[styles.sheet, { paddingBottom: bottomInset + 16 }]}

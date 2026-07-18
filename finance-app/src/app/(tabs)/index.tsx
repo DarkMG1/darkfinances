@@ -4,6 +4,8 @@ import { useRouter } from 'expo-router';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { useBankSync, useManualAssets, usePing, useRecurring, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { Screen } from '@/components/screen';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationAction } from '@/hooks/useMutationAction';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, ListRow, SectionLabel, StatCard } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { AreaChart } from '@/components/charts';
@@ -41,19 +43,24 @@ export default function Overview() {
   const recurring = useRecurring();
   const manual = useManualAssets();
   const bankSync = useBankSync();
+  const bankSyncAction = useMutationAction({
+    mutation: bankSync,
+    mutationLabel: 'Bank sync',
+    onRefetch: () => today.refetch(),
+  });
   const reviewCount = today.data?.review.count ?? 0;
   const topReview = today.data?.review.tasks?.[0] ?? null;
 
   const doBankSync = () => {
-    if (bankSync.isPending) return;
+    if (bankSyncAction.isLocked) return;
     haptics.tap();
-    bankSync.mutate(undefined, {
+    bankSyncAction.run(undefined, {
       onSuccess: (r) => {
-        const cleared = r?.phantom?.deletedCount ?? 0;
-        if (r?.warning) Alert.alert('Synced with a warning', `Your ledger was refreshed, but the bank fetch reported: ${r.warning}`);
+        const result = r as { warning?: string; phantom?: { deletedCount?: number } } | undefined;
+        const cleared = result?.phantom?.deletedCount ?? 0;
+        if (result?.warning) Alert.alert('Synced with a warning', `Your ledger was refreshed, but the bank fetch reported: ${result.warning}`);
         else if (cleared > 0) Alert.alert('Synced', `${cleared} stale pending charge${cleared === 1 ? '' : 's'} may need cleanup. Nothing was deleted.`);
       },
-      onError: (e) => { Alert.alert('Sync failed', e.error || 'Please try again.'); },
     });
   };
 
@@ -128,6 +135,8 @@ export default function Overview() {
 
   return (
     <Screen title="dark" accent="finances" onRefresh={onRefresh} testID="home-screen">
+      <MutationLiveRegion message={bankSyncAction.announce} />
+      <MutationFormBanner outcome={bankSyncAction.outcome} onRetry={bankSyncAction.retry} onRefetch={onRefresh} />
       {!today.data && today.isLoading ? (
         <SkeletonList hero rows={4} />
       ) : !today.data && today.isError ? (
@@ -375,15 +384,15 @@ export default function Overview() {
             <Pressable
               testID="home-sync-button"
               onPress={doBankSync}
-              disabled={bankSync.isPending}
+              disabled={bankSyncAction.isLocked}
               style={({ pressed }) => [styles.syncBtn, pressed && { opacity: 0.6 }]}
             >
-              {bankSync.isPending ? (
+              {bankSyncAction.isLocked ? (
                 <ActivityIndicator color={colors.accentLight} size="small" />
               ) : (
                 <SymbolView name="arrow.triangle.2.circlepath" tintColor={colors.accentLight} size={18} resizeMode="scaleAspectFit" />
               )}
-              <Text style={styles.syncText}>{bankSync.isPending ? 'Syncing…' : 'Sync with bank'}</Text>
+              <Text style={styles.syncText}>{bankSyncAction.isLocked ? 'Syncing…' : 'Sync with bank'}</Text>
             </Pressable>
           ) : null}
         </>
