@@ -58,6 +58,13 @@ const ACCOUNT_OVERRIDE_DERIVED_KEYS = [
   API_ENDPOINTS.recurring.key,
 ] as const;
 
+const RECURRING_OVERRIDE_DERIVED_KEYS = [
+  API_ENDPOINTS.today.key,
+  API_ENDPOINTS.forecast.key,
+  API_ENDPOINTS.recurring.key,
+  API_ENDPOINTS.bills.key,
+] as const;
+
 const TRANSACTION_DERIVED_KEYS = [
   API_ENDPOINTS.today.key,
   API_ENDPOINTS.accounts.key,
@@ -488,10 +495,7 @@ export function useSetRecurringOverride() {
     endpoint: (v) => `/api/v1/recurring/${encodeURIComponent(v.key)}/override`,
     method: 'POST',
     onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.recurring.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.bills.key] }),
-      ]);
+      await invalidateKeys(qc, RECURRING_OVERRIDE_DERIVED_KEYS);
     },
   });
 }

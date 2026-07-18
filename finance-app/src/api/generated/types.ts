@@ -564,6 +564,17 @@ export interface Forecast {
       complete: boolean;
       incompleteReasons: string[];
     };
+    stsContainment?: {
+      complete: boolean;
+      incompleteReasons: string[];
+    };
+    projectionContainment?: {
+      complete: boolean;
+      stsContainmentIncomplete: boolean;
+      graphEventsWithheld: boolean;
+      knownEventsIncludedDespiteStsIncomplete?: boolean;
+      incompleteReasons: string[];
+    };
   };
   possibleReimbursement?: { date: string; amount: number; includedInBalance: false } | null;
   warnings: string[];

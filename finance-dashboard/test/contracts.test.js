@@ -86,6 +86,10 @@ test('app and web render incomplete Safe-to-Spend as unavailable, never zero', (
   assert.match(browser, /metric\?\.complete === true && Number\.isFinite\(metric\.value\)/);
   assert.match(browser, /available \? fmt\(metric\.value\) : 'Unavailable'/);
   assert.doesNotMatch(browser, /fmt\(metric\.value\s*\|\|\s*0\)/);
+  assert.match(browser, /safeToSpendReasons/);
+  assert.match(browser, /metric\?\.incompleteReasons/);
+  assert.match(browser, /role="status"/);
+  assert.match(browser, /aria-live="polite"/);
 
   assert.match(appHome, /safeToSpend\?\.complete && safeToSpend\.value != null/);
   assert.match(appHome, /Safe to Spend unavailable/);

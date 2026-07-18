@@ -137,7 +137,12 @@ test('forecast endpoint returns complete assumptions aliases for valid demo fore
   const payload = await response.json();
   assert.equal(response.status, 200);
   const assumptions = payload.data.assumptions;
-  assert.equal(assumptions.genericBudget.complete, true);
+  assert.equal(assumptions.stsContainment.complete, false);
+  assert.ok(assumptions.stsContainment.incompleteReasons.includes('budget_data_unavailable'));
+  assert.equal(assumptions.projectionContainment.complete, false);
+  assert.equal(assumptions.projectionContainment.stsContainmentIncomplete, true);
+  assert.equal(assumptions.genericBudget.complete, false);
   assert.equal(assumptions.genericBudgetTarget, assumptions.genericBudget.target);
+  assert.ok(payload.data.warnings.some((warning) => /Safe-to-Spend containment incomplete/.test(warning)));
   assert.ok(!payload.data.warnings.some((warning) => /category amounts are not safe integer cents/.test(warning)));
 });

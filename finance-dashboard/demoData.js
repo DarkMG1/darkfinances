@@ -728,6 +728,27 @@ function forecast(days = 90) {
     points.push({ date: end, balance: running, inflow: 0, outflow: 0 });
   }
   const lowest = points.reduce((a, p) => (p.balance < a.balance ? p : a), points[0]);
+  const stsMetric = todaySnapshot.liquidity?.safeToSpend || {};
+  const stsContainment = {
+    complete: stsMetric.complete === true,
+    incompleteReasons: stsMetric.incompleteReasons || [],
+  };
+  const budgetGoalReasons = stsContainment.incompleteReasons.filter((reason) =>
+    reason === 'budget_data_unavailable' || String(reason).startsWith('goal_'));
+  const knownEventsIncludedDespiteStsIncomplete = !withholdGraphEvents
+    && !stsContainment.complete
+    && events.length > 0;
+  const projectionIncompleteReasons = [
+    ...(withholdGraphEvents ? ['obligation_graph_incomplete'] : []),
+    ...(!stsContainment.complete ? stsContainment.incompleteReasons : []),
+  ];
+  const projectionContainment = {
+    complete: stsContainment.complete && !withholdGraphEvents,
+    stsContainmentIncomplete: !stsContainment.complete,
+    graphEventsWithheld: withholdGraphEvents,
+    ...(knownEventsIncludedDespiteStsIncomplete ? { knownEventsIncludedDespiteStsIncomplete: true } : {}),
+    incompleteReasons: projectionIncompleteReasons,
+  };
   const warnings = [];
   if (withholdGraphEvents) {
     warnings.push('Obligation graph incomplete; scheduled cash events withheld.');
@@ -737,6 +758,15 @@ function forecast(days = 90) {
     ]) {
       warnings.push(`Obligation graph: ${reason}`);
     }
+  }
+  if (!stsContainment.complete) {
+    warnings.push('Safe-to-Spend containment incomplete; budget and goal commitments may be omitted from this projection.');
+    for (const reason of stsContainment.incompleteReasons) {
+      warnings.push(`Safe-to-Spend: ${reason}`);
+    }
+  }
+  if (knownEventsIncludedDespiteStsIncomplete) {
+    warnings.push('Known obligation graph cash events are included while Safe-to-Spend containment remains incomplete.');
   }
   if (lowest.balance < 1000) warnings.push('Projected cash gets low this period.');
   return {
@@ -759,12 +789,14 @@ function forecast(days = 90) {
         incompleteReasons: graph.completeness?.incompleteReasons || [],
       },
       graphDriven: true,
-      genericBudgetTarget: 0,
+      stsContainment,
+      projectionContainment,
+      genericBudgetTarget: budgetGoalReasons.length === 0 ? 0 : null,
       genericBudget: {
-        target: 0,
-        remaining: 0,
-        complete: true,
-        incompleteReasons: [],
+        target: budgetGoalReasons.length === 0 ? 0 : null,
+        remaining: budgetGoalReasons.length === 0 ? 0 : null,
+        complete: budgetGoalReasons.length === 0,
+        incompleteReasons: budgetGoalReasons,
       },
       billsExcludedFromGenericBudget: true,
       reimbursementsIncluded: false,

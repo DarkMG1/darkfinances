@@ -342,6 +342,7 @@
       <div class="card-title">Safe to Spend</div>
       <div class="stat-value" id="safeToSpendValue">Loading…</div>
       <div class="stat-sub" id="safeToSpendDetail">Checking decision inputs</div>
+      <div id="safeToSpendReasons" class="stat-sub" role="status" aria-live="polite" hidden></div>
       <div id="safeToSpendReserved"></div>
     </div>
 
@@ -690,11 +691,19 @@
       const available = metric?.complete === true && Number.isFinite(metric.value);
       const value = document.getElementById('safeToSpendValue');
       const detail = document.getElementById('safeToSpendDetail');
+      const reasonsHost = document.getElementById('safeToSpendReasons');
+      const reasons = available ? [] : (metric?.incompleteReasons || []);
       value.textContent = available ? fmt(metric.value) : 'Unavailable';
       value.style.color = available && metric.value < 0 ? 'var(--red)' : available ? 'var(--text)' : 'var(--yellow)';
       detail.textContent = available
         ? (metric.provenance?.method || 'Decision inputs complete')
         : 'Required inputs are missing or unresolved; no estimate is shown.';
+      if (reasonsHost) {
+        reasonsHost.innerHTML = reasons.length
+          ? `<ul aria-label="Safe-to-Spend incomplete reasons">${reasons.map((reason) => `<li>${html(reason)}</li>`).join('')}</ul>`
+          : '';
+        reasonsHost.hidden = reasons.length === 0;
+      }
       const reservedHost = document.getElementById('safeToSpendReserved');
       if (reservedHost) {
         const reserved = payload?.data?.obligations?.reserved || payload?.data?.obligationGraph?.reservations || [];
