@@ -2,7 +2,13 @@
 'use strict';
 
 const path = require('path');
-const { runStagedRestore } = require('./staged-restore');
+
+function loadStagedRestore() {
+  const libDir = path.basename(path.dirname(__filename)) === 'bin'
+    ? path.join(__dirname, '..', 'lib')
+    : __dirname;
+  return require(path.join(libDir, 'staged-restore'));
+}
 
 function usage() {
   console.error('Usage: restore-dashboard-runtime.js [--dry-run|--confirm] <bundle.tgz>');
@@ -35,6 +41,7 @@ if (process.env.CONFIRM === '1') {
 }
 
 try {
+  const { runStagedRestore } = loadStagedRestore();
   const result = runStagedRestore({
     archivePath: path.resolve(archivePath),
     destinationRoot: path.resolve(destinationRoot),

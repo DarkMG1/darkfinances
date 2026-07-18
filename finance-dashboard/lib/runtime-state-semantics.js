@@ -6,12 +6,14 @@ const { loadSplitwiseMirrorResolutions } = require('./splitwise-mirror');
 const TERMINAL_REPLACEMENT = new Set(['completed', 'rolled_back', 'legacy_unresolved', 'aborted']);
 const TERMINAL_DELETION = new Set(['completed']);
 const TERMINAL_REPAYMENT = new Set(['completed']);
+const TERMINAL_REIMBURSEMENT_LINK = new Set(['completed']);
 const TERMINAL_BULK = new Set(['completed', 'unresolved']);
 
 const TERMINAL_PROOF_REQUIRED = Object.freeze({
   transactionSagas: new Set(['completed', 'rolled_back']),
   transactionDeletionSagas: new Set(['completed']),
   repaymentConfirmationSagas: new Set(['completed']),
+  reimbursementLinkSagas: new Set(['completed']),
   bulkOperationSagas: new Set(['completed']),
 });
 
@@ -19,6 +21,7 @@ const SAGA_OWNERSHIP_FAMILIES = new Set([
   'transactionSagas',
   'transactionDeletionSagas',
   'repaymentConfirmationSagas',
+  'reimbursementLinkSagas',
   'bulkOperationSagas',
 ]);
 
@@ -89,6 +92,24 @@ function validateRepaymentSagaRecord(saga, label, { mode, isNew } = {}) {
   if (saga.inflow?.id != null) requireString(String(saga.inflow.id), `${label}.inflow.id`);
 }
 
+function validateReimbursementLinkSagaRecord(saga, label, { mode, isNew } = {}) {
+  validateSagaIdentity(saga, label);
+  if (saga.recordVersion !== 1) return;
+  if (mode === 'write' && isNew) {
+    if (saga.inflowId == null || String(saga.inflowId) === '') {
+      throw new Error(`${label} requires inflowId on write`);
+    }
+    if (saga.expenseId == null || String(saga.expenseId) === '') {
+      throw new Error(`${label} requires expenseId on write`);
+    }
+  }
+  if (mode === 'write' && TERMINAL_PROOF_REQUIRED.reimbursementLinkSagas.has(saga.phase) && !saga.terminalAt) {
+    throw new Error(`${label} terminal evidence requires terminalAt`);
+  }
+  if (saga.inflowId != null) requireString(String(saga.inflowId), `${label}.inflowId`);
+  if (saga.expenseId != null) requireString(String(saga.expenseId), `${label}.expenseId`);
+}
+
 function validateBulkSagaRecord(saga, label, { mode, isNew } = {}) {
   validateSagaIdentity(saga, label);
   if (saga.recordVersion !== 1) return;
@@ -150,6 +171,9 @@ const SEMANTIC_VALIDATORS = Object.freeze({
   },
   repaymentConfirmationSagas(value, options) {
     validateSagaCollection('repaymentConfirmationSagas', value, validateRepaymentSagaRecord, options);
+  },
+  reimbursementLinkSagas(value, options) {
+    validateSagaCollection('reimbursementLinkSagas', value, validateReimbursementLinkSagaRecord, options);
   },
   bulkOperationSagas(value, options) {
     validateSagaCollection('bulkOperationSagas', value, validateBulkSagaRecord, options);
@@ -222,6 +246,8 @@ function isTerminalSagaForFamily(family, saga) {
       return saga?.recordVersion === 1 && TERMINAL_DELETION.has(String(saga.phase || ''));
     case 'repaymentConfirmationSagas':
       return saga?.recordVersion === 1 && TERMINAL_REPAYMENT.has(String(saga.phase || ''));
+    case 'reimbursementLinkSagas':
+      return saga?.recordVersion === 1 && TERMINAL_REIMBURSEMENT_LINK.has(String(saga.phase || ''));
     case 'bulkOperationSagas':
       return saga?.recordVersion === 1 && TERMINAL_BULK.has(String(saga.phase || ''));
     default:
@@ -268,6 +294,10 @@ function ownedIdsForFamily(family, saga) {
       for (const allocation of saga.allocations || []) {
         if (allocation?.expenseId != null) ids.add(String(allocation.expenseId));
       }
+      break;
+    case 'reimbursementLinkSagas':
+      if (saga.inflowId != null) ids.add(String(saga.inflowId));
+      if (saga.expenseId != null) ids.add(String(saga.expenseId));
       break;
     case 'bulkOperationSagas':
       for (const item of saga.items || []) {

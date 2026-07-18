@@ -13,7 +13,9 @@ const {
   buildGenerationBinding,
   bindingsEquivalent,
 } = require('../lib/restore-generation-binding');
-const { buildAdmissionTokenForRestore } = require('../lib/restore-quiescence-admission');
+const { buildTestAdmissionToken, registerTestAdmission } = require('./fixtures/admission-token-fixtures');
+const { installTestCoordinatorKeys, installFakeSystemctl, restoreDrillContext } = require('./fixtures/coordinated-test-helpers');
+const { coordinatedLayoutForRoot } = require('../lib/coordinated-operation-layout');
 const { sha256File } = require('../lib/backup-verify');
 const { controlLayoutForDestination } = require('../lib/restore-control-layout');
 const { buildSnapshotManifest } = require('../lib/restore-snapshot');
@@ -29,6 +31,7 @@ const {
   lockPathForLayout,
 } = require('../lib/restore-instance-lock');
 const { writeProductionDashboard, PRODUCTION_SHAPED } = require('./fixtures/backup-bundle-dashboard-fixtures');
+const { findExecutableInPath } = require('../lib/ops-command-runners');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const restoreShell = path.join(repoRoot, 'ops/bin/restore-dashboard-runtime.sh');
@@ -39,17 +42,24 @@ function mkRoot(t, prefix) {
   return root;
 }
 
-function admissionEnv(root, destination, archivePath, extra = {}) {
-  const tokenPath = path.join(root, 'quiescence-admission.json');
-  fs.writeFileSync(tokenPath, `${JSON.stringify(buildAdmissionTokenForRestore({
-    archiveSha256: sha256File(archivePath),
-    destinationRoot: path.resolve(destination),
-  }), null, 2)}\n`, { mode: 0o600 });
-  return {
-    ...process.env,
-    RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
-    ...extra,
-  };
+function stagedRestore(root, destination, archive, options = {}, extra = {}) {
+  const ctx = restoreDrillContext(root, destination, archive, extra);
+  const {
+    runners: optionRunners,
+    env: envOverride,
+    coordinatorRoot: optionCoordinatorRoot,
+    layout: optionLayout,
+    ...restoreOptions
+  } = options;
+  return runStagedRestore({
+    archivePath: archive,
+    destinationRoot: destination,
+    env: envOverride ?? ctx.env,
+    runners: optionRunners ?? ctx.runners,
+    coordinatorRoot: optionCoordinatorRoot ?? ctx.coordinatorRoot,
+    layout: optionLayout ?? ctx.layout,
+    ...restoreOptions,
+  });
 }
 
 function controlJournal(destination) {
@@ -143,23 +153,13 @@ test('staged restore removes destination-only stale files and refuses unknown ex
   fs.writeFileSync(path.join(destination, 'receipts', 'stale-only.jpg'), 'stale\n', { mode: 0o600 });
 
   const archive = buildBundle(root, dashboard);
-  runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
-  });
+  stagedRestore(root, destination, archive, { dryRun: false, confirm: true });
   assert.equal(fs.existsSync(path.join(destination, 'receipts', 'stale-only.jpg')), false);
   assert.notEqual(fs.readFileSync(path.join(destination, 'rules.json'), 'utf8'), '[]\n');
 
   fs.writeFileSync(path.join(destination, 'unexpected.txt'), 'fail\n', { mode: 0o600 });
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: true,
-      env: admissionEnv(root, destination, archive),
+    () => stagedRestore(root, destination, archive, {dryRun: true,
     }),
     /completed restore destination drift detected/,
   );
@@ -175,12 +175,8 @@ test('dry-run performs checks and writes no destination bytes', (t) => {
   const before = destinationSnapshot(destination);
 
   const archive = buildBundle(root, dashboard);
-  const result = runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: true,
-    env: admissionEnv(root, destination, archive),
-  });
+  const result = stagedRestore(root, destination, archive, {dryRun: true,
+    });
   assert.equal(result.dryRun, true);
   assert.equal(result.phase, PHASE.PREFLIGHT_PASSED);
   assert.deepEqual(destinationSnapshot(destination), before);
@@ -194,13 +190,10 @@ test('refuses restore without quiescence admission token', (t) => {
   writeProductionDashboard(dashboard);
   const archive = buildBundle(root, dashboard);
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: true,
+    () => stagedRestore(root, destination, archive, {dryRun: true,
       env: { ...process.env, RESTORE_QUIESCENCE_ADMISSION_PATH: '' },
     }),
-    /missing quiescence admission token/,
+    /missing signed quiescence admission token/,
   );
 });
 
@@ -213,12 +206,7 @@ test('dry-run on missing destination creates no destination tree', (t) => {
   writeTerminalSagaDashboard(dashboard);
   const archive = buildBundle(root, dashboard);
   assert.equal(fs.existsSync(destination), false);
-  runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: true,
-    env: admissionEnv(root, destination, archive),
-  });
+  stagedRestore(root, destination, archive, { dryRun: true });
   assert.equal(fs.existsSync(destination), false);
 });
 
@@ -235,11 +223,7 @@ test('checksum tamper fails before swap', (t) => {
   fs.copyFileSync(`${archive}.manifest.json`, `${tampered}.manifest.json`);
   fs.copyFileSync(`${archive}.sha256`, `${tampered}.sha256`);
   assert.throws(
-    () => runStagedRestore({
-      archivePath: tampered,
-      destinationRoot: destination,
-      dryRun: true,
-      env: admissionEnv(root, destination, tampered),
+    () => stagedRestore(root, destination, tampered, {dryRun: true,
     }),
     /checksum mismatch|archive checksum mismatch|Damaged tar archive|Truncated tar archive|truncated gzip input/i,
   );
@@ -252,11 +236,7 @@ test('active legacy saga without generation binding fails before swap', (t) => {
   writeProductionDashboard(dashboard);
   const archive = buildBundle(root, dashboard, {}, { embedGenerationBindings: false });
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: true,
-      env: admissionEnv(root, destination, archive),
+    () => stagedRestore(root, destination, archive, {dryRun: true,
     }),
     /active restore subjects lack restoreGenerationBinding/,
   );
@@ -288,12 +268,7 @@ test('active saga with matching generation binding restores successfully', (t) =
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
 
-  const result = runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
+  const result = stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
   assert.equal(result.phase, PHASE.COMPLETE);
   assert.equal(fs.existsSync(path.join(destination, 'bulk-operation-sagas.json')), true);
@@ -327,12 +302,7 @@ test('active reimbursement link saga with matching generation binding restores s
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'reimb-links.json'), '{"schemaVersion":2,"links":[]}\n', { mode: 0o600 });
 
-  const result = runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
+  const result = stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
   assert.equal(result.phase, PHASE.COMPLETE);
   assert.equal(fs.existsSync(path.join(destination, 'reimbursement-link-sagas.json')), true);
@@ -349,11 +319,8 @@ test('active saga with mismatched Actual/release generation fails before swap', 
   });
 
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
+    () => stagedRestore(root, destination, archive, {
       dryRun: true,
-      env: admissionEnv(root, destination, archive),
       actualDataGeneration: 'c'.repeat(64),
       releaseManifestDigest: 'b'.repeat(64),
     }),
@@ -384,24 +351,15 @@ test('interruption after snapshot capture can resume via fixed control journal w
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
 
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: false,
+    () => stagedRestore(root, destination, archive, {dryRun: false,
       confirm: true,
-      env: admissionEnv(root, destination, archive, {
+          }, {
         RESTORE_FAULT_SCHEDULE: JSON.stringify([{ point: 'after:snapshot-capture', throwError: 'interrupt' }]),
       }),
-    }),
     /interrupt/,
   );
 
-  const resumed = runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
+  const resumed = stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
   assert.equal(resumed.phase, PHASE.COMPLETE);
   assert.equal(resumed.resumed, true);
@@ -428,15 +386,11 @@ test('interruption during swap rolls back entire prior generation byte-for-byte'
   const beforeManifest = buildSnapshotManifest(destination, require('../lib/backup-bundle-inventory').loadBackupStateInventory());
 
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: false,
+    () => stagedRestore(root, destination, archive, {dryRun: false,
       confirm: true,
-      env: admissionEnv(root, destination, archive, {
+          }, {
         RESTORE_FAULT_SCHEDULE: JSON.stringify([{ point: 'after:swap-file', detail: 'rules.json', throwError: 'swap interrupt' }]),
       }),
-    }),
     /swap interrupt/,
   );
 
@@ -457,15 +411,11 @@ test('sparse destination rollback removes introduced files and restores prior by
   const beforeManifest = buildSnapshotManifest(destination, require('../lib/backup-bundle-inventory').loadBackupStateInventory());
 
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: false,
+    () => stagedRestore(root, destination, archive, {dryRun: false,
       confirm: true,
-      env: admissionEnv(root, destination, archive, {
+          }, {
         RESTORE_FAULT_SCHEDULE: JSON.stringify([{ point: 'after:swap-file', detail: 'account-overrides.json', throwError: 'sparse interrupt' }]),
       }),
-    }),
     /sparse interrupt/,
   );
 
@@ -482,12 +432,8 @@ test('ENOSPC during preflight fails before swap', (t) => {
   writeProductionDashboard(dashboard, { overrides: { bulkOperationSagas: { schemaVersion: 1, sagas: {} } } });
   const archive = buildBundle(root, dashboard);
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: true,
-      env: admissionEnv(root, destination, archive, { RESTORE_TEST_ENOSPC: '1' }),
-    }),
+    () => stagedRestore(root, destination, archive, {dryRun: true,
+          }, { RESTORE_TEST_ENOSPC: '1' }),
     /insufficient disk space/,
   );
 });
@@ -501,15 +447,11 @@ test('permission fault during swap surfaces failure', (t) => {
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: false,
+    () => stagedRestore(root, destination, archive, {dryRun: false,
       confirm: true,
-      env: admissionEnv(root, destination, archive, {
+          }, {
         RESTORE_FAULT_SCHEDULE: JSON.stringify([{ point: 'before:swap-file', detail: 'rules.json', code: 'EACCES' }]),
       }),
-    }),
     /permission denied|EACCES/,
   );
 });
@@ -525,7 +467,7 @@ test('relocated install with no repository restores via bundled tooling only', (
 
   const relocated = spawnSync('bash', [restoreShell, archive], {
     env: {
-      ...admissionEnv(root, destination, archive),
+      ...restoreDrillContext(root, destination, archive).env,
       CONFIRM: '1',
       FINANCE_DASHBOARD_DIR: destination,
       DARKFINANCES_REPO_ROOT: path.join(root, 'missing-repo'),
@@ -549,7 +491,7 @@ test('restore drill shell wrapper dry-run exits 2 without writes', (t) => {
 
   const dryRun = spawnSync('bash', [restoreShell, archive], {
     env: {
-      ...admissionEnv(root, destination, archive),
+      ...restoreDrillContext(root, destination, archive).env,
       FINANCE_DASHBOARD_DIR: destination,
     },
     encoding: 'utf8',
@@ -596,12 +538,7 @@ test('terminal-only journal and sagas restore without per-record binding', (t) =
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  const result = runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
+  const result = stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
   assert.equal(result.phase, PHASE.COMPLETE);
 });
@@ -614,21 +551,11 @@ test('completed restore journal short-circuits repeat apply', (t) => {
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
+  stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
   const journal = controlJournal(destination);
   assert.equal(journal.phase, PHASE.COMPLETE);
-  const again = runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
+  const again = stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
   assert.equal(again.resumed, true);
 });
@@ -641,24 +568,14 @@ test('archive substitution after COMPLETE is rejected on replay', (t) => {
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
+  stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
   const bytes = fs.readFileSync(archive);
   bytes[bytes.length - 20] ^= 0xff;
   fs.writeFileSync(archive, bytes);
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: false,
-      confirm: true,
-      env: admissionEnv(root, destination, archive),
-    }),
+    () => stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
+  }),
     /archive substitution|archive checksum mismatch/i,
   );
 });
@@ -688,12 +605,7 @@ test('legacy v1 completed replacement saga is not mutated with generation bindin
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
+  stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
   const sagas = JSON.parse(fs.readFileSync(path.join(destination, 'transaction-sagas.json'), 'utf8'));
   assert.equal(sagas.sagas.t1[BINDING_FIELD], undefined);
@@ -709,11 +621,7 @@ test('rejects symlink destination root', (t) => {
   writeTerminalSagaDashboard(dashboard);
   const archive = buildBundle(root, dashboard);
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: linkDestination,
-      dryRun: true,
-      env: admissionEnv(root, linkDestination, archive),
+    () => stagedRestore(root, linkDestination, archive, {dryRun: true,
     }),
     /symbolic link/,
   );
@@ -725,21 +633,34 @@ test('expired admission token is rejected', (t) => {
   const destination = path.join(root, 'destination');
   writeTerminalSagaDashboard(dashboard);
   const archive = buildBundle(root, dashboard);
-  const tokenPath = path.join(root, 'expired.json');
-  const expired = buildAdmissionTokenForRestore({
-    archiveSha256: sha256File(archive),
-    destinationRoot: path.resolve(destination),
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(layout.workRoot, { recursive: true, mode: 0o700 });
+  const keys = installTestCoordinatorKeys(root);
+  const { token } = buildTestAdmissionToken({
+    keyPair: keys.pair,
     ttlMs: -1000,
+    bindings: {
+      archiveSha256: sha256File(archive),
+      destinationRoot: path.resolve(destination),
+    },
   });
-  fs.writeFileSync(tokenPath, `${JSON.stringify(expired, null, 2)}\n`, { mode: 0o600 });
+  registerTestAdmission(layout, token);
+  const tokenPath = path.join(layout.workRoot, 'expired.json');
+  fs.writeFileSync(tokenPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
+  const fakeBin = installFakeSystemctl(root);
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: true,
-      env: { ...process.env, RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath },
+    () => stagedRestore(root, destination, archive, {dryRun: true,
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
+        COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+        DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+      },
     }),
-    /expired/,
+    /expired|expiresAt must be after issuedAt/,
   );
 });
 
@@ -749,19 +670,40 @@ test('wrong admission archive binding is rejected before mutation', (t) => {
   const destination = path.join(root, 'destination');
   writeTerminalSagaDashboard(dashboard);
   const archive = buildBundle(root, dashboard);
-  const tokenPath = path.join(root, 'wrong-archive.json');
-  fs.writeFileSync(tokenPath, `${JSON.stringify(buildAdmissionTokenForRestore({
-    archiveSha256: 'f'.repeat(64),
-    destinationRoot: path.resolve(destination),
-  }), null, 2)}\n`, { mode: 0o600 });
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(layout.workRoot, { recursive: true, mode: 0o700 });
+  const keys = installTestCoordinatorKeys(root);
+  const { token } = buildTestAdmissionToken({
+    keyPair: keys.pair,
+    bindings: {
+      archiveSha256: 'f'.repeat(64),
+      destinationRoot: path.resolve(destination),
+    },
+  });
+  registerTestAdmission(layout, token);
+  const tokenPath = path.join(layout.workRoot, 'wrong-archive.json');
+  fs.writeFileSync(tokenPath, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  const { createMockRunners } = require('./fixtures/coordinated-backup-fixtures');
+  const { quiescedUnits } = require('./fixtures/coordinated-test-helpers');
+  const fakeBin = installFakeSystemctl(root, quiescedUnits());
+  const runners = createMockRunners({ units: quiescedUnits() });
   assert.throws(
     () => runStagedRestore({
       archivePath: archive,
       destinationRoot: destination,
       dryRun: false,
       confirm: true,
-      env: { ...process.env, RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath },
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+        RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
+        COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+        DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+      },
+      runners,
     }),
     /archive binding mismatch/,
   );
@@ -775,7 +717,7 @@ test('rollback failure leaves recoverable journal and next invocation converges'
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  const faultEnv = admissionEnv(root, destination, archive, {
+  const faultCtx = restoreDrillContext(root, destination, archive, {
     RESTORE_FAULT_SCHEDULE: JSON.stringify([
       { point: 'after:swap-file', detail: 'rules.json', throwError: 'swap interrupt' },
       { point: 'after:rollback-restore', detail: 'rules.json', throwError: 'rollback interrupt' },
@@ -787,7 +729,8 @@ test('rollback failure leaves recoverable journal and next invocation converges'
       destinationRoot: destination,
       dryRun: false,
       confirm: true,
-      env: faultEnv,
+      env: faultCtx.env,
+      runners: faultCtx.runners,
     }),
     /rollback interrupt/,
   );
@@ -795,13 +738,7 @@ test('rollback failure leaves recoverable journal and next invocation converges'
   assert.equal(failedJournal.phase, PHASE.ROLLBACK_FAILED);
   assert.ok(failedJournal.completedSwaps.length > 0);
 
-  const resumed = runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
-  });
+  const resumed = stagedRestore(root, destination, archive, { dryRun: false, confirm: true });
   assert.equal(resumed.phase, PHASE.COMPLETE);
 });
 
@@ -813,12 +750,7 @@ test('COMPLETE cleanup retains journal only and removes work and snapshot trees'
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
+  stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
   const layout = controlLayoutForDestination(destination);
   assert.equal(fs.existsSync(layout.journalPath), true);
@@ -839,13 +771,8 @@ test('rejects symlink restore journal path', (t) => {
   fs.writeFileSync(path.join(root, 'journal-outside.json'), '{}\n', { mode: 0o600 });
   fs.symlinkSync(path.join(root, 'journal-outside.json'), layout.journalPath);
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: false,
-      confirm: true,
-      env: admissionEnv(root, destination, archive),
-    }),
+    () => stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
+  }),
     /symbolic link/,
   );
 });
@@ -862,20 +789,17 @@ test('pre-swap generation evidence change is rejected', (t) => {
   const releasePath = path.join(root, 'release-manifest.json');
   fs.writeFileSync(releasePath, `${JSON.stringify({ schemaVersion: 1, digest: releaseDigest }, null, 2)}\n`, { mode: 0o600 });
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
+    () => stagedRestore(root, destination, archive, {
       dryRun: false,
       confirm: true,
       releaseManifestPath: releasePath,
-      env: admissionEnv(root, destination, archive, {
-        RESTORE_FAULT_SCHEDULE: JSON.stringify([{ point: 'after:binding-validate' }]),
-      }),
       injectFault: (point) => {
         if (point === 'after:binding-validate') {
           fs.writeFileSync(releasePath, `${JSON.stringify({ schemaVersion: 1, digest: 'b'.repeat(64) }, null, 2)}\n`, { mode: 0o600 });
         }
       },
+    }, {
+      RESTORE_FAULT_SCHEDULE: JSON.stringify([{ point: 'after:binding-validate' }]),
     }),
     /destination release generation does not match bundle binding/,
   );
@@ -889,23 +813,16 @@ test('shell wrapper resumes interrupted restore without explicit workRoot', (t) 
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  const tokenPath = path.join(root, 'admission.json');
-  fs.writeFileSync(tokenPath, `${JSON.stringify(buildAdmissionTokenForRestore({
-    archiveSha256: sha256File(archive),
-    destinationRoot: path.resolve(destination),
-  }), null, 2)}\n`, { mode: 0o600 });
   const faultEnv = {
-    ...process.env,
+    ...restoreDrillContext(root, destination, archive).env,
     FINANCE_DASHBOARD_DIR: destination,
-    RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
     RESTORE_FAULT_SCHEDULE: JSON.stringify([{ point: 'after:snapshot-capture', throwError: 'shell interrupt' }]),
   };
   const first = spawnSync(restoreShell, [archive], { encoding: 'utf8', env: faultEnv });
   assert.notEqual(first.status, 0, first.stderr);
   const resumeEnv = {
-    ...process.env,
+    ...restoreDrillContext(root, destination, archive).env,
     FINANCE_DASHBOARD_DIR: destination,
-    RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
     CONFIRM: '1',
   };
   const second = spawnSync(restoreShell, [archive], { encoding: 'utf8', env: resumeEnv });
@@ -916,12 +833,7 @@ test('shell wrapper resumes interrupted restore without explicit workRoot', (t) 
 function completeRestore(root, destination, archive) {
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
+  stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
 }
 
@@ -934,13 +846,8 @@ test('COMPLETE live replay detects deleted runtime content', (t) => {
   completeRestore(root, destination, archive);
   fs.rmSync(path.join(destination, 'rules.json'), { force: true });
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: false,
-      confirm: true,
-      env: admissionEnv(root, destination, archive),
-    }),
+    () => stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
+  }),
     /completed restore destination drift detected/,
   );
 });
@@ -954,23 +861,14 @@ test('COMPLETE live replay detects mode tamper and unknown runtime files', (t) =
   completeRestore(root, destination, archive);
   fs.chmodSync(path.join(destination, 'rules.json'), 0o644);
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: false,
-      confirm: true,
-      env: admissionEnv(root, destination, archive),
-    }),
+    () => stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
+  }),
     /completed restore destination drift detected/,
   );
   fs.chmodSync(path.join(destination, 'rules.json'), 0o600);
   fs.writeFileSync(path.join(destination, 'drift-extra.txt'), 'x\n', { mode: 0o600 });
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: true,
-      env: admissionEnv(root, destination, archive),
+    () => stagedRestore(root, destination, archive, {dryRun: true,
     }),
     /completed restore destination drift detected/,
   );
@@ -987,14 +885,10 @@ test('COMPLETE replay detects generation evidence drift', (t) => {
   const releasePath = path.join(root, 'release-manifest.json');
   fs.writeFileSync(releasePath, `${JSON.stringify({ schemaVersion: 1, digest: 'b'.repeat(64) }, null, 2)}\n`, { mode: 0o600 });
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: false,
+    () => stagedRestore(root, destination, archive, {dryRun: false,
       confirm: true,
       releaseManifestPath: releasePath,
-      env: admissionEnv(root, destination, archive),
-    }),
+          }),
     /completed restore destination drift detected/,
   );
 });
@@ -1008,11 +902,7 @@ test('dry-run against COMPLETE journal reports destination drift without false c
   completeRestore(root, destination, archive);
   fs.writeFileSync(path.join(destination, 'rules.json'), '{"rules":[{"id":"tampered"}]}\n', { mode: 0o600 });
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: true,
-      env: admissionEnv(root, destination, archive),
+    () => stagedRestore(root, destination, archive, {dryRun: true,
     }),
     /completed restore destination drift detected/,
   );
@@ -1031,6 +921,44 @@ test('oversized restore journal is rejected with controlled error', (t) => {
   );
 });
 
+function isolatedToolPath(root, toolNames) {
+  const bin = path.join(root, 'isolated-bin');
+  fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+  for (const name of toolNames) {
+    const resolved = findExecutableInPath(name, process.env);
+    if (!resolved) throw new Error(`${name} not found for test setup`);
+    fs.symlinkSync(resolved, path.join(bin, name));
+  }
+  return bin;
+}
+
+test('shell live restore releases lock when writer discovery fails on PATH', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-lock-writer-fail-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeTerminalSagaDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
+  const ctx = restoreDrillContext(root, destination, archive);
+  const layout = controlLayoutForDestination(destination);
+  const tarOnlyPath = isolatedToolPath(root, ['tar']);
+  assert.throws(
+    () => runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      dryRun: false,
+      confirm: true,
+      env: {
+        ...ctx.env,
+        PATH: tarOnlyPath,
+      },
+    }),
+    /live-quiescent|systemctl unavailable|unknown state/i,
+  );
+  assert.equal(fs.existsSync(lockPathForLayout(layout)), false);
+});
+
 test('concurrent live restore rejects second invocation while first holds lock', async (t) => {
   const root = mkRoot(t, 'darkfinances-restore-concurrent-');
   const dashboard = path.join(root, 'dashboard');
@@ -1041,15 +969,10 @@ test('concurrent live restore rejects second invocation while first holds lock',
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
   const ready = path.join(root, 'child-ready');
   const release = path.join(root, 'release-child');
-  const tokenPath = path.join(root, 'admission.json');
-  fs.writeFileSync(tokenPath, `${JSON.stringify(buildAdmissionTokenForRestore({
-    archiveSha256: sha256File(archive),
-    destinationRoot: path.resolve(destination),
-  }), null, 2)}\n`, { mode: 0o600 });
+  const baseEnv = restoreDrillContext(root, destination, archive).env;
   const childEnv = {
-    ...process.env,
+    ...baseEnv,
     FINANCE_DASHBOARD_DIR: destination,
-    RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
     RESTORE_FAULT_SCHEDULE: JSON.stringify([{
       point: 'after:preflight',
       createReadyFile: ready,
@@ -1079,9 +1002,8 @@ test('concurrent live restore rejects second invocation while first holds lock',
   ], {
     encoding: 'utf8',
     env: {
-      ...process.env,
+      ...baseEnv,
       FINANCE_DASHBOARD_DIR: destination,
-      RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
     },
   });
   assert.match(blocked.stderr, /restore already in progress/);
@@ -1107,12 +1029,7 @@ test('stale dead restore lock is removed and restore proceeds', (t) => {
     destinationRoot: layout.canonicalDestination,
     createdAt: new Date().toISOString(),
   }, null, 2)}\n`, { mode: 0o600 });
-  const result = runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    dryRun: false,
-    confirm: true,
-    env: admissionEnv(root, destination, archive),
+  const result = stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
   assert.equal(result.phase, PHASE.COMPLETE);
   assert.equal(fs.existsSync(lockPathForLayout(layout)), false);
@@ -1130,26 +1047,16 @@ test('malformed and symlink restore locks fail safe', (t) => {
   fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
   fs.writeFileSync(layout.controlRoot + '/restore.lock', 'not-json', { mode: 0o600 });
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: false,
-      confirm: true,
-      env: admissionEnv(root, destination, archive),
-    }),
+    () => stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
+  }),
     /restore lock unavailable/,
   );
   fs.rmSync(layout.controlRoot + '/restore.lock', { force: true });
   fs.writeFileSync(path.join(root, 'outside-lock'), '{}\n', { mode: 0o600 });
   fs.symlinkSync(path.join(root, 'outside-lock'), layout.controlRoot + '/restore.lock');
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
-      dryRun: false,
-      confirm: true,
-      env: admissionEnv(root, destination, archive),
-    }),
+    () => stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
+  }),
     /symbolic link/,
   );
 });

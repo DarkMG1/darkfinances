@@ -25,8 +25,18 @@ const {
 const {
   requireQuiescenceAdmission,
   assertAdmissionBindings,
-  buildAdmissionTokenForRestore,
+  issueSignedAdmissionToken,
+  consumeAdmissionToken,
+  revokeAdmissionToken,
 } = require('./restore-quiescence-admission');
+const { coordinatedLayoutForRoot } = require('./coordinated-operation-layout');
+const {
+  assertAllWritersQuiescentForAdmission,
+  captureWriterState,
+  previewWritersForRestore,
+} = require('./writer-quiescence');
+const { enumerateWriters, loadWriterInventory } = require('./writer-inventory');
+const { createDefaultRunners } = require('./ops-command-runners');
 const {
   controlLayoutForDestination,
   ensureControlRoot,
@@ -594,20 +604,27 @@ function runStagedRestore(options = {}) {
   const restoreId = restoreIdForDestination(canonicalDestination);
 
   if (dryRun) {
+    const coordinatorRoot = options.coordinatorRoot || env.DARKFINANCES_BACKUP_DIR || null;
     requireQuiescenceAdmission({
       ...options,
       env,
+      coordinatorRoot,
       requireBindings: true,
       bindingContext: {
         archiveSha256,
         destinationRoot: canonicalDestination,
       },
+      layout: options.layout || (coordinatorRoot ? coordinatedLayoutForRoot(coordinatorRoot) : null),
+      verifyLiveWriters: false,
     });
   }
 
   let journal = null;
   let resumeFromJournal = false;
   let restoreLock = null;
+  let admission = null;
+  let admissionConsumed = false;
+  let coordinatorLayout = null;
   const sidecarManifest = readManifestFromArchive(archivePath);
 
   if (persist) {
@@ -785,6 +802,18 @@ function runStagedRestore(options = {}) {
     injectFault?.('after:preflight');
 
     if (dryRun) {
+      const writerInventory = loadWriterInventory();
+      const runnersForPreview = options.runners || createDefaultRunners(env);
+      const writerPreview = previewWritersForRestore({
+        inventory: writerInventory,
+        env,
+        runners: runnersForPreview,
+        dashboardDir: canonicalDestination,
+        allowOwnRestoreLock: true,
+      }, {
+        label: 'restore dry-run',
+        failOnActive: env.RESTORE_DRY_RUN_STRICT === '1',
+      });
       const report = {
         manifestArtifactId: manifest.artifact.id,
         generationBindingDigest: bindingResult.expectedBinding.dashboardStateId,
@@ -797,24 +826,117 @@ function runStagedRestore(options = {}) {
         dryRun: true,
         stagedTreeDigest: stagedDigest,
         archiveSha256,
+        writerPreview: {
+          quiescent: writerPreview.quiescent,
+          writers: writerPreview.writers,
+        },
+        warnings: writerPreview.warnings,
       };
       return { dryRun: true, resumed: false, phase: PHASE.PREFLIGHT_PASSED, report };
     }
 
-    const admission = requireQuiescenceAdmission({
-      ...options,
-      env,
-      requireBindings: true,
-      bindingContext: {
-        archiveSha256,
-        destinationRoot: canonicalDestination,
-        manifestArtifactId: manifest.artifact.id,
-      },
-    });
+    admission = null;
+    admissionConsumed = false;
+    coordinatorLayout = options.layout
+      || (options.coordinatorRoot ? coordinatedLayoutForRoot(options.coordinatorRoot) : null);
+    const writerInventory = loadWriterInventory();
+    const writers = enumerateWriters(writerInventory, env);
+    const runnersForLive = options.runners || createDefaultRunners(env);
+    const liveSnapshots = new Map();
+    for (const writer of writers) {
+      liveSnapshots.set(writer.id, captureWriterState(writer, {
+        inventory: writerInventory,
+        env,
+        runners: runnersForLive,
+        dashboardDir: canonicalDestination,
+        allowOwnRestoreLock: true,
+      }));
+    }
+    if (options.coordinatedSession) {
+      const session = options.coordinatedSession;
+      for (const [id, prior] of (session.snapshotsById || new Map()).entries()) {
+        const current = liveSnapshots.get(id);
+        if (current && prior) {
+          current.originallyActive = prior.originallyActive;
+          current.originallyEnabled = prior.originallyEnabled;
+          current.originallyRunning = prior.originallyRunning;
+          current.restartPolicy = prior.restartPolicy ?? current.restartPolicy ?? null;
+        }
+      }
+      assertAllWritersQuiescentForAdmission({
+        ...session.context,
+        inventory: writerInventory,
+        writers,
+        snapshotsById: liveSnapshots,
+        dashboardDir: canonicalDestination,
+        allowOwnRestoreLock: true,
+      });
+      admission = issueSignedAdmissionToken({
+        layout: session.layout,
+        runId: session.runId,
+        journalId: session.journalId,
+        snapshotsById: liveSnapshots,
+        context: { ...session.context, inventory: writerInventory, writers, dashboardDir: canonicalDestination },
+        env,
+        privateKey: session.privateKey,
+        bindings: {
+          archiveSha256,
+          destinationRoot: canonicalDestination,
+          manifestArtifactId: manifest.artifact.id,
+          releaseManifestDigest: bindingResult.expectedBinding.releaseManifestDigest,
+          coordinatedManifestDigest: options.coordinatedManifestDigest
+            || bindingResult.expectedBinding.dashboardStateId,
+          writerInventoryDigest: session.writerInventoryDigest,
+          actualDataGeneration: bindingResult.expectedBinding.actualDataGeneration,
+        },
+      });
+      session.onAdmissionIssued?.(admission);
+      const tokenPath = path.join(session.layout.workRoot, `restore-admission-${session.runId}.json`);
+      writeFileAtomic(tokenPath, `${JSON.stringify(admission, null, 2)}\n`, 0o600);
+      env.RESTORE_QUIESCENCE_ADMISSION_PATH = tokenPath;
+    } else {
+      admission = requireQuiescenceAdmission({
+        ...options,
+        env,
+        requireBindings: true,
+        layout: coordinatorLayout,
+        bindingContext: {
+          archiveSha256,
+          destinationRoot: canonicalDestination,
+          manifestArtifactId: manifest.artifact.id,
+          releaseManifestDigest: bindingResult.expectedBinding.releaseManifestDigest,
+          actualDataGeneration: bindingResult.expectedBinding.actualDataGeneration,
+          coordinatedManifestDigest: options.coordinatedManifestDigest,
+          writerInventoryDigest: options.writerInventoryDigest,
+        },
+        writerContext: {
+          inventory: writerInventory,
+          env,
+          runners: runnersForLive,
+          dashboardDir: canonicalDestination,
+          writers,
+          snapshotsById: liveSnapshots,
+          allowOwnRestoreLock: true,
+        },
+      });
+      assertAllWritersQuiescentForAdmission({
+        inventory: writerInventory,
+        env,
+        runners: runnersForLive,
+        dashboardDir: canonicalDestination,
+        writers,
+        snapshotsById: liveSnapshots,
+        allowOwnRestoreLock: true,
+      }, admission.writers);
+    }
     assertAdmissionBindings(admission, {
       archiveSha256,
       destinationRoot: canonicalDestination,
       manifestArtifactId: manifest.artifact.id,
+      releaseManifestDigest: bindingResult.expectedBinding.releaseManifestDigest,
+      actualDataGeneration: bindingResult.expectedBinding.actualDataGeneration,
+      coordinatedManifestDigest: options.coordinatedManifestDigest,
+      writerInventoryDigest: options.writerInventoryDigest,
     });
 
     const freshEvidence = readDestinationGenerationEvidence({
@@ -893,6 +1015,11 @@ function runStagedRestore(options = {}) {
     writeJournal(layout.journalPath, journal, true);
     cleanupControlArtifacts(layout, { keepJournal: true });
     fsyncPath(layout.controlRoot, true);
+    if (admission && coordinatorLayout && options.skipAdmissionConsumption !== true) {
+      consumeAdmissionToken(coordinatorLayout, admission);
+      admissionConsumed = true;
+      options.coordinatedSession?.onAdmissionConsumed?.();
+    }
 
     return {
       dryRun: false,
@@ -901,6 +1028,9 @@ function runStagedRestore(options = {}) {
       report,
     };
   } catch (error) {
+    if (admission && !admissionConsumed && coordinatorLayout) {
+      revokeAdmissionToken(coordinatorLayout, admission, 'staged_restore_failed');
+    }
     if (persist && journal && journal.phase !== PHASE.COMPLETE) {
       updateJournal(journal, { phase: PHASE.FAILED, error: redactPath(error.message) });
       writeJournal(layout.journalPath, journal, true);
@@ -916,6 +1046,9 @@ function runStagedRestore(options = {}) {
             persist: true,
           });
         } catch (rollbackError) {
+          if (admission && !admissionConsumed && coordinatorLayout) {
+            revokeAdmissionToken(coordinatorLayout, admission, 'rollback_failed');
+          }
           throw safeError(new Error(`${error.message}; rollback failed: ${rollbackError.message}`));
         }
       }
@@ -942,7 +1075,6 @@ module.exports = {
   swapRuntimeTree,
   parseFaultSchedule,
   restoreIdForDestination,
-  buildAdmissionTokenForRestore,
   cleanupControlArtifacts,
   performRollback,
   JOURNAL_MAX_BYTES,
