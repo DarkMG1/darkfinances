@@ -25,7 +25,7 @@ test('screen wraps entry onError before mapping', () => {
   const mapIdx = handleErrorBlock.indexOf('mapMutationApiError');
   assert.ok(onErrorIdx >= 0 && mapIdx >= 0);
   assert.ok(onErrorIdx < mapIdx, 'onError callback must run before mapMutationApiError');
-  assert.match(handleErrorBlock, /try\s*\{[\s\S]*entry\.lastError/);
+  assert.match(handleErrorBlock, /safeMutationCallback\(entry\.lastError/);
 });
 
 test('hooks await error reconciliation before onSettled unlock', () => {

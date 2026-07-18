@@ -257,11 +257,12 @@ export function GroupedBars({ width, height = 180, labels, seriesA, seriesB, col
 // Tappable, horizontally-scrollable monthly-spend bars. Each column jumps the
 // Spending tab to that month; the selected column is highlighted and shows its
 // total. Auto-centers on the selected month (i.e. the most recent) on mount.
-export function MonthBars({ data, selected, onSelect, height = 120 }: {
+export function MonthBars({ data, selected, onSelect, height = 120, disabled = false }: {
   data: { month: string; spend: number | null }[];
   selected: string;
   onSelect: (m: string) => void;
   height?: number;
+  disabled?: boolean;
 }) {
   const scrollRef = useRef<ScrollView>(null);
   const [viewW, setViewW] = useState(0);
@@ -304,10 +305,11 @@ export function MonthBars({ data, selected, onSelect, height = 120 }: {
             <Pressable
               key={d.month}
               accessibilityRole="button"
-              accessibilityState={{ selected: on }}
+              accessibilityState={{ selected: on, disabled }}
               accessibilityLabel={`${monthLabel(d.month)}, ${valueLabel} spent`}
-              onPress={() => { haptics.tap(); onSelect(d.month); }}
-              style={[styles.barCol, { width: COL_W, height }]}
+              onPress={() => { if (disabled) return; haptics.tap(); onSelect(d.month); }}
+              disabled={disabled}
+              style={[styles.barCol, { width: COL_W, height }, disabled && { opacity: 0.45 }]}
               hitSlop={4}
             >
               <View style={styles.barPlot}>
@@ -344,35 +346,40 @@ export function MonthBars({ data, selected, onSelect, height = 120 }: {
 // Centered `‹ June 2026 ›` arrow header sitting atop the MonthBars. `‹`/`›` step
 // through `months` (disabled at the earliest data month / at the current month);
 // tapping the title jumps back to the current month.
-export function MonthNavigator({ months, selected, onSelect, currentKey }: {
+export function MonthNavigator({ months, selected, onSelect, currentKey, disabled = false }: {
   months: { month: string; spend: number | null }[];
   selected: string;
   onSelect: (m: string) => void;
   currentKey: string;
+  disabled?: boolean;
 }) {
   const idx = months.findIndex((m) => m.month === selected);
-  const canPrev = idx > 0;
-  const canNext = idx >= 0 && idx < months.length - 1;
+  const canPrev = idx > 0 && !disabled;
+  const canNext = idx >= 0 && idx < months.length - 1 && !disabled;
   const step = (delta: number) => {
+    if (disabled) return;
     const t = months[idx + delta];
     if (!t) return;
     haptics.tap();
     onSelect(t.month);
   };
   return (
-    <View style={styles.navWrap}>
+    <View style={[styles.navWrap, disabled && { opacity: 0.45 }]}>
       <View style={styles.navHeader}>
         <Pressable
           disabled={!canPrev}
           onPress={() => step(-1)}
           hitSlop={12}
+          accessibilityState={{ disabled: !canPrev }}
           style={({ pressed }) => [styles.navBtn, pressed && canPrev && { opacity: 0.5 }]}
         >
           <Text style={[styles.navArrow, !canPrev && styles.navArrowOff]}>‹</Text>
         </Pressable>
         <Pressable
-          onPress={() => { if (selected !== currentKey) { haptics.tap(); onSelect(currentKey); } }}
-          style={({ pressed }) => [pressed && selected !== currentKey && { opacity: 0.5 }]}
+          disabled={disabled}
+          onPress={() => { if (disabled || selected === currentKey) return; haptics.tap(); onSelect(currentKey); }}
+          accessibilityState={{ disabled }}
+          style={({ pressed }) => [pressed && !disabled && selected !== currentKey && { opacity: 0.5 }]}
         >
           <Text style={styles.navTitle}>{selected === currentKey ? 'This month' : monthLabel(selected)}</Text>
         </Pressable>
@@ -380,12 +387,13 @@ export function MonthNavigator({ months, selected, onSelect, currentKey }: {
           disabled={!canNext}
           onPress={() => step(1)}
           hitSlop={12}
+          accessibilityState={{ disabled: !canNext }}
           style={({ pressed }) => [styles.navBtn, pressed && canNext && { opacity: 0.5 }]}
         >
           <Text style={[styles.navArrow, !canNext && styles.navArrowOff]}>›</Text>
         </Pressable>
       </View>
-      <MonthBars data={months} selected={selected} onSelect={onSelect} />
+      <MonthBars data={months} selected={selected} onSelect={onSelect} disabled={disabled} />
     </View>
   );
 }

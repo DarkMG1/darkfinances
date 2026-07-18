@@ -227,6 +227,7 @@ export default function Goals() {
           placeholderTextColor={colors.muted}
           keyboardType="decimal-pad"
           accessibilityLabel="Target amount"
+          accessibilityHint={form.getFieldError('target') ? `Error: ${form.getFieldError('target')}` : undefined}
         />
         <MutationFieldError error={form.getFieldError('target')} testID="goals-target-error" />
 
@@ -241,6 +242,7 @@ export default function Goals() {
           placeholderTextColor={colors.muted}
           keyboardType="decimal-pad"
           accessibilityLabel="Allocated amount"
+          accessibilityHint={form.getFieldError('current') ? `Error: ${form.getFieldError('current')}` : undefined}
         />
         <MutationFieldError error={form.getFieldError('current')} testID="goals-current-error" />
         {accountId ? <Text style={styles.help}>The linked account limits total allocations; its full balance is not counted separately for every goal.</Text> : null}
@@ -257,6 +259,7 @@ export default function Goals() {
           placeholderTextColor={colors.muted}
           autoCapitalize="none"
           accessibilityLabel="Deadline"
+          accessibilityHint={form.getFieldError('deadline') ? `Error: ${form.getFieldError('deadline')}` : undefined}
         />
         <MutationFieldError error={form.getFieldError('deadline')} testID="goals-deadline-error" />
 

@@ -31,6 +31,7 @@ import { ReimbLinkEndpoint, ReimbTxnRef, Transaction } from '@/api/generated/typ
 import { Card, CardTitle, TagChips } from '@/components/ui';
 import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
 import { useMutationScreen } from '@/hooks/useMutationScreen';
+import { useMutationScreenFieldInvalidation } from '@/hooks/useMutationScreenFieldInvalidation';
 import { haptics } from '@/lib/haptics';
 import { formatAllocationDollars, parseStrictAllocationDollars } from '@/lib/allocation-parse';
 import { CapturedReceipt, pickReceiptFromLibrary, scanReceiptFromCamera } from '@/lib/receipts';
@@ -179,7 +180,9 @@ export default function TransactionDetail() {
   const payeeAction = screen.bind({ key: 'payee', mutation: setPayee, mutationLabel: 'Rename payee' });
   const notesAction = screen.bind({ key: 'notes', mutation: setNotes, mutationLabel: 'Save notes', fieldOrder: ['notes'] });
   const modalLocked = screen.isLocked;
-  const dateSaving = modalLocked && screen.activeKey === 'date';
+  const actionSaving = (key: string) => modalLocked && screen.activeKey === key;
+  const savingNotes = actionSaving('notes');
+  const dateSaving = actionSaving('date');
   const allowBackRef = useRef(false);
   const requestModalClose = (close: () => void) => {
     if (modalLocked) return;
@@ -289,6 +292,7 @@ export default function TransactionDetail() {
   };
 
   const pickCategory = (cid: string, categoryName: string) => {
+    if (modalLocked) return;
     const previous = { category, categoryId };
     setCategoryName(categoryName);
     setCategoryId(cid);
@@ -390,7 +394,7 @@ export default function TransactionDetail() {
     ]);
   };
   const removeReceipt = (id: string) => {
-    if (modalLocked || deleteReceiptAction.isPending) return;
+    if (modalLocked || actionSaving('deleteReceipt')) return;
     Alert.alert('Delete receipt', 'Remove this receipt image?', [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -400,7 +404,7 @@ export default function TransactionDetail() {
       },
     ]);
   };
-  const receiptDeleting = deleteReceiptAction.isPending;
+  const receiptDeleting = actionSaving('deleteReceipt');
   const receiptViewerLocked = modalLocked || receiptDeleting;
   const openReceiptViewer = (id: string) => {
     if (receiptViewerLocked) return;
@@ -482,8 +486,14 @@ export default function TransactionDetail() {
   };
 
   const canRename = !isLeg;
-  const openRename = () => { setRenameText(payeeName); setRenaming(true); haptics.tap(); };
+  const openRename = () => {
+    if (modalLocked) return;
+    setRenameText(payeeName);
+    setRenaming(true);
+    haptics.tap();
+  };
   const doRename = () => {
+    if (modalLocked) return;
     const next = renameText.trim();
     setRenaming(false);
     if (next === payeeName) return;
@@ -504,7 +514,8 @@ export default function TransactionDetail() {
   const sameRaws = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
   const dirty = noteText.trim() !== baseText || !sameRaws(rawsOf(tags), baseRaws);
   const recombineNotes = () => [noteText.trim(), ...tags.map((t) => t.raw)].join(' ').replace(/\s{2,}/g, ' ').trim();
-  const save = () =>
+  const save = () => {
+    if (modalLocked) return;
     notesAction.run(
       { id: txnId, notes: recombineNotes(), isLeg, parentId, accountId, date: currentDate },
       {
@@ -515,29 +526,21 @@ export default function TransactionDetail() {
         },
       },
     );
+  };
   const notesFieldError = screen.outcome?.fieldErrors?.notes as string | undefined;
   const allocationFieldError = screen.activeKey === 'link'
     ? (screen.outcome?.fieldErrors?.allocationCents as string | undefined)
     : undefined;
 
-  const notesErrorSnapshotRef = useRef<{ text: string; raws: string[] } | null>(null);
-  useEffect(() => {
-    if (!screen.outcome || screen.activeKey !== 'notes') {
-      notesErrorSnapshotRef.current = null;
-      return;
-    }
-    notesErrorSnapshotRef.current = { text: noteText.trim(), raws: rawsOf(tags) };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- snapshot at error time only
-  }, [screen.outcome, screen.activeKey]);
+  const linkFields = useMemo(() => ({ allocationText: allocationText.trim() }), [allocationText]);
+  const dateFields = useMemo(() => ({ date: dateText.trim() }), [dateText]);
+  const payeeFields = useMemo(() => ({ payee: renameText.trim() }), [renameText]);
+  const notesFields = useMemo(() => ({ text: noteText.trim(), raws: rawsOf(tags) }), [noteText, tags]);
 
-  useEffect(() => {
-    const snap = notesErrorSnapshotRef.current;
-    if (!snap || !screen.outcome || screen.activeKey !== 'notes') return;
-    if (noteText.trim() !== snap.text || !sameRaws(rawsOf(tags), snap.raws)) {
-      screen.clear();
-      notesErrorSnapshotRef.current = null;
-    }
-  }, [noteText, screen, screen.activeKey, screen.outcome, tags]);
+  useMutationScreenFieldInvalidation(screen, 'link', linkFields);
+  useMutationScreenFieldInvalidation(screen, 'date', dateFields);
+  useMutationScreenFieldInvalidation(screen, 'payee', payeeFields);
+  useMutationScreenFieldInvalidation(screen, 'notes', notesFields);
 
   const requestLeave = (leave: () => void) => {
     if (modalLocked) return;
@@ -600,6 +603,7 @@ export default function TransactionDetail() {
   }, [screen.activeKey, screen.outcome]);
 
   const addTag = (input: string) => {
+    if (modalLocked) return;
     const token = toTagToken(input);
     setTagInput('');
     if (!token) return;
@@ -610,6 +614,7 @@ export default function TransactionDetail() {
     haptics.tap();
   };
   const removeTag = (raw: string) => {
+    if (modalLocked) return;
     const doRemove = () => { setTags(tags.filter((t) => t.raw !== raw)); haptics.tap(); };
     if (originalRaws.has(raw.toLowerCase())) {
       Alert.alert(
@@ -701,8 +706,8 @@ export default function TransactionDetail() {
 
       <View style={[styles.menuHero, { paddingTop: insets.top + 14 }]}>
         <View style={styles.menuTopBar}>
-          <Pressable onPress={save} disabled={!dirty || notesAction.isPending || modalLocked} hitSlop={8} style={styles.topSide}>
-            {dirty ? <Text style={styles.headerSave}>{notesAction.isPending ? 'Saving…' : 'Save'}</Text> : null}
+          <Pressable onPress={save} disabled={!dirty || savingNotes || modalLocked} hitSlop={8} style={[styles.topSide, (savingNotes || modalLocked) && { opacity: 0.35 }]} accessibilityState={{ disabled: !dirty || savingNotes || modalLocked }}>
+            {dirty ? <Text style={styles.headerSave}>{savingNotes ? 'Saving…' : 'Save'}</Text> : null}
           </Pressable>
           {canEditDate ? (
             <Pressable testID="transaction-date-button" onPress={openDate} hitSlop={8} disabled={modalLocked} style={({ pressed }) => [styles.topDateBtn, pressed && !modalLocked && { opacity: 0.65 }, modalLocked && { opacity: 0.35 }]}>
@@ -722,7 +727,7 @@ export default function TransactionDetail() {
           </View>
         ) : null}
         {canRename ? (
-          <Pressable onPress={openRename} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+          <Pressable onPress={openRename} hitSlop={8} disabled={modalLocked} style={({ pressed }) => [pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.35 }]}>
             <Text style={styles.payee}>{payeeName || 'Add name'}</Text>
           </Pressable>
         ) : (
@@ -736,7 +741,7 @@ export default function TransactionDetail() {
           </View>
         ) : null}
         {!isSplit ? (
-          <Pressable testID="transaction-category-pill" onPress={() => { haptics.tap(); setPicking(true); }} style={({ pressed }) => [styles.categoryPill, pressed && { opacity: 0.75 }]}>
+          <Pressable testID="transaction-category-pill" onPress={() => { if (modalLocked) return; haptics.tap(); setPicking(true); }} disabled={modalLocked} style={({ pressed }) => [styles.categoryPill, pressed && !modalLocked && { opacity: 0.75 }, modalLocked && { opacity: 0.45 }]} accessibilityState={{ disabled: modalLocked }}>
             <SymbolView name={catMeta.symbol} tintColor={catMeta.color} size={16} resizeMode="scaleAspectFit" />
             <Text style={styles.categoryPillText}>{category || 'Uncategorized'}</Text>
             <SymbolView name="chevron.down" tintColor={colors.text} size={10} resizeMode="scaleAspectFit" />
@@ -763,13 +768,13 @@ export default function TransactionDetail() {
       ) : null}
 
       <MenuGroup testID="transaction-action-menu">
-        {canRename ? <MenuActionRow testID="transaction-rename-row" icon="pencil" label="Rename" onPress={openRename} /> : null}
+        {canRename ? <MenuActionRow testID="transaction-rename-row" icon="pencil" label="Rename" onPress={openRename} disabled={modalLocked} /> : null}
         <MenuSwitchRow
           testID="transaction-recurring-switch-row"
           icon="arrow.clockwise.circle"
           label="Is Recurring?"
           value={!!sub}
-          disabled={!!sub || !canMarkRecurring || markRecAction.isPending || modalLocked}
+          disabled={!!sub || !canMarkRecurring || actionSaving('markRec') || modalLocked}
           onValueChange={() => {
             if (sub) router.push(`/recurring/${encodeURIComponent(sub.key)}`);
             else if (canMarkRecurring) doMarkRecurring();
@@ -780,9 +785,9 @@ export default function TransactionDetail() {
             testID="transaction-move-reimbursement-row"
             icon="person.2.fill"
             label="Move to Reimbursements"
-            right={categoryAction.isPending ? 'Moving…' : 'Not personal spend'}
+            right={actionSaving('category') ? 'Moving…' : 'Not personal spend'}
             onPress={moveToReimb}
-            disabled={categoryAction.isPending || modalLocked}
+            disabled={actionSaving('category') || modalLocked}
             last
           />
         ) : (
@@ -795,28 +800,30 @@ export default function TransactionDetail() {
           testID="transaction-tags-row"
           icon="tag"
           label={tags.length ? `Tags (${tags.length})` : 'Add Tags'}
-          onPress={() => { setShowTags(!showTags); haptics.tap(); }}
+          onPress={() => { if (modalLocked) return; setShowTags(!showTags); haptics.tap(); }}
+          disabled={modalLocked}
         />
         <MenuActionRow
           testID="transaction-notes-row"
           icon="note.text"
           label={noteText.trim() ? 'Edit Note' : 'Add Note'}
-          onPress={() => { setShowNotes(!showNotes); haptics.tap(); }}
+          onPress={() => { if (modalLocked) return; setShowNotes(!showNotes); haptics.tap(); }}
+          disabled={modalLocked}
         />
         {!isLeg && categoryId ? (
           <MenuActionRow
             testID="transaction-create-rule-row"
             icon="bolt.circle"
             label="Create Rule"
-            right={saveRuleAction.isPending ? 'Saving…' : category}
+            right={actionSaving('saveRule') ? 'Saving…' : category}
             onPress={applyRuleForPayee}
-            disabled={saveRuleAction.isPending || modalLocked}
+            disabled={actionSaving('saveRule') || modalLocked}
           />
         ) : null}
         {canSplit ? (
           <MenuActionRow testID="transaction-split-row" icon="arrow.triangle.branch" label="Split" onPress={goSplit} />
         ) : null}
-        <MenuActionRow testID="transaction-receipt-row" icon="doc.viewfinder" label={receiptList.length ? `Receipts (${receiptList.length})` : 'Add Receipt'} onPress={startScan} disabled={scanning} last />
+        <MenuActionRow testID="transaction-receipt-row" icon="doc.viewfinder" label={receiptList.length ? `Receipts (${receiptList.length})` : 'Add Receipt'} onPress={startScan} disabled={scanning || modalLocked} last />
       </MenuGroup>
 
       <CardTitle style={styles.sectionTitle}>{income ? 'Repayment for' : 'Repaid by'}</CardTitle>
@@ -852,7 +859,7 @@ export default function TransactionDetail() {
         ) : (
           <Text style={styles.linkEmpty}>{income ? 'Not linked to any expense yet.' : 'No linked repayment yet.'}</Text>
         )}
-        <Pressable testID="transaction-link-repayment-button" style={({ pressed }) => [styles.linkBtn, pressed && { opacity: 0.6 }]} onPress={() => { haptics.tap(); setLinking(true); }}>
+        <Pressable testID="transaction-link-repayment-button" style={({ pressed }) => [styles.linkBtn, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]} onPress={() => { if (modalLocked) return; haptics.tap(); setLinking(true); }} disabled={modalLocked}>
           <Text style={styles.linkBtnText}>{income ? '+ Link to an expense' : '+ Link a repayment'}</Text>
         </Pressable>
       </Card>
@@ -889,8 +896,9 @@ export default function TransactionDetail() {
           <TagChips
             tags={tags}
             style={{ marginBottom: 12 }}
-            onPressTag={(raw) => router.push({ pathname: '/tag/[tag]', params: { tag: raw } })}
+            onPressTag={(raw) => { if (modalLocked) return; router.push({ pathname: '/tag/[tag]', params: { tag: raw } }); }}
             onRemoveTag={removeTag}
+            disabled={modalLocked}
           />
         ) : null}
         <View style={styles.tagAddRow}>
@@ -900,6 +908,7 @@ export default function TransactionDetail() {
             style={styles.tagInput}
             value={tagInput}
             onChangeText={setTagInput}
+            editable={!modalLocked}
             placeholder="Add a tag…"
             placeholderTextColor={colors.muted}
             autoCapitalize="none"
@@ -908,7 +917,7 @@ export default function TransactionDetail() {
             onSubmitEditing={() => addTag(tagInput)}
           />
           {tagInput.trim() ? (
-            <Pressable testID="transaction-tag-add-button" onPress={() => addTag(tagInput)} style={({ pressed }) => [styles.tagAddBtn, pressed && { opacity: 0.7 }]}>
+            <Pressable testID="transaction-tag-add-button" onPress={() => addTag(tagInput)} disabled={modalLocked} style={({ pressed }) => [styles.tagAddBtn, pressed && !modalLocked && { opacity: 0.7 }, modalLocked && { opacity: 0.45 }]}>
               <Text style={styles.tagAddBtnText}>Add</Text>
             </Pressable>
           ) : null}
@@ -916,7 +925,7 @@ export default function TransactionDetail() {
         {tagSuggestions.length ? (
           <View style={styles.suggestRow}>
             {tagSuggestions.map((s) => (
-              <Pressable testID={`transaction-tag-suggestion-${s.token}`} key={s.raw} onPress={() => addTag(s.raw)} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
+              <Pressable testID={`transaction-tag-suggestion-${s.token}`} key={s.raw} onPress={() => addTag(s.raw)} disabled={modalLocked} style={({ pressed }) => [styles.suggestChip, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]}>
                 <Text style={styles.suggestText}>#{s.token}</Text>
               </Pressable>
             ))}
@@ -927,7 +936,7 @@ export default function TransactionDetail() {
             <Text style={styles.tripLabel}>Add to a trip</Text>
             <View style={styles.suggestRow}>
               {eventChips.map((e) => (
-                <Pressable testID={`transaction-event-chip-${e.slug}`} key={e.slug} onPress={() => addTag(`ev-${e.slug}`)} style={({ pressed }) => [styles.tripChip, pressed && { opacity: 0.6 }]}>
+                <Pressable testID={`transaction-event-chip-${e.slug}`} key={e.slug} onPress={() => addTag(`ev-${e.slug}`)} disabled={modalLocked} style={({ pressed }) => [styles.tripChip, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]}>
                   <Text style={styles.tripChipText} numberOfLines={1}>{e.name}</Text>
                 </Pressable>
               ))}
@@ -1013,10 +1022,10 @@ export default function TransactionDetail() {
         <Pressable
           testID="transaction-delete-button"
           onPress={doDelete}
-          disabled={deleteTxnAction.isPending || modalLocked}
-          style={({ pressed }) => [styles.deleteBtn, (deleteTxnAction.isPending || modalLocked) && { opacity: 0.5 }, pressed && { opacity: 0.7 }]}
+          disabled={actionSaving('deleteTxn') || modalLocked}
+          style={({ pressed }) => [styles.deleteBtn, (actionSaving('deleteTxn') || modalLocked) && { opacity: 0.5 }, pressed && { opacity: 0.7 }]}
         >
-          <Text style={styles.deleteText}>{deleteTxnAction.isPending ? 'Deleting…' : 'Delete transaction'}</Text>
+          <Text style={styles.deleteText}>{actionSaving('deleteTxn') ? 'Deleting…' : 'Delete transaction'}</Text>
         </Pressable>
       ) : null}
 
@@ -1031,7 +1040,7 @@ export default function TransactionDetail() {
               keyExtractor={(c) => c.id}
               style={{ maxHeight: 400 }}
               renderItem={({ item }) => (
-                <Pressable testID={`transaction-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => pickCategory(item.id, item.name)}>
+                <Pressable testID={`transaction-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]} onPress={() => pickCategory(item.id, item.name)} disabled={modalLocked}>
                   <Text style={styles.catOptionText}>{item.name}</Text>
                   <Text style={styles.catOptionGroup}>{item.group}</Text>
                 </Pressable>
@@ -1074,11 +1083,11 @@ export default function TransactionDetail() {
                     accessibilityHint={allocationFieldError ? `Error: ${allocationFieldError}` : 'Enter a positive amount with at most two decimal places'}
                   />
                   <MutationFieldError error={allocationFieldError} testID="transaction-link-allocation-error" />
-                  <Pressable testID="transaction-link-confirm-button" style={styles.renameSave} onPress={submitLink} disabled={linkAction.isPending || suggestedAllocationCents == null || modalLocked} accessibilityRole="button" accessibilityLabel="Confirm reimbursement link">
-                    <Text style={styles.renameSaveText}>{linkAction.isPending ? 'Linking…' : 'Link'}</Text>
+                  <Pressable testID="transaction-link-confirm-button" style={styles.renameSave} onPress={submitLink} disabled={actionSaving('link') || suggestedAllocationCents == null || modalLocked} accessibilityRole="button" accessibilityLabel="Confirm reimbursement link">
+                    <Text style={styles.renameSaveText}>{actionSaving('link') ? 'Linking…' : 'Link'}</Text>
                   </Pressable>
-                  <Pressable testID="transaction-link-back-button" style={styles.linkBtn} onPress={() => setLinkTarget(null)} disabled={linkAction.isPending || modalLocked}>
-                    <Text style={[styles.linkBtnText, (linkAction.isPending || modalLocked) && { opacity: 0.35 }]}>Back to search</Text>
+                  <Pressable testID="transaction-link-back-button" style={styles.linkBtn} onPress={() => { if (modalLocked) return; setLinkTarget(null); }} disabled={actionSaving('link') || modalLocked}>
+                    <Text style={[styles.linkBtnText, (actionSaving('link') || modalLocked) && { opacity: 0.35 }]}>Back to search</Text>
                   </Pressable>
                 </>
               ) : (
@@ -1089,6 +1098,7 @@ export default function TransactionDetail() {
                 style={styles.searchInput}
                 value={linkQuery}
                 onChangeText={setLinkQuery}
+                editable={!modalLocked}
                 placeholder="Search payee, note…"
                 placeholderTextColor={colors.muted}
                 autoFocus
@@ -1104,7 +1114,7 @@ export default function TransactionDetail() {
                   <Text style={styles.linkEmpty}>{linkQuery.trim().length < 2 ? 'Type at least 2 characters to search.' : 'No matching transactions.'}</Text>
                 }
                 renderItem={({ item }) => (
-                  <Pressable testID={`transaction-link-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => createLink(item)} disabled={linkAction.isPending || modalLocked}>
+                  <Pressable testID={`transaction-link-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]} onPress={() => createLink(item)} disabled={actionSaving('link') || modalLocked}>
                     <View style={{ flex: 1, minWidth: 0 }}>
                       <Text style={styles.catOptionText} numberOfLines={1}>{item.payee || '(no payee)'}</Text>
                       <Text style={styles.catOptionGroup}>{fmtDay(item.date)} · {item.account}</Text>
@@ -1130,6 +1140,7 @@ export default function TransactionDetail() {
                 style={styles.searchInput}
                 value={renameText}
                 onChangeText={setRenameText}
+                editable={!modalLocked}
                 placeholder="Merchant name"
                 placeholderTextColor={colors.muted}
                 autoFocus
@@ -1137,8 +1148,8 @@ export default function TransactionDetail() {
                 returnKeyType="done"
                 onSubmitEditing={doRename}
               />
-              <Pressable testID="transaction-rename-save-button" style={styles.renameSave} onPress={doRename} disabled={payeeAction.isPending || modalLocked}>
-                <Text style={styles.renameSaveText}>{payeeAction.isPending ? 'Saving…' : 'Save'}</Text>
+              <Pressable testID="transaction-rename-save-button" style={styles.renameSave} onPress={doRename} disabled={actionSaving('payee') || modalLocked}>
+                <Text style={styles.renameSaveText}>{actionSaving('payee') ? 'Saving…' : 'Save'}</Text>
               </Pressable>
               <Text style={styles.tagHint}>The original bank description is kept for matching future charges.</Text>
             </Pressable>
@@ -1282,7 +1293,7 @@ export default function TransactionDetail() {
                   </Text>
                 ) : null}
                 <Pressable testID="transaction-receipt-delete-button" onPress={() => removeReceipt(r.id)} disabled={receiptViewerLocked} style={({ pressed }) => [styles.viewerDelete, pressed && !receiptViewerLocked && { opacity: 0.7 }, receiptViewerLocked && { opacity: 0.5 }]}>
-                  <Text style={styles.viewerDeleteText}>{deleteReceiptAction.isPending ? 'Deleting…' : 'Delete receipt'}</Text>
+                  <Text style={styles.viewerDeleteText}>{actionSaving('deleteReceipt') ? 'Deleting…' : 'Delete receipt'}</Text>
                 </Pressable>
               </View>
             );

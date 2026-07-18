@@ -10,6 +10,7 @@ import {
   awaitMutationErrorReconciliation,
   startMutationErrorReconciliation,
 } from '@/lib/mutation-error-reconciliation';
+import { safeMutationCallback } from '@/lib/mutation-safe-callback';
 import { useMutationAdmissionLifecycle } from '@/hooks/useMutationAdmissionLifecycle';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
@@ -125,12 +126,8 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     token: MutationDispatchToken,
   ) => {
     if (!isDispatchTokenCurrent(token)) return;
-    try {
-      entry.lastError?.(error);
-    } catch {
-      // Optional UI callbacks must not break reconciliation.
-    }
-    entry.rollback?.();
+    safeMutationCallback(entry.lastError, error);
+    safeMutationCallback(entry.rollback);
     const mapped = mapMutationApiError(error, {
       mutationLabel: entry.label,
       fieldPathOverrides: entry.fieldPathOverrides,
@@ -185,7 +182,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
           setOutcome(null);
           setAnnounce(`${entry.label} succeeded.`);
           setActiveKey(null);
-          runOptions?.onSuccess?.(data);
+          safeMutationCallback(runOptions?.onSuccess, data);
         },
         onError: (error) => {
           errorReconciliation = startMutationErrorReconciliation(() => handleError(key, error, entry, token));
@@ -199,7 +196,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
           if (pendingLockCountRef.current === 0) {
             setDispatchPending(false);
           }
-          runOptions?.onSettled?.();
+          safeMutationCallback(runOptions?.onSettled);
         },
       });
     } catch (error) {

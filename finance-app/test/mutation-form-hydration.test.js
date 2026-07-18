@@ -144,7 +144,8 @@ test('account edit rebaselines without clearing fields to blank on success', () 
 
 test('transaction date picker and receipt controls respect modalLocked coordinator lock', () => {
   const source = fs.readFileSync(path.join(__dirname, '../src/app/transaction/[id].tsx'), 'utf8');
-  assert.match(source, /dateSaving = modalLocked && screen\.activeKey === 'date'/);
+  assert.match(source, /actionSaving = \(key: string\) => modalLocked && screen\.activeKey === key/);
+  assert.match(source, /dateSaving = actionSaving\('date'\)/);
   assert.doesNotMatch(source, /dateAction\.isPending/);
   assert.match(source, /receiptViewerLocked = modalLocked \|\| receiptDeleting/);
   assert.match(source, /disabled={modalLocked}/);

@@ -197,8 +197,10 @@ export default function NetWorthScreen() {
     <Pressable
       testID={`networth-account-${a.id}`}
       key={a.id}
-      style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}
-      onPress={() => router.push({ pathname: '/account/[id]', params: { id: a.id, name: a.name, balance: String(a.balance), hidden: a.hidden ? '1' : '0', role: a.role } })}
+      style={({ pressed }) => [styles.row, pressed && !inputLocked && { opacity: 0.6 }, inputLocked && { opacity: 0.45 }]}
+      onPress={() => { if (inputLocked) return; router.push({ pathname: '/account/[id]', params: { id: a.id, name: a.name, balance: String(a.balance), hidden: a.hidden ? '1' : '0', role: a.role } }); }}
+      disabled={inputLocked}
+      accessibilityState={{ disabled: inputLocked }}
     >
       <Avatar label={a.name} size={36} />
       <View style={{ flex: 1, minWidth: 0 }}>
@@ -211,7 +213,7 @@ export default function NetWorthScreen() {
   );
 
   const manualRow = (m: ManualAsset) => (
-    <Pressable testID={`networth-manual-${m.id}`} key={m.id} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]} onPress={() => openEdit(m)}>
+    <Pressable testID={`networth-manual-${m.id}`} key={m.id} style={({ pressed }) => [styles.row, pressed && !inputLocked && { opacity: 0.6 }, inputLocked && { opacity: 0.45 }]} onPress={() => openEdit(m)} disabled={inputLocked} accessibilityState={{ disabled: inputLocked }}>
       <Avatar label={m.name} size={36} />
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text style={styles.name} numberOfLines={1}>{m.name}</Text>

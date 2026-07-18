@@ -168,23 +168,25 @@ export function TagChips({
   style,
   onPressTag,
   onRemoveTag,
+  disabled = false,
 }: {
   tags: { raw: string; label: string; kind: 'event' | 'tag' }[];
   style?: ViewStyle;
   onPressTag?: (raw: string) => void;
   onRemoveTag?: (raw: string) => void;
+  disabled?: boolean;
 }) {
   if (!tags?.length) return null;
   return (
-    <View style={[styles.tagRow, style]}>
+    <View style={[styles.tagRow, style, disabled && { opacity: 0.45 }]}>
       {tags.map((t, i) => {
         const tint = t.kind === 'event' ? colors.accentLight : colors.green;
         return (
           <View key={t.raw + i} style={[styles.tag, t.kind === 'event' ? styles.tagEvent : styles.tagPerson]}>
             <Pressable
-              onPress={onPressTag ? () => onPressTag(t.raw) : undefined}
-              disabled={!onPressTag}
-              style={({ pressed }) => [styles.tagPress, pressed && onPressTag ? { opacity: 0.6 } : null]}
+              onPress={onPressTag && !disabled ? () => onPressTag(t.raw) : undefined}
+              disabled={!onPressTag || disabled}
+              style={({ pressed }) => [styles.tagPress, pressed && onPressTag && !disabled ? { opacity: 0.6 } : null]}
             >
               <SymbolView
                 name={t.kind === 'event' ? 'mappin.and.ellipse' : 'number'}
@@ -198,7 +200,7 @@ export function TagChips({
               </Text>
             </Pressable>
             {onRemoveTag ? (
-              <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${t.label} tag`} hitSlop={16} onPress={() => onRemoveTag(t.raw)} style={({ pressed }) => (pressed ? { opacity: 0.5 } : null)}>
+              <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${t.label} tag`} accessibilityState={{ disabled }} hitSlop={16} onPress={() => { if (!disabled) onRemoveTag(t.raw); }} disabled={disabled} style={({ pressed }) => (pressed && !disabled ? { opacity: 0.5 } : null)}>
                 <SymbolView name="xmark.circle.fill" tintColor={tint} size={13} resizeMode="scaleAspectFit" style={styles.tagRemove} />
               </Pressable>
             ) : null}

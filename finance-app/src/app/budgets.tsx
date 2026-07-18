@@ -122,7 +122,7 @@ export default function Budgets() {
   return (
     <PushScreen testID="budgets-screen" onRefresh={onRefresh}>
       <MutationLiveRegion message={form.announce} />
-      <MonthNavigator months={availMonths} selected={month} onSelect={setMonth} currentKey={curKey} />
+      <MonthNavigator months={availMonths} selected={month} onSelect={setMonth} currentKey={curKey} disabled={inputLocked} />
       {chart.length > 1 ? (
         <Card style={{ marginBottom: 20 }}>
           <CardTitle>Income vs Spending · 12 mo</CardTitle>

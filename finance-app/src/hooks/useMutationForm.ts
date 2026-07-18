@@ -22,6 +22,10 @@ import {
   awaitMutationErrorReconciliation,
   startMutationErrorReconciliation,
 } from '@/lib/mutation-error-reconciliation';
+import {
+  nextDismissRequest,
+  shouldApplyFormDismiss,
+} from '@/lib/mutation-form-dismiss';
 import { useMutationAdmissionLifecycle } from '@/hooks/useMutationAdmissionLifecycle';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
@@ -120,6 +124,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   const rebaselineAfterSuccessRef = useRef(false);
   const suppressPersistRef = useRef(false);
   const hydrationTargetRef = useRef<{ identity: string; target: TFields } | null>(null);
+  const dismissSeqRef = useRef({ value: 0 });
 
   const bumpActivity = useCallback(() => {
     const seq = nextMutationActivationSeq();
@@ -151,6 +156,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     submittedFieldsRef.current = null;
     suppressPersistRef.current = false;
     rebaselineAfterSuccessRef.current = false;
+    dismissSeqRef.current.value += 1;
   }, [formId, formIdentityKey, persistDraft, profileGeneration, scopeDigest]);
 
   useLayoutEffect(() => {
@@ -232,7 +238,8 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     requestAnimationFrame(() => focusFirstInvalid());
   }, [fieldOrder, fieldPathOverrides, focusFirstInvalid, isDispatchTokenCurrent, mutationLabel, onRefetch]);
 
-  const finalizeDismiss = useCallback((onConfirmed?: () => void) => {
+  const finalizeDismiss = useCallback((onConfirmed?: () => void, request?: { identity: string; nonce: number }) => {
+    if (request && !shouldApplyFormDismiss(request, formIdentityKey, dismissSeqRef.current)) return;
     clearMutationFormDraft(scopeDigest, formId, profileGeneration);
     setOutcome(null);
     setPhase('idle');
@@ -241,7 +248,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     setBaseline({ ...fieldsRef.current });
     submittedFieldsRef.current = null;
     onConfirmed?.();
-  }, [formId, profileGeneration, scopeDigest]);
+  }, [formId, formIdentityKey, profileGeneration, scopeDigest]);
 
   const runMutation = useCallback((variables: TVariables) => {
     if (pendingLockRef.current) return;
@@ -352,6 +359,8 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   const requestDismiss = useCallback((onConfirmed?: () => void) => {
     if (isLocked) return false;
     if (isDirty) {
+      const identityAtRequest = formIdentityKey;
+      const nonce = nextDismissRequest(dismissSeqRef.current);
       Alert.alert(
         'Discard unsaved changes?',
         'Your edits will be lost.',
@@ -360,7 +369,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
           {
             text: 'Discard',
             style: 'destructive',
-            onPress: () => finalizeDismiss(onConfirmed),
+            onPress: () => finalizeDismiss(onConfirmed, { identity: identityAtRequest, nonce }),
           },
         ],
       );
@@ -368,7 +377,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     }
     finalizeDismiss(onConfirmed);
     return true;
-  }, [finalizeDismiss, isDirty, isLocked]);
+  }, [finalizeDismiss, formIdentityKey, isDirty, isLocked]);
 
   const getFieldError = useCallback((field: keyof TFields) => fieldErrors[field], [fieldErrors]);
 

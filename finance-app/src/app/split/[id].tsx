@@ -455,12 +455,12 @@ export default function SplitEditor() {
         )}
       </ScrollView>
 
-      <Modal visible={modePick} transparent animationType="fade" onRequestClose={() => setModePick(false)}>
-        <Pressable style={styles.modalBg} onPress={() => setModePick(false)}>
+      <Modal visible={modePick} transparent animationType="fade" onRequestClose={() => { if (mutationLocked) return; setModePick(false); }}>
+        <Pressable style={styles.modalBg} onPress={() => { if (mutationLocked) return; setModePick(false); }} disabled={mutationLocked}>
           <View testID="split-mode-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Split method</Text>
             {(['equal', 'specific', 'percent'] as Mode[]).map((m) => (
-              <Pressable testID={`split-mode-${m}${mode === m ? '-selected' : ''}`} key={m} style={({ pressed }) => [styles.modeOption, pressed && { opacity: 0.6 }]} onPress={() => changeMode(m)}>
+              <Pressable testID={`split-mode-${m}${mode === m ? '-selected' : ''}`} key={m} style={({ pressed }) => [styles.modeOption, pressed && !mutationLocked && { opacity: 0.6 }, mutationLocked && { opacity: 0.45 }]} onPress={() => changeMode(m)} disabled={mutationLocked}>
                 <Text style={styles.modeOptionText}>{MODE_LABEL[m]}</Text>
                 {mode === m ? <Text style={styles.modeCheck}>✓</Text> : null}
               </Pressable>
@@ -469,8 +469,8 @@ export default function SplitEditor() {
         </Pressable>
       </Modal>
 
-      <Modal visible={catPick !== null} transparent animationType="slide" onRequestClose={() => setCatPick(null)}>
-        <Pressable style={styles.modalBg} onPress={() => setCatPick(null)}>
+      <Modal visible={catPick !== null} transparent animationType="slide" onRequestClose={() => { if (mutationLocked) return; setCatPick(null); }}>
+        <Pressable style={styles.modalBg} onPress={() => { if (mutationLocked) return; setCatPick(null); }} disabled={mutationLocked}>
           <View testID="split-category-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Category for this split</Text>
             <FlatList
@@ -479,7 +479,7 @@ export default function SplitEditor() {
               style={{ maxHeight: 420 }}
               keyboardShouldPersistTaps="handled"
               renderItem={({ item }) => (
-                <Pressable testID={`split-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => pickCat(item.id, item.name)}>
+                <Pressable testID={`split-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && !mutationLocked && { opacity: 0.6 }, mutationLocked && { opacity: 0.45 }]} onPress={() => pickCat(item.id, item.name)} disabled={mutationLocked}>
                   <Text style={styles.catOptionText}>{item.name}</Text>
                   <Text style={styles.catOptionGroup}>{item.group}</Text>
                 </Pressable>

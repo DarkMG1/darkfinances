@@ -9,6 +9,7 @@ import {
   awaitMutationErrorReconciliation,
   startMutationErrorReconciliation,
 } from '@/lib/mutation-error-reconciliation';
+import { safeMutationCallback } from '@/lib/mutation-safe-callback';
 import { useMutationAdmissionLifecycle } from '@/hooks/useMutationAdmissionLifecycle';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationAdmissionRef } from '@/hooks/useMutationScreenAdmission';
@@ -100,7 +101,7 @@ export function useMutationAction<TVariables>({
     pendingLockRef.current = true;
     setDispatchPending(true);
     bumpActivity();
-    onActivate?.();
+    safeMutationCallback(onActivate);
     lastVars.current = variables;
     lastSuccess.current = options?.onSuccess;
     lastRollback.current = options?.rollback;
@@ -117,13 +118,13 @@ export function useMutationAction<TVariables>({
           lastSettled.current = undefined;
           setOutcome(null);
           setAnnounce(`${mutationLabel} succeeded.`);
-          options?.onSuccess?.(data);
-          onSuccess?.();
+          safeMutationCallback(options?.onSuccess, data);
+          safeMutationCallback(onSuccess);
         },
         onError: (error) => {
           errorReconciliation = startMutationErrorReconciliation(async () => {
             if (!isDispatchTokenCurrent(token)) return;
-            lastRollback.current?.();
+            safeMutationCallback(lastRollback.current);
             const mapped = mapMutationApiError(error, { fieldPathOverrides, fieldOrder, mutationLabel });
             setOutcome(mapped);
             setAnnounce(mapped.announce);
@@ -142,7 +143,7 @@ export function useMutationAction<TVariables>({
           if (!isDispatchTokenCurrent(token)) return;
           pendingLockRef.current = false;
           setDispatchPending(false);
-          options?.onSettled?.();
+          safeMutationCallback(options?.onSettled);
         },
       });
     } catch (error) {
