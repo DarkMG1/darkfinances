@@ -258,6 +258,12 @@ export interface BudgetCategory {
   target: number;
   spent: number;
   remaining: number;
+  reserve: number | null;
+  envelope: number | null;
+  envelopeDebt: number | null;
+  reserveCents: number | null;
+  envelopeCents: number | null;
+  envelopeDebtCents: number | null;
   projected: number;
   expectedToDate: number | null;
   dailyPace: number;
@@ -267,6 +273,8 @@ export interface BudgetCategory {
   status: 'on_track' | 'watch' | 'over' | 'snoozed';
   rolloverMode: string;
   rolloverAmount: number;
+  rolloverConfigured: boolean;
+  resolved: boolean;
   annualTarget: number | null;
   trueExpenseCadence: string | null;
   snoozedMonth: string | null;
@@ -925,6 +933,44 @@ export interface CreateTransactionInput {
   notes?: string;
 }
 
+export interface GoalFeasibility {
+  remainingCents: number;
+  remaining: number;
+  monthlyRequiredCents: number | null;
+  monthlyRequired: number | null;
+  deadlineOverdue: boolean;
+  accountStatus: 'manual' | 'linked' | 'missing' | 'closed' | 'hidden' | 'excluded';
+  accountRole: string | null;
+  overAllocated: boolean;
+  overAllocatedCents: number;
+  feasible: boolean | null;
+  advisoryOnly: true;
+}
+
+export interface GoalAccountSummary {
+  accountId: string;
+  role: string | null;
+  accountStatus: string;
+  capacityCents: number;
+  allocatedCents: number;
+  unallocatedCents: number;
+  overAllocatedCents: number;
+  goalIds: string[];
+  capacity: number;
+  allocated: number;
+  unallocated: number;
+  overAllocated: number;
+}
+
+export interface GoalAdvisory {
+  complete: true;
+  advisoryOnly: true;
+  totalRemainingCents: number;
+  monthlyPressureCents: number;
+  overAllocatedAccounts: GoalAccountSummary[];
+  overAllocatedAccountCount: number;
+}
+
 export interface Goal {
   id: string;
   name: string;
@@ -936,7 +982,9 @@ export interface Goal {
   fundingSource?: 'allocated-account' | 'manual';
   availableInAccount?: number | null;
   monthlyRequired?: number | null;
+  feasibility?: GoalFeasibility;
 }
+
 export interface GoalInput {
   id?: string;
   name: string;
@@ -949,6 +997,7 @@ export interface GoalInput {
 export interface OkResult {
   ok: boolean;
   id?: string;
+  feasibility?: GoalFeasibility | null;
   previousId?: string;
   parentId?: string;
   legIds?: string[];
@@ -1088,7 +1137,7 @@ export interface Today {
   health: NonNullable<Ping['actual']>;
   accounts: Account[];
   spending: Spending;
-  liquidity: { safeToSpend: MetricValue };
+  liquidity: { safeToSpend: MetricValue; goalAdvisory?: GoalAdvisory | null };
   obligationGraph?: ObligationGraphView;
   obligations: {
     bills: Bill[];

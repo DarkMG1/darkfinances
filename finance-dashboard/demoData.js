@@ -12,6 +12,7 @@ const {
   safeToSpendFromGraph,
 } = require('./lib/domain/obligation-graph');
 const { assembleObligationGraphInputs, buildGraphTransactionInputs } = require('./lib/obligation-graph-bridge');
+const { enrichGoalsResponse } = require('./lib/domain/goal-feasibility');
 const {
   buildCategoryInfo,
   buildTransferIndex,
@@ -212,7 +213,6 @@ function today() {
     operatingAccounts: cash,
     budgets: { supported: false },
     recurring: recurringData,
-    goals: goals(),
     spendingCompleteness: currentSpending.current?.completeness,
     obligationGraph: graph,
     liabilityPolicies: graphInputs.liabilityPolicies,
@@ -245,7 +245,7 @@ function today() {
     health: { ready: true, initializedAt: asOf, lastSyncAt: asOf, lastErrorAt: null, lastError: null },
     accounts: allAccounts,
     spending: currentSpending,
-    liquidity: { safeToSpend },
+    liquidity: { safeToSpend, goalAdvisory: buildDemoGoalAdvisory() },
     obligationGraph: {
       version: graph.version,
       summary: graphSummary(graph),
@@ -304,13 +304,52 @@ function income() {
 }
 
 // ---- Goals ----------------------------------------------------------------
-function goals() {
-  const mk = (id, name, target, current, accountId, deadline) => ({ id, name, target, accountId: accountId || null, deadline: deadline || null, current: round2(current), pct: Math.round((current / target) * 100) });
+function seedDefaultGoals() {
+  const mk = (id, name, target, current, accountId, deadline) => ({
+    id, name, target, accountId: accountId || null, deadline: deadline || null, current: round2(current),
+  });
   return [
     mk('goal-ef', 'Emergency Fund', 20000, 18450, 'acc-save'),
     mk('goal-jp', 'Japan Trip', 6000, 2750, null, ymd(daysAgo(-150))),
     mk('goal-mac', 'New MacBook', 2500, 1100, null),
   ];
+}
+
+function goalsList() {
+  const financeDate = financeAnchor();
+  const allAccounts = accounts();
+  const balanceCentsById = new Map(allAccounts.map((account) => [account.id, Math.round(account.balance * 100)]));
+  if (!demoState.goals) demoState.goals = seedDefaultGoals();
+  return enrichGoalsResponse({
+    goals: demoState.goals,
+    accounts: allAccounts,
+    balanceCentsById,
+    financeDate,
+  }).goals.map((goal) => ({
+    ...goal,
+    pct: goal.target > 0 ? Math.min(999, Math.round((goal.current / goal.target) * 100)) : null,
+    fundingSource: goal.accountId ? 'allocated-account' : 'manual',
+    availableInAccount: goal.accountId
+      ? Math.max(0, allAccounts.find((account) => account.id === goal.accountId)?.balance || 0)
+      : null,
+  }));
+}
+
+function buildDemoGoalAdvisory() {
+  const financeDate = financeAnchor();
+  const allAccounts = accounts();
+  const balanceCentsById = new Map(allAccounts.map((account) => [account.id, Math.round(account.balance * 100)]));
+  if (!demoState.goals) demoState.goals = seedDefaultGoals();
+  return enrichGoalsResponse({
+    goals: demoState.goals,
+    accounts: allAccounts,
+    balanceCentsById,
+    financeDate,
+  }).goalAdvisory;
+}
+
+function goals() {
+  return goalsList();
 }
 
 // ---- Spending (this month + prev) -----------------------------------------
@@ -636,8 +675,7 @@ const demoState = {
 };
 
 function currentGoals() {
-  if (!demoState.goals) demoState.goals = goals();
-  return demoState.goals;
+  return goalsList();
 }
 function manualAssets() {
   const items = demoState.manualAssets.map((m) => ({ ...m }));
@@ -754,7 +792,7 @@ function forecast(days = 90) {
     incompleteReasons: stsMetric.incompleteReasons || [],
   };
   const budgetGoalReasons = stsContainment.incompleteReasons.filter((reason) =>
-    reason === 'budget_data_unavailable' || String(reason).startsWith('goal_'));
+    reason === 'budget_data_unavailable' || reason === 'rollover_treatment_unknown');
   const knownEventsIncludedDespiteStsIncomplete = !withholdGraphEvents
     && !stsContainment.complete
     && events.length > 0;
@@ -925,13 +963,25 @@ function reimbLinks(id) {
 }
 
 function saveGoal(input = {}) {
-  const list = currentGoals();
+  if (!demoState.goals) demoState.goals = seedDefaultGoals();
+  const list = demoState.goals;
   const id = input.id || `goal-demo-${Date.now()}`;
-  const cur = input.accountId ? accounts().find((a) => a.id === input.accountId)?.balance || 0 : 0;
-  const row = { id, name: input.name || 'Demo Goal', target: Number(input.target) || 1000, accountId: input.accountId || null, deadline: input.deadline || null, current: round2(Math.max(0, cur)), pct: Math.round((Math.max(0, cur) / Math.max(1, Number(input.target) || 1000)) * 100) };
-  const idx = list.findIndex((g) => g.id === id);
+  const existing = list.find((goal) => goal.id === id);
+  const current = input.current != null
+    ? round2(Math.max(0, Number(input.current) || 0))
+    : round2(Math.max(0, Number(existing?.current) || 0));
+  const row = {
+    id,
+    name: input.name || existing?.name || 'Demo Goal',
+    target: Number(input.target) || existing?.target || 1000,
+    accountId: input.accountId !== undefined ? (input.accountId || null) : (existing?.accountId || null),
+    deadline: input.deadline !== undefined ? (input.deadline || null) : (existing?.deadline || null),
+    current,
+  };
+  const idx = list.findIndex((goal) => goal.id === id);
   if (idx >= 0) list[idx] = row; else list.push(row);
-  return { ok: true, id };
+  const saved = goalsList().find((goal) => goal.id === id);
+  return { ok: true, id, feasibility: saved?.feasibility || null };
 }
 function deleteGoal(id) { demoState.goals = currentGoals().filter((g) => g.id !== id); return { ok: true, removed: 1 }; }
 function saveManualAsset(input = {}) {
@@ -999,7 +1049,7 @@ function deleteReceipt(id) { demoState.receipts = demoState.receipts.filter((r) 
 
 module.exports = {
   accounts, transactions, spending, trends, budgets, reimbursement, insights, categories, recurring, bills, income,
-  goals: currentGoals, tags, manualAssets, investments, forecast, reports, review, today, events, rules, merchantHistory,
+  goals, tags, manualAssets, investments, forecast, reports, review, today, events, rules, merchantHistory,
   transactionDetail, reconciliation, reconcilePending, repaymentSuggestions, receipts, reimbLinks, reimbursementExport,
   saveGoal, deleteGoal, saveManualAsset, deleteManualAsset, saveRule, deleteRule, saveEvent, deleteEvent,
   createTransaction, updateTransaction, splitTransaction, unsplitTransaction, deleteTransaction,

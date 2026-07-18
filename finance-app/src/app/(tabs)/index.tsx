@@ -102,6 +102,7 @@ export default function Overview() {
   const reserved = today.data?.obligations.reserved ?? today.data?.obligationGraph?.reservations ?? [];
   const nextIncome = today.data?.obligations.nextIncome;
   const safeToSpend = today.data?.liquidity.safeToSpend;
+  const goalAdvisory = today.data?.liquidity.goalAdvisory;
   const incompleteReasons = today.data?.liquidity.safeToSpend.incompleteReasons ?? [];
 
   return (
@@ -157,6 +158,15 @@ export default function Overview() {
               {incompleteReasons.length ? (
                 <Text style={styles.incompleteText}>{incompleteReasons.join(' · ')}</Text>
               ) : null}
+            </Card>
+          ) : null}
+
+          {goalAdvisory?.overAllocatedAccountCount ? (
+            <Card testID="today-goal-advisory" style={styles.incompleteCard}>
+              <Text style={styles.incompleteTitle}>Goal tracking advisory</Text>
+              <Text style={styles.incompleteText}>
+                {goalAdvisory.overAllocatedAccountCount} linked account{goalAdvisory.overAllocatedAccountCount === 1 ? '' : 's'} show allocations above current balance. This does not reduce Safe to Spend.
+              </Text>
             </Card>
           ) : null}
 

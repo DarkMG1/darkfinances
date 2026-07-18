@@ -78,7 +78,13 @@ export default function Goals() {
                   </View>
                   <ProgressBar pct={g.pct ?? 0} />
                   <Text style={styles.sub}>{fmtPos(g.current)} allocated of {fmtPos(g.target)}</Text>
-                  {g.monthlyRequired != null ? <Text style={styles.sub}>{fmtPos(g.monthlyRequired)}/month needed through {g.deadline}</Text> : null}
+                  {g.feasibility?.overAllocated ? (
+                    <Text style={styles.warn}>Advisory: allocations exceed linked account balance by {fmtPos(g.feasibility.overAllocatedCents / 100)}</Text>
+                  ) : null}
+                  {g.availableInAccount != null ? (
+                    <Text style={styles.sub}>{fmtPos(g.availableInAccount)} available in linked account (advisory capacity)</Text>
+                  ) : null}
+                  {g.monthlyRequired != null ? <Text style={styles.sub}>{fmtPos(g.monthlyRequired)}/month advisory pace through {g.deadline}</Text> : null}
                 </Card>
               </Pressable>
             ))
@@ -148,6 +154,7 @@ const styles = StyleSheet.create({
   field: { color: colors.muted, fontSize: 12, fontWeight: '600', marginTop: 12, marginBottom: 6 },
   input: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 10, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15 },
   help: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 6 },
+  warn: { color: colors.yellow, fontSize: 12, marginTop: 8, lineHeight: 16 },
   chips: { gap: 8, paddingVertical: 2 },
   chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, maxWidth: 160 },
   chipActive: { backgroundColor: colors.accent, borderColor: colors.accent },

@@ -11,7 +11,8 @@ test('demo forecast exposes STS containment and labels projection incomplete whe
 
   assert.equal(today.liquidity.safeToSpend.complete, false);
   assert.ok(today.liquidity.safeToSpend.incompleteReasons.includes('budget_data_unavailable'));
-  assert.ok(today.liquidity.safeToSpend.incompleteReasons.includes('goal_commitment_unknown'));
+  assert.ok(!today.liquidity.safeToSpend.incompleteReasons.includes('goal_commitment_unknown'));
+  assert.equal(today.liquidity.goalAdvisory?.advisoryOnly, true);
 
   assert.equal(forecast.assumptions.stsContainment.complete, false);
   assert.deepEqual(
@@ -28,7 +29,7 @@ test('demo forecast exposes STS containment and labels projection incomplete whe
 
   assert.equal(forecast.assumptions.genericBudget.complete, false);
   assert.ok(forecast.assumptions.genericBudget.incompleteReasons.includes('budget_data_unavailable'));
-  assert.ok(forecast.assumptions.genericBudget.incompleteReasons.includes('goal_commitment_unknown'));
+  assert.ok(!forecast.assumptions.genericBudget.incompleteReasons.includes('goal_commitment_unknown'));
   assert.equal(forecast.assumptions.genericBudgetTarget, null);
 
   assert.ok(forecast.warnings.some((warning) => /Safe-to-Spend containment incomplete/.test(warning)));

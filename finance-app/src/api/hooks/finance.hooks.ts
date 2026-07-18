@@ -923,6 +923,7 @@ export function useSaveGoal() {
     method: 'POST',
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.goals.key] });
+      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.today.key] });
     },
   });
 }
@@ -934,6 +935,7 @@ export function useDeleteGoal() {
     method: 'DELETE',
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.goals.key] });
+      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.today.key] });
     },
   });
 }

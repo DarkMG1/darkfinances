@@ -174,14 +174,21 @@ test('renderSafeToSpend surfaces authoritative incompleteReasons when unavailabl
   const html = (value) => String(value == null ? '' : value);
 
   vm.runInNewContext(
-    `${fnMatch[0]}\nrenderSafeToSpend({ complete: false, value: null, incompleteReasons: ['budget_data_unavailable', 'goal_commitment_unknown'] });`,
+    `${fnMatch[0]}\nrenderSafeToSpend({ complete: false, value: null, incompleteReasons: ['budget_data_unavailable', 'rollover_treatment_unknown'] });`,
     { document, fmt, html },
   );
 
   assert.equal(dom.safeToSpendValue.textContent, 'Unavailable');
   assert.match(dom.safeToSpendReasons.innerHTML, /budget_data_unavailable/);
-  assert.match(dom.safeToSpendReasons.innerHTML, /goal_commitment_unknown/);
+  assert.match(dom.safeToSpendReasons.innerHTML, /rollover_treatment_unknown/);
   assert.equal(dom.safeToSpendReasons.hidden, false);
+});
+
+test('browser Today renders goal advisory without reducing Safe to Spend', () => {
+  assert.match(script, /function renderGoalAdvisory\(/);
+  assert.match(script, /does not reduce Safe to Spend/);
+  assert.match(script, /goalAdvisoryNote/);
+  assert.match(script, /Array\.isArray\(payload\) \? payload : \(payload\.data \?\? payload\.goals \?\? \[\]\)/);
 });
 
 function loadRenderMetricPos() {
