@@ -17,7 +17,6 @@ import {
   CreateTransactionInput,
   Forecast,
   Goal,
-  GoalsResponse,
   GoalInput,
   Income,
   Investments,
@@ -427,7 +426,7 @@ export function useTags() {
 }
 
 export function useGoals() {
-  return useFinanceQuery<GoalsResponse>({
+  return useFinanceQuery<Goal[]>({
     endpoint: API_ENDPOINTS.goals.endpoint,
     method: API_ENDPOINTS.goals.method,
     queryKey: [API_ENDPOINTS.goals.key],
@@ -924,6 +923,7 @@ export function useSaveGoal() {
     method: 'POST',
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.goals.key] });
+      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.today.key] });
     },
   });
 }
@@ -935,6 +935,7 @@ export function useDeleteGoal() {
     method: 'DELETE',
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.goals.key] });
+      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.today.key] });
     },
   });
 }

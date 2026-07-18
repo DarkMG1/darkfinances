@@ -165,7 +165,7 @@ export default function Overview() {
             <Card testID="today-goal-advisory" style={styles.incompleteCard}>
               <Text style={styles.incompleteTitle}>Goal tracking advisory</Text>
               <Text style={styles.incompleteText}>
-                {goalAdvisory.overAllocatedAccountCount} linked account{goalAdvisory.overAllocatedAccountCount === 1 ? '' : 's'} show allocations above current balance. This does not change Safe to Spend.
+                {goalAdvisory.overAllocatedAccountCount} linked account{goalAdvisory.overAllocatedAccountCount === 1 ? '' : 's'} show allocations above current balance. This does not reduce Safe to Spend.
               </Text>
             </Card>
           ) : null}

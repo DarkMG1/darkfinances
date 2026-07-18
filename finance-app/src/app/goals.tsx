@@ -66,10 +66,10 @@ export default function Goals() {
         <ErrorState error={goals.error?.error} onRetry={goals.refetch} />
       ) : (
         <>
-          {(goals.data?.goals ?? []).length === 0 ? (
+          {(goals.data ?? []).length === 0 ? (
             <EmptyState icon="target">No goals yet — add one below</EmptyState>
           ) : (
-            (goals.data?.goals ?? []).map((g) => (
+            (goals.data ?? []).map((g) => (
               <Pressable testID={`goals-row-${g.id}`} key={g.id} onPress={() => openEdit(g)} style={({ pressed }) => pressed && { opacity: 0.7 }}>
                 <Card style={{ marginBottom: 12 }}>
                   <View style={styles.head}>

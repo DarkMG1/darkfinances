@@ -344,6 +344,7 @@
       <div class="stat-value" id="safeToSpendValue">Loading…</div>
       <div class="stat-sub" id="safeToSpendDetail">Checking decision inputs</div>
       <div id="safeToSpendReasons" class="stat-sub" role="status" aria-live="polite" hidden></div>
+      <div id="goalAdvisoryNote" class="stat-sub" role="note" aria-live="polite" hidden></div>
       <div id="safeToSpendReserved"></div>
     </div>
 
@@ -692,6 +693,18 @@
       ch.style.color = diff >= 0 ? 'var(--green)' : 'var(--red)';
     }
 
+    function renderGoalAdvisory(advisory) {
+      const host = document.getElementById('goalAdvisoryNote');
+      if (!host) return;
+      if (!advisory?.overAllocatedAccountCount) {
+        host.innerHTML = '';
+        host.hidden = true;
+        return;
+      }
+      host.hidden = false;
+      host.innerHTML = `<div aria-label="Goal allocation advisory">${advisory.overAllocatedAccountCount} linked account${advisory.overAllocatedAccountCount === 1 ? '' : 's'} show allocations above current balance. Advisory only — does not reduce Safe to Spend.</div>`;
+    }
+
     function renderSafeToSpend(metric, payload = null) {
       const available = metric?.complete === true && Number.isFinite(metric.value);
       const value = document.getElementById('safeToSpendValue');
@@ -737,6 +750,7 @@
         if (!response.ok) throw new Error('Today unavailable');
         const payload = await response.json();
         renderSafeToSpend(payload?.data?.liquidity?.safeToSpend, payload);
+        renderGoalAdvisory(payload?.data?.liquidity?.goalAdvisory);
       } catch (error) {
         renderSafeToSpend(null);
         throw error;
@@ -1021,7 +1035,7 @@
     let goalsData = [];
     async function loadGoals() {
       const payload = await (await fetch('/api/goals')).json();
-      goalsData = Array.isArray(payload) ? payload : (payload.goals || []);
+      goalsData = Array.isArray(payload) ? payload : (payload.data ?? payload.goals ?? []);
       const card = document.getElementById('goalsCard');
       if (!goalsData.length) { card.innerHTML = '<div class="empty-state">No goals yet — tap “+ Add goal”.</div>'; return; }
       card.innerHTML = goalsData.map((g, i) => {

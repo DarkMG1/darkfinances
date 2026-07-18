@@ -258,12 +258,12 @@ export interface BudgetCategory {
   target: number;
   spent: number;
   remaining: number;
-  reserve: number;
-  envelope: number;
-  envelopeDebt: number;
-  reserveCents: number;
-  envelopeCents: number;
-  envelopeDebtCents: number;
+  reserve: number | null;
+  envelope: number | null;
+  envelopeDebt: number | null;
+  reserveCents: number | null;
+  envelopeCents: number | null;
+  envelopeDebtCents: number | null;
   projected: number;
   expectedToDate: number | null;
   dailyPace: number;
@@ -273,6 +273,8 @@ export interface BudgetCategory {
   status: 'on_track' | 'watch' | 'over' | 'snoozed';
   rolloverMode: string;
   rolloverAmount: number;
+  rolloverConfigured: boolean;
+  resolved: boolean;
   annualTarget: number | null;
   trueExpenseCadence: string | null;
   snoozedMonth: string | null;
@@ -983,11 +985,6 @@ export interface Goal {
   feasibility?: GoalFeasibility;
 }
 
-export interface GoalsResponse {
-  goals: Goal[];
-  accountSummaries: GoalAccountSummary[];
-  goalAdvisory: GoalAdvisory;
-}
 export interface GoalInput {
   id?: string;
   name: string;

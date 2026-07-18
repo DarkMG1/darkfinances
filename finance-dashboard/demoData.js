@@ -213,7 +213,6 @@ function today() {
     operatingAccounts: cash,
     budgets: { supported: false },
     recurring: recurringData,
-    goals: goalsList(),
     spendingCompleteness: currentSpending.current?.completeness,
     obligationGraph: graph,
     liabilityPolicies: graphInputs.liabilityPolicies,
@@ -246,7 +245,7 @@ function today() {
     health: { ready: true, initializedAt: asOf, lastSyncAt: asOf, lastErrorAt: null, lastError: null },
     accounts: allAccounts,
     spending: currentSpending,
-    liquidity: { safeToSpend, goalAdvisory: goalsPayload().goalAdvisory },
+    liquidity: { safeToSpend, goalAdvisory: buildDemoGoalAdvisory() },
     obligationGraph: {
       version: graph.version,
       summary: graphSummary(graph),
@@ -316,33 +315,41 @@ function seedDefaultGoals() {
   ];
 }
 
-function goalsPayload() {
+function goalsList() {
   const financeDate = financeAnchor();
   const allAccounts = accounts();
   const balanceCentsById = new Map(allAccounts.map((account) => [account.id, Math.round(account.balance * 100)]));
   if (!demoState.goals) demoState.goals = seedDefaultGoals();
-  const enriched = enrichGoalsResponse({
+  return enrichGoalsResponse({
     goals: demoState.goals,
     accounts: allAccounts,
     balanceCentsById,
     financeDate,
-  });
-  return {
-    goals: enriched.goals.map((goal) => ({
-      ...goal,
-      pct: goal.target > 0 ? Math.min(999, Math.round((goal.current / goal.target) * 100)) : null,
-      fundingSource: goal.accountId ? 'allocated-account' : 'manual',
-      availableInAccount: goal.accountId
-        ? Math.max(0, allAccounts.find((account) => account.id === goal.accountId)?.balance || 0)
-        : null,
-    })),
-    accountSummaries: enriched.accountSummaries,
-    goalAdvisory: enriched.goalAdvisory,
-  };
+  }).goals.map((goal) => ({
+    ...goal,
+    pct: goal.target > 0 ? Math.min(999, Math.round((goal.current / goal.target) * 100)) : null,
+    fundingSource: goal.accountId ? 'allocated-account' : 'manual',
+    availableInAccount: goal.accountId
+      ? Math.max(0, allAccounts.find((account) => account.id === goal.accountId)?.balance || 0)
+      : null,
+  }));
 }
 
-function goalsList() {
-  return goalsPayload().goals;
+function buildDemoGoalAdvisory() {
+  const financeDate = financeAnchor();
+  const allAccounts = accounts();
+  const balanceCentsById = new Map(allAccounts.map((account) => [account.id, Math.round(account.balance * 100)]));
+  if (!demoState.goals) demoState.goals = seedDefaultGoals();
+  return enrichGoalsResponse({
+    goals: demoState.goals,
+    accounts: allAccounts,
+    balanceCentsById,
+    financeDate,
+  }).goalAdvisory;
+}
+
+function goals() {
+  return goalsList();
 }
 
 // ---- Spending (this month + prev) -----------------------------------------
@@ -668,7 +675,7 @@ const demoState = {
 };
 
 function currentGoals() {
-  return goalsPayload().goals;
+  return goalsList();
 }
 function manualAssets() {
   const items = demoState.manualAssets.map((m) => ({ ...m }));
@@ -973,7 +980,7 @@ function saveGoal(input = {}) {
   };
   const idx = list.findIndex((goal) => goal.id === id);
   if (idx >= 0) list[idx] = row; else list.push(row);
-  const saved = goalsPayload().goals.find((goal) => goal.id === id);
+  const saved = goalsList().find((goal) => goal.id === id);
   return { ok: true, id, feasibility: saved?.feasibility || null };
 }
 function deleteGoal(id) { demoState.goals = currentGoals().filter((g) => g.id !== id); return { ok: true, removed: 1 }; }
@@ -1042,7 +1049,7 @@ function deleteReceipt(id) { demoState.receipts = demoState.receipts.filter((r) 
 
 module.exports = {
   accounts, transactions, spending, trends, budgets, reimbursement, insights, categories, recurring, bills, income,
-  goals: goalsPayload, tags, manualAssets, investments, forecast, reports, review, today, events, rules, merchantHistory,
+  goals, tags, manualAssets, investments, forecast, reports, review, today, events, rules, merchantHistory,
   transactionDetail, reconciliation, reconcilePending, repaymentSuggestions, receipts, reimbLinks, reimbursementExport,
   saveGoal, deleteGoal, saveManualAsset, deleteManualAsset, saveRule, deleteRule, saveEvent, deleteEvent,
   createTransaction, updateTransaction, splitTransaction, unsplitTransaction, deleteTransaction,

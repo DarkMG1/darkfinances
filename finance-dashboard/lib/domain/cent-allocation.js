@@ -107,10 +107,16 @@ function trySumCategoryFieldCents(categories, field) {
 }
 
 function trySumCategoryReserveCents(categories) {
+  if ((categories || []).some((category) => category.resolved === false || category.reserveCents === null)) {
+    return {
+      cents: null,
+      complete: false,
+      incompleteReasons: ['rollover_treatment_unknown'],
+    };
+  }
   try {
     const cents = sumCents((categories || []).map((category) => {
       if (Number.isSafeInteger(category.reserveCents)) return category.reserveCents;
-      if (category.reserve != null) return readCategoryMoneyCents(category.reserve);
       if (category.remaining != null) return readCategoryMoneyCents(category.remaining);
       throw new TypeError('category reserve field is required');
     }));

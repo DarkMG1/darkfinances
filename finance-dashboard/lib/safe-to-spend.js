@@ -19,7 +19,7 @@ const SAFE_TO_SPEND_REASON = Object.freeze({
   targetlessCategorySpending: 'targetless_category_spending',
   billRecurrenceUnresolved: 'bill_recurrence_unresolved',
   nonBillRecurrenceUnresolved: 'non_bill_recurrence_unresolved',
-  goalCommitmentUnknown: 'goal_commitment_unknown',
+  goalCommitmentUnknown: 'goal_commitment_unknown', // wire-compat only; never emitted after PR-24
   rolloverTreatmentUnknown: 'rollover_treatment_unknown',
   ...OBLIGATION_REASON,
 });
@@ -46,7 +46,6 @@ const SAFE_TO_SPEND_REASON_ORDER = Object.freeze([
   SAFE_TO_SPEND_REASON.targetlessCategorySpending,
   SAFE_TO_SPEND_REASON.billRecurrenceUnresolved,
   SAFE_TO_SPEND_REASON.nonBillRecurrenceUnresolved,
-  SAFE_TO_SPEND_REASON.goalCommitmentUnknown,
   SAFE_TO_SPEND_REASON.rolloverTreatmentUnknown,
 ]);
 
@@ -91,7 +90,6 @@ function safeToSpendIncompleteReasons({
   operatingAccounts = [],
   budgets = {},
   recurring = {},
-  goals = [],
   spendingCompleteness = null,
   obligationGraph = null,
   liabilityPolicies = {},

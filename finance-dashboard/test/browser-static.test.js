@@ -184,6 +184,13 @@ test('renderSafeToSpend surfaces authoritative incompleteReasons when unavailabl
   assert.equal(dom.safeToSpendReasons.hidden, false);
 });
 
+test('browser Today renders goal advisory without reducing Safe to Spend', () => {
+  assert.match(script, /function renderGoalAdvisory\(/);
+  assert.match(script, /does not reduce Safe to Spend/);
+  assert.match(script, /goalAdvisoryNote/);
+  assert.match(script, /Array\.isArray\(payload\) \? payload : \(payload\.data \?\? payload\.goals \?\? \[\]\)/);
+});
+
 function loadRenderMetricPos() {
   const start = script.indexOf('function renderMetricPos(');
   assert.ok(start >= 0, 'renderMetricPos helper must exist in dashboard script');

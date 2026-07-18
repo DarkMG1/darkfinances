@@ -30,9 +30,11 @@ function accountStatusForGoal(account, { accountId }) {
   if (!accountId) return { status: 'manual', role: null, missing: false, closed: false, excluded: false };
   if (!account) return { status: 'missing', role: null, missing: true, closed: false, excluded: false };
   if (account.closed) return { status: 'closed', role: account.role || null, missing: false, closed: true, excluded: false };
-  if (account.hidden) return { status: 'hidden', role: account.role || null, missing: false, closed: false, excluded: true };
   if (account.role === 'excluded') {
     return { status: 'excluded', role: account.role, missing: false, closed: false, excluded: true };
+  }
+  if (account.hidden) {
+    return { status: 'hidden', role: account.role || null, missing: false, closed: false, excluded: false };
   }
   return {
     status: 'linked',
@@ -71,22 +73,29 @@ function enrichGoalFeasibility(goal, {
     : null;
   const linked = Boolean(goal.accountId);
   const overAllocatedCents = linked && accountSummary ? accountSummary.overAllocatedCents : 0;
+  const status = accountStatus?.status ?? (linked ? 'linked' : 'manual');
+  let feasible = null;
+  if (!linked) {
+    feasible = null;
+  } else if (accountStatus?.missing || accountStatus?.closed || status === 'excluded') {
+    feasible = false;
+  } else {
+    feasible = overAllocatedCents === 0;
+  }
   return {
     remainingCents,
     monthlyRequiredCents,
     deadlineOverdue: pressure.overdue,
-    accountStatus: accountStatus?.status ?? (linked ? 'linked' : 'manual'),
+    accountStatus: status,
     accountRole: accountStatus?.role ?? accountSummary?.role ?? null,
     overAllocated: linked && overAllocatedCents > 0,
     overAllocatedCents: linked ? overAllocatedCents : 0,
-    feasible: linked
-      ? (accountStatus?.missing || accountStatus?.closed ? null : overAllocatedCents === 0)
-      : null,
+    feasible,
     advisoryOnly: true,
   };
 }
 
-function buildAccountSummaries({ goals, accountsById, balanceCentsById, financeDate }) {
+function buildAccountSummaries({ goals, accountsById, balanceCentsById }) {
   const accountIds = [...new Set((goals || []).map((goal) => goal.accountId).filter(Boolean))];
   return accountIds.map((accountId) => {
     const account = accountsById.get(accountId) || null;
@@ -130,7 +139,7 @@ function enrichGoalsResponse({
   financeDate,
 }) {
   const accountsById = new Map((accounts || []).map((account) => [account.id, account]));
-  const accountSummaries = buildAccountSummaries({ goals, accountsById, balanceCentsById, financeDate });
+  const accountSummaries = buildAccountSummaries({ goals, accountsById, balanceCentsById });
   const summaryByAccount = new Map(accountSummaries.map((summary) => [summary.accountId, summary]));
   const enrichedGoals = (goals || []).map((goal) => {
     const account = goal.accountId ? accountsById.get(goal.accountId) : null;

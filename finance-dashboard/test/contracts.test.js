@@ -115,9 +115,19 @@ test('legacy web reimbursement renders MetricValue totals without NaN or fabrica
 test('generated contract includes goal feasibility and advisory types', () => {
   assert.match(generatedTypes, /export interface GoalFeasibility/);
   assert.match(generatedTypes, /export interface GoalAdvisory/);
-  assert.match(generatedTypes, /export interface GoalsResponse/);
   assert.match(generatedTypes, /goalAdvisory\?: GoalAdvisory/);
-  assert.match(generatedTypes, /reserveCents: number/);
+  assert.match(generatedTypes, /rolloverConfigured: boolean/);
+  assert.match(generatedTypes, /resolved: boolean/);
+  assert.match(generatedTypes, /reserveCents: number \| null/);
+  assert.doesNotMatch(generatedTypes, /export interface GoalsResponse/);
+});
+
+test('app surfaces advisory goal feasibility without fabricating Safe-to-Spend', () => {
+  const goals = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'goals.tsx'), 'utf8');
+  assert.match(goals, /feasibility\?\.overAllocated/);
+  assert.match(goals, /\(goals\.data \?\? \[\]\)\.map/);
+  assert.match(appHome, /goalAdvisory/);
+  assert.match(appHome, /does not reduce Safe to Spend/);
 });
 
 test('generated contract exposes report trend completeness and nullable monthly review totals', () => {

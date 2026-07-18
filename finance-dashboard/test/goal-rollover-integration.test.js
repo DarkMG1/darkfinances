@@ -44,7 +44,8 @@ const {
 } = require('../lib/domain/obligation-graph');
 const { toCents, sumCents } = require('../lib/domain/money');
 const { daysInMonth } = require('../lib/date-only');
-const { getToday, getGoals, saveGoal, resetApi } = require('../dataModule');
+const { getToday, getGoals, saveGoal, getBudgets, getForecast, resetApi } = require('../dataModule');
+const { buildForecastGenericBudgetContext } = require('../lib/domain/cent-allocation');
 
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -83,7 +84,7 @@ test('balance decline after save keeps goal readable and re-save succeeds', asyn
     goals: [{ id: 'g1', name: 'Trip', target: 200, current: 60, accountId: 'acc-check' }],
   });
   const initial = await getGoals();
-  assert.equal(initial.goals[0].feasibility.overAllocated, false);
+  assert.equal(initial[0].feasibility.overAllocated, false);
 
   const dropped = structuredClone(fixtures.complete.fixture);
   dropped.accounts = dropped.accounts.map((account) => (
@@ -92,7 +93,7 @@ test('balance decline after save keeps goal readable and re-save succeeds', asyn
   fixtures.configure(dropped);
   resetApi();
   const afterDrop = await getGoals();
-  assert.equal(afterDrop.goals[0].feasibility.overAllocated, true);
+  assert.equal(afterDrop[0].feasibility.overAllocated, true);
 
   const saved = await saveGoal({ id: 'g1', name: 'Trip', target: 200, current: 60, accountId: 'acc-check' });
   assert.equal(saved.ok, true);
@@ -100,6 +101,13 @@ test('balance decline after save keeps goal readable and re-save succeeds', asyn
 });
 
 test('carryover envelope reserve replaces legacy remaining in obligation graph', () => {
+  const fields = categoryEnvelopeFields({
+    target: 200,
+    spent: 50,
+    balance: 250,
+    rolloverMode: 'carryover',
+    rolloverConfigured: true,
+  });
   const category = {
     id: 'annual',
     name: 'Annual',
@@ -107,13 +115,37 @@ test('carryover envelope reserve replaces legacy remaining in obligation graph',
     spent: 50,
     balance: 250,
     rolloverMode: 'carryover',
-    ...categoryEnvelopeFields({ target: 200, spent: 50, balance: 250, rolloverMode: 'carryover' }),
+    rolloverConfigured: true,
+    resolved: fields.resolved,
+    reserveCents: fields.reserveCents,
   };
   const { reservations } = buildBudgetReservations({
     budgets: { supported: true, groups: [{ categories: [category] }] },
   });
   assert.equal(reservations[0].remainingCents, toCents(250));
   assert.notEqual(reservations[0].remainingCents, toCents(150));
+});
+
+test('unresolved rollover skips graph reservation and quarantines forecast generic budget', async () => {
+  seedFixture(fixtures.complete.fixture, {
+    goals: [],
+    budgetSettings: { defaults: {}, categories: {} },
+  });
+  const budgets = await getBudgets();
+  const unresolved = budgets.groups.flatMap((group) => group.categories).find((c) => c.id === 'groceries');
+  assert.equal(unresolved.resolved, false);
+  assert.equal(unresolved.reserveCents, null);
+  const { reservations } = buildBudgetReservations({ budgets });
+  assert.ok(!reservations.some((row) => row.categoryId === 'groceries'));
+  const genericCategories = budgets.groups.flatMap((group) => group.categories);
+  const context = buildForecastGenericBudgetContext(genericCategories);
+  assert.equal(context.complete, false);
+  assert.ok(context.incompleteReasons.includes('rollover_treatment_unknown'));
+  const today = await getToday();
+  assert.equal(today.liquidity.safeToSpend.complete, false);
+  assert.ok(today.liquidity.safeToSpend.incompleteReasons.includes('rollover_treatment_unknown'));
+  const forecast = await getForecast({ days: 30 });
+  assert.ok(forecast.assumptions.genericBudget.incompleteReasons.includes('rollover_treatment_unknown'));
 });
 
 test('goal invariance: STS unchanged when goals added to complete fixture', async () => {
@@ -134,6 +166,7 @@ test('Jan/Feb month boundary uses reserve cents for current month only', () => {
     remaining: 310,
     reserve: 310,
     reserveCents: toCents(310),
+    resolved: true,
   }];
   const context = buildForecastGenericBudgetContext(categories);
   const entries = buildForecastBudgetDailyCents({
@@ -185,8 +218,10 @@ test('concurrent same-account goals stay advisory without blocking save', async 
       { id: 'g2', name: 'B', target: 100, current: 60, accountId: 'acc-check' },
     ],
   });
-  const payload = await getGoals();
-  assert.ok(payload.accountSummaries[0].overAllocated > 0);
+  const goals = await getGoals();
+  assert.ok(goals.some((goal) => goal.feasibility.overAllocated));
+  const today = await getToday();
+  assert.ok(today.liquidity.goalAdvisory.overAllocatedAccountCount > 0);
   const saved = await saveGoal({ id: 'g1', name: 'A', target: 100, current: 60, accountId: 'acc-check' });
   assert.equal(saved.ok, true);
   assert.equal(saved.feasibility.overAllocated, true);
@@ -214,6 +249,8 @@ test('graph conservation with carryover envelope reservations', () => {
           spent: 50,
           balance: 250,
           rolloverMode: 'carryover',
+          rolloverConfigured: true,
+          resolved: true,
           reserveCents: toCents(250),
         }],
       }],
@@ -235,12 +272,32 @@ test('graph conservation with carryover envelope reservations', () => {
   assert.equal(stf.valueCents, toCents(4750));
 });
 
-test('legacy goals list shape remains a plain array for unversioned clients', async () => {
+test('legacy goals list shape remains a plain array for old clients', async () => {
   seedFixture(fixtures.complete.fixture, {
     goals: [{ id: 'goal', name: 'Trip', target: 500, current: 100 }],
   });
   const payload = await getGoals();
-  assert.ok(Array.isArray(payload.goals));
-  assert.ok(payload.goalAdvisory);
-  assert.equal(payload.goals[0].feasibility.advisoryOnly, true);
+  assert.ok(Array.isArray(payload));
+  assert.equal(typeof payload.map, 'function');
+  assert.equal(payload[0].feasibility.advisoryOnly, true);
+});
+
+test('saveGoal preserves omitted current allocation on edit', async () => {
+  seedFixture(fixtures.complete.fixture, {
+    goals: [{ id: 'g1', name: 'Trip', target: 200, current: 42, accountId: 'acc-check' }],
+  });
+  const saved = await saveGoal({ id: 'g1', name: 'Trip', target: 200, accountId: 'acc-check' });
+  assert.equal(saved.ok, true);
+  const goals = await getGoals();
+  assert.equal(goals[0].current, 42);
+});
+
+test('stale missing linked account edit succeeds and surfaces missing status', async () => {
+  seedFixture(fixtures.complete.fixture, {
+    goals: [{ id: 'g1', name: 'Trip', target: 200, current: 42, accountId: 'acc-missing' }],
+  });
+  const saved = await saveGoal({ id: 'g1', name: 'Trip renamed', target: 250, accountId: 'acc-missing' });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.feasibility.accountStatus, 'missing');
+  assert.equal(saved.feasibility.feasible, false);
 });
