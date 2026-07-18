@@ -7,6 +7,7 @@ import { PushScreen } from '@/components/screen';
 import { Card, CardTitle, EmptyState, ErrorState } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { GroupedBars, MonthNavigator, ProgressBar, trendPeriodComplete } from '@/components/charts';
+import { categoryEnvelopeDebtDisplay, categoryReserveDisplay } from '@/lib/budget-category-display';
 import { haptics } from '@/lib/haptics';
 import { useCurrentMonthKey, useSelectedMonth } from '@/lib/selectedMonth';
 import { colors, fmtPos } from '@/theme/colors';
@@ -132,6 +133,14 @@ export default function Budgets() {
                   const target = c.target ?? c.budgeted;
                   const pct = hasTargets && target > 0 ? (c.spent / target) * 100 : (c.spent / groupMax) * 100;
                   const meta = metaLabel(c);
+                  const reserveDisplay = categoryReserveDisplay(c);
+                  const debtDisplay = categoryEnvelopeDebtDisplay(c.envelopeDebt);
+                  const reserveMeta = reserveDisplay.kind === 'unavailable'
+                    ? 'reserve unavailable'
+                    : `reserve ${fmtPos(reserveDisplay.dollars)}`;
+                  const reserveAccessibility = reserveDisplay.kind === 'unavailable'
+                    ? 'Reserve unavailable. Rollover policy unresolved.'
+                    : `Reserve ${fmtPos(reserveDisplay.dollars)}`;
                   return (
                     <Pressable
                       testID={`budgets-category-${c.id}`}
@@ -149,8 +158,22 @@ export default function Budgets() {
                       </View>
                       <ProgressBar pct={pct} over={hasTargets && c.over} />
                       <View style={styles.catMetaRow}>
-                        <Text style={styles.catMeta}>Left {fmtPos(c.remaining ?? 0)} · reserve {fmtPos(c.reserve ?? c.remaining ?? 0)} · projected {fmtPos(c.projected ?? c.spent)} · {fmtPos(c.dailyPace ?? 0)}/day</Text>
-                        {c.envelopeDebt > 0 ? <Text style={styles.debtMeta}>Advisory envelope debt {fmtPos(c.envelopeDebt)}</Text> : null}
+                        <Text
+                          style={styles.catMeta}
+                          accessibilityRole="text"
+                          accessibilityLabel={`Left ${fmtPos(c.remaining ?? 0)}. ${reserveAccessibility}. Projected ${fmtPos(c.projected ?? c.spent)}. ${fmtPos(c.dailyPace ?? 0)} per day.`}
+                        >
+                          Left {fmtPos(c.remaining ?? 0)} ·{' '}
+                          <Text style={reserveDisplay.kind === 'unavailable' ? styles.reserveUnavailable : undefined}>
+                            {reserveMeta}
+                          </Text>
+                          {' · projected '}{fmtPos(c.projected ?? c.spent)} · {fmtPos(c.dailyPace ?? 0)}/day
+                        </Text>
+                        {debtDisplay.show ? (
+                          <Text style={styles.debtMeta} accessibilityRole="text">
+                            Advisory envelope debt {fmtPos(debtDisplay.dollars!)}
+                          </Text>
+                        ) : null}
                         {meta ? <Text style={styles.catMeta}>{meta}</Text> : null}
                       </View>
                     </Pressable>
@@ -222,6 +245,7 @@ const styles = StyleSheet.create({
   catAmt: { color: colors.muted, fontSize: 12 },
   catMetaRow: { marginTop: 5, gap: 2 },
   catMeta: { color: colors.muted, fontSize: 11 },
+  reserveUnavailable: { color: colors.yellow, fontStyle: 'italic' },
   debtMeta: { color: colors.yellow, fontSize: 11 },
   modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 },

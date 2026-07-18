@@ -130,6 +130,17 @@ test('app surfaces advisory goal feasibility without fabricating Safe-to-Spend',
   assert.match(appHome, /does not reduce Safe to Spend/);
 });
 
+test('budgets screen fails closed on unresolved reserve and nullable envelope debt', () => {
+  const budgets = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'budgets.tsx'), 'utf8');
+  assert.match(budgets, /categoryReserveDisplay/);
+  assert.match(budgets, /categoryEnvelopeDebtDisplay/);
+  assert.match(budgets, /reserve unavailable/);
+  assert.match(budgets, /Rollover policy unresolved/);
+  assert.doesNotMatch(budgets, /c\.reserve \?\? c\.remaining/);
+  assert.doesNotMatch(budgets, /c\.envelopeDebt > 0/);
+  assert.match(generatedTypes, /envelopeDebt: number \| null/);
+});
+
 test('generated contract exposes report trend completeness and nullable monthly review totals', () => {
   assert.match(generatedTypes, /categoryTrendsComplete\?: boolean/);
   assert.match(generatedTypes, /merchantTrendsComplete\?: boolean/);
