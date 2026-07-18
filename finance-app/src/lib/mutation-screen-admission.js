@@ -25,6 +25,9 @@ function releaseMutationAdmission(admissionRef, lease) {
   }
 }
 
+/** Alias for dispatch-bound lease release (shared owner must match). */
+const releaseAdmissionForLease = releaseMutationAdmission;
+
 function isMutationAdmissionBlocked(admissionRef) {
   return admissionRef?.current?.ownerLease != null;
 }
@@ -36,6 +39,7 @@ function resetAdmissionLeaseCounter() {
 module.exports = {
   createMutationAdmissionRef,
   isMutationAdmissionBlocked,
+  releaseAdmissionForLease,
   releaseMutationAdmission,
   resetAdmissionLeaseCounter,
   tryAcquireMutationAdmission,

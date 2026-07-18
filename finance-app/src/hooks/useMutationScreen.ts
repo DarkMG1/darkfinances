@@ -63,7 +63,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     setDispatchPending,
   } = useMutationHookIdentity({ pendingLockKind: 'counter' });
   const pendingLockCountRef = pendingLockRef as React.MutableRefObject<number>;
-  const { acquireAdmission, releaseAdmissionFromSettle } = useMutationAdmissionLifecycle(admissionRef, identityKey);
+  const { acquireAdmission, releaseAdmissionForLease } = useMutationAdmissionLifecycle(admissionRef, identityKey);
 
   const [outcome, setOutcome] = useState<MappedMutationOutcome | null>(null);
   const [announce, setAnnounce] = useState('');
@@ -147,7 +147,8 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
   ) => {
     const entry = registryRef.current.get(key);
     if (!entry || pendingLockCountRef.current > 0) return;
-    if (!acquireAdmission()) return;
+    const lease = acquireAdmission();
+    if (lease == null) return;
 
     const token = captureDispatchToken();
     pendingLockCountRef.current += 1;
@@ -181,7 +182,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
           void handleError(key, error, entry, token);
         },
         onSettled: () => {
-          releaseAdmissionFromSettle();
+          releaseAdmissionForLease(lease);
           if (!isDispatchTokenCurrent(token)) return;
           pendingLockCountRef.current = Math.max(0, pendingLockCountRef.current - 1);
           markPending(key, false);
@@ -192,7 +193,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
         },
       });
     } catch (error) {
-      releaseAdmissionFromSettle();
+      releaseAdmissionForLease(lease);
       pendingLockCountRef.current = Math.max(0, pendingLockCountRef.current - 1);
       markPending(key, false);
       if (pendingLockCountRef.current === 0) {
@@ -200,7 +201,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
       }
       throw error;
     }
-  }, [acquireAdmission, bumpActivity, captureDispatchToken, handleError, isDispatchTokenCurrent, markPending, pendingLockCountRef, releaseAdmissionFromSettle, setDispatchPending]);
+  }, [acquireAdmission, bumpActivity, captureDispatchToken, handleError, isDispatchTokenCurrent, markPending, pendingLockCountRef, releaseAdmissionForLease, setDispatchPending]);
 
   const bind = useCallback(<TVariables,>(actionOptions: MutationScreenActionOptions<TVariables>): MutationScreenAction<TVariables> => {
     const existing = registryRef.current.get(actionOptions.key);

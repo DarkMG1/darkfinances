@@ -5,10 +5,39 @@ const path = require('path');
 const {
   createMutationAdmissionRef,
   isMutationAdmissionBlocked,
-  releaseMutationAdmission,
+  releaseAdmissionForLease,
   resetAdmissionLeaseCounter,
   tryAcquireMutationAdmission,
 } = require('../src/lib/mutation-screen-admission');
+
+function createHookAdmission(admissionRef) {
+  let heldLease = null;
+  return {
+    acquire() {
+      const lease = tryAcquireMutationAdmission(admissionRef);
+      if (lease == null) return null;
+      heldLease = lease;
+      return lease;
+    },
+    identityCleanup() {
+      if (heldLease == null) return;
+      const lease = heldLease;
+      heldLease = null;
+      releaseAdmissionForLease(admissionRef, lease);
+    },
+    settle(lease) {
+      if (heldLease === lease) heldLease = null;
+      releaseAdmissionForLease(admissionRef, lease);
+    },
+    catchRelease(lease) {
+      if (heldLease === lease) heldLease = null;
+      releaseAdmissionForLease(admissionRef, lease);
+    },
+    held() {
+      return heldLease;
+    },
+  };
+}
 
 test('admission lease blocks second acquire until matching release', () => {
   resetAdmissionLeaseCounter();
@@ -18,7 +47,7 @@ test('admission lease blocks second acquire until matching release', () => {
   assert.ok(leaseA > 0);
   assert.equal(tryAcquireMutationAdmission(ref), null);
   assert.equal(isMutationAdmissionBlocked(ref), true);
-  releaseMutationAdmission(ref, leaseA);
+  releaseAdmissionForLease(ref, leaseA);
   assert.equal(isMutationAdmissionBlocked(ref), false);
   const leaseB = tryAcquireMutationAdmission(ref);
   assert.notEqual(leaseB, leaseA);
@@ -28,46 +57,87 @@ test('stale lease release cannot free a newer owner', () => {
   resetAdmissionLeaseCounter();
   const ref = { current: createMutationAdmissionRef() };
   const leaseA = tryAcquireMutationAdmission(ref);
-  releaseMutationAdmission(ref, leaseA);
+  releaseAdmissionForLease(ref, leaseA);
   const leaseB = tryAcquireMutationAdmission(ref);
-  releaseMutationAdmission(ref, leaseA);
+  releaseAdmissionForLease(ref, leaseA);
   assert.equal(ref.current.ownerLease, leaseB);
   assert.equal(isMutationAdmissionBlocked(ref), true);
-  releaseMutationAdmission(ref, leaseB);
+  releaseAdmissionForLease(ref, leaseB);
   assert.equal(isMutationAdmissionBlocked(ref), false);
 });
 
-test('identity change path: stale A settle after B acquires leaves B locked', () => {
+test('dispatch-bound lifecycle: A lease1 identity cleanup -> B lease2 -> stale A settle leaves B owner', () => {
   resetAdmissionLeaseCounter();
   const ref = { current: createMutationAdmissionRef() };
-  const leaseA = tryAcquireMutationAdmission(ref);
-  releaseMutationAdmission(ref, leaseA);
-  const leaseB = tryAcquireMutationAdmission(ref);
-  releaseMutationAdmission(ref, leaseA);
-  assert.equal(ref.current.ownerLease, leaseB);
-  releaseMutationAdmission(ref, leaseB);
+  const hookA = createHookAdmission(ref);
+  const hookB = createHookAdmission(ref);
+
+  const lease1 = hookA.acquire();
+  assert.ok(lease1 > 0);
+  hookA.identityCleanup();
+  assert.equal(isMutationAdmissionBlocked(ref), false);
+
+  const lease2 = hookB.acquire();
+  assert.ok(lease2 > 0);
+  assert.equal(hookB.held(), lease2);
+
+  hookA.settle(lease1);
+  assert.equal(ref.current.ownerLease, lease2);
+  assert.equal(hookB.held(), lease2);
+  assert.equal(isMutationAdmissionBlocked(ref), true);
+
+  hookB.settle(lease2);
+  assert.equal(isMutationAdmissionBlocked(ref), false);
+  assert.equal(hookB.held(), null);
+});
+
+test('dispatch-bound lifecycle: stale A catch after B acquire cannot release B', () => {
+  resetAdmissionLeaseCounter();
+  const ref = { current: createMutationAdmissionRef() };
+  const hookA = createHookAdmission(ref);
+  const hookB = createHookAdmission(ref);
+
+  const lease1 = hookA.acquire();
+  hookA.identityCleanup();
+  const lease2 = hookB.acquire();
+  hookA.catchRelease(lease1);
+
+  assert.equal(ref.current.ownerLease, lease2);
+  assert.equal(hookB.held(), lease2);
+  hookB.settle(lease2);
   assert.equal(tryAcquireMutationAdmission(ref) != null, true);
+});
+
+test('normal settle, retry re-acquire, and idempotent double-settle', () => {
+  resetAdmissionLeaseCounter();
+  const ref = { current: createMutationAdmissionRef() };
+  const hook = createHookAdmission(ref);
+
+  const lease1 = hook.acquire();
+  hook.settle(lease1);
+  assert.equal(isMutationAdmissionBlocked(ref), false);
+
+  const lease2 = hook.acquire();
+  assert.notEqual(lease2, lease1);
+  hook.settle(lease2);
+  hook.settle(lease2);
+  assert.equal(isMutationAdmissionBlocked(ref), false);
 });
 
 test('admission helpers no-op safely without ref', () => {
   resetAdmissionLeaseCounter();
   assert.equal(tryAcquireMutationAdmission(undefined), 0);
   assert.equal(isMutationAdmissionBlocked(undefined), false);
-  releaseMutationAdmission(undefined, 1);
+  releaseAdmissionForLease(undefined, 1);
 });
 
-test('mutation hooks use admission lifecycle with lease release before token guard', () => {
+test('mutation hooks bind dispatch lease and release before token guard', () => {
   for (const rel of ['useMutationForm.ts', 'useMutationAction.ts', 'useMutationScreen.ts']) {
     const source = fs.readFileSync(path.join(__dirname, '../src/hooks', rel), 'utf8');
     assert.match(source, /useMutationAdmissionLifecycle/, `${rel} uses admission lifecycle`);
-    assert.match(source, /releaseAdmissionFromSettle\(\)/, `${rel} releases admission on settled`);
-    const settled = source.match(/onSettled:\s*\(\)\s*=>\s*\{([\s\S]*?)\n\s*\}/)?.[1] ?? '';
-    const releaseIdx = settled.indexOf('releaseAdmissionFromSettle');
-    const tokenIdx = settled.indexOf('isDispatchTokenCurrent');
-    assert.ok(releaseIdx >= 0, `${rel} must release admission in onSettled`);
-    if (tokenIdx >= 0) {
-      assert.ok(releaseIdx < tokenIdx, `${rel} must release admission before token guard`);
-    }
+    assert.match(source, /const lease = acquireAdmission\(\)/, `${rel} captures dispatch lease`);
+    assert.match(source, /releaseAdmissionForLease\(lease\)/, `${rel} releases bound lease on settled/catch`);
+    assert.match(source, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*releaseAdmissionForLease\(lease\)/, `${rel} settles with bound lease`);
   }
 });
 
@@ -98,10 +168,10 @@ test('reconcile close and toggle guard combined screen lock', () => {
   assert.match(source, /screen = useMutationScreen\([\s\S]*admissionRef/);
 });
 
-test('hooks release admission on synchronous mutate throw', () => {
+test('hooks release bound lease on synchronous mutate throw', () => {
   for (const rel of ['useMutationForm.ts', 'useMutationAction.ts', 'useMutationScreen.ts']) {
     const source = fs.readFileSync(path.join(__dirname, '../src/hooks', rel), 'utf8');
     assert.match(source, /catch \(error\)/, `${rel} handles synchronous mutate throw`);
-    assert.match(source, /releaseAdmissionFromSettle\(\)/, `${rel} releases admission in catch`);
+    assert.match(source, /releaseAdmissionForLease\(lease\)/, `${rel} releases bound lease in catch`);
   }
 });

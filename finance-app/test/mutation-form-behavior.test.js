@@ -47,9 +47,8 @@ test('mutation hooks unlock on settled and guard stale profile callbacks', () =>
     assert.match(source, /isDispatchTokenCurrent\(token\)/, `${rel} must guard callbacks with dispatch token`);
   }
   const screen = fs.readFileSync(path.join(root, 'src/hooks/useMutationScreen.ts'), 'utf8');
-  assert.match(screen, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*releaseAdmissionFromSettle\(\)/);
-  assert.match(screen, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*if \(!isDispatchTokenCurrent\(token\)\) return;/);
-  assert.match(screen, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*releaseAdmissionFromSettle\(\);[\s\S]*if \(!isDispatchTokenCurrent\(token\)\) return;[\s\S]*markPending\(key, false\)/);
+  assert.match(screen, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*releaseAdmissionForLease\(lease\)/);
+  assert.match(screen, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*releaseAdmissionForLease\(lease\);[\s\S]*if \(!isDispatchTokenCurrent\(token\)\) return;[\s\S]*markPending\(key, false\)/);
   assert.match(screen, /setPendingKeys\(new Set\(\)\)/);
   assert.match(screen, /isPending: pendingKeys\.has/);
 });
@@ -135,7 +134,7 @@ test('transaction receipt viewer guards open/close/delete with modal lock and de
   assert.match(source, /openReceiptViewer/);
   assert.match(source, /closeReceiptViewer/);
   assert.match(source, /receiptDeleting/);
-  assert.match(source, /modalLocked \|\| unlinkAction\.isPending/);
+  assert.match(source, /disabled={modalLocked}/);
 });
 
 test('networth manual sheet uses stable session formId and dirty kind changes', () => {

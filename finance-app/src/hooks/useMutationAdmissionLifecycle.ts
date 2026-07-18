@@ -5,7 +5,7 @@ import {
 } from '@/lib/mutation-screen-admission';
 import type { MutationAdmissionRef } from '@/hooks/useMutationScreenAdmission';
 
-/** Per-hook admission lease: acquire, release on settle before token checks, cleanup on identity/unmount. */
+/** Per-hook admission lease bound to each dispatch; stale settles cannot release a newer owner. */
 export function useMutationAdmissionLifecycle(
   admissionRef: MutationAdmissionRef | undefined,
   identityKey: string,
@@ -14,8 +14,9 @@ export function useMutationAdmissionLifecycle(
 
   const releaseHeldAdmission = useCallback(() => {
     const lease = admissionLeaseRef.current;
+    if (lease == null) return;
     admissionLeaseRef.current = null;
-    if (lease != null) releaseMutationAdmission(admissionRef, lease);
+    releaseMutationAdmission(admissionRef, lease);
   }, [admissionRef]);
 
   useEffect(() => {
@@ -23,18 +24,25 @@ export function useMutationAdmissionLifecycle(
     return releaseHeldAdmission;
   }, [identityKey, releaseHeldAdmission]);
 
-  const acquireAdmission = useCallback((): boolean => {
+  const acquireAdmission = useCallback((): number | null => {
     const lease = tryAcquireMutationAdmission(admissionRef);
-    if (lease == null) return false;
+    if (lease == null) return null;
     admissionLeaseRef.current = lease;
-    return true;
+    return lease;
   }, [admissionRef]);
 
-  const releaseAdmissionFromSettle = useCallback(() => {
-    const lease = admissionLeaseRef.current;
-    admissionLeaseRef.current = null;
-    if (lease != null) releaseMutationAdmission(admissionRef, lease);
+  const releaseAdmissionForLease = useCallback((lease: number | null | undefined) => {
+    if (lease == null || lease === 0) return;
+    if (admissionLeaseRef.current === lease) {
+      admissionLeaseRef.current = null;
+    }
+    releaseMutationAdmission(admissionRef, lease);
   }, [admissionRef]);
 
-  return { acquireAdmission, releaseAdmissionFromSettle, releaseHeldAdmission };
+  return {
+    acquireAdmission,
+    releaseAdmissionForLease,
+    releaseHeldAdmission,
+    admissionLeaseRef,
+  };
 }

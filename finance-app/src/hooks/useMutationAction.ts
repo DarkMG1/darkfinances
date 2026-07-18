@@ -50,7 +50,7 @@ export function useMutationAction<TVariables>({
     isDispatchTokenCurrent,
   } = identity;
   const pendingLockRef = identity.pendingLockRef as React.MutableRefObject<boolean>;
-  const { acquireAdmission, releaseAdmissionFromSettle } = useMutationAdmissionLifecycle(admissionRef, identityKey);
+  const { acquireAdmission, releaseAdmissionForLease } = useMutationAdmissionLifecycle(admissionRef, identityKey);
 
   const [outcome, setOutcome] = useState<MappedMutationOutcome | null>(null);
   const [announce, setAnnounce] = useState('');
@@ -90,7 +90,8 @@ export function useMutationAction<TVariables>({
 
   const run = useCallback((variables: TVariables, options?: { onSuccess?: (data: unknown) => void; onSettled?: () => void; rollback?: () => void }) => {
     if (pendingLockRef.current) return;
-    if (!acquireAdmission()) return;
+    const lease = acquireAdmission();
+    if (lease == null) return;
     const token = captureDispatchToken();
     pendingLockRef.current = true;
     setDispatchPending(true);
@@ -129,7 +130,7 @@ export function useMutationAction<TVariables>({
           }
         },
         onSettled: () => {
-          releaseAdmissionFromSettle();
+          releaseAdmissionForLease(lease);
           if (!isDispatchTokenCurrent(token)) return;
           pendingLockRef.current = false;
           setDispatchPending(false);
@@ -137,7 +138,7 @@ export function useMutationAction<TVariables>({
         },
       });
     } catch (error) {
-      releaseAdmissionFromSettle();
+      releaseAdmissionForLease(lease);
       pendingLockRef.current = false;
       setDispatchPending(false);
       throw error;
@@ -155,7 +156,7 @@ export function useMutationAction<TVariables>({
     onRefetch,
     onSuccess,
     pendingLockRef,
-    releaseAdmissionFromSettle,
+    releaseAdmissionForLease,
     setDispatchPending,
   ]);
 

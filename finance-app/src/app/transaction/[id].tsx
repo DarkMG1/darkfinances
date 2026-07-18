@@ -179,6 +179,7 @@ export default function TransactionDetail() {
   const payeeAction = screen.bind({ key: 'payee', mutation: setPayee, mutationLabel: 'Rename payee' });
   const notesAction = screen.bind({ key: 'notes', mutation: setNotes, mutationLabel: 'Save notes', fieldOrder: ['notes'] });
   const modalLocked = screen.isLocked;
+  const dateSaving = modalLocked && screen.activeKey === 'date';
   const allowBackRef = useRef(false);
   const requestModalClose = (close: () => void) => {
     if (modalLocked) return;
@@ -449,6 +450,7 @@ export default function TransactionDetail() {
     return ymd(new Date(y, m - 1, 0));
   };
   const openDate = () => {
+    if (modalLocked) return;
     const current = currentDate || financeTodayValue;
     const d = parseYmd(current);
     setDateText(current);
@@ -458,6 +460,7 @@ export default function TransactionDetail() {
     haptics.tap();
   };
   const doSetDate = (picked?: string) => {
+    if (modalLocked) return;
     const next = (picked || dateText || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(next)) {
       screen.reportClientValidation('Use the format YYYY-MM-DD, e.g. 2026-06-30.', { date: 'Invalid date format.' }, ['date']);
@@ -621,11 +624,13 @@ export default function TransactionDetail() {
     return cells;
   }, [calendarMonth]);
   const changeCalendarMonth = (delta: number) => {
+    if (modalLocked) return;
     setMonthPicking(false);
     setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + delta, 1));
     haptics.tap();
   };
   const pickShortcutDate = (next: string) => {
+    if (modalLocked) return;
     const d = parseYmd(next);
     setDateText(next);
     setCalendarMonth(new Date(d.getFullYear(), d.getMonth(), 1));
@@ -681,7 +686,7 @@ export default function TransactionDetail() {
             {dirty ? <Text style={styles.headerSave}>{notesAction.isPending ? 'Saving…' : 'Save'}</Text> : null}
           </Pressable>
           {canEditDate ? (
-            <Pressable testID="transaction-date-button" onPress={openDate} hitSlop={8} style={({ pressed }) => [styles.topDateBtn, pressed && { opacity: 0.65 }]}>
+            <Pressable testID="transaction-date-button" onPress={openDate} hitSlop={8} disabled={modalLocked} style={({ pressed }) => [styles.topDateBtn, pressed && !modalLocked && { opacity: 0.65 }, modalLocked && { opacity: 0.35 }]}>
               <Text style={styles.topDate}>{fmtMenuDay(currentDate)}</Text>
               <SymbolView name="chevron.down" tintColor={colors.text} size={11} resizeMode="scaleAspectFit" />
             </Pressable>
@@ -820,7 +825,7 @@ export default function TransactionDetail() {
                       : ''}
                 </Text>
               </Pressable>
-              <Pressable testID={`transaction-linked-unlink-${t.id}`} hitSlop={10} onPress={() => removeLink(t)} disabled={modalLocked || unlinkAction.isPending} style={({ pressed }) => pressed && { opacity: 0.5 }} accessibilityRole="button" accessibilityLabel={`Unlink ${t.payee || 'transaction'}`}>
+              <Pressable testID={`transaction-linked-unlink-${t.id}`} hitSlop={10} onPress={() => removeLink(t)} disabled={modalLocked} style={({ pressed }) => [pressed && !modalLocked && { opacity: 0.5 }, modalLocked && { opacity: 0.35 }]} accessibilityRole="button" accessibilityLabel={`Unlink ${t.payee || 'transaction'}`}>
                 <Text style={styles.unlink}>Unlink</Text>
               </Pressable>
             </View>
@@ -1129,7 +1134,7 @@ export default function TransactionDetail() {
                 <Text style={styles.calendarSub}>{selectedDay ? fmtDay(selectedDay) : 'Pick a date'}</Text>
               </View>
               <Pressable testID="transaction-date-done-button" onPress={() => requestModalClose(() => setDating(false))} hitSlop={10} disabled={modalLocked}>
-                <Text style={styles.calendarDone}>Done</Text>
+                <Text style={[styles.calendarDone, modalLocked && { opacity: 0.35 }]}>Done</Text>
               </Pressable>
             </View>
 
@@ -1141,14 +1146,16 @@ export default function TransactionDetail() {
                     ? setCalendarMonth(new Date(calendarMonth.getFullYear() - 1, calendarMonth.getMonth(), 1))
                     : changeCalendarMonth(-1)
                 }
-                style={({ pressed }) => [styles.calendarNavBtn, pressed && { opacity: 0.6 }]}
+                disabled={modalLocked}
+                style={({ pressed }) => [styles.calendarNavBtn, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.35 }]}
               >
                 <Text style={styles.calendarNavText}>‹</Text>
               </Pressable>
               <Pressable
                 testID="transaction-date-title-button"
-                onPress={() => { setMonthPicking(!monthPicking); haptics.tap(); }}
-                style={({ pressed }) => [styles.calendarTitleBtn, pressed && { opacity: 0.7 }]}
+                onPress={() => { if (modalLocked) return; setMonthPicking(!monthPicking); haptics.tap(); }}
+                disabled={modalLocked}
+                style={({ pressed }) => [styles.calendarTitleBtn, pressed && !modalLocked && { opacity: 0.7 }, modalLocked && { opacity: 0.35 }]}
               >
                 <Text style={styles.calendarTitle}>{monthPicking ? calendarMonth.getFullYear() : monthLabel(selectedMonthKey)}</Text>
                 <Text style={styles.calendarTitleCaret}>{monthPicking ? '⌃' : '⌄'}</Text>
@@ -1160,7 +1167,8 @@ export default function TransactionDetail() {
                     ? setCalendarMonth(new Date(calendarMonth.getFullYear() + 1, calendarMonth.getMonth(), 1))
                     : changeCalendarMonth(1)
                 }
-                style={({ pressed }) => [styles.calendarNavBtn, pressed && { opacity: 0.6 }]}
+                disabled={modalLocked}
+                style={({ pressed }) => [styles.calendarNavBtn, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.35 }]}
               >
                 <Text style={styles.calendarNavText}>›</Text>
               </Pressable>
@@ -1174,8 +1182,9 @@ export default function TransactionDetail() {
                     <Pressable
                       testID={`transaction-date-month-${idx}${active ? '-selected' : ''}`}
                       key={name}
-                      onPress={() => { setCalendarMonth(new Date(calendarMonth.getFullYear(), idx, 1)); setMonthPicking(false); haptics.tap(); }}
-                      style={({ pressed }) => [styles.monthCell, active && styles.monthCellActive, pressed && { opacity: 0.7 }]}
+                      onPress={() => { if (modalLocked) return; setCalendarMonth(new Date(calendarMonth.getFullYear(), idx, 1)); setMonthPicking(false); haptics.tap(); }}
+                      disabled={modalLocked}
+                      style={({ pressed }) => [styles.monthCell, active && styles.monthCellActive, pressed && !modalLocked && { opacity: 0.7 }, modalLocked && { opacity: 0.35 }]}
                     >
                       <Text style={[styles.monthCellText, active && styles.monthCellTextActive]}>{name}</Text>
                     </Pressable>
@@ -1197,13 +1206,14 @@ export default function TransactionDetail() {
                       <Pressable
                         testID={day ? `transaction-date-day-${Number(day.slice(8))}${active ? '-selected' : ''}` : undefined}
                         key={day ?? `blank-${idx}`}
-                        disabled={!day || dateAction.isPending || modalLocked}
+                        disabled={!day || modalLocked}
                         onPress={() => day && doSetDate(day)}
                         style={({ pressed }) => [
                           styles.dayCell,
                           active && styles.dayCellActive,
                           today && !active && styles.dayCellToday,
-                          pressed && { opacity: 0.7 },
+                          pressed && !modalLocked && { opacity: 0.7 },
+                          modalLocked && { opacity: 0.35 },
                         ]}
                       >
                         <Text style={[styles.dayText, active && styles.dayTextActive, !day && { opacity: 0 }]}>{day ? Number(day.slice(8)) : '0'}</Text>
@@ -1215,14 +1225,14 @@ export default function TransactionDetail() {
             )}
 
             <View style={styles.suggestRow}>
-              <Pressable testID="transaction-date-today-button" onPress={() => pickShortcutDate(todayKey)} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
+              <Pressable testID="transaction-date-today-button" onPress={() => pickShortcutDate(todayKey)} disabled={modalLocked} style={({ pressed }) => [styles.suggestChip, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.35 }]}>
                 <Text style={styles.suggestText}>Today</Text>
               </Pressable>
-              <Pressable testID="transaction-date-last-month-button" onPress={() => pickShortcutDate(lastMonthLastDay())} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
+              <Pressable testID="transaction-date-last-month-button" onPress={() => pickShortcutDate(lastMonthLastDay())} disabled={modalLocked} style={({ pressed }) => [styles.suggestChip, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.35 }]}>
                 <Text style={styles.suggestText}>End of last month</Text>
               </Pressable>
             </View>
-            {dateAction.isPending ? <Text style={styles.calendarSaving}>Saving…</Text> : null}
+            {dateSaving ? <Text style={styles.calendarSaving}>Saving…</Text> : null}
             <Text style={styles.tagHint}>
               {income
                 ? 'A refund dated in the month you made the purchase subtracts from that month’s spending instead of this one.'
