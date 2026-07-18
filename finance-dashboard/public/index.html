@@ -705,11 +705,12 @@
         nwEl.textContent = 'Unavailable';
       }
       nwEl.style.color = netWorth != null && netWorth >= 0 ? 'var(--text)' : 'var(--red)';
+      const aggregatesUnavailable = state.netWorthHasServerMetric && (state.netWorthIncompleteReasons || []).length;
       document.getElementById('netWorthBreakdown').textContent =
         state.netWorthAuthoritative
           ? `${fmtPos(totalAssets)} assets · ${fmtPos(Math.abs(totalLiabilities))} liabilities · server projection`
-          : (state.netWorthHasServerMetric && (state.netWorthIncompleteReasons || []).length
-            ? 'Net worth incomplete — assign account roles or resolve overrides'
+          : (aggregatesUnavailable
+            ? 'Asset/liability breakdown unavailable — server projection incomplete'
             : `${fmtPos(totalAssets)} assets · ${fmtPos(Math.abs(totalLiabilities))} liabilities · local estimate (inclusion-aware)`);
       renderNetWorthChange();
     }
@@ -719,6 +720,10 @@
     function renderNetWorthChange() {
       const ch = document.getElementById('netWorthChange');
       if (!ch || state.netWorth == null || state.trendFirstNW == null || state.trendMonths == null) return;
+      if (state.netWorthHasServerMetric && (state.netWorthIncompleteReasons || []).length) {
+        ch.textContent = '';
+        return;
+      }
       const diff = state.netWorth - state.trendFirstNW;
       ch.textContent = `${diff >= 0 ? '▲' : '▼'} ${fmt(Math.abs(diff))} over ${state.trendMonths} mo`;
       ch.style.color = diff >= 0 ? 'var(--green)' : 'var(--red)';

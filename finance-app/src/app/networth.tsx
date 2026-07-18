@@ -8,7 +8,7 @@ import { Avatar, Card, ErrorState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { AreaChart } from '@/components/charts';
 import { haptics } from '@/lib/haptics';
-import { accountsHaveInclusion, resolveMoneyMetric } from '@/lib/account-metrics';
+import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
 import { colors, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -59,15 +59,20 @@ export default function NetWorthScreen() {
     : (resolvedNetWorth.unavailable ? 0 : (resolvedNetWorth.value ?? fallbackNetWorth));
   const assets = acctAssets + manualAssetTotal;
   const liabilities = acctLiab - manualLiabTotal;
-  const breakdownUnavailable = resolvedNetWorth.unavailable;
+  const aggregateDisplay = resolveNetWorthAggregateDisplay({
+    resolved: resolvedNetWorth,
+    assets,
+    liabilities,
+  });
+  const breakdownUnavailable = !aggregateDisplay.showAggregates;
 
   const nwHist = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
   // Manual assets have no history, so base "this month" on synced accounts only.
   const acctNetWorth = acctAssets + acctLiab;
-  const nwDelta = prevNW != null ? acctNetWorth - prevNW : null;
+  const nwDelta = breakdownUnavailable || prevNW == null ? null : acctNetWorth - prevNW;
   const nwPoints = nwHist.map((m) => ({ value: m.netWorth as number, label: m.month }));
-  const totalAbs = assets + Math.abs(liabilities);
+  const totalAbs = breakdownUnavailable ? 0 : assets + Math.abs(liabilities);
   const assetPct = totalAbs > 0 ? (assets / totalAbs) * 100 : 100;
 
   const onRefresh = () => Promise.all([accounts.refetch(), today.refetch(), trends.refetch(), manual.refetch()]);
@@ -100,7 +105,7 @@ export default function NetWorthScreen() {
       <Avatar label={a.name} size={36} />
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text style={styles.name} numberOfLines={1}>{a.name}</Text>
-        {netWorth !== 0 ? <Text style={styles.sub}>{Math.round((Math.abs(a.balance) / Math.abs(netWorth)) * 100)}% of net worth</Text> : null}
+        {netWorthAuthoritative && !breakdownUnavailable && netWorth !== 0 ? <Text style={styles.sub}>{Math.round((Math.abs(a.balance) / Math.abs(netWorth)) * 100)}% of net worth</Text> : null}
       </View>
       <Text style={[styles.amt, { color: a.balance < 0 ? colors.red : colors.text }]}>{fmtMoney(a.balance)}</Text>
       <Text style={styles.chev}>›</Text>

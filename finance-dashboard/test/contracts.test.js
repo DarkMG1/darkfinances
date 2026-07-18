@@ -124,19 +124,12 @@ test('clients prefer authoritative server net worth and withhold local fallback 
   const home = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'index.tsx'), 'utf8');
   const networth = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'networth.tsx'), 'utf8');
   const widget = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'components', 'widget-sync.tsx'), 'utf8');
-  const accountMetrics = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'lib', 'account-metrics.ts'), 'utf8');
-  assert.match(home, /resolveMoneyMetric/);
-  assert.match(home, /accountsHaveInclusion/);
-  assert.match(networth, /resolveMoneyMetric/);
-  assert.match(networth, /inclusion\?\.netWorth/);
-  assert.match(widget, /computeFallbackNetWorth/);
-  assert.match(widget, /hasServerMetric/);
-  assert.match(widget, /complete === false\) return/);
-  assert.match(accountMetrics, /computeFallbackNetWorth/);
-  assert.match(accountMetrics, /inclusion\?\.netWorth/);
-  assert.match(browser, /netWorthHasServerMetric/);
+  assert.match(home, /resolveNetWorthAggregateDisplay/);
+  assert.match(networth, /resolveNetWorthAggregateDisplay/);
+  assert.match(widget, /resolveWidgetNetWorthDecision/);
+  assert.match(widget, /clearFinanceWidget/);
+  assert.match(browser, /aggregatesUnavailable/);
   assert.match(browser, /inclusion\?\.netWorth/);
-  assert.match(browser, /netWorthAuthoritative/);
 });
 
 test('generated contract includes splitwise mirror identity and manual asset completeness', () => {

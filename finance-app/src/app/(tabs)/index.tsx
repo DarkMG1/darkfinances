@@ -11,7 +11,7 @@ import { Account } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { useFinanceToday } from '@/lib/date-only';
-import { accountsHaveInclusion, resolveMoneyMetric } from '@/lib/account-metrics';
+import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -78,6 +78,11 @@ export default function Overview() {
   const netWorth = netWorthAuthoritative && resolvedNetWorth.value != null
     ? resolvedNetWorth.value
     : (resolvedNetWorth.unavailable ? 0 : (resolvedNetWorth.value ?? fallbackNetWorth));
+  const aggregateDisplay = resolveNetWorthAggregateDisplay({
+    resolved: resolvedNetWorth,
+    assets,
+    liabilities,
+  });
 
   const financeToday = useFinanceToday();
   const curMonth = financeToday.slice(0, 7);
@@ -97,7 +102,7 @@ export default function Overview() {
   // synced accounts only, since manual assets have no monthly history.
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
   const acctNetWorth = acctAssets + acctLiab;
-  const nwDelta = prevNW != null ? acctNetWorth - prevNW : null;
+  const nwDelta = resolvedNetWorth.unavailable || prevNW == null ? null : acctNetWorth - prevNW;
 
   const cash = hasInclusion
     ? accts.filter((a) => a.inclusion?.liquidCash)
@@ -219,7 +224,11 @@ export default function Overview() {
                     {nwDelta >= 0 ? '▲' : '▼'} {fmtPos(Math.abs(nwDelta))} this month
                   </Text>
                 ) : null}
-                <Text style={styles.heroSub}>{fmtPos(assets)} assets · {fmtPos(Math.abs(liabilities))} liabilities · details ›</Text>
+                {aggregateDisplay.showAggregates ? (
+                  <Text style={styles.heroSub}>{fmtPos(aggregateDisplay.assets!)} assets · {fmtPos(Math.abs(aggregateDisplay.liabilities!))} liabilities · details ›</Text>
+                ) : (
+                  <Text style={styles.heroSub}>{aggregateDisplay.unavailableLabel} · details ›</Text>
+                )}
               </View>
             </Pressable>
           ) : null}
