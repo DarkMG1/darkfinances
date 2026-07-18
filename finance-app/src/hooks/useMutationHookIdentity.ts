@@ -26,10 +26,17 @@ export function useMutationHookIdentity(options: UseMutationHookIdentityOptions 
   const pendingLockRef = useRef<boolean | number>(pendingLockKind === 'counter' ? 0 : false);
   const [dispatchPending, setDispatchPending] = useState(false);
   const identityKey = `${scopeDigest}:${profileGeneration}:${formId ?? ''}`;
+  const prevIdentityKeyRef = useRef(identityKey);
 
-  useEffect(() => {
+  /* eslint-disable react-hooks/refs -- invalidate dispatch tokens synchronously on identity transition before passive effects */
+  if (prevIdentityKeyRef.current !== identityKey) {
     bumpMutationHookEpoch(epochRef);
     invalidateMutationDispatch(dispatchIdRef, epochRef);
+    prevIdentityKeyRef.current = identityKey;
+  }
+  /* eslint-enable react-hooks/refs */
+
+  useEffect(() => {
     resetMutationHookPendingLock(pendingLockRef, pendingLockKind);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional lock reset on identity change
     setDispatchPending(false);

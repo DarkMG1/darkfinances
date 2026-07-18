@@ -6,12 +6,10 @@ import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
 import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
 import { hapticClientValidationRejected } from '@/lib/haptics';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
-import {
-  releaseMutationAdmission,
-  tryAcquireMutationAdmission,
-} from '@/lib/mutation-screen-admission';
+import { useMutationAdmissionLifecycle } from '@/hooks/useMutationAdmissionLifecycle';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
+import type { MutationAdmissionRef } from '@/hooks/useMutationScreenAdmission';
 
 export type RefetchStaleData = () => void | boolean | Promise<boolean | void | unknown>;
 
@@ -38,7 +36,7 @@ export interface MutationScreenAction<TVariables> {
 
 export interface UseMutationScreenOptions {
   onRefetchStale?: RefetchStaleData;
-  admissionRef?: React.MutableRefObject<boolean>;
+  admissionRef?: MutationAdmissionRef;
 }
 
 export interface UseMutationScreenResult {
@@ -65,6 +63,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     setDispatchPending,
   } = useMutationHookIdentity({ pendingLockKind: 'counter' });
   const pendingLockCountRef = pendingLockRef as React.MutableRefObject<number>;
+  const { acquireAdmission, releaseAdmissionFromSettle } = useMutationAdmissionLifecycle(admissionRef, identityKey);
 
   const [outcome, setOutcome] = useState<MappedMutationOutcome | null>(null);
   const [announce, setAnnounce] = useState('');
@@ -148,7 +147,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
   ) => {
     const entry = registryRef.current.get(key);
     if (!entry || pendingLockCountRef.current > 0) return;
-    if (!tryAcquireMutationAdmission(admissionRef)) return;
+    if (!acquireAdmission()) return;
 
     const token = captureDispatchToken();
     pendingLockCountRef.current += 1;
@@ -164,34 +163,44 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     setAnnounce('');
     markPending(key, true);
 
-    entry.mutation.mutate(variables, {
-      onSuccess: (data) => {
-        if (!isDispatchTokenCurrent(token)) return;
-        entry.lastVars = null;
-        entry.lastSuccess = undefined;
-        entry.lastSettled = undefined;
-        entry.lastError = undefined;
-        entry.rollback = undefined;
-        setOutcome(null);
-        setAnnounce(`${entry.label} succeeded.`);
-        setActiveKey(null);
-        runOptions?.onSuccess?.(data);
-      },
-      onError: (error) => {
-        void handleError(key, error, entry, token);
-      },
-      onSettled: () => {
-        if (!isDispatchTokenCurrent(token)) return;
-        pendingLockCountRef.current = Math.max(0, pendingLockCountRef.current - 1);
-        markPending(key, false);
-        if (pendingLockCountRef.current === 0) {
-          releaseMutationAdmission(admissionRef);
-          setDispatchPending(false);
-        }
-        runOptions?.onSettled?.();
-      },
-    });
-  }, [admissionRef, bumpActivity, captureDispatchToken, handleError, isDispatchTokenCurrent, markPending, pendingLockCountRef, setDispatchPending]);
+    try {
+      entry.mutation.mutate(variables, {
+        onSuccess: (data) => {
+          if (!isDispatchTokenCurrent(token)) return;
+          entry.lastVars = null;
+          entry.lastSuccess = undefined;
+          entry.lastSettled = undefined;
+          entry.lastError = undefined;
+          entry.rollback = undefined;
+          setOutcome(null);
+          setAnnounce(`${entry.label} succeeded.`);
+          setActiveKey(null);
+          runOptions?.onSuccess?.(data);
+        },
+        onError: (error) => {
+          void handleError(key, error, entry, token);
+        },
+        onSettled: () => {
+          releaseAdmissionFromSettle();
+          if (!isDispatchTokenCurrent(token)) return;
+          pendingLockCountRef.current = Math.max(0, pendingLockCountRef.current - 1);
+          markPending(key, false);
+          if (pendingLockCountRef.current === 0) {
+            setDispatchPending(false);
+          }
+          runOptions?.onSettled?.();
+        },
+      });
+    } catch (error) {
+      releaseAdmissionFromSettle();
+      pendingLockCountRef.current = Math.max(0, pendingLockCountRef.current - 1);
+      markPending(key, false);
+      if (pendingLockCountRef.current === 0) {
+        setDispatchPending(false);
+      }
+      throw error;
+    }
+  }, [acquireAdmission, bumpActivity, captureDispatchToken, handleError, isDispatchTokenCurrent, markPending, pendingLockCountRef, releaseAdmissionFromSettle, setDispatchPending]);
 
   const bind = useCallback(<TVariables,>(actionOptions: MutationScreenActionOptions<TVariables>): MutationScreenAction<TVariables> => {
     const existing = registryRef.current.get(actionOptions.key);

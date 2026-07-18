@@ -47,9 +47,9 @@ test('mutation hooks unlock on settled and guard stale profile callbacks', () =>
     assert.match(source, /isDispatchTokenCurrent\(token\)/, `${rel} must guard callbacks with dispatch token`);
   }
   const screen = fs.readFileSync(path.join(root, 'src/hooks/useMutationScreen.ts'), 'utf8');
-  const settledBlock = screen.match(/onSettled:\s*\(\)\s*=>\s*\{([\s\S]*?)\n      \},/)?.[1] ?? '';
-  assert.match(settledBlock, /if \(!isDispatchTokenCurrent\(token\)\) return;/);
-  assert.doesNotMatch(settledBlock, /markPending\(key, false\)[\s\S]*if \(!isDispatchTokenCurrent/);
+  assert.match(screen, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*releaseAdmissionFromSettle\(\)/);
+  assert.match(screen, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*if \(!isDispatchTokenCurrent\(token\)\) return;/);
+  assert.match(screen, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*releaseAdmissionFromSettle\(\);[\s\S]*if \(!isDispatchTokenCurrent\(token\)\) return;[\s\S]*markPending\(key, false\)/);
   assert.match(screen, /setPendingKeys\(new Set\(\)\)/);
   assert.match(screen, /isPending: pendingKeys\.has/);
 });

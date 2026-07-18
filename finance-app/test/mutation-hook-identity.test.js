@@ -68,11 +68,34 @@ test('hook sources reset pending locks and guard callbacks on identity change', 
     assert.match(source, /onSettled:/, `${label} unlocks in onSettled`);
   }
   const identityHook = require('fs').readFileSync(require('path').join(__dirname, '../src/hooks/useMutationHookIdentity.ts'), 'utf8');
-  assert.match(identityHook, /bumpMutationHookEpoch/);
+  assert.match(identityHook, /prevIdentityKeyRef/);
+  assert.match(identityHook, /if \(prevIdentityKeyRef\.current !== identityKey\)/);
+  assert.match(identityHook, /bumpMutationHookEpoch\(epochRef\)/);
+  assert.match(identityHook, /invalidateMutationDispatch\(dispatchIdRef, epochRef\)/);
   assert.match(identityHook, /resetMutationHookPendingLock/);
-  assert.match(identityHook, /invalidateMutationDispatch/);
-  assert.match(identityHook, /dispatchIdRef/);
+  assert.doesNotMatch(identityHook, /useEffect\(\(\) => \{\s*bumpMutationHookEpoch/);
   assert.match(identityHook, /useEffect\(\(\) => \(\) => \{/);
+});
+
+test('identity transition invalidates dispatch tokens synchronously before passive effect', () => {
+  const {
+    bumpMutationHookEpoch,
+    captureMutationDispatchToken,
+    invalidateMutationDispatch,
+    isMutationDispatchTokenCurrent,
+  } = require('../src/lib/mutation-hook-identity');
+
+  const epochRef = { value: 0 };
+  const dispatchIdRef = { value: 0 };
+  const token = captureMutationDispatchToken(epochRef, dispatchIdRef, 'scope-a', 1, 'form-1');
+
+  bumpMutationHookEpoch(epochRef);
+  invalidateMutationDispatch(dispatchIdRef, epochRef);
+
+  assert.equal(isMutationDispatchTokenCurrent(token, epochRef, dispatchIdRef, 'scope-a', 1, 'form-1'), false);
+
+  const nextToken = captureMutationDispatchToken(epochRef, dispatchIdRef, 'scope-a', 1, 'form-1');
+  assert.equal(isMutationDispatchTokenCurrent(nextToken, epochRef, dispatchIdRef, 'scope-a', 1, 'form-1'), true);
 });
 
 test('form and action hooks ignore stale react-query isPending for lock and dispatch', () => {
