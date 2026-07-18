@@ -32,6 +32,7 @@ import { Card, CardTitle, TagChips } from '@/components/ui';
 import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
 import { useMutationScreen } from '@/hooks/useMutationScreen';
 import { useMutationScreenFieldInvalidation } from '@/hooks/useMutationScreenFieldInvalidation';
+import { resolveTransactionDateAttempt } from '@/lib/mutation-transaction-date-attempt';
 import { haptics } from '@/lib/haptics';
 import { formatAllocationDollars, parseStrictAllocationDollars } from '@/lib/allocation-parse';
 import { CapturedReceipt, pickReceiptFromLibrary, scanReceiptFromCamera } from '@/lib/receipts';
@@ -94,6 +95,7 @@ export default function TransactionDetail() {
   const splitLegs = detail.data?.legs ?? [];
   const splitCount = Number(p.splitCount) || splitLegs.length;
   const goSplit = () => {
+    if (modalLocked) return;
     haptics.tap();
     router.push({ pathname: '/split/[id]', params: { id: txnId, accountId, date: currentDate } });
   };
@@ -225,15 +227,15 @@ export default function TransactionDetail() {
     if (!linkTarget || screen.isLocked) return;
     const cents = parseStrictAllocationDollars(allocationText);
     if (cents == null || cents <= 0) {
-      screen.reportClientValidation('Enter a positive dollar amount with at most two decimal places (e.g. 20.00).', { allocationCents: 'Invalid allocation amount.' }, ['allocationCents']);
+      screen.reportClientValidation('Enter a positive dollar amount with at most two decimal places (e.g. 20.00).', { allocationCents: 'Invalid allocation amount.' }, ['allocationCents'], 'link');
       return;
     }
     if (suggestedAllocationCents == null) {
-      screen.reportClientValidation('Link capacity is still loading or needs legacy review. Refresh and try again.');
+      screen.reportClientValidation('Link capacity is still loading or needs legacy review. Refresh and try again.', {}, [], 'link');
       return;
     }
     if (cents > suggestedAllocationCents) {
-      screen.reportClientValidation(`This link can allocate at most ${fmtPos(suggestedAllocationCents / 100)} based on remaining capacity on both sides.`, { allocationCents: 'Allocation exceeds remaining capacity.' }, ['allocationCents']);
+      screen.reportClientValidation(`This link can allocate at most ${fmtPos(suggestedAllocationCents / 100)} based on remaining capacity on both sides.`, { allocationCents: 'Allocation exceeds remaining capacity.' }, ['allocationCents'], 'link');
       return;
     }
     const ref: ReimbTxnRef = {
@@ -263,11 +265,13 @@ export default function TransactionDetail() {
   // The picker lists the opposite sign: an inflow links to expenses, vice versa.
   const candidates = (search.data?.transactions ?? []).filter((t) => t.id !== txnId && (income ? t.amount < 0 : t.amount > 0));
 
-  const openTxn = (t: ReimbTxnRef) =>
+  const openTxn = (t: ReimbTxnRef) => {
+    if (modalLocked) return;
     router.push({
       pathname: '/transaction/[id]',
       params: { id: t.id, date: t.date ?? '', accountId: t.accountId ?? '' },
     });
+  };
 
   const createLink = (t: Transaction) => openAllocationFor(t);
   const removeLink = (other: ReimbLinkEndpoint) => {
@@ -366,7 +370,7 @@ export default function TransactionDetail() {
 
   const uploadCapture = (cap: CapturedReceipt | null) => {
     if (!cap) { setScanning(false); return; }
-    if (!cap.base64) { setScanning(false); screen.reportClientValidation('Could not read image. Please try again.'); return; }
+    if (!cap.base64) { setScanning(false); screen.reportClientValidation('Could not read image. Please try again.', {}, [], 'receipt'); return; }
     receiptAction.run(
       { txnId, accountId, transactionDate: currentDate, imageBase64: cap.base64, mime: cap.mime, ocrText: cap.ocrText, ocrLines: cap.ocrLines, amount: cap.amount, date: cap.date, source: cap.source ?? 'camera' },
       { onSettled: () => setScanning(false) },
@@ -421,7 +425,11 @@ export default function TransactionDetail() {
   const canHistory = !!payeeName;
   const mhist = useMerchantHistory(canHistory ? payeeName : undefined, 12);
   const histCount = mhist.data?.count;
-  const goHistory = () => { haptics.tap(); router.push({ pathname: '/merchant/[name]', params: { name: payeeName } }); };
+  const goHistory = () => {
+    if (modalLocked) return;
+    haptics.tap();
+    router.push({ pathname: '/merchant/[name]', params: { name: payeeName } });
+  };
 
   // Move to Reimbursements — file an expense someone else pays under the
   // Reimbursement category so it leaves personal spending and shows as owed.
@@ -465,12 +473,16 @@ export default function TransactionDetail() {
   };
   const doSetDate = (picked?: string) => {
     if (modalLocked) return;
-    const next = (picked || dateText || '').trim();
+    const { next, dateText: attemptDateText } = resolveTransactionDateAttempt(dateText, picked);
+    if (attemptDateText !== dateText) {
+      setDateText(attemptDateText);
+    }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(next)) {
-      screen.reportClientValidation('Use the format YYYY-MM-DD, e.g. 2026-06-30.', { date: 'Invalid date format.' }, ['date']);
+      screen.reportClientValidation('Use the format YYYY-MM-DD, e.g. 2026-06-30.', { date: 'Invalid date format.' }, ['date'], 'date');
       return;
     }
     if (next === currentDate) { setDating(false); return; }
+    haptics.tap();
     dateAction.run(
       { id: txnId, date: next, isLeg },
       {
@@ -480,7 +492,6 @@ export default function TransactionDetail() {
           setDating(false);
           router.replace({ pathname: '/transaction/[id]', params: { id: txnId, accountId, date: next } });
         },
-        rollback: () => { setDateText(currentDate || financeTodayValue); },
       },
     );
   };
@@ -528,6 +539,9 @@ export default function TransactionDetail() {
     );
   };
   const notesFieldError = screen.outcome?.fieldErrors?.notes as string | undefined;
+  const dateFieldError = screen.activeKey === 'date'
+    ? (screen.outcome?.fieldErrors?.date as string | undefined)
+    : undefined;
   const allocationFieldError = screen.activeKey === 'link'
     ? (screen.outcome?.fieldErrors?.allocationCents as string | undefined)
     : undefined;
@@ -756,7 +770,13 @@ export default function TransactionDetail() {
 
       <View style={styles.menuBody}>
       {sub ? (
-        <Pressable onPress={() => router.push(`/recurring/${encodeURIComponent(sub.key)}`)} style={({ pressed }) => pressed && { opacity: 0.7 }}>
+        <Pressable
+          disabled={modalLocked}
+          onPress={() => { if (modalLocked) return; router.push(`/recurring/${encodeURIComponent(sub.key)}`); }}
+          style={({ pressed }) => [pressed && !modalLocked && { opacity: 0.7 }, modalLocked && { opacity: 0.45 }]}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: modalLocked }}
+        >
           <View style={styles.subBanner}>
             <Text style={styles.subText}>
               Part of a subscription · {cadenceLabel(sub.cadence)}
@@ -821,7 +841,7 @@ export default function TransactionDetail() {
           />
         ) : null}
         {canSplit ? (
-          <MenuActionRow testID="transaction-split-row" icon="arrow.triangle.branch" label="Split" onPress={goSplit} />
+          <MenuActionRow testID="transaction-split-row" icon="arrow.triangle.branch" label="Split" onPress={goSplit} disabled={modalLocked} />
         ) : null}
         <MenuActionRow testID="transaction-receipt-row" icon="doc.viewfinder" label={receiptList.length ? `Receipts (${receiptList.length})` : 'Add Receipt'} onPress={startScan} disabled={scanning || modalLocked} last />
       </MenuGroup>
@@ -840,7 +860,7 @@ export default function TransactionDetail() {
         {linked.length ? (
           linked.map((t) => (
             <View key={t.id} testID={`transaction-linked-row-${t.id}`} style={styles.linkRow}>
-              <Pressable testID={`transaction-linked-open-${t.id}`} style={({ pressed }) => [styles.linkMain, pressed && { opacity: 0.6 }]} onPress={() => openTxn(t)}>
+              <Pressable testID={`transaction-linked-open-${t.id}`} style={({ pressed }) => [styles.linkMain, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]} onPress={() => openTxn(t)} disabled={modalLocked} accessibilityState={{ disabled: modalLocked }}>
                 <Text style={styles.linkPayee} numberOfLines={1}>{t.payee || '(no payee)'}</Text>
                 <Text style={styles.linkSub}>
                   {t.date ? fmtDay(t.date) : ''}
@@ -881,7 +901,7 @@ export default function TransactionDetail() {
             ) : (
               <Text style={styles.linkEmpty}>{detail.isLoading ? 'Loading…' : 'No legs found.'}</Text>
             )}
-            <Pressable testID="transaction-edit-split-button" style={({ pressed }) => [styles.linkBtn, pressed && { opacity: 0.6 }]} onPress={goSplit}>
+            <Pressable testID="transaction-edit-split-button" style={({ pressed }) => [styles.linkBtn, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]} onPress={goSplit} disabled={modalLocked} accessibilityState={{ disabled: modalLocked }}>
               <Text style={styles.linkBtnText}>Edit split · {fmtPos(Math.abs(amount))} into {splitCount}</Text>
             </Pressable>
           </Card>
@@ -999,7 +1019,7 @@ export default function TransactionDetail() {
       ) : null}
 
       {canHistory ? (
-        <Pressable testID="transaction-history-button" onPress={goHistory} style={({ pressed }) => [styles.historyBtn, pressed && { opacity: 0.7 }]}>
+        <Pressable testID="transaction-history-button" onPress={goHistory} disabled={modalLocked} style={({ pressed }) => [styles.historyBtn, pressed && !modalLocked && { opacity: 0.7 }, modalLocked && { opacity: 0.45 }]} accessibilityState={{ disabled: modalLocked }}>
           <Text style={styles.historyText}>See History{histCount != null ? ` (${histCount})` : ''}</Text>
           <Text style={styles.historyArrow}>›</Text>
         </Pressable>
@@ -1163,12 +1183,13 @@ export default function TransactionDetail() {
             <View style={styles.calendarSheetHeader}>
               <View>
                 <Text style={styles.sheetTitle}>Transaction date</Text>
-                <Text style={styles.calendarSub}>{selectedDay ? fmtDay(selectedDay) : 'Pick a date'}</Text>
+                <Text style={styles.calendarSub} accessibilityHint={dateFieldError ? `Error: ${dateFieldError}` : undefined}>{selectedDay ? fmtDay(selectedDay) : 'Pick a date'}</Text>
               </View>
               <Pressable testID="transaction-date-done-button" onPress={() => requestModalClose(() => setDating(false))} hitSlop={10} disabled={modalLocked}>
                 <Text style={[styles.calendarDone, modalLocked && { opacity: 0.35 }]}>Done</Text>
               </Pressable>
             </View>
+            <MutationFieldError error={dateFieldError} testID="transaction-date-error" />
 
             <View style={styles.calendarNav}>
               <Pressable
@@ -1327,7 +1348,7 @@ function MenuActionRow({
   last?: boolean;
 }) {
   return (
-    <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={right ? `${label}, ${right}` : label} onPress={onPress} disabled={disabled || !onPress} style={({ pressed }) => [styles.menuRow, last && styles.menuRowLast, disabled && { opacity: 0.55 }, pressed && { opacity: 0.65 }]}>
+    <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={right ? `${label}, ${right}` : label} accessibilityState={{ disabled: !!disabled }} onPress={onPress} disabled={disabled || !onPress} style={({ pressed }) => [styles.menuRow, last && styles.menuRowLast, disabled && { opacity: 0.55 }, pressed && !disabled && { opacity: 0.65 }]}>
       <View style={styles.menuIconBubble}>
         <SymbolView name={icon} tintColor={colors.accentLight} size={15} resizeMode="scaleAspectFit" />
       </View>

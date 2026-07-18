@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { UseMutationResult } from '@tanstack/react-query';
 import type { FinanceError } from '@/api/client/requests';
-import { mapClientValidationOutcome, mapMutationApiError } from '@/lib/mutation-form-errors';
+import { mapMutationApiError } from '@/lib/mutation-form-errors';
 import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
 import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
 import { hapticClientValidationRejected } from '@/lib/haptics';
@@ -11,6 +11,7 @@ import {
   startMutationErrorReconciliation,
 } from '@/lib/mutation-error-reconciliation';
 import { safeMutationCallback } from '@/lib/mutation-safe-callback';
+import { buildScreenClientValidationOutcome } from '@/lib/mutation-screen-client-validation';
 import { useMutationAdmissionLifecycle } from '@/hooks/useMutationAdmissionLifecycle';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
@@ -55,7 +56,12 @@ export interface UseMutationScreenResult {
   retry: () => void;
   clear: () => void;
   refetchStale: () => Promise<void>;
-  reportClientValidation: (summary: string, fieldErrors?: Record<string, string>, fieldOrder?: string[]) => void;
+  reportClientValidation: (
+    summary: string,
+    fieldErrors?: Record<string, string>,
+    fieldOrder?: string[],
+    actionKey?: string,
+  ) => void;
 }
 
 export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMutationScreenResult {
@@ -262,12 +268,23 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     if (ok) clear();
   }, [clear, options]);
 
-  const reportClientValidation = useCallback((summary: string, fieldErrors: Record<string, string> = {}, fieldOrder: string[] = []) => {
+  const reportClientValidation = useCallback((
+    summary: string,
+    fieldErrors: Record<string, string> = {},
+    fieldOrder: string[] = [],
+    actionKey?: string,
+  ) => {
     bumpActivity();
-    const mapped = mapClientValidationOutcome(fieldErrors, fieldOrder);
-    setActiveKey(null);
-    setOutcome({ ...mapped, summary });
-    setAnnounce(summary);
+    const next = buildScreenClientValidationOutcome(
+      summary,
+      fieldErrors,
+      fieldOrder,
+      actionKey,
+      registryRef.current,
+    );
+    setActiveKey(next.activeKey);
+    setOutcome(next.outcome);
+    setAnnounce(next.announce);
     hapticClientValidationRejected();
   }, [bumpActivity]);
 

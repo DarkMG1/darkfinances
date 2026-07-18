@@ -7,10 +7,6 @@ function nextDismissRequest(seqRef) {
   return seqRef.value;
 }
 
-function bumpDismissGeneration(seqRef) {
-  seqRef.value += 1;
-}
-
 /**
  * @param {{ identity: string; nonce: number } | null | undefined} request
  * @param {string} currentIdentity
@@ -24,7 +20,6 @@ function shouldApplyFormDismiss(request, currentIdentity, seqRef) {
 }
 
 module.exports = {
-  bumpDismissGeneration,
   nextDismissRequest,
   shouldApplyFormDismiss,
 };
