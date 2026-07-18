@@ -1,7 +1,7 @@
 'use strict';
 /* VENDORED from finance-dashboard/lib/bounded-ledger-access.js
  * Regenerate: node finance-dashboard/scripts/sync-bounded-ledger-vendor.js
- * Source sha256: 952553e39d61faed8c3b313e1eff8a61872554c8ebddb91bf3115211f7960c63
+ * Source sha256: 7e282f850ab2a6a20c62088748a7eef0fd4ed0fd44e76477fa93661f0a7aaa15
  * Standalone for actual-tools — must not require finance-dashboard at runtime.
  */
 
@@ -13,6 +13,7 @@ const {
   loadQueryScalingConfig,
 } = require('./query-scaling-config');
 const {
+  QueryAbortedError,
   QueryCursorSecretError,
   QueryRangeExceededError,
   QueryResultLimitExceededError,
@@ -263,6 +264,18 @@ function discardRetainedBatches(batches) {
   batches.length = 0;
 }
 
+function throwIfQueryAborted({ stats, batches, effectiveSignal, phase } = {}) {
+  if (!effectiveSignal?.aborted) return;
+  discardRetainedBatches(batches);
+  if (stats) {
+    stats.aborted = true;
+    stats.rowsReturned = 0;
+    stats.peakRowsRetained = 0;
+  }
+  const detail = phase ? ` (${phase})` : '';
+  throw new QueryAbortedError(`Ledger query was aborted${detail}`);
+}
+
 function enforceRowBudgetOrThrow({
   stats,
   batches,
@@ -298,25 +311,16 @@ async function fetchAccountTransactionsBounded(api, {
   let totalRowsRetained = 0;
 
   for (const account of accounts) {
-    if (effectiveSignal?.aborted) {
-      if (stats) stats.aborted = true;
-      break;
-    }
+    throwIfQueryAborted({ stats, batches, effectiveSignal, phase: 'before account fetch' });
     const accountTxns = [];
     for (const chunk of chunks) {
-      if (effectiveSignal?.aborted) {
-        if (stats) stats.aborted = true;
-        break;
-      }
+      throwIfQueryAborted({ stats, batches, effectiveSignal, phase: 'before chunk fetch' });
       const txns = await api.getTransactions(account.id, chunk.start, chunk.end);
       if (stats) {
         stats.getTransactionsCalls += 1;
         stats.rowsScanned += txns.length;
       }
-      if (effectiveSignal?.aborted) {
-        if (stats) stats.aborted = true;
-        break;
-      }
+      throwIfQueryAborted({ stats, batches, effectiveSignal, phase: 'after in-flight fetch' });
       enforceRowBudgetOrThrow({
         stats,
         batches,
@@ -328,7 +332,7 @@ async function fetchAccountTransactionsBounded(api, {
       totalRowsRetained += txns.length;
       noteRowsRetained(stats, totalRowsRetained);
     }
-    if (effectiveSignal?.aborted) break;
+    throwIfQueryAborted({ stats, batches, effectiveSignal, phase: 'before retaining account batch' });
     batches.push({ account, transactions: accountTxns });
     if (stats) stats.accountsQueried += 1;
   }
@@ -445,6 +449,7 @@ module.exports = {
   encodeSearchCursor,
   enforceRowBudgetOrThrow,
   fetchAccountTransactionsBounded,
+  throwIfQueryAborted,
   findSupersedingCleared,
   flattenAccountTransactions,
   getActiveQueryAbortSignal,

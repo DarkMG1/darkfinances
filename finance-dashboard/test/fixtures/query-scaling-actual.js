@@ -101,6 +101,8 @@ async function getPayees() {
 
 async function getTransactions(accountId, start, end) {
   state.callLog.push({ accountId, start, end });
+  const delayMs = Number(process.env.FINANCE_QUERY_TEST_FETCH_DELAY_MS || 0);
+  if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
   const rows = state.rowsByAccount.get(String(accountId)) || [];
   return rows
     .filter((row) => row.date >= start && row.date <= end)

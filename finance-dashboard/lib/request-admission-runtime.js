@@ -12,7 +12,8 @@ const { IDEMPOTENCY_KEY_RE } = require('./operation-journal');
 function createClientAbortSignal(req) {
   const controller = new AbortController();
   const onClose = () => {
-    if (!req.complete) controller.abort();
+    if (req.complete || req.aborted) return;
+    controller.abort();
   };
   req.on('close', onClose);
   return {
@@ -129,13 +130,16 @@ async function withMutationAdmission(req, operationJournal, mutationQueue, fn, {
 async function withReadAdmission(req, actualCoordinator, fn, {
   admission = getRequestAdmissionController(),
   routeSpec = classifyReadRoute(req),
+  signal: externalSignal = null,
 } = {}) {
   if (routeSpec.lane === 'none') return fn();
 
   const principal = deriveRequestPrincipal(req);
   const endpointWeight = admission.endpointWeight(routeSpec.endpoint);
   const totalWeight = Math.max(1, routeSpec.weight || 1) * endpointWeight;
-  const abort = createClientAbortSignal(req);
+  const abort = externalSignal
+    ? { signal: externalSignal, dispose() {} }
+    : createClientAbortSignal(req);
 
   let trafficClass = TRAFFIC.ORDINARY;
   let lane = routeSpec.lane;

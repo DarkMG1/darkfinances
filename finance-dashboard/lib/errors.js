@@ -133,6 +133,18 @@ class QueryCursorSecretError extends AppError {
   }
 }
 
+class QueryAbortedError extends AppError {
+  constructor(message = 'Ledger query was aborted') {
+    super(message, {
+      code: 'QUERY_ABORTED',
+      status: 503,
+      expose: true,
+    });
+    this.name = 'QueryAbortedError';
+    this.requiresIdempotencyKeyReuse = false;
+  }
+}
+
 class ForecastMoneyValidationError extends AppError {
   constructor(cause) {
     super('Forecast money input is invalid', {
@@ -199,6 +211,7 @@ module.exports = {
   AppError,
   ForecastMoneyValidationError,
   KnownPreApplyError,
+  QueryAbortedError,
   QueryCursorSecretError,
   QueryRangeExceededError,
   QueryResultLimitExceededError,

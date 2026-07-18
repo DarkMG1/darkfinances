@@ -21,6 +21,7 @@ const {
   resetRequestAdmissionController,
 } = require('./lib/request-admission');
 const {
+  createClientAbortSignal,
   withMutationAdmission,
   withOperationStatusAdmission,
   withReadAdmission,
@@ -1349,6 +1350,7 @@ function csvEscape(v) {
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 async function reportCsv(req, res) {
+  const abort = createClientAbortSignal(req);
   try {
     let stats;
     await runWithQueryInstrumentation(async (activeStats) => {
@@ -1370,14 +1372,18 @@ async function reportCsv(req, res) {
         res.setHeader('Content-Type', 'text/csv; charset=utf-8');
         res.setHeader('Content-Disposition', `attachment; filename="finance-${rep.month}.csv"`);
         res.send(lines.join('\n'));
-      }, { admission: requestAdmission });
-    });
+      }, { admission: requestAdmission, signal: abort.signal });
+    }, { signal: abort.signal });
     attachQueryStatsHeaders(res, stats);
-  } catch (e) { sendApiError(req, res, e); }
+  } catch (e) {
+    if (!res.headersSent) sendApiError(req, res, e);
+  } finally {
+    abort.dispose();
+  }
 }
 
 // Raw responders for the legacy web API; enveloped {data}/{error} responders for v1.
-const runHandler = (req, fn, operation) => {
+const runHandler = (req, fn, operation, { signal } = {}) => {
   if (operation) return fn(req, operation);
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
     return withMutationAdmission(req, operationJournal, mutationQueue, () => fn(req), {
@@ -1385,22 +1391,29 @@ const runHandler = (req, fn, operation) => {
       admission: requestAdmission,
     });
   }
-  return withReadAdmission(req, actualCoordinator, () => fn(req), { admission: requestAdmission });
+  return withReadAdmission(req, actualCoordinator, () => fn(req), { admission: requestAdmission, signal });
 };
 async function executeReadWithQueryStats(req, fn) {
+  const abort = createClientAbortSignal(req);
   let stats;
-  const payload = await runWithQueryInstrumentation(async (activeStats) => {
-    stats = activeStats;
-    return runHandler(req, fn);
-  });
-  return { payload, stats };
+  try {
+    const payload = await runWithQueryInstrumentation(async (activeStats) => {
+      stats = activeStats;
+      return runHandler(req, fn, undefined, { signal: abort.signal });
+    }, { signal: abort.signal });
+    return { payload, stats };
+  } finally {
+    abort.dispose();
+  }
 }
 const raw = (fn) => async (req, res) => {
   try {
     const { payload, stats } = await executeReadWithQueryStats(req, fn);
     attachQueryStatsHeaders(res, stats);
     res.json(payload);
-  } catch (e) { sendApiError(req, res, e); }
+  } catch (e) {
+    if (!res.headersSent) sendApiError(req, res, e);
+  }
 };
 function operationJournalError(error, phase) {
   runtimeHealth.fatalErrorAt = new Date().toISOString();
@@ -1476,14 +1489,19 @@ const env = (fn, mutationRoute = null) => async (req, res) => {
       return res.json({ data: execution.result, operation: execution.operation });
     }
     let stats;
-    const result = await runWithQueryInstrumentation(async (activeStats) => {
-      stats = activeStats;
-      return runHandler(req, fn);
-    });
-    attachQueryStatsHeaders(res, stats);
-    return res.json({ data: result });
+    const abort = createClientAbortSignal(req);
+    try {
+      const result = await runWithQueryInstrumentation(async (activeStats) => {
+        stats = activeStats;
+        return runHandler(req, fn, undefined, { signal: abort.signal });
+      }, { signal: abort.signal });
+      attachQueryStatsHeaders(res, stats);
+      return res.json({ data: result });
+    } finally {
+      abort.dispose();
+    }
   } catch (e) {
-    return sendApiError(req, res, e);
+    if (!res.headersSent) return sendApiError(req, res, e);
   }
 };
 

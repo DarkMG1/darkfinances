@@ -8,7 +8,7 @@ const {
   getActiveQueryStats,
   runWithQueryInstrumentation,
 } = require('../lib/bounded-ledger-access');
-const { QueryResultLimitExceededError } = require('../lib/errors');
+const { QueryAbortedError, QueryResultLimitExceededError } = require('../lib/errors');
 
 process.env.ACTUAL_API_PATH = path.join(__dirname, 'fixtures', 'query-scaling-actual.js');
 process.env.ACTUAL_DATA_DIR = path.join(__dirname, '.tmp-query-scaling-cache');
@@ -168,7 +168,7 @@ describe('query scaling integration', () => {
 });
 
 describe('fetchAccountTransactionsBounded', () => {
-  it('aborts sequential reads when signal aborts mid-fetch', async () => {
+  it('throws QueryAbortedError when signal aborts mid-fetch without retaining partial batches', async () => {
     const controller = new AbortController();
     let calls = 0;
     const api = {
@@ -179,17 +179,32 @@ describe('fetchAccountTransactionsBounded', () => {
       },
     };
     let stats;
-    const batches = await runWithQueryInstrumentation(async () => {
-      stats = getActiveQueryStats();
-      return fetchAccountTransactionsBounded(api, {
-        accounts: [{ id: 'a1' }, { id: 'a2' }, { id: 'a3' }],
-        start: '2024-01-01',
-        end: '2024-01-31',
-        signal: controller.signal,
-      });
-    }, { signal: controller.signal });
-    assert.equal(batches.length, 1);
+    await assert.rejects(
+      () => runWithQueryInstrumentation(async () => {
+        stats = getActiveQueryStats();
+        return fetchAccountTransactionsBounded(api, {
+          accounts: [{ id: 'a1' }, { id: 'a2' }, { id: 'a3' }],
+          start: '2024-01-01',
+          end: '2024-01-31',
+          signal: controller.signal,
+        });
+      }, { signal: controller.signal }),
+      QueryAbortedError,
+    );
     assert.equal(stats.aborted, true);
-    assert.equal(stats.getTransactionsCalls, 2);
+    assert.equal(stats.rowsReturned, 0);
+    assert.equal(stats.peakRowsRetained, 0);
+    assert.equal(calls, 2);
+  });
+
+  it('getTransactions fails closed on abort without returning partial rows', async () => {
+    const controller = new AbortController();
+    await assert.rejects(
+      () => runWithQueryInstrumentation(async () => {
+        controller.abort();
+        return data.getTransactions({ start: '2024-01-01', end: '2024-06-30' });
+      }, { signal: controller.signal }),
+      QueryAbortedError,
+    );
   });
 });

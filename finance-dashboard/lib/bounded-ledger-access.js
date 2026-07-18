@@ -9,6 +9,7 @@ const {
   loadQueryScalingConfig,
 } = require('./query-scaling-config');
 const {
+  QueryAbortedError,
   QueryCursorSecretError,
   QueryRangeExceededError,
   QueryResultLimitExceededError,
@@ -282,6 +283,18 @@ function discardRetainedBatches(batches) {
   batches.length = 0;
 }
 
+function throwIfQueryAborted({ stats, batches, effectiveSignal, phase } = {}) {
+  if (!effectiveSignal?.aborted) return;
+  discardRetainedBatches(batches);
+  if (stats) {
+    stats.aborted = true;
+    stats.rowsReturned = 0;
+    stats.peakRowsRetained = 0;
+  }
+  const detail = phase ? ` (${phase})` : '';
+  throw new QueryAbortedError(`Ledger query was aborted${detail}`);
+}
+
 function enforceRowBudgetOrThrow({
   stats,
   batches,
@@ -317,25 +330,16 @@ async function fetchAccountTransactionsBounded(api, {
   let totalRowsRetained = 0;
 
   for (const account of accounts) {
-    if (effectiveSignal?.aborted) {
-      if (stats) stats.aborted = true;
-      break;
-    }
+    throwIfQueryAborted({ stats, batches, effectiveSignal, phase: 'before account fetch' });
     const accountTxns = [];
     for (const chunk of chunks) {
-      if (effectiveSignal?.aborted) {
-        if (stats) stats.aborted = true;
-        break;
-      }
+      throwIfQueryAborted({ stats, batches, effectiveSignal, phase: 'before chunk fetch' });
       const txns = await api.getTransactions(account.id, chunk.start, chunk.end);
       if (stats) {
         stats.getTransactionsCalls += 1;
         stats.rowsScanned += txns.length;
       }
-      if (effectiveSignal?.aborted) {
-        if (stats) stats.aborted = true;
-        break;
-      }
+      throwIfQueryAborted({ stats, batches, effectiveSignal, phase: 'after in-flight fetch' });
       enforceRowBudgetOrThrow({
         stats,
         batches,
@@ -347,7 +351,7 @@ async function fetchAccountTransactionsBounded(api, {
       totalRowsRetained += txns.length;
       noteRowsRetained(stats, totalRowsRetained);
     }
-    if (effectiveSignal?.aborted) break;
+    throwIfQueryAborted({ stats, batches, effectiveSignal, phase: 'before retaining account batch' });
     batches.push({ account, transactions: accountTxns });
     if (stats) stats.accountsQueried += 1;
   }
@@ -465,6 +469,7 @@ module.exports = {
   encodeSearchCursor,
   enforceRowBudgetOrThrow,
   fetchAccountTransactionsBounded,
+  throwIfQueryAborted,
   findSupersedingCleared,
   flattenAccountTransactions,
   getActiveQueryAbortSignal,

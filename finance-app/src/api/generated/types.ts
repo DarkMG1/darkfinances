@@ -103,17 +103,23 @@ export interface Investments {
 export interface Reports {
   generatedAt: string;
   month: string;
+  completeness?: ProjectionCompleteness;
   saved: { id: string; title: string; subtitle: string }[];
   monthlyReview: {
-    income: number;
-    spend: number;
-    net: number;
+    income: number | null;
+    spend: number | null;
+    net: number | null;
+    knownSpendSubtotal?: number;
+    knownIncomeSubtotal?: number;
+    completeness?: ProjectionCompleteness;
     transactionCount: number;
     largest: Transaction[];
     uncategorized: Transaction[];
   };
-  categoryTrends: { name: string; spend: number; pct: number }[];
+  categoryTrends: { name: string; spend: number; pct: number | null }[];
   merchantTrends: { payee: string; spend: number; count: number }[];
+  categoryTrendsComplete?: boolean;
+  merchantTrendsComplete?: boolean;
   tagSummary: Tag[];
   cashFlow: TrendMonth[];
 }

@@ -8,6 +8,7 @@ const generated = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-a
 const browser = fs.readFileSync(path.resolve(__dirname, '..', 'public', 'index.html'), 'utf8');
 const appHome = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'index.tsx'), 'utf8');
 const appReimbursement = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'reimbursement.tsx'), 'utf8');
+const generatedTypes = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
 
 function serverRoutes() {
   const direct = [...server.matchAll(/\bv1\.(get|post|delete|put|patch)\('([^']+)'/g)]
@@ -107,4 +108,11 @@ test('legacy web reimbursement renders MetricValue totals without NaN or fabrica
 
   assert.match(appReimbursement, /totalOwedMetric\?\.complete \? \(totalOwedMetric\.value \?\? 0\)/);
   assert.match(appReimbursement, /grandLowerBound != null \?/);
+});
+
+test('generated contract exposes report trend completeness and nullable monthly review totals', () => {
+  assert.match(generatedTypes, /categoryTrendsComplete\?: boolean/);
+  assert.match(generatedTypes, /merchantTrendsComplete\?: boolean/);
+  assert.match(generatedTypes, /monthlyReview:[\s\S]*income: number \| null/);
+  assert.match(generatedTypes, /monthlyReview:[\s\S]*knownSpendSubtotal\?: number/);
 });

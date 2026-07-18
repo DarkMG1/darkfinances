@@ -1,4 +1,4 @@
-const { AppError, classifyError, AdmissionOverloadedError, AdmissionUnavailableError } = require('./errors');
+const { AppError, classifyError, AdmissionOverloadedError, AdmissionUnavailableError, QueryAbortedError } = require('./errors');
 const { ReimbursementExportIncompleteError } = require('./reimbursement-export-common');
 const { sanitizeIssues } = require('./request-issues');
 
@@ -39,6 +39,9 @@ function apiErrorBody(error, req) {
       body.requiresIdempotencyKeyReuse = true;
       body.admission.requiresIdempotencyKeyReuse = true;
     }
+  } else if (error instanceof QueryAbortedError) {
+    body.query = { aborted: true };
+    body.requiresIdempotencyKeyReuse = false;
   } else if (error?.requiresIdempotencyKeyReuse === true) {
     body.requiresIdempotencyKeyReuse = true;
   }
@@ -46,6 +49,7 @@ function apiErrorBody(error, req) {
 }
 
 function sendApiError(req, res, error) {
+  if (res.headersSent || res.writableEnded) return res;
   const classified = classifyError(error);
   if (classified.status >= 500) {
     console.error(`[request:${req.requestId}]`, (error && error.stack) || error);

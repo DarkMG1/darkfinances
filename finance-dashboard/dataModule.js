@@ -6111,23 +6111,30 @@ async function getMonthlyReport({ month } = {}) {
 function buildReportsPayload({ month, monthly, trends, insights, tags, generatedAt = new Date().toISOString() }) {
   const summaryComplete = monthly.summary?.completeness?.complete !== false;
   const merchants = {};
-  for (const t of monthly.transactions || []) {
-    if (t.amount >= 0) continue;
-    const key = t.payee || 'Unknown';
-    const cur = merchants[key] || { payee: key, spend: 0, count: 0 };
-    cur.spend = round2(cur.spend + Math.abs(t.amount));
-    cur.count++;
-    merchants[key] = cur;
+  if (summaryComplete) {
+    for (const t of monthly.transactions || []) {
+      if (t.amount >= 0) continue;
+      if (t.transfer) continue;
+      const key = t.payee || 'Unknown';
+      const cur = merchants[key] || { payee: key, spend: 0, count: 0 };
+      cur.spend = round2(cur.spend + Math.abs(t.amount));
+      cur.count++;
+      merchants[key] = cur;
+    }
   }
-  const topMerchants = Object.values(merchants).sort((a, b) => b.spend - a.spend).slice(0, 12);
+  const topMerchants = summaryComplete
+    ? Object.values(merchants).sort((a, b) => b.spend - a.spend).slice(0, 12)
+    : [];
   const totalSpend = summaryComplete ? (monthly.summary?.totalSpend ?? 0) : null;
-  const categories = Object.entries(monthly.summary?.spending || {})
-    .map(([name, spend]) => ({
-      name,
-      spend: round2(Number(spend) || 0),
-      pct: summaryComplete && totalSpend > 0 ? round2(((Number(spend) || 0) / totalSpend) * 100) : null,
-    }))
-    .sort((a, b) => b.spend - a.spend);
+  const categories = summaryComplete
+    ? Object.entries(monthly.summary?.spending || {})
+      .map(([name, spend]) => ({
+        name,
+        spend: round2(Number(spend) || 0),
+        pct: totalSpend > 0 ? round2(((Number(spend) || 0) / totalSpend) * 100) : null,
+      }))
+      .sort((a, b) => b.spend - a.spend)
+    : [];
   return {
     generatedAt,
     month,
@@ -6156,6 +6163,8 @@ function buildReportsPayload({ month, monthly, trends, insights, tags, generated
     },
     categoryTrends: categories,
     merchantTrends: topMerchants,
+    categoryTrendsComplete: summaryComplete,
+    merchantTrendsComplete: summaryComplete,
     tagSummary: tags.tags || [],
     cashFlow: trends.months || [],
   };

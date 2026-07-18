@@ -7,16 +7,20 @@ const {
   decodeSearchCursor,
   encodeSearchCursor,
   enforceRowBudgetOrThrow,
+  fetchAccountTransactionsBounded,
   resolveBoundedLedgerStart,
   resolveCursorSigningSecret,
   assertCursorSigningConfigured,
   resolveNetWorthQueryStart,
   resolveSearchWindow,
+  runWithQueryInstrumentation,
+  splitCalendarChunks,
   validateCanonicalDateRange,
 } = require('../lib/bounded-ledger-access');
 const { loadQueryScalingConfig } = require('../lib/query-scaling-config');
 const { daysBetween } = require('../lib/date-only');
 const {
+  QueryAbortedError,
   QueryCursorSecretError,
   QueryRangeExceededError,
   QueryResultLimitExceededError,
@@ -262,5 +266,129 @@ describe('bounded ledger access', () => {
     process.env.FINANCE_QUERY_CURSOR_SECRET = 'rotation-secret-b';
     assert.throws(() => decodeSearchCursor(cursor), QueryRangeExceededError);
     process.env.FINANCE_QUERY_CURSOR_SECRET = saved;
+  });
+
+  describe('query abort fail-closed semantics', () => {
+    const accounts = [{ id: 'a1' }, { id: 'a2' }, { id: 'a3' }];
+    const range = { start: '2024-01-01', end: '2024-01-31' };
+
+    function makeApi({ delayMs = 0 } = {}) {
+      let calls = 0;
+      return {
+        calls: () => calls,
+        getTransactions: async (accountId) => {
+          calls += 1;
+          if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+          return [{ id: `${accountId}-${calls}`, date: '2024-01-01', amount: -100 }];
+        },
+      };
+    }
+
+    async function expectAbort(fn) {
+      await assert.rejects(fn, (error) => {
+        assert.equal(error.name, 'QueryAbortedError');
+        assert.equal(error.code, 'QUERY_ABORTED');
+        return true;
+      });
+    }
+
+    it('throws before the first Actual call when already aborted', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const api = makeApi();
+      await expectAbort(() => fetchAccountTransactionsBounded(api, {
+        accounts,
+        ...range,
+        signal: controller.signal,
+      }));
+      assert.equal(api.calls(), 0);
+    });
+
+    it('throws during the first fetch and discards in-flight rows', async () => {
+      const controller = new AbortController();
+      const api = {
+        getTransactions: async () => {
+          controller.abort();
+          return [{ id: 'late', date: '2024-01-01', amount: -100 }];
+        },
+      };
+      await expectAbort(() => fetchAccountTransactionsBounded(api, {
+        accounts: [{ id: 'a1' }],
+        ...range,
+        signal: controller.signal,
+      }));
+    });
+
+    it('throws after N account fetches without retaining partial batches', async () => {
+      const controller = new AbortController();
+      let calls = 0;
+      const api = {
+        getTransactions: async (accountId) => {
+          calls += 1;
+          if (calls === 2) controller.abort();
+          return [{ id: accountId, date: '2024-01-01', amount: -100 }];
+        },
+      };
+      let stats;
+      await expectAbort(() => runWithQueryInstrumentation(async () => {
+        stats = require('../lib/bounded-ledger-access').getActiveQueryStats();
+        return fetchAccountTransactionsBounded(api, { accounts, ...range, signal: controller.signal });
+      }, { signal: controller.signal }));
+      assert.equal(stats.aborted, true);
+      assert.equal(stats.rowsReturned, 0);
+      assert.equal(stats.peakRowsRetained, 0);
+      assert.equal(calls, 2);
+    });
+
+    it('throws after the final fetch before returning batches', async () => {
+      const controller = new AbortController();
+      const api = {
+        getTransactions: async (accountId) => {
+          if (accountId === 'a3') controller.abort();
+          return [{ id: accountId, date: '2024-01-01', amount: -100 }];
+        },
+      };
+      await expectAbort(() => fetchAccountTransactionsBounded(api, {
+        accounts,
+        ...range,
+        signal: controller.signal,
+      }));
+    });
+
+    it('throws across calendar chunks without retaining partial account batches', async () => {
+      const config = { ...loadQueryScalingConfig(), ledgerChunkDays: 10, maxLedgerQueryDays: 3660 };
+      const controller = new AbortController();
+      let calls = 0;
+      const api = {
+        getTransactions: async (accountId) => {
+          calls += 1;
+          if (calls === 2) controller.abort();
+          return [{ id: `${accountId}-${calls}`, date: '2024-01-15', amount: -100 }];
+        },
+      };
+      await expectAbort(() => fetchAccountTransactionsBounded(api, {
+        accounts: [{ id: 'a1' }],
+        start: '2024-01-01',
+        end: '2024-02-29',
+        config,
+        signal: controller.signal,
+      }));
+    });
+
+    it('isolates abort signals across concurrent instrumentation contexts', async () => {
+      const left = new AbortController();
+      const right = new AbortController();
+      left.abort();
+      const api = makeApi();
+      await expectAbort(() => runWithQueryInstrumentation(
+        () => fetchAccountTransactionsBounded(api, { accounts: [{ id: 'a1' }], ...range, signal: left.signal }),
+        { signal: left.signal },
+      ));
+      const batches = await runWithQueryInstrumentation(
+        () => fetchAccountTransactionsBounded(api, { accounts: [{ id: 'a1' }], ...range, signal: right.signal }),
+        { signal: right.signal },
+      );
+      assert.equal(batches.length, 1);
+    });
   });
 });

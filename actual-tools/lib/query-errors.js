@@ -27,7 +27,18 @@ class QueryCursorSecretError extends Error {
   }
 }
 
+class QueryAbortedError extends Error {
+  constructor(message = 'Ledger query was aborted') {
+    super(message);
+    this.name = 'QueryAbortedError';
+    this.code = 'QUERY_ABORTED';
+    this.status = 503;
+    this.requiresIdempotencyKeyReuse = false;
+  }
+}
+
 module.exports = {
+  QueryAbortedError,
   QueryCursorSecretError,
   QueryRangeExceededError,
   QueryResultLimitExceededError,
