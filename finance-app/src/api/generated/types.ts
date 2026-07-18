@@ -3,6 +3,44 @@
 export type Nullish<T> = T | null | undefined;
 export type AccountRole = 'operating_cash' | 'protected_savings' | 'credit_card' | 'loan' | 'investment' | 'excluded' | 'unknown';
 
+export type CreditLiabilityCoverage = 'exclude' | 'current_balance' | 'statement';
+
+export interface AccountCreditStatementOverride {
+  balanceCents: number;
+  paymentDueDate: string;
+  observedAt: string;
+}
+
+export interface AccountOverrideEntry {
+  name?: string;
+  hidden?: boolean;
+  role?: AccountRole;
+  creditLiabilityCoverage?: CreditLiabilityCoverage;
+  paymentRecurringKey?: string;
+  fundingAccountId?: string;
+  statement?: AccountCreditStatementOverride;
+  clearCreditLiability?: boolean;
+}
+
+export interface AccountCreditLiabilityOverride {
+  coverage: CreditLiabilityCoverage | null;
+  paymentRecurringKey: string | null;
+  fundingAccountId: string | null;
+  statement: AccountCreditStatementOverride | null;
+}
+
+export interface AccountCreditLiabilityPolicy {
+  mode: 'unknown' | 'exclude' | 'current_balance' | 'statement';
+  eligible: boolean;
+  coverageKind: 'current_balance' | 'statement' | null;
+  paymentRecurringKey: string | null;
+  fundingAccountId: string | null;
+  obligationCents: number | null;
+  paymentDueDate: string | null;
+  observedAt: string | null;
+  quarantineReasons: string[];
+}
+
 export interface Account {
   id: string;
   name: string;
@@ -11,6 +49,8 @@ export interface Account {
   hidden?: boolean;
   role: AccountRole;
   roleSource: 'explicit' | 'unknown';
+  creditLiability?: AccountCreditLiabilityOverride | null;
+  creditLiabilityPolicy?: AccountCreditLiabilityPolicy | null;
 }
 
 export interface ManualAsset {
@@ -416,6 +456,8 @@ export interface RecurringItem {
   key: string;
   payee: string;
   category: string;
+  categoryId?: string | null;
+  categoryIdentityStatus?: 'explicit' | 'inferred' | 'ambiguous' | 'missing';
   cadence: Cadence;
   amount: number;
   monthlyEquivalent: number;
@@ -517,6 +559,22 @@ export interface Forecast {
     };
     billsExcludedFromGenericBudget: boolean;
     reimbursementsIncluded: boolean;
+    obligationGraph?: {
+      version: number;
+      complete: boolean;
+      incompleteReasons: string[];
+    };
+    stsContainment?: {
+      complete: boolean;
+      incompleteReasons: string[];
+    };
+    projectionContainment?: {
+      complete: boolean;
+      stsContainmentIncomplete: boolean;
+      graphEventsWithheld: boolean;
+      knownEventsIncludedDespiteStsIncomplete?: boolean;
+      incompleteReasons: string[];
+    };
   };
   possibleReimbursement?: { date: string; amount: number; includedInBalance: false } | null;
   warnings: string[];
@@ -951,6 +1009,34 @@ export interface Ping {
   };
 }
 
+export interface ObligationReservation {
+  id: string;
+  label: string;
+  date: string;
+  amountCents: number;
+  role: string;
+  reserved: boolean;
+  source?: { kind?: string; key?: string; id?: string; provenance?: string };
+  explanation?: string[];
+  incompleteReasons?: string[];
+}
+
+export interface ObligationGraphSummary {
+  version: number;
+  nodeCount: number;
+  edgeCount: number;
+  occurrenceCount: number;
+  reservedOutflowCents: number;
+  completeness: { complete: boolean; incompleteReasons: string[]; occurrenceCount: number; reservedOccurrenceCount: number };
+}
+
+export interface ObligationGraphView {
+  version: number;
+  summary: ObligationGraphSummary;
+  completeness: { complete: boolean; incompleteReasons: string[]; occurrenceCount: number; reservedOccurrenceCount: number };
+  reservations: ObligationReservation[];
+}
+
 export interface MetricProvenance {
   metric: string;
   asOf: string;
@@ -976,7 +1062,13 @@ export interface Today {
   accounts: Account[];
   spending: Spending;
   liquidity: { safeToSpend: MetricValue };
-  obligations: { bills: Bill[]; nextIncome: IncomeStream | null; source: 'inferred' | 'confirmed' };
+  obligationGraph?: ObligationGraphView;
+  obligations: {
+    bills: Bill[];
+    nextIncome: IncomeStream | null;
+    source: 'inferred' | 'confirmed' | 'obligation-graph';
+    reserved?: ObligationReservation[];
+  };
   review: ReviewInbox;
   activity: { recent: Transaction[] };
 }

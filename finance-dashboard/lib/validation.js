@@ -189,7 +189,26 @@ const schemas = {
     name: z.string().max(300).optional().nullable(),
     hidden: z.boolean().optional(),
     role: accountRole.optional().nullable(),
-  }).strict().refine((value) => value.name !== undefined || value.hidden !== undefined || value.role !== undefined, 'an override field is required'),
+    creditLiabilityCoverage: z.enum(['exclude', 'current_balance', 'statement']).optional().nullable(),
+    paymentRecurringKey: z.string().max(200).optional().nullable(),
+    fundingAccountId: identifier.optional().nullable(),
+    statement: z.object({
+      balanceCents: z.number().int(),
+      paymentDueDate: dateOnly,
+      observedAt: z.string().datetime(),
+    }).strict().optional().nullable(),
+    clearCreditLiability: z.boolean().optional(),
+  }).strict().refine(
+    (value) => value.name !== undefined
+      || value.hidden !== undefined
+      || value.role !== undefined
+      || value.creditLiabilityCoverage !== undefined
+      || value.paymentRecurringKey !== undefined
+      || value.fundingAccountId !== undefined
+      || value.statement !== undefined
+      || value.clearCreditLiability === true,
+    'an override field is required',
+  ),
 
   reviewDisposition: z.object({
     id: nonEmpty(500),
@@ -234,6 +253,7 @@ const schemas = {
     hidden: z.boolean().optional(),
     forced: z.boolean().optional(),
     isBill: z.boolean().optional().nullable(),
+    categoryId: identifier.optional().nullable(),
     cancellation: cancellation.optional(),
   }).strict(),
 

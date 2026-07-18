@@ -28,6 +28,7 @@ for (const [env, filename] of Object.entries({
   REVIEW_STATE_PATH: 'review-state.json',
   TRANSACTION_SAGAS_PATH: 'transaction-sagas.json',
   VENMO_TRUTH_PATH: 'venmo-truth.json',
+  DEBT_PLANNER_PATH: 'debt-planner.json',
 })) process.env[env] = path.join(dir, filename);
 
 const fixtures = require(fixturePath);
@@ -39,7 +40,7 @@ function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-async function metricFor(fixture) {
+async function metricFor(fixture, { overrides } = {}) {
   fixtures.configure(fixture);
   writeJson(process.env.ACCOUNT_OVERRIDES_PATH, {
     schemaVersion: 2,
@@ -50,6 +51,8 @@ async function metricFor(fixture) {
   });
   writeJson(process.env.BUDGET_SETTINGS_PATH, fixture.budgetSettings);
   writeJson(process.env.GOALS_PATH, fixture.goals);
+  writeJson(process.env.RECURRING_OVERRIDES_PATH, overrides || {});
+  writeJson(process.env.DEBT_PLANNER_PATH, { debts: [] });
   resetApi();
   return (await getToday()).liquidity.safeToSpend;
 }
@@ -57,7 +60,14 @@ async function metricFor(fixture) {
 test('Safe-to-Spend quarantines every unresolved decision input', async (t) => {
   for (const scenario of fixtures.scenarios) {
     await t.test(scenario.name, async () => {
-      const metric = await metricFor(scenario.fixture);
+      const metric = await metricFor(scenario.fixture, { overrides: scenario.overrides });
+      if (scenario.complete) {
+        assert.equal(metric.complete, true);
+        assert.equal(metric.value, 4700);
+        assert.equal(metric.valueCents, 470000);
+        assert.deepEqual(metric.incompleteReasons, []);
+        return;
+      }
       assert.equal(metric.complete, false);
       assert.equal(metric.value, null);
       assert.equal(metric.valueCents, null);

@@ -99,8 +99,10 @@ export default function Overview() {
   ].filter((g) => g.items.length);
 
   const upcoming = (today.data?.obligations.bills ?? []).slice(0, 3);
+  const reserved = today.data?.obligations.reserved ?? today.data?.obligationGraph?.reservations ?? [];
   const nextIncome = today.data?.obligations.nextIncome;
   const safeToSpend = today.data?.liquidity.safeToSpend;
+  const incompleteReasons = today.data?.liquidity.safeToSpend.incompleteReasons ?? [];
 
   return (
     <Screen title="dark" accent="finances" onRefresh={onRefresh} testID="home-screen">
@@ -152,7 +154,28 @@ export default function Overview() {
             <Card testID="today-safe-to-spend-unavailable" style={styles.incompleteCard}>
               <Text style={styles.incompleteTitle}>Safe to Spend unavailable</Text>
               <Text style={styles.incompleteText}>Required inputs are missing or unresolved. No estimate is shown until they are complete.</Text>
+              {incompleteReasons.length ? (
+                <Text style={styles.incompleteText}>{incompleteReasons.join(' · ')}</Text>
+              ) : null}
             </Card>
+          ) : null}
+
+          {reserved.length ? (
+            <View style={{ marginTop: 4 }}>
+              <SectionLabel>Cash Reserved</SectionLabel>
+              <Card style={styles.list}>
+                {reserved.slice(0, 4).map((item, i) => (
+                  <ListRow
+                    key={item.id}
+                    testID={`home-reserved-row-${i}`}
+                    title={item.label}
+                    subtitle={`${item.date}${item.source?.provenance ? ` · ${item.source.provenance}` : ''}`}
+                    value={fmtPos(Math.abs(item.amountCents) / 100)}
+                    chevron={false}
+                  />
+                ))}
+              </Card>
+            </View>
           ) : null}
 
           {widgets.netWorth ? (

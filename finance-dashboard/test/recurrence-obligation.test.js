@@ -106,7 +106,8 @@ test('getToday quarantines Safe-to-Spend when active rent projection is uncertai
   assert.equal(metric.complete, false);
   assert.equal(metric.value, null);
   assert.equal(metric.valueCents, null);
-  assert.ok(metric.incompleteReasons.includes(SAFE_TO_SPEND_REASON.billRecurrenceUnresolved));
+  assert.ok(metric.incompleteReasons.includes('bill_recurrence_unresolved'));
+  assert.ok(metric.incompleteReasons.includes('obligation_recurrence_unresolved'));
 });
 
 test('web dueLabel helper treats null as date uncertain', () => {

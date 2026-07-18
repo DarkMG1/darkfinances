@@ -10,7 +10,17 @@ const ACCOUNT_ROLES = [
   'unknown',
 ];
 const ROLE_SET = new Set(ACCOUNT_ROLES);
-const ENTRY_KEYS = new Set(['name', 'hidden', 'role']);
+const ENTRY_KEYS = new Set([
+  'name',
+  'hidden',
+  'role',
+  'creditLiabilityCoverage',
+  'paymentRecurringKey',
+  'fundingAccountId',
+  'statement',
+]);
+const STATEMENT_KEYS = new Set(['balanceCents', 'paymentDueDate', 'observedAt']);
+const COVERAGE_MODES = new Set(['exclude', 'current_balance', 'statement']);
 const FLAT_LEGACY_REJECT_KEYS = new Set(['schemaVersion', 'accounts']);
 const PRESERVED_METADATA_KEYS = new Set([
   'metadata',
@@ -43,10 +53,95 @@ function validAccountId(id) {
 }
 
 function entryHasOverrideIntent(entry) {
-  return entry.name !== undefined || entry.hidden !== undefined || entry.role !== undefined;
+  return entry.name !== undefined
+    || entry.hidden !== undefined
+    || entry.role !== undefined
+    || entry.creditLiabilityCoverage !== undefined
+    || entry.paymentRecurringKey !== undefined
+    || entry.fundingAccountId !== undefined
+    || entry.statement !== undefined;
+}
+
+function validStatement(entry) {
+  if (entry.statement === undefined) return true;
+  if (!isPlainObject(entry.statement)) return false;
+  if (!Object.keys(entry.statement).every((key) => STATEMENT_KEYS.has(key))) return false;
+  const { balanceCents, paymentDueDate, observedAt } = entry.statement;
+  if (!Number.isSafeInteger(balanceCents)) return false;
+  if (typeof paymentDueDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(paymentDueDate)) return false;
+  if (typeof observedAt !== 'string' || Number.isNaN(Date.parse(observedAt))) return false;
+  return true;
+}
+
+function validateCreditOverrideCrossFields(entry) {
+  const issues = [];
+  if (!entry || typeof entry !== 'object') return { ok: true, issues };
+  const coverage = entry.creditLiabilityCoverage;
+  const hasStatement = entry.statement !== undefined;
+  if (hasStatement && coverage !== 'statement') {
+    issues.push('statement requires creditLiabilityCoverage=statement');
+  }
+  if (coverage === 'statement' && !hasStatement) {
+    issues.push('statement coverage requires statement payload');
+  }
+  if ((coverage === 'current_balance' || coverage === 'statement')
+    && entry.paymentRecurringKey !== undefined
+    && !String(entry.paymentRecurringKey || '').trim()) {
+    issues.push('paymentRecurringKey required for liability coverage');
+  }
+  if (coverage === 'statement' && entry.statement) {
+    const { balanceCents, paymentDueDate, observedAt } = entry.statement;
+    if (!Number.isSafeInteger(balanceCents) || balanceCents >= 0) issues.push('statement.balanceCents must be negative integer cents');
+    if (typeof paymentDueDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(paymentDueDate)) {
+      issues.push('statement.paymentDueDate required');
+    }
+    if (typeof observedAt !== 'string' || Number.isNaN(Date.parse(observedAt))) {
+      issues.push('statement.observedAt required');
+    }
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+function mergeAccountOverrideEntry(current = {}, patch = {}) {
+  const next = { ...current };
+  for (const key of ENTRY_KEYS) {
+    if (!hasOwn(patch, key)) continue;
+    const value = patch[key];
+    if (value === undefined) continue;
+    if (key === 'hidden') {
+      if (value) next.hidden = true;
+      else delete next.hidden;
+      continue;
+    }
+    if (key === 'role') {
+      if (value === null || value === 'unknown' || value === '') delete next.role;
+      else next.role = value;
+      continue;
+    }
+    if (key === 'name') {
+      const trimmed = typeof value === 'string' ? value.trim() : '';
+      if (trimmed) next.name = trimmed;
+      else delete next.name;
+      continue;
+    }
+    if (value === null || value === '') {
+      delete next[key];
+      continue;
+    }
+    next[key] = key === 'statement' ? cloneJson(value) : value;
+  }
+  if (patch.clearCreditLiability === true) {
+    delete next.creditLiabilityCoverage;
+    delete next.paymentRecurringKey;
+    delete next.fundingAccountId;
+    delete next.statement;
+  }
+  return next;
 }
 
 function validEntry(entry) {
+  const crossField = validateCreditOverrideCrossFields(entry);
+  if (!crossField.ok) return false;
   return entry &&
     typeof entry === 'object' &&
     !Array.isArray(entry) &&
@@ -54,6 +149,10 @@ function validEntry(entry) {
     (entry.name === undefined || typeof entry.name === 'string') &&
     (entry.hidden === undefined || typeof entry.hidden === 'boolean') &&
     (entry.role === undefined || ROLE_SET.has(entry.role)) &&
+    (entry.creditLiabilityCoverage === undefined || COVERAGE_MODES.has(entry.creditLiabilityCoverage)) &&
+    (entry.paymentRecurringKey === undefined || typeof entry.paymentRecurringKey === 'string') &&
+    (entry.fundingAccountId === undefined || typeof entry.fundingAccountId === 'string') &&
+    validStatement(entry) &&
     entryHasOverrideIntent(entry);
 }
 
@@ -103,12 +202,16 @@ function migrateAccountOverrides(value) {
 module.exports = {
   ACTUAL_ACCOUNT_ID_RE,
   DEMO_ACCOUNT_ID_RE,
+  COVERAGE_MODES,
   ENVELOPE_KEYS,
   ACCOUNT_ROLES,
   ENTRY_KEYS,
   FLAT_LEGACY_REJECT_KEYS,
   PRESERVED_METADATA_KEYS,
+  STATEMENT_KEYS,
   migrateAccountOverrides,
+  mergeAccountOverrideEntry,
+  validateCreditOverrideCrossFields,
   validAccountId,
   validEntry,
 };

@@ -6,6 +6,13 @@
 const { metricValue } = require('./lib/metric-provenance');
 const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
 const {
+  buildObligationGraph,
+  forecastCashEventsFromGraph,
+  graphSummary,
+  safeToSpendFromGraph,
+} = require('./lib/domain/obligation-graph');
+const { assembleObligationGraphInputs, buildGraphTransactionInputs } = require('./lib/obligation-graph-bridge');
+const {
   buildCategoryInfo,
   buildTransferIndex,
   classifyTransactionLeaves,
@@ -95,7 +102,7 @@ function buildSub(payee, category, amount, daysSinceLast, occ, priceFrom) {
   const priceChange = priceFrom && priceFrom !== amount
     ? { from: round2(priceFrom), to: round2(amount), pct: Math.round(((amount - priceFrom) / priceFrom) * 100) } : null;
   return {
-    key: recurKey(payee), payee, category, cadence: 'monthly', amount: round2(amount), monthlyEquivalent: round2(amount),
+    key: recurKey(payee), payee, category, categoryId: catId(category), cadence: 'monthly', amount: round2(amount), monthlyEquivalent: round2(amount),
     isBill: /rent|mortgage|phone|internet|cable|utilit|electric|water|\bgas\b|sewer|trash|insuranc|\bloan/i.test(category),
     occurrences: occ, firstCharged: history[0].date, lastCharged: last, nextRenewal,
     renewalWindow: renewalWindow(nextRenewal),
@@ -103,8 +110,12 @@ function buildSub(payee, category, amount, daysSinceLast, occ, priceFrom) {
   };
 }
 function activeSubs() {
+  const cardPayment = buildSub('Sapphire Card Payment', 'Transfer', 1240.3, 4, 6);
+  cardPayment.isBill = true;
+  cardPayment.key = recurKey('Sapphire Card Payment');
   return [
     buildSub('Skyline Apartments', 'Rent', 2100, 2, 12),
+    cardPayment,
     buildSub('Verizon Wireless', 'Phone', 85.0, 6, 11),
     buildSub('City Fiber Internet', 'Internet', 69.99, 14, 10),
     buildSub('Adobe Creative Cloud', 'Software', 54.99, 12, 9),
@@ -149,36 +160,82 @@ function bills() {
 
 function today() {
   const asOf = new Date().toISOString();
+  const financeDate = financeAnchor();
+  const monthEndDate = monthEnd(financeDate.slice(0, 7));
   const allAccounts = accounts();
   const cash = allAccounts.filter((account) => account.role === 'operating_cash');
-  const cashValue = round2(cash.reduce((sum, account) => sum + account.balance, 0));
+  const cashCents = Math.round(cash.reduce((sum, account) => sum + account.balance, 0) * 100);
   const upcoming = bills();
+  const recurringData = recurring();
+  const incomeData = income();
   const currentSpending = spending({});
   const inbox = review();
+  const graphTxnInputs = buildGraphTransactionInputs(
+    transactions().map((t) => actualRowFromDemoTransaction(t)),
+    demoCategoryInfo(),
+    {
+      windowStart: financeDate,
+      windowEnd: monthEndDate,
+      accountRolesById: Object.fromEntries(allAccounts.map((account) => [account.id, account.role])),
+    },
+  );
+  const graphInputs = assembleObligationGraphInputs({
+    financeDate,
+    windowStart: financeDate,
+    windowEnd: monthEndDate,
+    accounts: allAccounts,
+    accountOverrides: {
+      'acc-credit': {
+        creditLiabilityCoverage: 'current_balance',
+        paymentRecurringKey: 'sapphire card payment',
+        fundingAccountId: 'acc-check',
+      },
+    },
+    recurring: recurringData,
+    income: incomeData,
+    bills: upcoming,
+    budgets: { supported: false },
+    reimb: { totalOwed: 0 },
+    operatingAccountIds: cash.map((account) => account.id),
+    transfers: graphTxnInputs.transfers,
+    economicTransactions: graphTxnInputs.economicTransactions,
+  });
+  const graph = buildObligationGraph(graphInputs);
+  const stfFromGraph = safeToSpendFromGraph(graph, {
+    operatingCashCents: cashCents,
+    monthStart: financeDate,
+    monthEnd: monthEndDate,
+  });
   const incompleteReasons = safeToSpendIncompleteReasons({
     accounts: allAccounts,
     visibleAccounts: allAccounts,
     operatingAccounts: cash,
     budgets: { supported: false },
-    recurring: recurring(),
+    recurring: recurringData,
     goals: goals(),
     spendingCompleteness: currentSpending.current?.completeness,
+    obligationGraph: graph,
+    liabilityPolicies: graphInputs.liabilityPolicies,
   });
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',
-    value: round2(cashValue - upcoming.total),
-    valueCents: Math.round((cashValue - upcoming.total) * 100),
+    value: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? stfFromGraph.valueCents / 100
+      : null,
+    valueCents: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? stfFromGraph.valueCents
+      : null,
     complete: incompleteReasons.length === 0,
     incompleteReasons,
     asOf,
-    financeDate: financeAnchor(),
+    financeDate,
     sources: cash.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
-    method: 'demo operating cash minus upcoming bills',
+    method: stfFromGraph.method,
     excludes: ['possible reimbursements'],
   });
   return {
     asOf,
-    financeDate: financeAnchor(),
+    financeDate,
     revision: `demo-${currentMonth()}`,
     complete: safeToSpend.complete && currentSpending.current?.completeness?.complete !== false,
     incompleteReasons: [...new Set([
@@ -189,7 +246,18 @@ function today() {
     accounts: allAccounts,
     spending: currentSpending,
     liquidity: { safeToSpend },
-    obligations: { bills: upcoming.bills.slice(0, 5), nextIncome: income().streams[0] || null, source: 'inferred' },
+    obligationGraph: {
+      version: graph.version,
+      summary: graphSummary(graph),
+      completeness: graph.completeness,
+      reservations: (stfFromGraph.reservations || []).slice(0, 12),
+    },
+    obligations: {
+      bills: upcoming.bills.slice(0, 5),
+      nextIncome: incomeData.streams[0] || null,
+      source: graph.completeness.complete ? 'obligation-graph' : 'inferred',
+      reserved: (stfFromGraph.reservations || []).slice(0, 8),
+    },
     review: inbox,
     activity: { recent: transactions().slice(0, 8) },
   };
@@ -582,50 +650,158 @@ function investments() {
   return { generatedAt: new Date().toISOString(), holdings, totals, allocation: { byAssetClass, byAccount }, debts, debtTotals };
 }
 function forecast(days = 90) {
+  const todaySnapshot = today();
   const start = financeAnchor();
-  const end = addDays(start, days);
-  const base = accounts().filter((a) => !a.offbudget && a.balance > 0).reduce((s, a) => s + a.balance, 0);
-  const events = [
-    { date: addDays(start, 7), label: 'Acme Corp Payroll', amount: 3250, kind: 'income' },
-    { date: addDays(start, 13), label: 'Skyline Apartments', amount: -2100, kind: 'bill' },
-    { date: addDays(start, 21), label: 'Budgeted spending', amount: -950, kind: 'budget' },
-    { date: addDays(start, 28), label: 'Alex reimbursement', amount: 142.5, kind: 'reimbursement' },
-  ].filter((e) => e.date <= end);
+  const horizonDays = Math.min(180, Math.max(30, Number(days) || 90));
+  const end = addDays(start, horizonDays);
+  const allAccounts = accounts();
+  const cash = allAccounts.filter((account) => account.role === 'operating_cash');
+  const startBalance = round2(cash.reduce((sum, account) => sum + account.balance, 0));
+  const recurringData = recurring();
+  const incomeData = income();
+  const upcoming = bills();
+  const graphTxnInputs = buildGraphTransactionInputs(
+    transactions().map((t) => actualRowFromDemoTransaction(t)),
+    demoCategoryInfo(),
+    {
+      windowStart: start,
+      windowEnd: end,
+      accountRolesById: Object.fromEntries(allAccounts.map((account) => [account.id, account.role])),
+    },
+  );
+  const graphInputs = assembleObligationGraphInputs({
+    financeDate: start,
+    windowStart: start,
+    windowEnd: end,
+    accounts: allAccounts,
+    accountOverrides: {
+      'acc-credit': {
+        creditLiabilityCoverage: 'current_balance',
+        paymentRecurringKey: 'sapphire card payment',
+        fundingAccountId: 'acc-check',
+      },
+    },
+    recurring: recurringData,
+    income: incomeData,
+    bills: { bills: upcoming.bills.filter((bill) => bill.dueDate <= end) },
+    budgets: { supported: false },
+    reimb: { totalOwed: 0 },
+    operatingAccountIds: cash.map((account) => account.id),
+    transfers: graphTxnInputs.transfers,
+    economicTransactions: graphTxnInputs.economicTransactions,
+  });
+  const graph = buildObligationGraph(graphInputs);
+  const obligationBlocked = !todaySnapshot.obligationGraph?.completeness?.complete
+    || (todaySnapshot.incompleteReasons || []).some((reason) => String(reason).startsWith('obligation_'));
+  const withholdGraphEvents = obligationBlocked;
+  const graphEvents = !withholdGraphEvents
+    ? forecastCashEventsFromGraph(graph, { windowStart: start, windowEnd: end })
+    : [];
+  const events = graphEvents.map((event) => ({
+    date: event.date,
+    label: event.label,
+    amount: round2(event.amountCents / 100),
+    kind: event.kind,
+    sourceId: event.sourceId || null,
+    provenance: event.provenance || 'inferred',
+  })).sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
+  const byDate = new Map();
+  for (const event of events) {
+    const cents = Math.round(event.amount * 100);
+    const cur = byDate.get(event.date) || { date: event.date, inflow: 0, outflow: 0 };
+    if (cents >= 0) cur.inflow = round2(cur.inflow + event.amount);
+    else cur.outflow = round2(cur.outflow + Math.abs(event.amount));
+    byDate.set(event.date, cur);
+  }
   const points = [];
-  let bal = base;
-  for (let d = 0; d <= days; d += Math.max(1, Math.round(days / 12))) {
+  let running = startBalance;
+  const step = Math.max(1, Math.round(horizonDays / 12));
+  for (let d = 0; d <= horizonDays; d += step) {
     const date = addDays(start, d);
-    const todays = events.filter((e) => e.date <= date);
-    bal = round2(base + todays.reduce((s, e) => s + e.amount, 0) - d * 22);
-    points.push({ date, balance: bal, inflow: round2(todays.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)), outflow: round2(Math.abs(todays.filter((e) => e.amount < 0).reduce((s, e) => s + e.amount, 0))) });
+    for (const event of events) {
+      if (event.date > addDays(start, d - step) && event.date <= date) running = round2(running + event.amount);
+    }
+    const dayTotals = byDate.get(date) || { inflow: 0, outflow: 0 };
+    points.push({ date, balance: running, inflow: dayTotals.inflow, outflow: dayTotals.outflow });
+  }
+  if (points.length === 0 || points[points.length - 1].date !== end) {
+    points.push({ date: end, balance: running, inflow: 0, outflow: 0 });
   }
   const lowest = points.reduce((a, p) => (p.balance < a.balance ? p : a), points[0]);
-  const genericBudgetTarget = 950;
+  const stsMetric = todaySnapshot.liquidity?.safeToSpend || {};
+  const stsContainment = {
+    complete: stsMetric.complete === true,
+    incompleteReasons: stsMetric.incompleteReasons || [],
+  };
+  const budgetGoalReasons = stsContainment.incompleteReasons.filter((reason) =>
+    reason === 'budget_data_unavailable' || String(reason).startsWith('goal_'));
+  const knownEventsIncludedDespiteStsIncomplete = !withholdGraphEvents
+    && !stsContainment.complete
+    && events.length > 0;
+  const projectionIncompleteReasons = [
+    ...(withholdGraphEvents ? ['obligation_graph_incomplete'] : []),
+    ...(!stsContainment.complete ? stsContainment.incompleteReasons : []),
+  ];
+  const projectionContainment = {
+    complete: stsContainment.complete && !withholdGraphEvents,
+    stsContainmentIncomplete: !stsContainment.complete,
+    graphEventsWithheld: withholdGraphEvents,
+    ...(knownEventsIncludedDespiteStsIncomplete ? { knownEventsIncludedDespiteStsIncomplete: true } : {}),
+    incompleteReasons: projectionIncompleteReasons,
+  };
+  const warnings = [];
+  if (withholdGraphEvents) {
+    warnings.push('Obligation graph incomplete; scheduled cash events withheld.');
+    for (const reason of [
+      ...(todaySnapshot.obligationGraph?.completeness?.incompleteReasons || []),
+      ...(todaySnapshot.incompleteReasons || []).filter((reason) => String(reason).startsWith('obligation_')),
+    ]) {
+      warnings.push(`Obligation graph: ${reason}`);
+    }
+  }
+  if (!stsContainment.complete) {
+    warnings.push('Safe-to-Spend containment incomplete; budget and goal commitments may be omitted from this projection.');
+    for (const reason of stsContainment.incompleteReasons) {
+      warnings.push(`Safe-to-Spend: ${reason}`);
+    }
+  }
+  if (knownEventsIncludedDespiteStsIncomplete) {
+    warnings.push('Known obligation graph cash events are included while Safe-to-Spend containment remains incomplete.');
+  }
+  if (lowest.balance < 1000) warnings.push('Projected cash gets low this period.');
   return {
     generatedAt: new Date().toISOString(),
-    range: { start, end, days },
-    startBalance: round2(base),
+    range: { start, end, days: horizonDays },
+    startBalance,
     endingBalance: points[points.length - 1].balance,
     lowest: { date: lowest.date, balance: lowest.balance },
     totals: {
-      inflow: round2(events.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)),
-      outflow: round2(Math.abs(events.filter((e) => e.amount < 0).reduce((s, e) => s + e.amount, 0))),
+      inflow: round2(events.filter((event) => event.amount > 0).reduce((sum, event) => sum + event.amount, 0)),
+      outflow: round2(Math.abs(events.filter((event) => event.amount < 0).reduce((sum, event) => sum + event.amount, 0))),
     },
     points,
     events,
     assumptions: {
-      liquidAccounts: accounts().filter((a) => !a.offbudget && a.balance > 0).map((a) => ({ id: a.id, name: a.name })),
-      genericBudgetTarget,
+      liquidAccounts: cash.map((account) => ({ id: account.id, name: account.name })),
+      obligationGraph: {
+        ...graphSummary(graph),
+        complete: graph.completeness?.complete,
+        incompleteReasons: graph.completeness?.incompleteReasons || [],
+      },
+      graphDriven: true,
+      stsContainment,
+      projectionContainment,
+      genericBudgetTarget: budgetGoalReasons.length === 0 ? 0 : null,
       genericBudget: {
-        target: genericBudgetTarget,
-        remaining: genericBudgetTarget,
-        complete: true,
-        incompleteReasons: [],
+        target: budgetGoalReasons.length === 0 ? 0 : null,
+        remaining: budgetGoalReasons.length === 0 ? 0 : null,
+        complete: budgetGoalReasons.length === 0,
+        incompleteReasons: budgetGoalReasons,
       },
       billsExcludedFromGenericBudget: true,
       reimbursementsIncluded: false,
     },
-    warnings: lowest.balance < 1000 ? ['Projected cash gets low this period.'] : [],
+    warnings,
   };
 }
 function reports() {

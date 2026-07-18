@@ -151,3 +151,35 @@ test('browser trends chart does not coerce incomplete months to zero spend/incom
   assert.doesNotMatch(script, /m\.income \?\? 0/);
   assert.doesNotMatch(script, /m\.spend \?\? 0/);
 });
+
+test('renderSafeToSpend surfaces authoritative incompleteReasons when unavailable', () => {
+  const fnMatch = script.match(/function renderSafeToSpend\([\s\S]*?\n {4}\}/);
+  assert.ok(fnMatch, 'renderSafeToSpend should exist in dashboard script');
+
+  const dom = {
+    safeToSpendValue: { textContent: '', style: {} },
+    safeToSpendDetail: { textContent: '' },
+    safeToSpendReasons: { innerHTML: '', hidden: false },
+    safeToSpendReserved: { innerHTML: '' },
+  };
+  const document = {
+    getElementById: (id) => ({
+      safeToSpendValue: dom.safeToSpendValue,
+      safeToSpendDetail: dom.safeToSpendDetail,
+      safeToSpendReasons: dom.safeToSpendReasons,
+      safeToSpendReserved: dom.safeToSpendReserved,
+    }[id] || null),
+  };
+  const fmt = (value) => `$${value}`;
+  const html = (value) => String(value == null ? '' : value);
+
+  vm.runInNewContext(
+    `${fnMatch[0]}\nrenderSafeToSpend({ complete: false, value: null, incompleteReasons: ['budget_data_unavailable', 'goal_commitment_unknown'] });`,
+    { document, fmt, html },
+  );
+
+  assert.equal(dom.safeToSpendValue.textContent, 'Unavailable');
+  assert.match(dom.safeToSpendReasons.innerHTML, /budget_data_unavailable/);
+  assert.match(dom.safeToSpendReasons.innerHTML, /goal_commitment_unknown/);
+  assert.equal(dom.safeToSpendReasons.hidden, false);
+});

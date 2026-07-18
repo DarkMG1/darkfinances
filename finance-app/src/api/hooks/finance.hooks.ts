@@ -7,7 +7,9 @@ import { useServerConfig } from '@/state/server';
 import { API_ENDPOINTS } from '@/api/generated/endpoints';
 import {
   Account,
+  AccountCreditStatementOverride,
   AccountRole,
+  CreditLiabilityCoverage,
   Bills,
   Budgets,
   CategorizeResult,
@@ -47,6 +49,21 @@ import {
   TransactionDetail,
   Trends,
 } from '@/api/generated/types';
+
+const ACCOUNT_OVERRIDE_DERIVED_KEYS = [
+  API_ENDPOINTS.today.key,
+  API_ENDPOINTS.forecast.key,
+  API_ENDPOINTS.accounts.key,
+  API_ENDPOINTS.bills.key,
+  API_ENDPOINTS.recurring.key,
+] as const;
+
+const RECURRING_OVERRIDE_DERIVED_KEYS = [
+  API_ENDPOINTS.today.key,
+  API_ENDPOINTS.forecast.key,
+  API_ENDPOINTS.recurring.key,
+  API_ENDPOINTS.bills.key,
+] as const;
 
 const TRANSACTION_DERIVED_KEYS = [
   API_ENDPOINTS.today.key,
@@ -461,6 +478,7 @@ export interface SetRecurringVars {
   hidden?: boolean;
   forced?: boolean;
   isBill?: boolean | null;
+  categoryId?: string | null;
   cancellation?: {
     status?: string | null;
     notes?: string | null;
@@ -477,10 +495,7 @@ export function useSetRecurringOverride() {
     endpoint: (v) => `/api/v1/recurring/${encodeURIComponent(v.key)}/override`,
     method: 'POST',
     onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.recurring.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.bills.key] }),
-      ]);
+      await invalidateKeys(qc, RECURRING_OVERRIDE_DERIVED_KEYS);
     },
   });
 }
@@ -985,6 +1000,11 @@ export interface SetAccountOverrideVars {
   name?: string;
   hidden?: boolean;
   role?: AccountRole | null;
+  creditLiabilityCoverage?: CreditLiabilityCoverage | null;
+  paymentRecurringKey?: string | null;
+  fundingAccountId?: string | null;
+  statement?: AccountCreditStatementOverride | null;
+  clearCreditLiability?: boolean;
 }
 export function useSetAccountOverride() {
   const qc = useQueryClient();
@@ -992,10 +1012,7 @@ export function useSetAccountOverride() {
     endpoint: (v) => `/api/v1/accounts/${encodeURIComponent(v.id)}/override`,
     method: 'POST',
     onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.accounts.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactions.key] }),
-      ]);
+      await invalidateKeys(qc, ACCOUNT_OVERRIDE_DERIVED_KEYS);
     },
   });
 }

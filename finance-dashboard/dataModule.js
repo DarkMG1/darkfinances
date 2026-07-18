@@ -143,11 +143,27 @@ const {
   sumOperatingCashBalanceCents,
 } = require('./lib/domain/forecast-money');
 const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
+const {
+  mergeAccountOverrideEntry,
+  validEntry,
+  validateCreditOverrideCrossFields,
+} = require('./lib/account-overrides-schema');
+const { resolveAccountCreditPolicy, COVERAGE_MODE } = require('./lib/domain/credit-liability-policy');
+const { resolveRecurringCategoryIdentity } = require('./lib/domain/obligation-identities');
 const { metricValue } = require('./lib/metric-provenance');
 const {
   SAFE_TO_SPEND_INPUTS,
   safeToSpendIncompleteReasons,
 } = require('./lib/safe-to-spend');
+const {
+  buildObligationGraph,
+  billsFromGraph,
+  forecastCashEventsFromGraph,
+  graphSummary,
+  safeToSpendFromGraph,
+} = require('./lib/domain/obligation-graph');
+const { assembleObligationGraphInputs, buildGraphTransactionInputs, collectBillCategoryIds } = require('./lib/obligation-graph-bridge');
+const { verifyCyclePartitionInvariants } = require('./lib/domain/liability-cycle-partition');
 const {
   AccountNotFoundError,
   TransactionNotFoundError,
@@ -768,40 +784,82 @@ async function getAccounts() {
     return Promise.all(
       accounts.map(async (a) => {
         const ov = overrides[a.id] || {};
+        const financeDate = todayYMD();
+        const balanceCents = await api.getAccountBalance(a.id);
+        const creditPolicy = resolveAccountCreditPolicy({
+          ...a,
+          financeDate,
+          role: ov.role || 'unknown',
+          hidden: !!ov.hidden,
+          balance: balanceCents / 100,
+        }, ov);
         return {
           id: a.id,
           name: ov.name || a.name, // display rename (Actual name untouched)
           offbudget: !!a.offbudget,
-          balance: (await api.getAccountBalance(a.id)) / 100,
+          balance: balanceCents / 100,
           hidden: !!ov.hidden,
           role: ov.role || 'unknown',
           roleSource: ov.role ? 'explicit' : 'unknown',
+          creditLiability: ov.creditLiabilityCoverage || ov.paymentRecurringKey || ov.fundingAccountId || ov.statement
+            ? {
+              coverage: ov.creditLiabilityCoverage || null,
+              paymentRecurringKey: ov.paymentRecurringKey || null,
+              fundingAccountId: ov.fundingAccountId || null,
+              statement: ov.statement || null,
+            }
+            : null,
+          creditLiabilityPolicy: creditPolicy.excluded && creditPolicy.mode === COVERAGE_MODE.EXCLUDE
+            ? { mode: 'exclude', eligible: false, quarantineReasons: [] }
+            : {
+              mode: creditPolicy.mode,
+              eligible: creditPolicy.eligible,
+              coverageKind: creditPolicy.coverageKind || null,
+              paymentRecurringKey: creditPolicy.paymentRecurringKey || null,
+              fundingAccountId: creditPolicy.fundingAccountId || null,
+              obligationCents: creditPolicy.obligationCents ?? null,
+              paymentDueDate: creditPolicy.paymentDueDate || null,
+              observedAt: creditPolicy.observedAt || null,
+              quarantineReasons: creditPolicy.quarantineReasons || [],
+            },
         };
       })
     );
   });
 }
 
-function setAccountOverride({ id, name, hidden, role } = {}) {
+function setAccountOverride({
+  id,
+  name,
+  hidden,
+  role,
+  creditLiabilityCoverage,
+  paymentRecurringKey,
+  fundingAccountId,
+  statement,
+  clearCreditLiability,
+} = {}) {
   if (!id) throw new Error('id required');
   const store = readAccountOverrides(ACCOUNT_OVERRIDES_PATH);
   const overrides = store.accounts;
-  const cur = overrides[id] || {};
-  if (name !== undefined) {
-    const trimmed = (name || '').trim();
-    if (trimmed) cur.name = trimmed;
-    else delete cur.name; // empty resets to the Actual name
+  const cur = mergeAccountOverrideEntry(overrides[id] || {}, {
+    name,
+    hidden,
+    role,
+    creditLiabilityCoverage,
+    paymentRecurringKey,
+    fundingAccountId,
+    statement,
+    clearCreditLiability,
+  });
+  if (Object.keys(cur).length) {
+    const cross = validateCreditOverrideCrossFields(cur);
+    if (!cross.ok) throw new Error(cross.issues.join('; '));
+    if (!validEntry(cur)) throw new Error('invalid account override');
+    overrides[id] = cur;
+  } else {
+    delete overrides[id];
   }
-  if (hidden !== undefined) {
-    if (hidden) cur.hidden = true;
-    else delete cur.hidden;
-  }
-  if (role !== undefined) {
-    if (role === null || role === 'unknown') delete cur.role;
-    else cur.role = role;
-  }
-  if (Object.keys(cur).length) overrides[id] = cur;
-  else delete overrides[id];
   writeAccountOverrides(ACCOUNT_OVERRIDES_PATH, store);
   return { ok: true, id, override: overrides[id] || null };
 }
@@ -3299,8 +3357,12 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
           key,
           payee: payeeName,
           category: (catInfo[lf.catId] && catInfo[lf.catId].name) || 'Uncategorized',
+          categoryIdCounts: {},
           charges: [],
         });
+        if (lf.catId) {
+          rec.categoryIdCounts[lf.catId] = (rec.categoryIdCounts[lf.catId] || 0) + 1;
+        }
         rec.charges.push({ date: t.date, amt: -lf.amount / 100 });
       }
     }
@@ -3390,11 +3452,20 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
       let status = daysBetween(lastCharged, today) <= inactiveGapDays(effCadence) ? 'active' : 'inactive';
       if (ov && ov.status) status = ov.status; // user override (e.g. cancelled)
       const finalIsBill = ov && typeof ov.isBill === 'boolean' ? ov.isBill : isBill;
+      const categoryIdentity = resolveRecurringCategoryIdentity({
+        override: ov || {},
+        categoryIdCounts: rec.categoryIdCounts || {},
+      });
+      const resolvedCategoryName = categoryIdentity.categoryId && catInfo[categoryIdentity.categoryId]
+        ? catInfo[categoryIdentity.categoryId].name
+        : rec.category;
 
       items.push({
         key: rec.key,
         payee: rec.payee,
-        category: rec.category,
+        category: resolvedCategoryName,
+        categoryId: categoryIdentity.categoryId,
+        categoryIdentityStatus: categoryIdentity.status,
         cadence: effCadence,
         amount: round2(amount),
         monthlyEquivalent: round2(monthlyEquivalent),
@@ -3451,7 +3522,7 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
   });
 }
 
-function setRecurringOverride({ key, status, hidden, forced, isBill, cancellation } = {}) {
+function setRecurringOverride({ key, status, hidden, forced, isBill, categoryId, cancellation } = {}) {
   if (!key) throw new Error('key required');
   const overrides = readJsonSafe(OVERRIDES_PATH, {});
   const cur = overrides[key] || {};
@@ -3462,6 +3533,10 @@ function setRecurringOverride({ key, status, hidden, forced, isBill, cancellatio
   if (isBill !== undefined) {
     if (isBill === null) delete cur.isBill; // clear to fall back to auto-detected type
     else cur.isBill = !!isBill;
+  }
+  if (categoryId !== undefined) {
+    if (categoryId === null || categoryId === '') delete cur.categoryId;
+    else cur.categoryId = categoryId;
   }
   if (status !== undefined) {
     if (!status || status === 'active') delete cur.status;
@@ -3585,6 +3660,111 @@ async function getIncome({ window = 12 } = {}) {
   });
 }
 
+function readDebtPlannerDebts() {
+  const dStore = readJsonSafe(DEBT_PLANNER_PATH, { debts: [] }) || {};
+  return Array.isArray(dStore.debts) ? dStore.debts : [];
+}
+
+function enrichReimbLinksForGraph(links) {
+  return (links || []).map((link) => {
+    const classified = classifyStoredLink(link);
+    return {
+      ...link,
+      ambiguous: classified.ambiguous,
+      allocationIncomplete: classified.allocationCents == null && !classified.trusted,
+    };
+  });
+}
+
+function assertObligationGraphIntegration(graph) {
+  if (!graph?.completeness?.complete) return;
+  const cycleCheck = verifyCyclePartitionInvariants(graph.cyclePartitions || []);
+  if (!cycleCheck.ok) {
+    throw new Error(`obligation graph cycle partitions: ${cycleCheck.issues.join('; ')}`);
+  }
+  const reservedByCycle = new Map();
+  for (const occ of graph.occurrences || []) {
+    if (!occ.reserved || !occ.cycleKey) continue;
+    reservedByCycle.set(occ.cycleKey, sumCents([reservedByCycle.get(occ.cycleKey) || 0, -occ.amountCents]));
+  }
+  for (const cycle of graph.cyclePartitions || []) {
+    if (cycle.quarantined || cycle.adjustedObligationCents <= 0) continue;
+    const reserved = reservedByCycle.get(cycle.cycleKey) || 0;
+    if (reserved !== cycle.adjustedObligationCents) {
+      throw new Error(`cycle ${cycle.cycleKey} reserved ${reserved} != adjusted ${cycle.adjustedObligationCents}`);
+    }
+  }
+}
+
+async function buildObligationGraphBundle({
+  financeDate,
+  windowStart,
+  windowEnd,
+  accounts,
+  recurring,
+  income,
+  bills,
+  budgets,
+  reimb,
+  reimbLinks,
+  operatingAccounts,
+  txnContext = null,
+}) {
+  const accountOverrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
+  const accountRolesById = Object.fromEntries((accounts || []).map((account) => [account.id, account.role]));
+  const creditAccountIds = new Set((accounts || [])
+    .filter((account) => account.role === 'credit_card' && !account.closed && !account.hidden && account.role !== 'excluded')
+    .map((account) => account.id));
+
+  let txnInputs;
+  if (txnContext?.rows && txnContext?.catInfo) {
+    txnInputs = buildGraphTransactionInputs(txnContext.rows, txnContext.catInfo, {
+      windowStart,
+      windowEnd,
+      accountRolesById,
+      creditAccountIds,
+    });
+  } else {
+    txnInputs = await withApi(async (api) => {
+      const groups = await api.getCategoryGroups();
+      const catInfo = buildCatInfo(groups);
+      const rows = await fetchOnBudgetRows(api, windowStart, windowEnd);
+      return buildGraphTransactionInputs(rows, catInfo, {
+        windowStart,
+        windowEnd,
+        accountRolesById,
+        creditAccountIds,
+      });
+    });
+  }
+
+  const inputs = assembleObligationGraphInputs({
+    financeDate,
+    windowStart,
+    windowEnd,
+    accounts,
+    accountOverrides,
+    recurring,
+    income,
+    bills,
+    budgets,
+    debts: readDebtPlannerDebts(),
+    reimb: { ...reimb, possibleDate: addDays(financeDate, 14) },
+    reimbLinks: enrichReimbLinksForGraph(reimbLinks),
+    operatingAccountIds: operatingAccounts.map((account) => account.id),
+    transfers: txnInputs.transfers,
+    economicTransactions: txnInputs.economicTransactions,
+  });
+  const graph = buildObligationGraph(inputs);
+  assertObligationGraphIntegration(graph);
+  return {
+    graph,
+    inputs,
+    summary: graphSummary(graph),
+    liabilityPolicies: inputs.liabilityPolicies || {},
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Upcoming bills — projected from active recurring items (paid-state aware)
 // ---------------------------------------------------------------------------
@@ -3641,15 +3821,37 @@ async function getForecast({ days = 90 } = {}) {
   const horizonDays = Math.min(180, Math.max(30, Number(days) || 90));
   const today = todayYMD();
   const horizon = addDays(today, horizonDays);
-  const [accounts, income, bills, budgets, reimb] = await Promise.all([
+  const forecastBundle = await withApi(async (api) => {
+    const groups = await api.getCategoryGroups();
+    const catInfo = buildCatInfo(groups);
+    const rows = await fetchOnBudgetRows(api, today, horizon);
+    return { catInfo, rows };
+  });
+  const [accounts, income, recurring, budgets, reimb] = await Promise.all([
     getAccounts(),
     getIncome({}),
-    getBills({ days: horizonDays }),
+    getRecurring({}),
     getBudgets({}),
     getReimbursement({}),
   ]);
+  const { catInfo, rows } = forecastBundle;
+  const bills = await getBills({ days: horizonDays, recurring });
   const liquidAccounts = accountsForMetric(accounts.filter((account) => !account.hidden), 'operating_cash');
   const startBalanceCents = sumOperatingCashBalanceCents(liquidAccounts);
+  const { graph } = await buildObligationGraphBundle({
+    financeDate: today,
+    windowStart: today,
+    windowEnd: horizon,
+    accounts,
+    recurring,
+    income,
+    bills,
+    budgets,
+    reimb,
+    reimbLinks: enrichReimbLinksForGraph(readReimbLinks().links),
+    operatingAccounts: liquidAccounts,
+    txnContext: { rows, catInfo },
+  });
   const eventRows = [];
   const pushEventCents = (date, label, amountCents, kind, provenance, sourceId = null) => {
     if (!date || date < today || date > horizon) return;
@@ -3657,49 +3859,34 @@ async function getForecast({ days = 90 } = {}) {
     eventRows.push({ date, label, amountCents, kind, provenance, sourceId });
   };
 
-  for (const s of income.streams || []) {
-    if (!s.active) continue;
-    const schedule = inferRecurrenceSchedule({
-      dates: [...new Set([...(s.history || []).map((h) => h.date), s.lastPaid].filter(Boolean))].sort(),
-      cadence: s.cadence,
-    });
-    if (schedule.uncertain) continue;
-    const payDates = projectOccurrences({
-      schedule,
-      windowStart: today,
-      windowEnd: horizon,
-    });
-    for (const due of payDates) {
+  const graphCompleteness = graph.completeness;
+  if (graphCompleteness.complete) {
+    for (const event of forecastCashEventsFromGraph(graph, { windowStart: today, windowEnd: horizon })) {
       pushEventCents(
-        due,
-        s.payee || 'Income',
-        forecastIncomeEventCents(s.amount),
-        'income',
-        'inferred',
-        s.key,
-      );
-    }
-  }
-  for (const b of bills.bills || []) {
-    if (!b.paid) {
-      pushEventCents(
-        b.dueDate,
-        b.payee || 'Bill',
-        forecastBillEventCents(b.amount),
-        'bill',
-        b.matched ? 'known' : 'inferred',
-        b.id,
+        event.date,
+        event.label,
+        event.amountCents,
+        event.kind,
+        event.provenance,
+        event.sourceId,
       );
     }
   }
 
+  const billCategoryIds = new Set(collectBillCategoryIds(recurring, budgets));
   const genericCategories = (budgets.groups || []).flatMap((group) =>
     (group.categories || [])
-      .filter((category) => !BILL_CAT.test(`${group.name || ''} ${category.name || ''}`))
+      .filter((category) => !billCategoryIds.has(category.id))
       .map((category) => category)
   );
   const genericBudget = buildForecastGenericBudgetContext(genericCategories);
   const forecastWarnings = [...genericBudget.warnings];
+  if (!graphCompleteness.complete) {
+    forecastWarnings.push('Obligation graph incomplete; scheduled cash events withheld.');
+    for (const reason of graphCompleteness.incompleteReasons || []) {
+      forecastWarnings.push(`Obligation graph: ${reason}`);
+    }
+  }
   if (genericBudget.complete) {
     const budgetEntries = buildForecastBudgetDailyCents({
       today,
@@ -3770,6 +3957,11 @@ async function getForecast({ days = 90 } = {}) {
       },
       billsExcludedFromGenericBudget: true,
       reimbursementsIncluded: false,
+      obligationGraph: {
+        version: graph.version,
+        complete: graphCompleteness.complete,
+        incompleteReasons: graphCompleteness.incompleteReasons,
+      },
     },
     possibleReimbursement,
     warnings: [
@@ -3791,12 +3983,14 @@ async function getToday() {
     const cur = monthRange(financeYear, financeMonth - 1);
     const prev = monthRange(financeYear, financeMonth - 2);
     const curEnd = financeToday;
+    const monthEndDate = monthRange(financeYear, financeMonth - 1).end;
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
-    const [currentLeaves, previousLeaves] = await classifiedOnBudgetLeavesForWindows(api, [
-      { start: cur.start, end: curEnd },
-      { start: prev.start, end: prev.end },
-    ], catInfo);
+    const rows = await fetchOnBudgetRows(api, prev.start, monthEndDate);
+    const transferIndex = buildTransferIndex(rows);
+    const classifyWindow = (start, end) => classifyLeavesInDateRange(rows, catInfo, start, end, transferIndex);
+    const currentLeaves = classifyWindow(cur.start, curEnd);
+    const previousLeaves = classifyWindow(prev.start, prev.end);
     const current = summarize(currentLeaves);
     const previous = summarize(previousLeaves);
     return {
@@ -3807,10 +4001,11 @@ async function getToday() {
         completeness: mergeProjectionCompleteness([current.completeness, previous.completeness]),
       },
       classifiedLeaves: currentLeaves,
+      txnContext: { rows, catInfo },
     };
   });
   const spending = spendingBundle.spending;
-  const [accounts, budgets, recurring, goals, income, review, recent] = await Promise.all([
+  const [accounts, budgets, recurring, goals, income, review, recent, reimb] = await Promise.all([
     getAccounts(),
     getBudgets({ month }),
     getRecurring({}),
@@ -3818,22 +4013,32 @@ async function getToday() {
     getIncome({}),
     getReview({ month, classifiedLeaves: spendingBundle.classifiedLeaves }),
     getTransactions({ start: addDays(financeDate, -14), end: financeDate, collapse: true }),
+    getReimbursement({}),
   ]);
   const bills = await getBills({ days: 45, recurring });
 
   const visibleAccounts = accounts.filter((account) => !account.hidden);
   const operatingAccounts = accountsForMetric(visibleAccounts, 'operating_cash');
   const cashCents = Math.round(operatingAccounts.reduce((sum, account) => sum + account.balance, 0) * 100);
-  const billCents = Math.round((bills.bills || [])
-    .filter((bill) => !bill.paid && bill.dueDate >= financeDate && bill.dueDate <= monthEndDate)
-    .reduce((sum, bill) => sum + bill.amount, 0) * 100);
-  const budgetCents = Math.round((budgets.groups || []).reduce(
-    (total, group) => total + (group.categories || [])
-      .filter((category) => !BILL_CAT.test(`${group.name || ''} ${category.name || ''}`))
-      .reduce((sum, category) => sum + Math.max(0, Number(category.remaining) || 0), 0),
-    0
-  ) * 100);
-  const safeCents = cashCents - billCents - budgetCents;
+  const { graph, summary: obligationSummary, liabilityPolicies } = await buildObligationGraphBundle({
+    financeDate,
+    windowStart: financeDate,
+    windowEnd: monthEndDate,
+    accounts,
+    recurring,
+    income,
+    bills,
+    budgets,
+    reimb,
+    reimbLinks: enrichReimbLinksForGraph(readReimbLinks().links),
+    operatingAccounts,
+    txnContext: spendingBundle.txnContext,
+  });
+  const stfFromGraph = safeToSpendFromGraph(graph, {
+    operatingCashCents: cashCents,
+    monthStart: financeDate,
+    monthEnd: monthEndDate,
+  });
   const incompleteReasons = safeToSpendIncompleteReasons({
     accounts,
     visibleAccounts,
@@ -3842,16 +4047,22 @@ async function getToday() {
     recurring,
     goals,
     spendingCompleteness: spending.current?.completeness,
+    obligationGraph: graph,
+    liabilityPolicies,
   });
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',
-    value: fromCents(safeCents),
-    valueCents: safeCents,
+    value: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? fromCents(stfFromGraph.valueCents)
+      : null,
+    valueCents: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? stfFromGraph.valueCents
+      : null,
     complete: incompleteReasons.length === 0,
     asOf,
     financeDate,
     sources: operatingAccounts.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
-    method: 'operating cash minus unpaid bills due this month minus remaining non-bill budget',
+    method: stfFromGraph.method,
     excludes: ['protected savings', 'investments', 'credit availability', 'possible reimbursements', 'unfunded goals'],
     incompleteReasons,
   });
@@ -3870,10 +4081,17 @@ async function getToday() {
     accounts,
     spending,
     liquidity: { safeToSpend },
+    obligationGraph: {
+      version: graph.version,
+      summary: obligationSummary,
+      completeness: graph.completeness,
+      reservations: (stfFromGraph.reservations || []).slice(0, 12),
+    },
     obligations: {
       bills: (bills.bills || []).filter((bill) => !bill.paid).slice(0, 5),
       nextIncome: (income.streams || []).filter((stream) => stream.active).sort((a, b) => String(a.nextPay).localeCompare(String(b.nextPay)))[0] || null,
-      source: 'inferred',
+      source: graph.completeness.complete ? 'obligation-graph' : 'inferred',
+      reserved: (stfFromGraph.reservations || []).slice(0, 8),
     },
     review,
     activity: { recent: recent.slice(0, 8) },

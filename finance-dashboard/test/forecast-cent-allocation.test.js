@@ -264,6 +264,7 @@ test('getToday Safe-to-Spend quarantine is unchanged by cent allocation work', a
   assert.equal(metric.complete, false);
   assert.equal(metric.value, null);
   assert.ok(metric.incompleteReasons.includes('bill_recurrence_unresolved'));
+  assert.ok(metric.incompleteReasons.includes('obligation_recurrence_unresolved'));
 });
 
 test('forecast inclusion policy matches characterized today-inclusive remaining window', () => {
