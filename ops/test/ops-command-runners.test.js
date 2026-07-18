@@ -10,6 +10,9 @@ const {
   findExecutableInPath,
   isSafeCommandName,
   createDefaultRunners,
+  MAX_PATH_ENTRIES,
+  MAX_PATH_TOTAL_LENGTH,
+  MAX_PATH_ENTRY_LENGTH,
 } = require('../lib/ops-command-runners');
 
 function mkRoot(t, prefix) {
@@ -70,12 +73,51 @@ test('findExecutableInPath skips empty PATH entries and missing directories', (t
   assert.equal(findExecutableInPath('tar', { PATH: pathEnv }), path.join(bin, 'tar'));
 });
 
-test('findExecutableInPath returns null for missing, empty, or oversize PATH', (t) => {
+test('findExecutableInPath returns null for missing, empty, or invalid PATH', () => {
   assert.equal(findExecutableInPath('systemctl', { PATH: '' }), null);
   assert.equal(findExecutableInPath('systemctl', {}), null);
   assert.equal(findExecutableInPath('../systemctl', { PATH: '/usr/bin' }), null);
-  const huge = `${'a'.repeat(5000)}:/usr/bin`;
+});
+
+test('findExecutableInPath rejects entire PATH when any entry is oversize', () => {
+  const huge = `${'a'.repeat(MAX_PATH_ENTRY_LENGTH + 1)}:/usr/bin`;
   assert.equal(findExecutableInPath('systemctl', { PATH: huge }), null);
+});
+
+test('findExecutableInPath rejects entire PATH when total length exceeds bound', (t) => {
+  const root = mkRoot(t, 'df-path-total-len-');
+  const bin = path.join(root, 'bin');
+  writeExecutable(bin, 'tar');
+  const prefix = `${bin}:`;
+  const paddingEntry = 'p'.repeat(Math.max(0, MAX_PATH_TOTAL_LENGTH - prefix.length + 1));
+  assert.equal(findExecutableInPath('tar', { PATH: `${prefix}${paddingEntry}` }), null);
+});
+
+test('findExecutableInPath rejects entire PATH when entry count exceeds bound', (t) => {
+  const root = mkRoot(t, 'df-path-entry-count-');
+  const bin = path.join(root, 'bin');
+  writeExecutable(bin, 'tool-z');
+  const filler = Array.from({ length: MAX_PATH_ENTRIES }, (_, index) => `/tmp/df-path-${index}`).join(':');
+  assert.equal(findExecutableInPath('tool-z', { PATH: `${filler}:${bin}` }), null);
+});
+
+test('findExecutableInPath rejects entire PATH when any entry is malformed', (t) => {
+  const root = mkRoot(t, 'df-path-malformed-');
+  const bin = path.join(root, 'bin');
+  writeExecutable(bin, 'tar');
+  assert.equal(findExecutableInPath('tar', { PATH: `bad\u0000dir:${bin}` }), null);
+});
+
+test('findExecutableInPath resolves typical Linux PATH layout', (t) => {
+  const root = mkRoot(t, 'df-path-linux-');
+  const localBin = path.join(root, '.local', 'bin');
+  const usrBin = path.join(root, 'usr', 'bin');
+  writeExecutable(localBin, 'custom-tool');
+  writeExecutable(usrBin, 'tar');
+  const linuxPath = `/usr/local/bin:${localBin}:${usrBin}:/bin:/usr/bin`;
+  assert.equal(findExecutableInPath('custom-tool', { PATH: linuxPath }), path.join(localBin, 'custom-tool'));
+  assert.equal(findExecutableInPath('tar', { PATH: linuxPath }), path.join(usrBin, 'tar'));
+  assert.equal(findExecutableInPath('missing-tool', { PATH: linuxPath }), null);
 });
 
 test('findExecutableInPath honors first PATH match like Linux exec lookup', (t) => {

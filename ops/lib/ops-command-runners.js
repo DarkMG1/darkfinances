@@ -12,6 +12,7 @@ const MAX_CAPTURE_BYTES = 64 * 1024;
 const MAX_PATH_ENTRIES = 256;
 const MAX_PATH_ENTRY_LENGTH = 4096;
 const MAX_CANDIDATE_PATH_LENGTH = 4096;
+const MAX_PATH_TOTAL_LENGTH = 65_536;
 
 function isSafeCommandName(name) {
   if (typeof name !== 'string' || !name || name.length > 255) return false;
@@ -26,6 +27,30 @@ function pathDelimiter(platform = process.platform) {
 function splitPathEnv(pathEnv, platform = process.platform) {
   if (typeof pathEnv !== 'string' || !pathEnv) return [];
   return pathEnv.split(pathDelimiter(platform));
+}
+
+function isPathEntryMalformed(entry) {
+  return typeof entry !== 'string' || entry.includes('\0');
+}
+
+function validatePathEnv(pathEnv, platform = process.platform) {
+  if (typeof pathEnv !== 'string' || !pathEnv) {
+    return { ok: false, reason: 'missing_or_empty' };
+  }
+  if (pathEnv.length > MAX_PATH_TOTAL_LENGTH) {
+    return { ok: false, reason: 'total_length' };
+  }
+  const entries = splitPathEnv(pathEnv, platform);
+  if (entries.length > MAX_PATH_ENTRIES) {
+    return { ok: false, reason: 'entry_count' };
+  }
+  for (const entry of entries) {
+    if (!entry) continue;
+    if (isPathEntryMalformed(entry) || entry.length > MAX_PATH_ENTRY_LENGTH) {
+      return { ok: false, reason: 'malformed_or_oversize_entry' };
+    }
+  }
+  return { ok: true, entries };
 }
 
 function isExecutableCandidate(candidatePath) {
@@ -43,15 +68,15 @@ function isExecutableCandidate(candidatePath) {
 
 function findExecutableInPath(name, env = process.env, platform = process.platform) {
   if (!isSafeCommandName(name)) return null;
-  const entries = splitPathEnv(env.PATH, platform);
-  const limit = Math.min(entries.length, MAX_PATH_ENTRIES);
+  const validated = validatePathEnv(env.PATH, platform);
+  if (!validated.ok) return null;
+  const entries = validated.entries;
   const extensions = platform === 'win32'
     ? splitPathEnv(env.PATHEXT || '.EXE;.CMD;.BAT;.COM', platform)
     : [''];
 
-  for (let index = 0; index < limit; index += 1) {
-    const entry = entries[index];
-    if (!entry || entry.length > MAX_PATH_ENTRY_LENGTH) continue;
+  for (const entry of entries) {
+    if (!entry) continue;
     const dir = path.resolve(entry);
     for (const extension of extensions) {
       const suffix = extension && !extension.startsWith('.') ? `.${extension}` : extension;
@@ -238,8 +263,11 @@ module.exports = {
   MAX_PATH_ENTRIES,
   MAX_PATH_ENTRY_LENGTH,
   MAX_CANDIDATE_PATH_LENGTH,
+  MAX_PATH_TOTAL_LENGTH,
   isSafeCommandName,
+  isPathEntryMalformed,
   splitPathEnv,
+  validatePathEnv,
   isExecutableCandidate,
   findExecutableInPath,
   commandExists,
