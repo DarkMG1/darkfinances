@@ -149,6 +149,14 @@ const {
   safeToSpendIncompleteReasons,
 } = require('./lib/safe-to-spend');
 const {
+  buildObligationGraph,
+  billsFromGraph,
+  forecastCashEventsFromGraph,
+  graphSummary,
+  safeToSpendFromGraph,
+} = require('./lib/domain/obligation-graph');
+const { assembleObligationGraphInputs, buildGraphTransactionInputs } = require('./lib/obligation-graph-bridge');
+const {
   AccountNotFoundError,
   TransactionNotFoundError,
 } = require('./lib/errors');
@@ -3585,6 +3593,66 @@ async function getIncome({ window = 12 } = {}) {
   });
 }
 
+function readDebtPlannerDebts() {
+  const dStore = readJsonSafe(DEBT_PLANNER_PATH, { debts: [] }) || {};
+  return Array.isArray(dStore.debts) ? dStore.debts : [];
+}
+
+function enrichReimbLinksForGraph(links) {
+  return (links || []).map((link) => {
+    const classified = classifyStoredLink(link);
+    return {
+      ...link,
+      ambiguous: classified.ambiguous,
+      allocationIncomplete: classified.allocationCents == null && !classified.trusted,
+    };
+  });
+}
+
+async function buildObligationGraphBundle({
+  financeDate,
+  windowStart,
+  windowEnd,
+  accounts,
+  recurring,
+  income,
+  bills,
+  budgets,
+  reimb,
+  reimbLinks,
+  operatingAccounts,
+}) {
+  const accountRolesById = Object.fromEntries((accounts || []).map((account) => [account.id, account.role]));
+  const txnInputs = await withApi(async (api) => {
+    const groups = await api.getCategoryGroups();
+    const catInfo = buildCatInfo(groups);
+    const rows = await fetchOnBudgetRows(api, windowStart, windowEnd);
+    return buildGraphTransactionInputs(rows, catInfo, {
+      windowStart,
+      windowEnd,
+      accountRolesById,
+    });
+  });
+  const inputs = assembleObligationGraphInputs({
+    financeDate,
+    windowStart,
+    windowEnd,
+    accounts,
+    recurring,
+    income,
+    bills,
+    budgets,
+    debts: readDebtPlannerDebts(),
+    reimb: { ...reimb, possibleDate: addDays(financeDate, 14) },
+    reimbLinks: enrichReimbLinksForGraph(reimbLinks),
+    operatingAccountIds: operatingAccounts.map((account) => account.id),
+    transfers: txnInputs.transfers,
+    economicTransactions: txnInputs.economicTransactions,
+  });
+  const graph = buildObligationGraph(inputs);
+  return { graph, inputs, summary: graphSummary(graph) };
+}
+
 // ---------------------------------------------------------------------------
 // Upcoming bills — projected from active recurring items (paid-state aware)
 // ---------------------------------------------------------------------------
@@ -3641,15 +3709,29 @@ async function getForecast({ days = 90 } = {}) {
   const horizonDays = Math.min(180, Math.max(30, Number(days) || 90));
   const today = todayYMD();
   const horizon = addDays(today, horizonDays);
-  const [accounts, income, bills, budgets, reimb] = await Promise.all([
+  const [accounts, income, recurring, budgets, reimb] = await Promise.all([
     getAccounts(),
     getIncome({}),
-    getBills({ days: horizonDays }),
+    getRecurring({}),
     getBudgets({}),
     getReimbursement({}),
   ]);
+  const bills = await getBills({ days: horizonDays, recurring });
   const liquidAccounts = accountsForMetric(accounts.filter((account) => !account.hidden), 'operating_cash');
   const startBalanceCents = sumOperatingCashBalanceCents(liquidAccounts);
+  const { graph } = await buildObligationGraphBundle({
+    financeDate: today,
+    windowStart: today,
+    windowEnd: horizon,
+    accounts,
+    recurring,
+    income,
+    bills,
+    budgets,
+    reimb,
+    reimbLinks: enrichReimbLinksForGraph(readReimbLinks().links),
+    operatingAccounts: liquidAccounts,
+  });
   const eventRows = [];
   const pushEventCents = (date, label, amountCents, kind, provenance, sourceId = null) => {
     if (!date || date < today || date > horizon) return;
@@ -3657,40 +3739,15 @@ async function getForecast({ days = 90 } = {}) {
     eventRows.push({ date, label, amountCents, kind, provenance, sourceId });
   };
 
-  for (const s of income.streams || []) {
-    if (!s.active) continue;
-    const schedule = inferRecurrenceSchedule({
-      dates: [...new Set([...(s.history || []).map((h) => h.date), s.lastPaid].filter(Boolean))].sort(),
-      cadence: s.cadence,
-    });
-    if (schedule.uncertain) continue;
-    const payDates = projectOccurrences({
-      schedule,
-      windowStart: today,
-      windowEnd: horizon,
-    });
-    for (const due of payDates) {
-      pushEventCents(
-        due,
-        s.payee || 'Income',
-        forecastIncomeEventCents(s.amount),
-        'income',
-        'inferred',
-        s.key,
-      );
-    }
-  }
-  for (const b of bills.bills || []) {
-    if (!b.paid) {
-      pushEventCents(
-        b.dueDate,
-        b.payee || 'Bill',
-        forecastBillEventCents(b.amount),
-        'bill',
-        b.matched ? 'known' : 'inferred',
-        b.id,
-      );
-    }
+  for (const event of forecastCashEventsFromGraph(graph, { windowStart: today, windowEnd: horizon })) {
+    pushEventCents(
+      event.date,
+      event.label,
+      event.amountCents,
+      event.kind,
+      event.provenance,
+      event.sourceId,
+    );
   }
 
   const genericCategories = (budgets.groups || []).flatMap((group) =>
@@ -3716,6 +3773,7 @@ async function getForecast({ days = 90 } = {}) {
   const possibleReimbursement = reimb.totalOwed > 0.5
     ? { date: addDays(today, 14), amount: round2(reimb.totalOwed), includedInBalance: false }
     : null;
+  const graphCompleteness = graph.completeness;
 
   const events = eventRows
     .map((row) => ({ ...row, amount: fromCents(row.amountCents) }))
@@ -3770,6 +3828,11 @@ async function getForecast({ days = 90 } = {}) {
       },
       billsExcludedFromGenericBudget: true,
       reimbursementsIncluded: false,
+      obligationGraph: {
+        version: graph.version,
+        complete: graphCompleteness.complete,
+        incompleteReasons: graphCompleteness.incompleteReasons,
+      },
     },
     possibleReimbursement,
     warnings: [
@@ -3810,7 +3873,7 @@ async function getToday() {
     };
   });
   const spending = spendingBundle.spending;
-  const [accounts, budgets, recurring, goals, income, review, recent] = await Promise.all([
+  const [accounts, budgets, recurring, goals, income, review, recent, reimb] = await Promise.all([
     getAccounts(),
     getBudgets({ month }),
     getRecurring({}),
@@ -3818,22 +3881,31 @@ async function getToday() {
     getIncome({}),
     getReview({ month, classifiedLeaves: spendingBundle.classifiedLeaves }),
     getTransactions({ start: addDays(financeDate, -14), end: financeDate, collapse: true }),
+    getReimbursement({}),
   ]);
   const bills = await getBills({ days: 45, recurring });
 
   const visibleAccounts = accounts.filter((account) => !account.hidden);
   const operatingAccounts = accountsForMetric(visibleAccounts, 'operating_cash');
   const cashCents = Math.round(operatingAccounts.reduce((sum, account) => sum + account.balance, 0) * 100);
-  const billCents = Math.round((bills.bills || [])
-    .filter((bill) => !bill.paid && bill.dueDate >= financeDate && bill.dueDate <= monthEndDate)
-    .reduce((sum, bill) => sum + bill.amount, 0) * 100);
-  const budgetCents = Math.round((budgets.groups || []).reduce(
-    (total, group) => total + (group.categories || [])
-      .filter((category) => !BILL_CAT.test(`${group.name || ''} ${category.name || ''}`))
-      .reduce((sum, category) => sum + Math.max(0, Number(category.remaining) || 0), 0),
-    0
-  ) * 100);
-  const safeCents = cashCents - billCents - budgetCents;
+  const { graph, summary: obligationSummary } = await buildObligationGraphBundle({
+    financeDate,
+    windowStart: financeDate,
+    windowEnd: monthEndDate,
+    accounts,
+    recurring,
+    income,
+    bills,
+    budgets,
+    reimb,
+    reimbLinks: enrichReimbLinksForGraph(readReimbLinks().links),
+    operatingAccounts,
+  });
+  const stfFromGraph = safeToSpendFromGraph(graph, {
+    operatingCashCents: cashCents,
+    monthStart: financeDate,
+    monthEnd: monthEndDate,
+  });
   const incompleteReasons = safeToSpendIncompleteReasons({
     accounts,
     visibleAccounts,
@@ -3842,16 +3914,21 @@ async function getToday() {
     recurring,
     goals,
     spendingCompleteness: spending.current?.completeness,
+    obligationGraph: graph,
   });
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',
-    value: fromCents(safeCents),
-    valueCents: safeCents,
+    value: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? fromCents(stfFromGraph.valueCents)
+      : null,
+    valueCents: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? stfFromGraph.valueCents
+      : null,
     complete: incompleteReasons.length === 0,
     asOf,
     financeDate,
     sources: operatingAccounts.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
-    method: 'operating cash minus unpaid bills due this month minus remaining non-bill budget',
+    method: stfFromGraph.method,
     excludes: ['protected savings', 'investments', 'credit availability', 'possible reimbursements', 'unfunded goals'],
     incompleteReasons,
   });
@@ -3870,10 +3947,17 @@ async function getToday() {
     accounts,
     spending,
     liquidity: { safeToSpend },
+    obligationGraph: {
+      version: graph.version,
+      summary: obligationSummary,
+      completeness: graph.completeness,
+      reservations: (stfFromGraph.reservations || []).slice(0, 12),
+    },
     obligations: {
       bills: (bills.bills || []).filter((bill) => !bill.paid).slice(0, 5),
       nextIncome: (income.streams || []).filter((stream) => stream.active).sort((a, b) => String(a.nextPay).localeCompare(String(b.nextPay)))[0] || null,
-      source: 'inferred',
+      source: graph.completeness.complete ? 'obligation-graph' : 'inferred',
+      reserved: (stfFromGraph.reservations || []).slice(0, 8),
     },
     review,
     activity: { recent: recent.slice(0, 8) },

@@ -68,6 +68,19 @@ test('app and web gate spending and trends on projection completeness', () => {
   assert.match(review, /transfer_identity/);
 });
 
+test('generated contract includes obligation graph reservation types', () => {
+  const types = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
+  assert.match(types, /export interface ObligationGraphView/);
+  assert.match(types, /obligation-graph/);
+  assert.match(types, /obligationGraph\?:/);
+});
+
+test('app and web render reserved obligations from graph', () => {
+  assert.match(appHome, /Cash Reserved/);
+  assert.match(appHome, /obligations\.reserved/);
+  assert.match(browser, /safeToSpendReserved/);
+});
+
 test('app and web render incomplete Safe-to-Spend as unavailable, never zero', () => {
   assert.match(browser, /Safe to Spend/);
   assert.match(browser, /metric\?\.complete === true && Number\.isFinite\(metric\.value\)/);

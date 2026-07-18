@@ -517,6 +517,11 @@ export interface Forecast {
     };
     billsExcludedFromGenericBudget: boolean;
     reimbursementsIncluded: boolean;
+    obligationGraph?: {
+      version: number;
+      complete: boolean;
+      incompleteReasons: string[];
+    };
   };
   possibleReimbursement?: { date: string; amount: number; includedInBalance: false } | null;
   warnings: string[];
@@ -951,6 +956,34 @@ export interface Ping {
   };
 }
 
+export interface ObligationReservation {
+  id: string;
+  label: string;
+  date: string;
+  amountCents: number;
+  role: string;
+  reserved: boolean;
+  source?: { kind?: string; key?: string; id?: string; provenance?: string };
+  explanation?: string[];
+  incompleteReasons?: string[];
+}
+
+export interface ObligationGraphSummary {
+  version: number;
+  nodeCount: number;
+  edgeCount: number;
+  occurrenceCount: number;
+  reservedOutflowCents: number;
+  completeness: { complete: boolean; incompleteReasons: string[]; occurrenceCount: number; reservedOccurrenceCount: number };
+}
+
+export interface ObligationGraphView {
+  version: number;
+  summary: ObligationGraphSummary;
+  completeness: { complete: boolean; incompleteReasons: string[]; occurrenceCount: number; reservedOccurrenceCount: number };
+  reservations: ObligationReservation[];
+}
+
 export interface MetricProvenance {
   metric: string;
   asOf: string;
@@ -976,7 +1009,13 @@ export interface Today {
   accounts: Account[];
   spending: Spending;
   liquidity: { safeToSpend: MetricValue };
-  obligations: { bills: Bill[]; nextIncome: IncomeStream | null; source: 'inferred' | 'confirmed' };
+  obligationGraph?: ObligationGraphView;
+  obligations: {
+    bills: Bill[];
+    nextIncome: IncomeStream | null;
+    source: 'inferred' | 'confirmed' | 'obligation-graph';
+    reserved?: ObligationReservation[];
+  };
   review: ReviewInbox;
   activity: { recent: Transaction[] };
 }

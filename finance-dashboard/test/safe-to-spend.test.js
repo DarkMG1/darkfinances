@@ -58,6 +58,13 @@ test('Safe-to-Spend quarantines every unresolved decision input', async (t) => {
   for (const scenario of fixtures.scenarios) {
     await t.test(scenario.name, async () => {
       const metric = await metricFor(scenario.fixture);
+      if (scenario.complete) {
+        assert.equal(metric.complete, true);
+        assert.equal(metric.value, 4700);
+        assert.equal(metric.valueCents, 470000);
+        assert.deepEqual(metric.incompleteReasons, []);
+        return;
+      }
       assert.equal(metric.complete, false);
       assert.equal(metric.value, null);
       assert.equal(metric.valueCents, null);

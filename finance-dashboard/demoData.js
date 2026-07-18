@@ -6,6 +6,12 @@
 const { metricValue } = require('./lib/metric-provenance');
 const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
 const {
+  buildObligationGraph,
+  graphSummary,
+  safeToSpendFromGraph,
+} = require('./lib/domain/obligation-graph');
+const { assembleObligationGraphInputs, buildGraphTransactionInputs } = require('./lib/obligation-graph-bridge');
+const {
   buildCategoryInfo,
   buildTransferIndex,
   classifyTransactionLeaves,
@@ -149,36 +155,70 @@ function bills() {
 
 function today() {
   const asOf = new Date().toISOString();
+  const financeDate = financeAnchor();
+  const monthEndDate = monthEnd(financeDate.slice(0, 7));
   const allAccounts = accounts();
   const cash = allAccounts.filter((account) => account.role === 'operating_cash');
-  const cashValue = round2(cash.reduce((sum, account) => sum + account.balance, 0));
+  const cashCents = Math.round(cash.reduce((sum, account) => sum + account.balance, 0) * 100);
   const upcoming = bills();
+  const recurringData = recurring();
+  const incomeData = income();
   const currentSpending = spending({});
   const inbox = review();
+  const graphTxnInputs = buildGraphTransactionInputs(
+    transactions().map((t) => actualRowFromDemoTransaction(t)),
+    demoCategoryInfo(),
+    {
+      windowStart: financeDate,
+      windowEnd: monthEndDate,
+      accountRolesById: Object.fromEntries(allAccounts.map((account) => [account.id, account.role])),
+    },
+  );
+  const graphInputs = assembleObligationGraphInputs({
+    financeDate,
+    windowStart: financeDate,
+    windowEnd: monthEndDate,
+    accounts: allAccounts,
+    recurring: recurringData,
+    income: incomeData,
+    bills: upcoming,
+    budgets: { supported: false },
+    reimb: { totalOwed: 0 },
+    operatingAccountIds: cash.map((account) => account.id),
+    transfers: graphTxnInputs.transfers,
+    economicTransactions: graphTxnInputs.economicTransactions,
+  });
+  const graph = buildObligationGraph(graphInputs);
+  const stfFromGraph = safeToSpendFromGraph(graph, {
+    operatingCashCents: cashCents,
+    monthStart: financeDate,
+    monthEnd: monthEndDate,
+  });
   const incompleteReasons = safeToSpendIncompleteReasons({
     accounts: allAccounts,
     visibleAccounts: allAccounts,
     operatingAccounts: cash,
     budgets: { supported: false },
-    recurring: recurring(),
+    recurring: recurringData,
     goals: goals(),
     spendingCompleteness: currentSpending.current?.completeness,
+    obligationGraph: graph,
   });
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',
-    value: round2(cashValue - upcoming.total),
-    valueCents: Math.round((cashValue - upcoming.total) * 100),
+    value: stfFromGraph.complete ? stfFromGraph.valueCents / 100 : null,
+    valueCents: stfFromGraph.valueCents,
     complete: incompleteReasons.length === 0,
     incompleteReasons,
     asOf,
-    financeDate: financeAnchor(),
+    financeDate,
     sources: cash.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
-    method: 'demo operating cash minus upcoming bills',
+    method: stfFromGraph.method,
     excludes: ['possible reimbursements'],
   });
   return {
     asOf,
-    financeDate: financeAnchor(),
+    financeDate,
     revision: `demo-${currentMonth()}`,
     complete: safeToSpend.complete && currentSpending.current?.completeness?.complete !== false,
     incompleteReasons: [...new Set([
@@ -189,7 +229,18 @@ function today() {
     accounts: allAccounts,
     spending: currentSpending,
     liquidity: { safeToSpend },
-    obligations: { bills: upcoming.bills.slice(0, 5), nextIncome: income().streams[0] || null, source: 'inferred' },
+    obligationGraph: {
+      version: graph.version,
+      summary: graphSummary(graph),
+      completeness: graph.completeness,
+      reservations: (stfFromGraph.reservations || []).slice(0, 12),
+    },
+    obligations: {
+      bills: upcoming.bills.slice(0, 5),
+      nextIncome: incomeData.streams[0] || null,
+      source: graph.completeness.complete ? 'obligation-graph' : 'inferred',
+      reserved: (stfFromGraph.reservations || []).slice(0, 8),
+    },
     review: inbox,
     activity: { recent: transactions().slice(0, 8) },
   };

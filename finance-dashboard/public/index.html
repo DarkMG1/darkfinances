@@ -342,6 +342,7 @@
       <div class="card-title">Safe to Spend</div>
       <div class="stat-value" id="safeToSpendValue">Loading…</div>
       <div class="stat-sub" id="safeToSpendDetail">Checking decision inputs</div>
+      <div id="safeToSpendReserved"></div>
     </div>
 
     <!-- Accounts -->
@@ -685,7 +686,7 @@
       ch.style.color = diff >= 0 ? 'var(--green)' : 'var(--red)';
     }
 
-    function renderSafeToSpend(metric) {
+    function renderSafeToSpend(metric, payload = null) {
       const available = metric?.complete === true && Number.isFinite(metric.value);
       const value = document.getElementById('safeToSpendValue');
       const detail = document.getElementById('safeToSpendDetail');
@@ -694,6 +695,13 @@
       detail.textContent = available
         ? (metric.provenance?.method || 'Decision inputs complete')
         : 'Required inputs are missing or unresolved; no estimate is shown.';
+      const reservedHost = document.getElementById('safeToSpendReserved');
+      if (reservedHost) {
+        const reserved = payload?.data?.obligations?.reserved || payload?.data?.obligationGraph?.reservations || [];
+        reservedHost.innerHTML = reserved.length
+          ? reserved.slice(0, 4).map((item) => `<div class="stat-sub">${item.label}: ${fmt(Math.abs(item.amountCents) / 100)} on ${item.date}</div>`).join('')
+          : '';
+      }
     }
 
     async function loadToday() {
@@ -701,7 +709,7 @@
         const response = await fetch('/api/v1/today');
         if (!response.ok) throw new Error('Today unavailable');
         const payload = await response.json();
-        renderSafeToSpend(payload?.data?.liquidity?.safeToSpend);
+        renderSafeToSpend(payload?.data?.liquidity?.safeToSpend, payload);
       } catch (error) {
         renderSafeToSpend(null);
         throw error;
