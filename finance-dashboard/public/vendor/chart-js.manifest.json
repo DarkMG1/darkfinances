@@ -8,6 +8,6 @@
   "npmIntegrity": "sha512-vQEj6d+z0dcsKLlQvbKIMYFHd3t8W/7L2vfJIbYcfyPcRx92CsHqECpueN8qVGNlKyDcr5wBrYAYKnfu/9Q1hQ==",
   "sourcePath": "node_modules/chart.js/dist/chart.umd.js",
   "assetPath": "public/vendor/chart.umd.js",
-  "sha256": "321e3a3fa98da4aaa957d10be57cbb514de0989eed8f9d726b5d05902cd01904",
-  "size": 204948
+  "sha256": "4189ade3d07862981d2a92e0629d48a83ae840260122bc1fac01094e4b1c0aa2",
+  "size": 204910
 }

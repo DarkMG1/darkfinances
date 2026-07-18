@@ -152,6 +152,18 @@ test('verifyChartJsAsset fails on corrupted committed asset without repairing it
   }
 });
 
+test('verifyChartJsAsset rejects dangling source map references', () => {
+  const original = fs.readFileSync(ASSET_PATH, 'utf8');
+  assert.doesNotMatch(original, /sourceMappingURL/);
+  fs.appendFileSync(ASSET_PATH, '\n//# sourceMappingURL=chart.umd.js.map\n');
+  try {
+    assert.throws(() => verifyChartJsAsset(), /dangling source map/);
+  } finally {
+    fs.writeFileSync(ASSET_PATH, original);
+    verifyChartJsAsset();
+  }
+});
+
 test('pinChartJsAsset rewrites manifest, notice, and asset from the installed package', () => {
   withTempDir((tempRoot) => {
     const { dashboardRoot, repoRoot } = copyFixtureTree(tempRoot);

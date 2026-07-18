@@ -20,6 +20,20 @@ function sha256Buffer(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
+function stripSourceMappingComment(source) {
+  return source.replace(/\n\/\/# sourceMappingURL=.*$/m, '');
+}
+
+function writePinnedChartAsset(sourcePath, assetPath) {
+  const raw = fs.readFileSync(sourcePath, 'utf8');
+  const stripped = stripSourceMappingComment(raw);
+  if (/\n\/\/# sourceMappingURL=/.test(stripped)) {
+    throw new Error('chart.js asset still contains a sourceMappingURL comment after stripping');
+  }
+  fs.writeFileSync(assetPath, stripped);
+  return Buffer.from(stripped, 'utf8');
+}
+
 function loadManifest(manifestPath = MANIFEST_PATH) {
   return JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 }
@@ -93,6 +107,9 @@ function verifyChartJsAsset({
   }
 
   const asset = fs.readFileSync(assetPath);
+  if (/\n\/\/# sourceMappingURL=/.test(asset.toString())) {
+    throw new Error('committed chart.js asset must not reference a dangling source map');
+  }
   const assetDigest = sha256Buffer(asset);
   if (asset.length !== manifest.size) {
     throw new Error(`committed chart.js asset size ${asset.length} does not match manifest ${manifest.size}`);
@@ -114,11 +131,13 @@ function verifyChartJsAsset({
         `installed chart.js version ${installedPackageJson.version} does not match manifest ${manifest.version}`,
       );
     }
-    const installedDigest = sha256File(installedSourcePath);
+    const installedRaw = fs.readFileSync(installedSourcePath, 'utf8');
+    const installedStripped = stripSourceMappingComment(installedRaw);
+    const installedDigest = sha256Buffer(Buffer.from(installedStripped, 'utf8'));
     if (installedDigest !== manifest.sha256) {
       throw new Error('installed chart.js source digest does not match manifest sha256');
     }
-    if (fs.statSync(installedSourcePath).size !== manifest.size) {
+    if (installedStripped.length !== manifest.size) {
       throw new Error('installed chart.js source size does not match manifest size');
     }
   } else if (requireInstalledPackage) {
@@ -170,8 +189,10 @@ function pinChartJsAsset({
     throw new Error('installed chart.js version does not match lockfile entry');
   }
 
-  const digest = sha256File(installedSourcePath);
-  const size = fs.statSync(installedSourcePath).size;
+  fs.mkdirSync(path.dirname(assetPath), { recursive: true });
+  const assetBuffer = writePinnedChartAsset(installedSourcePath, assetPath);
+  const digest = sha256Buffer(assetBuffer);
+  const size = assetBuffer.length;
   const manifest = {
     package: 'chart.js',
     version: lockEntry.version,
@@ -186,8 +207,6 @@ function pinChartJsAsset({
     size,
   };
 
-  fs.mkdirSync(path.dirname(assetPath), { recursive: true });
-  fs.copyFileSync(installedSourcePath, assetPath);
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   fs.writeFileSync(noticePath, `${buildNotice(manifest)}\n`);
   verifyChartJsAsset({ manifestPath, assetPath, lockfilePath, requireInstalledPackage: true });

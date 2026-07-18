@@ -111,8 +111,8 @@ test('getToday quarantines Safe-to-Spend when active rent projection is uncertai
 });
 
 test('web dueLabel helper treats null as date uncertain', () => {
-  const browser = fs.readFileSync(path.resolve(__dirname, '..', 'public', 'index.html'), 'utf8');
-  assert.match(browser, /if \(!d\) return 'date uncertain'/);
-  assert.match(browser, /if \(!d\) return null/);
-  assert.doesNotMatch(browser, /const dueLabel = \(d\) => \{ const n = daysUntil\(d\)/);
+  const source = fs.readFileSync(path.resolve(__dirname, '..', 'public', 'js', 'finance-date.js'), 'utf8');
+  assert.match(source, /if \(!d\) return 'date uncertain'/);
+  assert.match(source, /if \(!d\) return null/);
+  assert.doesNotMatch(source, /const dueLabel = \(d\) => \{ const n = daysUntil\(d\)/);
 });

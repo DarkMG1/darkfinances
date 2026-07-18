@@ -15,6 +15,7 @@ const {
 const { FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { SerialQueue } = require('./lib/serial-queue');
 const { bindGracefulShutdownSignals } = require('./lib/graceful-shutdown');
+const { createBrowserStaticMiddleware, isPublicBrowserAsset } = require('./lib/browser-static');
 const { getActualCoordinator } = require('./lib/actual-coordinator');
 const { loadAdmissionLimitsConfig } = require('./lib/admission-limits-config');
 const {
@@ -235,9 +236,9 @@ app.use((req, res, next) => {
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; " +
-      "script-src 'self' 'unsafe-inline'; " +
-      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-      "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'"
+      "script-src 'self'; " +
+      "style-src 'self'; " +
+      "font-src 'self'; img-src 'self' data:; connect-src 'self'"
   );
   next();
 });
@@ -707,12 +708,19 @@ async function warmCache() {
 // Session-only gate for the web app + static assets. /api/v1/* runs its own
 // (session-OR-token) auth below so native clients can use a bearer token.
 app.use((req, res, next) => {
-  if (req.path === '/demo' || req.path.startsWith('/login') || req.path.startsWith('/auth/') || isVersionedApiPath(req.path)) return next();
+  if (
+    req.path === '/demo'
+    || req.path.startsWith('/login')
+    || req.path.startsWith('/auth/')
+    || isVersionedApiPath(req.path)
+    || isPublicBrowserAsset(req.path)
+  ) return next();
   requireAuth(req, res, next);
 });
 
 app.get('/demo', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-app.use(express.static(path.join(__dirname, 'public')));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.use(createBrowserStaticMiddleware({ publicRoot: path.join(__dirname, 'public') }));
 
 // Demo mode for the legacy web API (runs after the passkey gate above).
 app.use((req, res, next) => isVersionedApiPath(req.path)
