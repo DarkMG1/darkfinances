@@ -291,8 +291,15 @@ function throwIfQueryAborted({ stats, batches, effectiveSignal, phase } = {}) {
     stats.rowsReturned = 0;
     stats.peakRowsRetained = 0;
   }
+  recordQueryAbortSentinel(phase);
   const detail = phase ? ` (${phase})` : '';
   throw new QueryAbortedError(`Ledger query was aborted${detail}`);
+}
+
+function recordQueryAbortSentinel(phase) {
+  try {
+    require('./query-abort-sentinel').recordQueryAbort(phase);
+  } catch (_) { /* optional test sentinel */ }
 }
 
 function enforceRowBudgetOrThrow({

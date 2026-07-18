@@ -1,6 +1,7 @@
 'use strict';
 
 const { AppError } = require('./errors');
+const { createClientAbortSignal } = require('./client-abort-signal');
 const { deriveRequestPrincipal } = require('./request-principal');
 const {
   classifyMutationRoute,
@@ -8,21 +9,6 @@ const {
 } = require('./admission-route-policy');
 const { getRequestAdmissionController, TRAFFIC } = require('./request-admission');
 const { IDEMPOTENCY_KEY_RE } = require('./operation-journal');
-
-function createClientAbortSignal(req) {
-  const controller = new AbortController();
-  const onClose = () => {
-    if (req.complete || req.aborted) return;
-    controller.abort();
-  };
-  req.on('close', onClose);
-  return {
-    signal: controller.signal,
-    dispose() {
-      req.off('close', onClose);
-    },
-  };
-}
 
 function assertIdempotencyKeyHeader(req) {
   const key = req.get('Idempotency-Key');
@@ -40,7 +26,7 @@ async function runMutationQueue(mutationQueue, fn) {
   return mutationQueue.run(fn);
 }
 
-async function withVersionedMutationAdmission(req, operationJournal, mutationQueue, fn, {
+async function withVersionedMutationAdmission(req, res, operationJournal, mutationQueue, fn, {
   isDemo,
   admission = getRequestAdmissionController(),
 } = {}) {
@@ -50,7 +36,7 @@ async function withVersionedMutationAdmission(req, operationJournal, mutationQue
   const route = classifyMutationRoute(req);
   const principal = deriveRequestPrincipal(req);
   const weight = admission.endpointWeight(route.endpoint);
-  const abort = createClientAbortSignal(req);
+  const abort = createClientAbortSignal(req, res);
 
   try {
     const { ticket } = await admission.acquireMutationWithJournalPeek({
@@ -78,7 +64,7 @@ async function withVersionedMutationAdmission(req, operationJournal, mutationQue
   }
 }
 
-async function withLegacyMutationAdmission(req, mutationQueue, fn, {
+async function withLegacyMutationAdmission(req, res, mutationQueue, fn, {
   isDemo,
   admission = getRequestAdmissionController(),
 } = {}) {
@@ -87,7 +73,7 @@ async function withLegacyMutationAdmission(req, mutationQueue, fn, {
   const route = classifyMutationRoute(req);
   const principal = deriveRequestPrincipal(req);
   const weight = admission.endpointWeight(route.endpoint);
-  const abort = createClientAbortSignal(req);
+  const abort = createClientAbortSignal(req, res);
 
   try {
     const ticket = await admission.acquire({
@@ -116,18 +102,18 @@ async function withLegacyMutationAdmission(req, mutationQueue, fn, {
   }
 }
 
-async function withMutationAdmission(req, operationJournal, mutationQueue, fn, {
+async function withMutationAdmission(req, res, operationJournal, mutationQueue, fn, {
   isDemo,
   isVersioned = false,
   admission = getRequestAdmissionController(),
 } = {}) {
   if (isVersioned) {
-    return withVersionedMutationAdmission(req, operationJournal, mutationQueue, fn, { isDemo, admission });
+    return withVersionedMutationAdmission(req, res, operationJournal, mutationQueue, fn, { isDemo, admission });
   }
-  return withLegacyMutationAdmission(req, mutationQueue, fn, { isDemo, admission });
+  return withLegacyMutationAdmission(req, res, mutationQueue, fn, { isDemo, admission });
 }
 
-async function withReadAdmission(req, actualCoordinator, fn, {
+async function withReadAdmission(req, res, actualCoordinator, fn, {
   admission = getRequestAdmissionController(),
   routeSpec = classifyReadRoute(req),
   signal: externalSignal = null,
@@ -139,7 +125,7 @@ async function withReadAdmission(req, actualCoordinator, fn, {
   const totalWeight = Math.max(1, routeSpec.weight || 1) * endpointWeight;
   const abort = externalSignal
     ? { signal: externalSignal, dispose() {} }
-    : createClientAbortSignal(req);
+    : createClientAbortSignal(req, res);
 
   let trafficClass = TRAFFIC.ORDINARY;
   let lane = routeSpec.lane;
@@ -200,12 +186,12 @@ async function withReadAdmission(req, actualCoordinator, fn, {
   }
 }
 
-async function withOperationStatusAdmission(req, mutationQueue, fn, {
+async function withOperationStatusAdmission(req, res, mutationQueue, fn, {
   admission = getRequestAdmissionController(),
 } = {}) {
   const principal = deriveRequestPrincipal(req);
   const routeSpec = classifyReadRoute(req);
-  const abort = createClientAbortSignal(req);
+  const abort = createClientAbortSignal(req, res);
   try {
     const ticket = await admission.acquire({
       lane: 'read',

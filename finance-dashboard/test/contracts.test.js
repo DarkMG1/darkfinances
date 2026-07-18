@@ -15,7 +15,9 @@ function serverRoutes() {
     .map((match) => `${match[1].toUpperCase()} /api/v1${match[2]}`);
   const journaled = [...server.matchAll(/\bregisterV1Mutation\('([A-Z]+)', '([^']+)'/g)]
     .map((match) => `${match[1]} /api/v1${match[2]}`);
-  return [...new Set([...direct, ...journaled])].sort();
+  return [...new Set([...direct, ...journaled])]
+    .filter((route) => !route.includes('/test/'))
+    .sort();
 }
 
 function generatedRoutes() {

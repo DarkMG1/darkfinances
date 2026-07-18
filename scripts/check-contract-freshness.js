@@ -33,7 +33,9 @@ function routes(source, pattern) {
 const serverRoutes = [...new Set([
   ...routes(server, /\bv1\.(get|post|delete|put|patch)\('([^']+)'/g),
   ...routes(server, /\bregisterV1Mutation\('(POST|DELETE|PUT|PATCH)', '([^']+)'/g),
-])].sort();
+])]
+  .filter((route) => !route.includes('/test/'))
+  .sort();
 const generatedRoutes = [...generated.matchAll(/\bdef\('([^']+)', '(GET|POST|DELETE|PUT|PATCH)'/g)]
   .map((match) => `${match[2]} ${match[1]}`)
   .sort();

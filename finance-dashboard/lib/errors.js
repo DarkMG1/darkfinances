@@ -145,6 +145,12 @@ class QueryAbortedError extends AppError {
   }
 }
 
+function isQueryAbortedError(error) {
+  if (!error) return false;
+  if (error instanceof QueryAbortedError) return true;
+  return error.code === 'QUERY_ABORTED' || error.name === 'QueryAbortedError';
+}
+
 class ForecastMoneyValidationError extends AppError {
   constructor(cause) {
     super('Forecast money input is invalid', {
@@ -212,6 +218,7 @@ module.exports = {
   ForecastMoneyValidationError,
   KnownPreApplyError,
   QueryAbortedError,
+  isQueryAbortedError,
   QueryCursorSecretError,
   QueryRangeExceededError,
   QueryResultLimitExceededError,

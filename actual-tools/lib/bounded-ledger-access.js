@@ -1,7 +1,7 @@
 'use strict';
 /* VENDORED from finance-dashboard/lib/bounded-ledger-access.js
  * Regenerate: node finance-dashboard/scripts/sync-bounded-ledger-vendor.js
- * Source sha256: 7e282f850ab2a6a20c62088748a7eef0fd4ed0fd44e76477fa93661f0a7aaa15
+ * Source sha256: e0fa02868d282329e7035c182782d805fd5233afb8273939d25b76e518ee2a0f
  * Standalone for actual-tools — must not require finance-dashboard at runtime.
  */
 
@@ -272,8 +272,15 @@ function throwIfQueryAborted({ stats, batches, effectiveSignal, phase } = {}) {
     stats.rowsReturned = 0;
     stats.peakRowsRetained = 0;
   }
+  recordQueryAbortSentinel(phase);
   const detail = phase ? ` (${phase})` : '';
   throw new QueryAbortedError(`Ledger query was aborted${detail}`);
+}
+
+function recordQueryAbortSentinel(phase) {
+  try {
+    require('./query-abort-sentinel').recordQueryAbort(phase);
+  } catch (_) { /* optional test sentinel */ }
 }
 
 function enforceRowBudgetOrThrow({

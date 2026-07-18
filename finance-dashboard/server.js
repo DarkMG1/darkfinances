@@ -986,7 +986,7 @@ async function deleteReceiptH(req, operation) {
 // token via headers, so this just serves the file bytes with the right type.
 async function receiptImageH(req, res) {
   try {
-    await withReadAdmission(req, actualCoordinator, async () => {
+    await withReadAdmission(req, res, actualCoordinator, async () => {
       const f = await Promise.resolve(data.getReceiptFile({ id: req.params.id }));
       if (!f) {
         sendApiErrorCode(req, res, 'NOT_FOUND');
@@ -1308,7 +1308,7 @@ const setReconEnabledH = (req, operation) => {
 
 async function reimbursementExport(req, res) {
   try {
-    await withReadAdmission(req, actualCoordinator, async () => {
+    await withReadAdmission(req, res, actualCoordinator, async () => {
       const { from, to } = req.query;
       const strict = req.query.strict === '1' || req.query.strict === 'true';
       const format = String(req.query.format || 'json').toLowerCase();
@@ -1350,12 +1350,12 @@ function csvEscape(v) {
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 async function reportCsv(req, res) {
-  const abort = createClientAbortSignal(req);
+  const abort = createClientAbortSignal(req, res);
   try {
     let stats;
     await runWithQueryInstrumentation(async (activeStats) => {
       stats = activeStats;
-      await withReadAdmission(req, actualCoordinator, async () => {
+      await withReadAdmission(req, res, actualCoordinator, async () => {
         const rep = await data.getMonthlyReport({ month: req.query.month });
         const net = Math.round((rep.summary.totalIncome - rep.summary.totalSpend) * 100) / 100;
         const lines = [
@@ -1383,23 +1383,23 @@ async function reportCsv(req, res) {
 }
 
 // Raw responders for the legacy web API; enveloped {data}/{error} responders for v1.
-const runHandler = (req, fn, operation, { signal } = {}) => {
+const runHandler = (req, res, fn, operation, { signal } = {}) => {
   if (operation) return fn(req, operation);
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
-    return withMutationAdmission(req, operationJournal, mutationQueue, () => fn(req), {
+    return withMutationAdmission(req, res, operationJournal, mutationQueue, () => fn(req), {
       isDemo,
       admission: requestAdmission,
     });
   }
-  return withReadAdmission(req, actualCoordinator, () => fn(req), { admission: requestAdmission, signal });
+  return withReadAdmission(req, res, actualCoordinator, () => fn(req), { admission: requestAdmission, signal });
 };
-async function executeReadWithQueryStats(req, fn) {
-  const abort = createClientAbortSignal(req);
+async function executeReadWithQueryStats(req, res, fn) {
+  const abort = createClientAbortSignal(req, res);
   let stats;
   try {
     const payload = await runWithQueryInstrumentation(async (activeStats) => {
       stats = activeStats;
-      return runHandler(req, fn, undefined, { signal: abort.signal });
+      return runHandler(req, res, fn, undefined, { signal: abort.signal });
     }, { signal: abort.signal });
     return { payload, stats };
   } finally {
@@ -1408,7 +1408,7 @@ async function executeReadWithQueryStats(req, fn) {
 }
 const raw = (fn) => async (req, res) => {
   try {
-    const { payload, stats } = await executeReadWithQueryStats(req, fn);
+    const { payload, stats } = await executeReadWithQueryStats(req, res, fn);
     attachQueryStatsHeaders(res, stats);
     res.json(payload);
   } catch (e) {
@@ -1442,8 +1442,8 @@ async function bulkTerminalProofResolver({ key, operation }) {
   };
 }
 
-async function readOperationStatus(req, key) {
-  return withOperationStatusAdmission(req, mutationQueue, () => reconcileOperationJournalFromProof(operationJournal, key, {
+async function readOperationStatus(req, res, key) {
+  return withOperationStatusAdmission(req, res, mutationQueue, () => reconcileOperationJournalFromProof(operationJournal, key, {
     proofResolver: bulkTerminalProofResolver,
     onJournalError: operationJournalError,
   }), { admission: requestAdmission });
@@ -1481,6 +1481,7 @@ const env = (fn, mutationRoute = null) => async (req, res) => {
       }
       const execution = await withMutationAdmission(
         req,
+        res,
         operationJournal,
         mutationQueue,
         () => executeVersionedMutation(req, fn, mutationRoute),
@@ -1489,11 +1490,11 @@ const env = (fn, mutationRoute = null) => async (req, res) => {
       return res.json({ data: execution.result, operation: execution.operation });
     }
     let stats;
-    const abort = createClientAbortSignal(req);
+    const abort = createClientAbortSignal(req, res);
     try {
       const result = await runWithQueryInstrumentation(async (activeStats) => {
         stats = activeStats;
-        return runHandler(req, fn, undefined, { signal: abort.signal });
+        return runHandler(req, res, fn, undefined, { signal: abort.signal });
       }, { signal: abort.signal });
       attachQueryStatsHeaders(res, stats);
       return res.json({ data: result });
@@ -1617,8 +1618,8 @@ function registerV1Mutation(method, route, handler) {
   registeredV1MutationRoutes.add(key);
   v1[method.toLowerCase()](route, env(handler, definition));
 }
-v1.get('/operations/:key', env(async (req) => {
-  const operation = await readOperationStatus(req, req.params.key);
+v1.get('/operations/:key', env(async (req, res) => {
+  const operation = await readOperationStatus(req, res, req.params.key);
   if (!operation) {
     throw new AppError('Operation not found', {
       code: 'OPERATION_NOT_FOUND',
@@ -1737,6 +1738,54 @@ registerV1Mutation('POST', '/reconciliation/enabled', setReconEnabledH);
 registerV1Mutation('POST', '/goals', saveGoal);
 registerV1Mutation('DELETE', '/goals/:id', deleteGoal);
 registerV1Mutation('POST', '/refresh', (_req, operation) => doRefresh(operation));
+if (process.env.NODE_ENV === 'test') {
+  const {
+    getQueryAbortSentinelSnapshot,
+    resetQueryAbortSentinel,
+  } = require('./lib/query-abort-sentinel');
+  v1.get('/test/query-scaling-state', env(async () => {
+    let callLog = [];
+    try {
+      const fixturePath = process.env.ACTUAL_API_PATH;
+      if (fixturePath) {
+        const fixture = require(fixturePath);
+        if (Array.isArray(fixture.state?.callLog)) {
+          callLog = fixture.state.callLog.map((entry) => ({ ...entry }));
+        }
+      }
+    } catch (_) { /* fixture unavailable */ }
+    return {
+      callLog,
+      abortSentinel: getQueryAbortSentinelSnapshot(),
+    };
+  }));
+  v1.get('/test/query-scaling-events', env(async () => data.getEvents()));
+  v1.get('/test/query-scaling-reset', env(async () => {
+    try {
+      const fixturePath = process.env.ACTUAL_API_PATH;
+      if (fixturePath) {
+        const fixture = require(fixturePath);
+        if (typeof fixture.reset === 'function') {
+          fixture.reset({
+            accountCount: Number(process.env.FINANCE_QUERY_TEST_ACCOUNT_COUNT || 6),
+            rowsPerAccount: Number(process.env.FINANCE_QUERY_TEST_ROWS_PER_ACCOUNT || 40),
+            anchorMonth: '2024-06',
+            yearSpan: 1,
+          });
+        }
+      }
+    } catch (_) { /* fixture unavailable */ }
+    resetQueryAbortSentinel();
+    return { ok: true };
+  }));
+  v1.get('/test/query-scaling-throw', env(async () => {
+    throw new AppError('Intentional handler failure', {
+      code: 'TEST_HANDLER_ERROR',
+      status: 500,
+      expose: true,
+    });
+  }));
+}
 const missingV1MutationRoutes = MUTATION_ROUTES
   .filter(({ method, path: route }) => !registeredV1MutationRoutes.has(routeKey(method, route)));
 if (missingV1MutationRoutes.length) {

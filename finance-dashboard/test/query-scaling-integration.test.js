@@ -207,4 +207,15 @@ describe('fetchAccountTransactionsBounded', () => {
       QueryAbortedError,
     );
   });
+
+  it('getEvents propagates QueryAbortedError instead of swallowing enrichment aborts', async () => {
+    const controller = new AbortController();
+    await assert.rejects(
+      () => runWithQueryInstrumentation(async () => {
+        controller.abort();
+        return data.getEvents();
+      }, { signal: controller.signal }),
+      QueryAbortedError,
+    );
+  });
 });

@@ -167,6 +167,10 @@ const { verifyCyclePartitionInvariants } = require('./lib/domain/liability-cycle
 const {
   AccountNotFoundError,
   TransactionNotFoundError,
+  QueryAbortedError,
+  QueryResultLimitExceededError,
+  QueryRangeExceededError,
+  isQueryAbortedError,
 } = require('./lib/errors');
 const { statePath } = require('./lib/state-registry');
 const { myShareExpenseCents, loadSplitwiseMirrorResolutions, owesSnapshotMaxAgeMs, preflightSplitwiseMirrorAdmission, SplitwiseMirrorSnapshotError } = require('./lib/splitwise-mirror');
@@ -175,6 +179,7 @@ const { getActualCoordinator } = require('./lib/actual-coordinator');
 const {
   LEDGER_EPOCH,
   fetchAccountTransactionsBounded,
+  getActiveQueryAbortSignal,
   loadLedgerReadContext,
   resolveBoundedLedgerStart,
   resolveNetWorthQueryStart,
@@ -189,7 +194,6 @@ const {
 } = require('./lib/bounded-ledger-access');
 const { loadQueryScalingConfig } = require('./lib/query-scaling-config');
 const { boundedLifetimeMetric, QUERY_INCOMPLETE_REASON } = require('./lib/query-completeness');
-const { QueryResultLimitExceededError, QueryRangeExceededError } = require('./lib/errors');
 const ACTUAL_API_PATH = process.env.ACTUAL_API_PATH || '@actual-app/api';
 const api = require(ACTUAL_API_PATH);
 
@@ -1697,7 +1701,11 @@ async function getEvents() {
   let tagCounts = {};
   try {
     tagCounts = await withApi(async (api) => {
-      const from = addDays(todayYMD(), -config.maxEventsTagLookbackDays);
+      const activeSignal = getActiveQueryAbortSignal();
+      if (activeSignal?.aborted) {
+        throw new QueryAbortedError('Ledger query was aborted (before event tag enrichment)');
+      }
+      const from = addDays(todayYMD(), -(config.maxEventsTagLookbackDays - 1));
       const to = todayYMD();
       validateCanonicalDateRange(from, to, {
         config,
@@ -1711,6 +1719,7 @@ async function getEvents() {
         start: from,
         end: to,
         config,
+        signal: activeSignal || undefined,
       });
       for (const { transactions: tx } of batches) {
         for (const t of tx) {
@@ -1721,7 +1730,10 @@ async function getEvents() {
       }
       return counts;
     });
-  } catch (_) { /* best-effort enrichment */ }
+  } catch (error) {
+    if (isQueryAbortedError(error)) throw error;
+    /* best-effort enrichment */
+  }
   return {
     events: events
       .slice()
