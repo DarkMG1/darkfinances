@@ -183,9 +183,10 @@ const scenarios = [
     complete: true,
   },
   {
-    name: 'unknown goal commitment',
+    name: 'goals present remain advisory and do not quarantine STS',
     fixture: buildFixture({ goals: [{ id: 'goal', name: 'Future purchase', target: 1200, current: 300 }] }),
-    reasons: [REASON.goalCommitmentUnknown],
+    reasons: [],
+    complete: true,
   },
   {
     name: 'unknown rollover treatment',
@@ -206,7 +207,6 @@ const scenarios = [
       'credit_card_coverage_unknown',
       REASON.budgetTargetsMissing,
       REASON.targetlessCategorySpending,
-      REASON.goalCommitmentUnknown,
       REASON.rolloverTreatmentUnknown,
     ],
   },

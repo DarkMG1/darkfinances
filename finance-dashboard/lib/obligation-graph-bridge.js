@@ -2,6 +2,10 @@
 
 const { toCents } = require('./domain/money');
 const {
+  categoryReserveCents,
+  resolveCategoryEnvelope,
+} = require('./domain/budget-envelope');
+const {
   buildTransferIndex,
   classifyTransactionLeaves,
   leafCountsAsRealSpend,
@@ -79,13 +83,15 @@ function buildBudgetReservations({ budgets, billCategoryIds = new Set() }) {
   for (const group of budgets?.groups || []) {
     for (const category of group.categories || []) {
       if (billCategoryIds.has(category.id)) continue;
-      const remaining = Number(category.remaining);
-      if (!Number.isFinite(remaining) || remaining <= 0) continue;
+      const reserveCents = Number.isSafeInteger(category.reserveCents)
+        ? category.reserveCents
+        : categoryReserveCents(resolveCategoryEnvelope(category));
+      if (!Number.isSafeInteger(reserveCents) || reserveCents <= 0) continue;
       reservations.push({
         durableIdentity: `budget:${category.id}`,
         categoryId: category.id,
         categoryName: category.name,
-        remainingCents: toCents(remaining),
+        remainingCents: reserveCents,
         incompleteReasons: [],
       });
     }

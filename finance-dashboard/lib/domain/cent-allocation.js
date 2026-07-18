@@ -106,21 +106,46 @@ function trySumCategoryFieldCents(categories, field) {
   }
 }
 
+function trySumCategoryReserveCents(categories) {
+  try {
+    const cents = sumCents((categories || []).map((category) => {
+      if (Number.isSafeInteger(category.reserveCents)) return category.reserveCents;
+      if (category.reserve != null) return readCategoryMoneyCents(category.reserve);
+      if (category.remaining != null) return readCategoryMoneyCents(category.remaining);
+      throw new TypeError('category reserve field is required');
+    }));
+    return {
+      cents,
+      complete: true,
+      incompleteReasons: [],
+    };
+  } catch {
+    return {
+      cents: null,
+      complete: false,
+      incompleteReasons: ['money_input_invalid'],
+    };
+  }
+}
+
 function buildForecastGenericBudgetContext(categories) {
   const targetSum = trySumCategoryFieldCents(categories, 'target');
   const remainingSum = trySumCategoryFieldCents(categories, 'remaining');
-  const complete = targetSum.complete && remainingSum.complete;
+  const reserveSum = trySumCategoryReserveCents(categories);
+  const complete = targetSum.complete && remainingSum.complete && reserveSum.complete;
   const incompleteReasons = complete
     ? []
     : [...new Set([
       ...(targetSum.complete ? [] : targetSum.incompleteReasons),
       ...(remainingSum.complete ? [] : remainingSum.incompleteReasons),
+      ...(reserveSum.complete ? [] : reserveSum.incompleteReasons),
     ])];
   const targetDollars = complete ? fromCents(targetSum.cents) : null;
-  const remainingDollars = complete ? fromCents(remainingSum.cents) : null;
+  const remainingDollars = complete ? fromCents(reserveSum.cents) : null;
   return {
     targetSum,
     remainingSum,
+    reserveSum,
     complete,
     incompleteReasons,
     assumptions: {

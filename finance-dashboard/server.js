@@ -590,7 +590,10 @@ function demoMiddleware(v1mode) {
       case 'manual-assets': return send(demo.manualAssets());
       case 'investments': return send(demo.investments());
       case 'reports': return send(demo.reports());
-      case 'goals': return send(demo.goals());
+      case 'goals': {
+        const payload = demo.goals();
+        return send(isVersionedApiRequest(req) ? payload : payload.goals);
+      }
       case 'owes-config': return send({ expected: {}, debtorPatterns: {}, tripStart: {}, swNet: [], settledExt: [] });
       case 'reimb-links': return send(demo.reimbLinks(req.query.id ? String(req.query.id) : undefined));
       default: {
@@ -806,7 +809,9 @@ const resolvers = {
     });
     return cachedActual(key, () => data.searchTransactions({ q, start, end, limit, cursor }), 120);
   },
-  goals: () => cachedActual('goals', () => data.getGoals(), 120),
+  goals: (req) => cachedActual('goals', () => data.getGoals(), 120).then((payload) => (
+    isVersionedApiRequest(req) ? payload : payload.goals
+  )),
   tags: (req) => {
     const start = req.query.start ? String(req.query.start) : '';
     const end = req.query.end ? String(req.query.end) : '';

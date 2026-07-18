@@ -17,6 +17,7 @@ import {
   CreateTransactionInput,
   Forecast,
   Goal,
+  GoalsResponse,
   GoalInput,
   Income,
   Investments,
@@ -426,7 +427,7 @@ export function useTags() {
 }
 
 export function useGoals() {
-  return useFinanceQuery<Goal[]>({
+  return useFinanceQuery<GoalsResponse>({
     endpoint: API_ENDPOINTS.goals.endpoint,
     method: API_ENDPOINTS.goals.method,
     queryKey: [API_ENDPOINTS.goals.key],

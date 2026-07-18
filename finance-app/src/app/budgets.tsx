@@ -149,7 +149,8 @@ export default function Budgets() {
                       </View>
                       <ProgressBar pct={pct} over={hasTargets && c.over} />
                       <View style={styles.catMetaRow}>
-                        <Text style={styles.catMeta}>Left {fmtPos(c.remaining ?? 0)} · projected {fmtPos(c.projected ?? c.spent)} · {fmtPos(c.dailyPace ?? 0)}/day</Text>
+                        <Text style={styles.catMeta}>Left {fmtPos(c.remaining ?? 0)} · reserve {fmtPos(c.reserve ?? c.remaining ?? 0)} · projected {fmtPos(c.projected ?? c.spent)} · {fmtPos(c.dailyPace ?? 0)}/day</Text>
+                        {c.envelopeDebt > 0 ? <Text style={styles.debtMeta}>Advisory envelope debt {fmtPos(c.envelopeDebt)}</Text> : null}
                         {meta ? <Text style={styles.catMeta}>{meta}</Text> : null}
                       </View>
                     </Pressable>
@@ -221,6 +222,7 @@ const styles = StyleSheet.create({
   catAmt: { color: colors.muted, fontSize: 12 },
   catMetaRow: { marginTop: 5, gap: 2 },
   catMeta: { color: colors.muted, fontSize: 11 },
+  debtMeta: { color: colors.yellow, fontSize: 11 },
   modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 },
   sheetTitle: { color: colors.text, fontSize: 17, fontWeight: '700' },

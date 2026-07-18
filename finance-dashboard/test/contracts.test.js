@@ -112,6 +112,14 @@ test('legacy web reimbursement renders MetricValue totals without NaN or fabrica
   assert.match(appReimbursement, /grandLowerBound != null \?/);
 });
 
+test('generated contract includes goal feasibility and advisory types', () => {
+  assert.match(generatedTypes, /export interface GoalFeasibility/);
+  assert.match(generatedTypes, /export interface GoalAdvisory/);
+  assert.match(generatedTypes, /export interface GoalsResponse/);
+  assert.match(generatedTypes, /goalAdvisory\?: GoalAdvisory/);
+  assert.match(generatedTypes, /reserveCents: number/);
+});
+
 test('generated contract exposes report trend completeness and nullable monthly review totals', () => {
   assert.match(generatedTypes, /categoryTrendsComplete\?: boolean/);
   assert.match(generatedTypes, /merchantTrendsComplete\?: boolean/);

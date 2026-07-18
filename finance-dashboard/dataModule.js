@@ -133,6 +133,8 @@ const {
   spendSummaryFromClassifiedLeaves,
 } = require('./lib/domain/projection-completeness');
 const { fromCents, sumCents, toCents } = require('./lib/domain/money');
+const { categoryEnvelopeFields } = require('./lib/domain/budget-envelope');
+const { enrichGoalsResponse } = require('./lib/domain/goal-feasibility');
 const {
   buildForecastBudgetDailyCents,
   buildForecastGenericBudgetContext,
@@ -1439,9 +1441,15 @@ async function getBudgets({ month } = {}) {
           const target = budgeted > 0 ? budgeted : (Number.isFinite(legacyTarget) && legacyTarget > 0 ? legacyTarget : 0);
           const annualTarget = Number(meta.annualTarget || 0) || null;
           const remaining = round2(Math.max(0, target - spent));
+          const rolloverMode = meta.rolloverMode || 'none';
+          const envelope = categoryEnvelopeFields({
+            balance: (c.balance || 0) / 100,
+            spent,
+            target,
+            rolloverMode,
+          });
           const projected = progress.elapsed > 0 ? round2((spent / progress.elapsed) * progress.days) : spent;
           const expectedToDate = target > 0 ? round2((target / progress.days) * progress.elapsed) : null;
-          const rolloverMode = meta.rolloverMode || 'none';
           const rolloverAmount = rolloverMode === 'none' ? 0 : round2((c.balance || 0) / 100);
           const rolloverConfigured = [settings.defaults, idSettings, nameSettings]
             .some((source) => Object.prototype.hasOwnProperty.call(source, 'rolloverMode'));
@@ -1472,6 +1480,12 @@ async function getBudgets({ month } = {}) {
             target,
             annualTarget,
             remaining,
+            reserve: fromCents(envelope.reserveCents),
+            envelope: fromCents(envelope.envelopeCents),
+            envelopeDebt: fromCents(envelope.envelopeDebtCents),
+            reserveCents: envelope.reserveCents,
+            envelopeCents: envelope.envelopeCents,
+            envelopeDebtCents: envelope.envelopeDebtCents,
             projected,
             expectedToDate,
             dailyPace: target > 0 ? round2(target / progress.days) : 0,
@@ -4122,7 +4136,7 @@ async function getForecast({ days = 90 } = {}) {
     const budgetEntries = buildForecastBudgetDailyCents({
       today,
       horizonDays,
-      currentMonthRemainingCents: genericBudget.remainingSum.cents,
+      currentMonthRemainingCents: genericBudget.reserveSum.cents,
       fullMonthTargetCents: genericBudget.targetSum.cents,
       addDays,
       daysInMonth,
@@ -4236,7 +4250,7 @@ async function getToday() {
     };
   });
   const spending = spendingBundle.spending;
-  const [accounts, budgets, recurring, goals, income, review, recent, reimb] = await Promise.all([
+  const [accounts, budgets, recurring, goalsPayload, income, review, recent, reimb] = await Promise.all([
     getAccounts(),
     getBudgets({ month }),
     getRecurring({}),
@@ -4246,6 +4260,8 @@ async function getToday() {
     getTransactions({ start: addDays(financeDate, -14), end: financeDate, collapse: true }),
     getReimbursement({}),
   ]);
+  const goals = goalsPayload.goals || goalsPayload;
+  const goalAdvisory = goalsPayload.goalAdvisory || null;
   const bills = await getBills({ days: 45, recurring });
 
   const visibleAccounts = accounts.filter((account) => !account.hidden);
@@ -4311,7 +4327,7 @@ async function getToday() {
     health: getHealth(),
     accounts,
     spending,
-    liquidity: { safeToSpend },
+    liquidity: { safeToSpend, goalAdvisory },
     obligationGraph: {
       version: graph.version,
       summary: obligationSummary,
@@ -5942,65 +5958,119 @@ async function setTransactionDate({ id, date, isLeg }) {
 // ---------------------------------------------------------------------------
 async function getGoals() {
   return withApi(async (api) => {
-    const goals = readJsonSafe(GOALS_PATH, []);
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed);
-    const bals = await Promise.all(accounts.map((a) => api.getAccountBalance(a.id)));
-    const balById = {};
-    accounts.forEach((a, i) => { balById[a.id] = bals[i] / 100; });
-    return goals.map((g) => {
-      const current = Math.max(0, Number(g.current) || 0);
-      const remaining = Math.max(0, Number(g.target) - current);
-      let monthlyRequired = null;
-      if (g.deadline && /^\d{4}-\d{2}$/.test(g.deadline)) {
-        const now = todayYMD().slice(0, 7);
-        const [nowYear, nowMonth] = now.split('-').map(Number);
-        const [endYear, endMonth] = g.deadline.split('-').map(Number);
-        const months = Math.max(1, (endYear - nowYear) * 12 + endMonth - nowMonth + 1);
-        monthlyRequired = fromCents(Math.ceil(Math.round(remaining * 100) / months));
-      }
+    const financeDate = todayYMD();
+    const storedGoals = readJsonSafe(GOALS_PATH, []);
+    const accounts = await api.getAccounts();
+    const openAccounts = accounts.filter((a) => !a.closed);
+    const bals = await Promise.all(openAccounts.map((a) => api.getAccountBalance(a.id)));
+    const balanceCentsById = new Map();
+    openAccounts.forEach((a, i) => { balanceCentsById.set(a.id, bals[i]); });
+    const accountRoles = readAccountOverrides(ACCOUNT_OVERRIDES_PATH);
+    const accountsWithRoles = accounts.map((account) => {
+      const override = accountRoles.accounts?.[account.id];
       return {
-        ...g,
-        current: round2(current),
-        pct: g.target > 0 ? Math.min(999, Math.round((current / g.target) * 100)) : null,
-        fundingSource: g.accountId ? 'allocated-account' : 'manual',
-        availableInAccount: g.accountId && balById[g.accountId] != null ? Math.max(0, round2(balById[g.accountId])) : null,
-        monthlyRequired,
+        ...account,
+        role: override?.role || account.role || 'unknown',
+        hidden: !!account.hidden,
+        closed: !!account.closed,
       };
     });
+    const normalizedGoals = storedGoals.map((g) => {
+      const current = Math.max(0, Number(g.current) || 0);
+      return {
+        ...g,
+        target: fromCents(toCents(g.target)),
+        current: fromCents(toCents(current)),
+      };
+    });
+    const enriched = enrichGoalsResponse({
+      goals: normalizedGoals,
+      accounts: accountsWithRoles,
+      balanceCentsById,
+      financeDate,
+    });
+    const goals = enriched.goals.map((goal) => {
+      const accountId = goal.accountId;
+      const balCents = accountId ? balanceCentsById.get(accountId) : null;
+      return {
+        ...goal,
+        pct: goal.target > 0 ? Math.min(999, Math.round((goal.current / goal.target) * 100)) : null,
+        fundingSource: accountId ? 'allocated-account' : 'manual',
+        availableInAccount: accountId && balCents != null ? Math.max(0, fromCents(Math.max(0, balCents))) : null,
+      };
+    });
+    return {
+      goals,
+      accountSummaries: enriched.accountSummaries,
+      goalAdvisory: enriched.goalAdvisory,
+    };
   });
 }
 
 async function saveGoal(goal = {}) {
   const target = fromCents(toCents(goal.target));
-  const current = goal.current === undefined ? 0 : fromCents(toCents(goal.current));
+  const current = goal.current === undefined ? undefined : fromCents(toCents(goal.current));
   if (!goal.name || !(target > 0)) throw new Error('name and positive target required');
-  if (current < 0) throw new Error('current must be non-negative');
-  const input = { ...goal, target, current };
+  if (current != null && current < 0) throw new Error('current must be non-negative');
+  const input = { ...goal, target };
+  if (current != null) input.current = current;
   return withApi(async (api) => {
     const goals = readJsonSafe(GOALS_PATH, []);
     const normalized = { ...input };
     if (normalized.accountId) {
       const accounts = await api.getAccounts();
-      const account = accounts.find((candidate) => candidate.id === normalized.accountId && !candidate.closed);
+      const account = accounts.find((candidate) => candidate.id === normalized.accountId);
       if (!account) throw new Error('linked account not found');
-      const capacity = Math.max(0, (await api.getAccountBalance(account.id)) / 100);
-      const allocatedElsewhere = goals
-        .filter((candidate) => candidate.id !== normalized.id && candidate.accountId === normalized.accountId)
-        .reduce((sum, candidate) => sum + Math.max(0, Number(candidate.current) || 0), 0);
-      if (allocatedElsewhere + normalized.current > capacity + 0.005) {
-        throw new Error(`goal allocations exceed the linked account balance by ${round2(allocatedElsewhere + normalized.current - capacity)}`);
-      }
+      if (account.closed) throw new Error('linked account is closed');
     }
     if (normalized.id) {
-      const i = goals.findIndex((candidate) => candidate.id === normalized.id);
-      if (i >= 0) goals[i] = { ...goals[i], ...normalized };
-      else goals.push(normalized);
+      const existing = goals.find((candidate) => candidate.id === normalized.id);
+      if (existing) {
+        if (normalized.current === undefined) normalized.current = existing.current ?? 0;
+        goals[goals.findIndex((candidate) => candidate.id === normalized.id)] = { ...existing, ...normalized };
+      } else {
+        if (normalized.current === undefined) normalized.current = 0;
+        goals.push(normalized);
+      }
     } else {
       normalized.id = 'g' + Date.now().toString(36);
+      if (normalized.current === undefined) normalized.current = 0;
       goals.push(normalized);
     }
     writeJsonSafe(GOALS_PATH, goals);
-    return { ok: true, id: normalized.id };
+    const financeDate = todayYMD();
+    const allAccounts = await api.getAccounts();
+    const openAccounts = allAccounts.filter((a) => !a.closed);
+    const bals = await Promise.all(openAccounts.map((a) => api.getAccountBalance(a.id)));
+    const balanceCentsById = new Map();
+    openAccounts.forEach((a, i) => { balanceCentsById.set(a.id, bals[i]); });
+    const accountRoles = readAccountOverrides(ACCOUNT_OVERRIDES_PATH);
+    const accountsWithRoles = allAccounts.map((account) => {
+      const override = accountRoles.accounts?.[account.id];
+      return {
+        ...account,
+        role: override?.role || account.role || 'unknown',
+        hidden: !!override?.hidden || !!account.hidden,
+        closed: !!account.closed,
+      };
+    });
+    const savedGoals = goals.map((candidate) => ({
+      ...candidate,
+      target: fromCents(toCents(candidate.target)),
+      current: fromCents(toCents(candidate.current ?? 0)),
+    }));
+    const enriched = enrichGoalsResponse({
+      goals: savedGoals,
+      accounts: accountsWithRoles,
+      balanceCentsById,
+      financeDate,
+    });
+    const saved = enriched.goals.find((candidate) => candidate.id === normalized.id);
+    return {
+      ok: true,
+      id: normalized.id,
+      feasibility: saved?.feasibility || null,
+    };
   });
 }
 

@@ -145,11 +145,6 @@ function safeToSpendIncompleteReasons({
 
   for (const reason of legacyRecurrenceReasons({ recurring, obligationGraph })) found.add(reason);
 
-  add(
-    SAFE_TO_SPEND_REASON.goalCommitmentUnknown,
-    goals.some((goal) => Number(goal.target) > 0),
-  );
-
   const ordered = SAFE_TO_SPEND_REASON_ORDER.filter((reason) => found.has(reason));
   for (const reason of OBLIGATION_REASON_ORDER) {
     if (found.has(reason) && !ordered.includes(reason)) ordered.push(reason);
