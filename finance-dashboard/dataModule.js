@@ -155,7 +155,7 @@ const {
   graphSummary,
   safeToSpendFromGraph,
 } = require('./lib/domain/obligation-graph');
-const { assembleObligationGraphInputs, buildGraphTransactionInputs } = require('./lib/obligation-graph-bridge');
+const { assembleObligationGraphInputs, buildGraphTransactionInputs, collectBillCategoryIds } = require('./lib/obligation-graph-bridge');
 const {
   AccountNotFoundError,
   TransactionNotFoundError,
@@ -3621,23 +3621,42 @@ async function buildObligationGraphBundle({
   reimb,
   reimbLinks,
   operatingAccounts,
+  txnContext = null,
 }) {
+  const accountOverrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
   const accountRolesById = Object.fromEntries((accounts || []).map((account) => [account.id, account.role]));
-  const txnInputs = await withApi(async (api) => {
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
-    const rows = await fetchOnBudgetRows(api, windowStart, windowEnd);
-    return buildGraphTransactionInputs(rows, catInfo, {
+  const creditAccountIds = new Set((accounts || [])
+    .filter((account) => account.role === 'credit_card' && !account.closed && !account.hidden && account.role !== 'excluded')
+    .map((account) => account.id));
+
+  let txnInputs;
+  if (txnContext?.rows && txnContext?.catInfo) {
+    txnInputs = buildGraphTransactionInputs(txnContext.rows, txnContext.catInfo, {
       windowStart,
       windowEnd,
       accountRolesById,
+      creditAccountIds,
     });
-  });
+  } else {
+    txnInputs = await withApi(async (api) => {
+      const groups = await api.getCategoryGroups();
+      const catInfo = buildCatInfo(groups);
+      const rows = await fetchOnBudgetRows(api, windowStart, windowEnd);
+      return buildGraphTransactionInputs(rows, catInfo, {
+        windowStart,
+        windowEnd,
+        accountRolesById,
+        creditAccountIds,
+      });
+    });
+  }
+
   const inputs = assembleObligationGraphInputs({
     financeDate,
     windowStart,
     windowEnd,
     accounts,
+    accountOverrides,
     recurring,
     income,
     bills,
@@ -3650,7 +3669,12 @@ async function buildObligationGraphBundle({
     economicTransactions: txnInputs.economicTransactions,
   });
   const graph = buildObligationGraph(inputs);
-  return { graph, inputs, summary: graphSummary(graph) };
+  return {
+    graph,
+    inputs,
+    summary: graphSummary(graph),
+    liabilityPolicies: inputs.liabilityPolicies || {},
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -3709,6 +3733,12 @@ async function getForecast({ days = 90 } = {}) {
   const horizonDays = Math.min(180, Math.max(30, Number(days) || 90));
   const today = todayYMD();
   const horizon = addDays(today, horizonDays);
+  const forecastBundle = await withApi(async (api) => {
+    const groups = await api.getCategoryGroups();
+    const catInfo = buildCatInfo(groups);
+    const rows = await fetchOnBudgetRows(api, today, horizon);
+    return { catInfo, rows };
+  });
   const [accounts, income, recurring, budgets, reimb] = await Promise.all([
     getAccounts(),
     getIncome({}),
@@ -3716,6 +3746,7 @@ async function getForecast({ days = 90 } = {}) {
     getBudgets({}),
     getReimbursement({}),
   ]);
+  const { catInfo, rows } = forecastBundle;
   const bills = await getBills({ days: horizonDays, recurring });
   const liquidAccounts = accountsForMetric(accounts.filter((account) => !account.hidden), 'operating_cash');
   const startBalanceCents = sumOperatingCashBalanceCents(liquidAccounts);
@@ -3731,6 +3762,7 @@ async function getForecast({ days = 90 } = {}) {
     reimb,
     reimbLinks: enrichReimbLinksForGraph(readReimbLinks().links),
     operatingAccounts: liquidAccounts,
+    txnContext: { rows, catInfo },
   });
   const eventRows = [];
   const pushEventCents = (date, label, amountCents, kind, provenance, sourceId = null) => {
@@ -3739,24 +3771,34 @@ async function getForecast({ days = 90 } = {}) {
     eventRows.push({ date, label, amountCents, kind, provenance, sourceId });
   };
 
-  for (const event of forecastCashEventsFromGraph(graph, { windowStart: today, windowEnd: horizon })) {
-    pushEventCents(
-      event.date,
-      event.label,
-      event.amountCents,
-      event.kind,
-      event.provenance,
-      event.sourceId,
-    );
+  const graphCompleteness = graph.completeness;
+  if (graphCompleteness.complete) {
+    for (const event of forecastCashEventsFromGraph(graph, { windowStart: today, windowEnd: horizon })) {
+      pushEventCents(
+        event.date,
+        event.label,
+        event.amountCents,
+        event.kind,
+        event.provenance,
+        event.sourceId,
+      );
+    }
   }
 
+  const billCategoryIds = new Set(collectBillCategoryIds(recurring, budgets));
   const genericCategories = (budgets.groups || []).flatMap((group) =>
     (group.categories || [])
-      .filter((category) => !BILL_CAT.test(`${group.name || ''} ${category.name || ''}`))
+      .filter((category) => !billCategoryIds.has(category.id))
       .map((category) => category)
   );
   const genericBudget = buildForecastGenericBudgetContext(genericCategories);
   const forecastWarnings = [...genericBudget.warnings];
+  if (!graphCompleteness.complete) {
+    forecastWarnings.push('Obligation graph incomplete; scheduled cash events withheld.');
+    for (const reason of graphCompleteness.incompleteReasons || []) {
+      forecastWarnings.push(`Obligation graph: ${reason}`);
+    }
+  }
   if (genericBudget.complete) {
     const budgetEntries = buildForecastBudgetDailyCents({
       today,
@@ -3773,7 +3815,6 @@ async function getForecast({ days = 90 } = {}) {
   const possibleReimbursement = reimb.totalOwed > 0.5
     ? { date: addDays(today, 14), amount: round2(reimb.totalOwed), includedInBalance: false }
     : null;
-  const graphCompleteness = graph.completeness;
 
   const events = eventRows
     .map((row) => ({ ...row, amount: fromCents(row.amountCents) }))
@@ -3854,12 +3895,14 @@ async function getToday() {
     const cur = monthRange(financeYear, financeMonth - 1);
     const prev = monthRange(financeYear, financeMonth - 2);
     const curEnd = financeToday;
+    const monthEndDate = monthRange(financeYear, financeMonth - 1).end;
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
-    const [currentLeaves, previousLeaves] = await classifiedOnBudgetLeavesForWindows(api, [
-      { start: cur.start, end: curEnd },
-      { start: prev.start, end: prev.end },
-    ], catInfo);
+    const rows = await fetchOnBudgetRows(api, prev.start, monthEndDate);
+    const transferIndex = buildTransferIndex(rows);
+    const classifyWindow = (start, end) => classifyLeavesInDateRange(rows, catInfo, start, end, transferIndex);
+    const currentLeaves = classifyWindow(cur.start, curEnd);
+    const previousLeaves = classifyWindow(prev.start, prev.end);
     const current = summarize(currentLeaves);
     const previous = summarize(previousLeaves);
     return {
@@ -3870,6 +3913,7 @@ async function getToday() {
         completeness: mergeProjectionCompleteness([current.completeness, previous.completeness]),
       },
       classifiedLeaves: currentLeaves,
+      txnContext: { rows, catInfo },
     };
   });
   const spending = spendingBundle.spending;
@@ -3888,7 +3932,7 @@ async function getToday() {
   const visibleAccounts = accounts.filter((account) => !account.hidden);
   const operatingAccounts = accountsForMetric(visibleAccounts, 'operating_cash');
   const cashCents = Math.round(operatingAccounts.reduce((sum, account) => sum + account.balance, 0) * 100);
-  const { graph, summary: obligationSummary } = await buildObligationGraphBundle({
+  const { graph, summary: obligationSummary, liabilityPolicies } = await buildObligationGraphBundle({
     financeDate,
     windowStart: financeDate,
     windowEnd: monthEndDate,
@@ -3900,6 +3944,7 @@ async function getToday() {
     reimb,
     reimbLinks: enrichReimbLinksForGraph(readReimbLinks().links),
     operatingAccounts,
+    txnContext: spendingBundle.txnContext,
   });
   const stfFromGraph = safeToSpendFromGraph(graph, {
     operatingCashCents: cashCents,
@@ -3915,6 +3960,7 @@ async function getToday() {
     goals,
     spendingCompleteness: spending.current?.completeness,
     obligationGraph: graph,
+    liabilityPolicies,
   });
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',

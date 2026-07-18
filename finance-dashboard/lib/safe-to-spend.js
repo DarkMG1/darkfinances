@@ -1,6 +1,10 @@
 'use strict';
 
-const { OBLIGATION_REASON, OBLIGATION_REASON_ORDER } = require('./domain/obligation-graph');
+const {
+  OBLIGATION_REASON,
+  OBLIGATION_REASON_ORDER,
+  NODE_KIND,
+} = require('./domain/obligation-graph');
 
 const SAFE_TO_SPEND_INPUTS = Symbol('safe-to-spend-inputs');
 
@@ -24,11 +28,13 @@ const SAFE_TO_SPEND_REASON_ORDER = Object.freeze([
   SAFE_TO_SPEND_REASON.transferIdentityUnresolved,
   SAFE_TO_SPEND_REASON.duplicateIdentity,
   SAFE_TO_SPEND_REASON.occurrenceCapExceeded,
+  SAFE_TO_SPEND_REASON.identityOverlapAmbiguous,
   SAFE_TO_SPEND_REASON.accountRolesUnassigned,
   SAFE_TO_SPEND_REASON.operatingCashAccountMissing,
   SAFE_TO_SPEND_REASON.budgetDataUnavailable,
   SAFE_TO_SPEND_REASON.recurrenceUnresolved,
   SAFE_TO_SPEND_REASON.liabilityUnresolved,
+  SAFE_TO_SPEND_REASON.liabilityFundingMismatch,
   SAFE_TO_SPEND_REASON.fundingAccountMissing,
   SAFE_TO_SPEND_REASON.transferAmbiguous,
   SAFE_TO_SPEND_REASON.reimbursementAllocationIncomplete,
@@ -44,6 +50,41 @@ const SAFE_TO_SPEND_REASON_ORDER = Object.freeze([
   SAFE_TO_SPEND_REASON.rolloverTreatmentUnknown,
 ]);
 
+function legacyRecurrenceReasons({ recurring = {}, obligationGraph = null } = {}) {
+  const found = [];
+  const recurrenceItems = [...(recurring.items || []), ...(recurring.hiddenItems || [])];
+  const graphNodes = obligationGraph?.nodes || [];
+
+  const billUnresolved = recurrenceItems.some((item) =>
+    item.status === 'active' && item.isBill === true && item.projectionUncertain === true);
+  if (billUnresolved) found.push(SAFE_TO_SPEND_REASON.billRecurrenceUnresolved);
+
+  const graphBillUnresolved = graphNodes.some((node) =>
+    (node.kind === NODE_KIND.RECURRING_BILL)
+    && (node.incompleteReasons || []).includes(OBLIGATION_REASON.recurrenceUnresolved));
+  if (graphBillUnresolved && !found.includes(SAFE_TO_SPEND_REASON.billRecurrenceUnresolved)) {
+    found.push(SAFE_TO_SPEND_REASON.billRecurrenceUnresolved);
+  }
+
+  for (const item of recurrenceItems) {
+    if (item.status !== 'active' || item.isBill) continue;
+    if (item.projectionUncertain) {
+      if (!found.includes(SAFE_TO_SPEND_REASON.nonBillRecurrenceUnresolved)) {
+        found.push(SAFE_TO_SPEND_REASON.nonBillRecurrenceUnresolved);
+      }
+      continue;
+    }
+    const graphNode = graphNodes.find((node) => node.source?.key === item.key);
+    if (graphNode && (graphNode.incompleteReasons || []).includes(OBLIGATION_REASON.recurrenceUnresolved)) {
+      if (!found.includes(SAFE_TO_SPEND_REASON.nonBillRecurrenceUnresolved)) {
+        found.push(SAFE_TO_SPEND_REASON.nonBillRecurrenceUnresolved);
+      }
+    }
+  }
+
+  return found;
+}
+
 function safeToSpendIncompleteReasons({
   accounts = [],
   visibleAccounts = accounts.filter((account) => !account.hidden),
@@ -53,6 +94,7 @@ function safeToSpendIncompleteReasons({
   goals = [],
   spendingCompleteness = null,
   obligationGraph = null,
+  liabilityPolicies = {},
 } = {}) {
   const found = new Set();
   const add = (reason, condition) => {
@@ -70,13 +112,22 @@ function safeToSpendIncompleteReasons({
   );
   add(SAFE_TO_SPEND_REASON.operatingCashAccountMissing, operatingAccounts.length === 0);
 
-  if (obligationGraph) {
-    for (const reason of graphReasons) add(reason, true);
+  for (const reason of graphReasons) add(reason, true);
+
+  for (const policy of Object.values(liabilityPolicies || {})) {
+    for (const reason of policy.quarantineReasons || []) {
+      if (reason === 'credit_card_coverage_unknown') add(SAFE_TO_SPEND_REASON.creditCardCoverageUnknown, true);
+      else add(reason, true);
+    }
   }
 
   add(
     SAFE_TO_SPEND_REASON.creditCardCoverageUnknown,
-    !obligationGraph && accounts.some((account) => account.role === 'credit_card' && Number(account.balance) < 0),
+    accounts.some((account) => {
+      if (account.role !== 'credit_card' || Number(account.balance) >= 0) return false;
+      const policy = liabilityPolicies[account.id];
+      return !policy || policy.mode === 'unknown';
+    }),
   );
 
   if (budgets.supported === false || !budgets[SAFE_TO_SPEND_INPUTS]) {
@@ -92,15 +143,8 @@ function safeToSpendIncompleteReasons({
     add(SAFE_TO_SPEND_REASON.rolloverTreatmentUnknown, inputs.unresolvedRolloverCategoryCount > 0);
   }
 
-  const recurrenceItems = [...(recurring.items || []), ...(recurring.hiddenItems || [])];
-  add(
-    SAFE_TO_SPEND_REASON.billRecurrenceUnresolved,
-    !obligationGraph && recurrenceItems.some((item) => item.status === 'active' && item.isBill === true && item.projectionUncertain === true),
-  );
-  add(
-    SAFE_TO_SPEND_REASON.nonBillRecurrenceUnresolved,
-    !obligationGraph && recurrenceItems.some((item) => item.status === 'active' && item.isBill !== true),
-  );
+  for (const reason of legacyRecurrenceReasons({ recurring, obligationGraph })) found.add(reason);
+
   add(
     SAFE_TO_SPEND_REASON.goalCommitmentUnknown,
     goals.some((goal) => Number(goal.target) > 0),
@@ -117,5 +161,6 @@ module.exports = {
   SAFE_TO_SPEND_INPUTS,
   SAFE_TO_SPEND_REASON,
   SAFE_TO_SPEND_REASON_ORDER,
+  legacyRecurrenceReasons,
   safeToSpendIncompleteReasons,
 };

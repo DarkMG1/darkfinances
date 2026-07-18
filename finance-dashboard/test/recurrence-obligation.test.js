@@ -106,6 +106,7 @@ test('getToday quarantines Safe-to-Spend when active rent projection is uncertai
   assert.equal(metric.complete, false);
   assert.equal(metric.value, null);
   assert.equal(metric.valueCents, null);
+  assert.ok(metric.incompleteReasons.includes('bill_recurrence_unresolved'));
   assert.ok(metric.incompleteReasons.includes('obligation_recurrence_unresolved'));
 });
 

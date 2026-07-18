@@ -10,7 +10,17 @@ const ACCOUNT_ROLES = [
   'unknown',
 ];
 const ROLE_SET = new Set(ACCOUNT_ROLES);
-const ENTRY_KEYS = new Set(['name', 'hidden', 'role']);
+const ENTRY_KEYS = new Set([
+  'name',
+  'hidden',
+  'role',
+  'creditLiabilityCoverage',
+  'paymentRecurringKey',
+  'fundingAccountId',
+  'statement',
+]);
+const STATEMENT_KEYS = new Set(['balanceCents', 'paymentDueDate', 'observedAt']);
+const COVERAGE_MODES = new Set(['exclude', 'current_balance', 'statement']);
 const FLAT_LEGACY_REJECT_KEYS = new Set(['schemaVersion', 'accounts']);
 const PRESERVED_METADATA_KEYS = new Set([
   'metadata',
@@ -43,7 +53,24 @@ function validAccountId(id) {
 }
 
 function entryHasOverrideIntent(entry) {
-  return entry.name !== undefined || entry.hidden !== undefined || entry.role !== undefined;
+  return entry.name !== undefined
+    || entry.hidden !== undefined
+    || entry.role !== undefined
+    || entry.creditLiabilityCoverage !== undefined
+    || entry.paymentRecurringKey !== undefined
+    || entry.fundingAccountId !== undefined
+    || entry.statement !== undefined;
+}
+
+function validStatement(entry) {
+  if (entry.statement === undefined) return true;
+  if (!isPlainObject(entry.statement)) return false;
+  if (!Object.keys(entry.statement).every((key) => STATEMENT_KEYS.has(key))) return false;
+  const { balanceCents, paymentDueDate, observedAt } = entry.statement;
+  if (!Number.isSafeInteger(balanceCents)) return false;
+  if (typeof paymentDueDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(paymentDueDate)) return false;
+  if (typeof observedAt !== 'string' || Number.isNaN(Date.parse(observedAt))) return false;
+  return true;
 }
 
 function validEntry(entry) {
@@ -54,6 +81,10 @@ function validEntry(entry) {
     (entry.name === undefined || typeof entry.name === 'string') &&
     (entry.hidden === undefined || typeof entry.hidden === 'boolean') &&
     (entry.role === undefined || ROLE_SET.has(entry.role)) &&
+    (entry.creditLiabilityCoverage === undefined || COVERAGE_MODES.has(entry.creditLiabilityCoverage)) &&
+    (entry.paymentRecurringKey === undefined || typeof entry.paymentRecurringKey === 'string') &&
+    (entry.fundingAccountId === undefined || typeof entry.fundingAccountId === 'string') &&
+    validStatement(entry) &&
     entryHasOverrideIntent(entry);
 }
 
@@ -103,11 +134,13 @@ function migrateAccountOverrides(value) {
 module.exports = {
   ACTUAL_ACCOUNT_ID_RE,
   DEMO_ACCOUNT_ID_RE,
+  COVERAGE_MODES,
   ENVELOPE_KEYS,
   ACCOUNT_ROLES,
   ENTRY_KEYS,
   FLAT_LEGACY_REJECT_KEYS,
   PRESERVED_METADATA_KEYS,
+  STATEMENT_KEYS,
   migrateAccountOverrides,
   validAccountId,
   validEntry,

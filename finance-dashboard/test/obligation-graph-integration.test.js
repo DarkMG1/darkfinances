@@ -1,0 +1,100 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-obligation-graph-integration-'));
+const fixturePath = path.join(__dirname, 'fixtures', 'safe-to-spend.js');
+process.env.ACTUAL_API_PATH = fixturePath;
+process.env.ACTUAL_DATA_DIR = path.join(dir, 'actual-cache');
+for (const [env, filename] of Object.entries({
+  ACCOUNT_OVERRIDES_PATH: 'account-overrides.json',
+  BILLS_PAID_PATH: 'bills-paid.json',
+  BUDGET_SETTINGS_PATH: 'budget-settings.json',
+  EVENTS_PATH: 'events.json',
+  GOALS_PATH: 'goals.json',
+  OWES_CONFIG_PATH: 'owes-config.json',
+  OWES_TRUTH_PATH: 'owes-truth.json',
+  PERSONAL_CONFIG_PATH: 'personal-config.json',
+  RECEIPTS_PATH: 'receipts.json',
+  RECON_PATH: 'reconciliation.json',
+  REIMB_LINKS_PATH: 'reimb-links.json',
+  REIMB_SUGGEST_PATH: 'reimb-suggest.json',
+  RECURRING_OVERRIDES_PATH: 'recurring-overrides.json',
+  REVIEW_STATE_PATH: 'review-state.json',
+  TRANSACTION_SAGAS_PATH: 'transaction-sagas.json',
+  VENMO_TRUTH_PATH: 'venmo-truth.json',
+  DEBT_PLANNER_PATH: 'debt-planner.json',
+})) process.env[env] = path.join(dir, filename);
+
+const fixtures = require(fixturePath);
+const { getToday, getForecast, resetApi } = require('../dataModule');
+const { SAFE_TO_SPEND_REASON } = require('../lib/safe-to-spend');
+
+test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+function writeJson(file, value) {
+  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function bootstrap(fixture, overrides = {}, accountOverrides = {}) {
+  fixtures.configure(fixture);
+  writeJson(process.env.ACCOUNT_OVERRIDES_PATH, {
+    schemaVersion: 2,
+    accounts: {
+      ...Object.fromEntries(fixture.accounts.map((account) => [
+        account.id,
+        { name: account.name, role: account.role },
+      ])),
+      ...accountOverrides,
+    },
+  });
+  writeJson(process.env.BUDGET_SETTINGS_PATH, fixture.budgetSettings);
+  writeJson(process.env.GOALS_PATH, fixture.goals);
+  writeJson(process.env.RECURRING_OVERRIDES_PATH, overrides);
+  writeJson(process.env.DEBT_PLANNER_PATH, { debts: [] });
+  resetApi();
+}
+
+test('getToday and getForecast share legacy recurrence reasons and withhold forecast on incomplete graph', async () => {
+  const fixture = fixtures.buildUncertainRentFixture();
+  await bootstrap(fixture, { 'skyline apartments': { forced: true, isBill: true } });
+  const today = await getToday();
+  assert.equal(today.liquidity.safeToSpend.complete, false);
+  assert.ok(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.billRecurrenceUnresolved));
+  assert.ok(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.recurrenceUnresolved));
+  assert.ok(today.obligationGraph);
+
+  const forecast = await getForecast({ days: 45 });
+  assert.equal(forecast.assumptions.obligationGraph.complete, false);
+  assert.ok(forecast.warnings.some((warning) => warning.includes('withheld')));
+  assert.equal(forecast.events.filter((event) => event.kind === 'bill').length, 0);
+});
+
+test('explicit current_balance policy produces parity between graph reservations and Safe-to-Spend', async () => {
+  const fixture = fixtures.buildFixture({ cardBalance: -900 });
+  await bootstrap(fixture, {}, {
+    'acc-credit': {
+      role: 'credit_card',
+      creditLiabilityCoverage: 'current_balance',
+      paymentRecurringKey: 'credit-card-payment',
+      fundingAccountId: 'acc-check',
+    },
+  });
+  writeJson(process.env.RECURRING_OVERRIDES_PATH, {
+    'credit card payment': { forced: true, isBill: true },
+  });
+  const today = await getToday();
+  assert.equal(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.creditCardCoverageUnknown), false);
+});
+
+test('default credit-card policy keeps credit_card_coverage_unknown for old clients', async () => {
+  const fixture = fixtures.buildFixture({ cardBalance: -900 });
+  await bootstrap(fixture);
+  const today = await getToday();
+  assert.ok(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.creditCardCoverageUnknown));
+  assert.equal(today.liquidity.safeToSpend.value, null);
+});

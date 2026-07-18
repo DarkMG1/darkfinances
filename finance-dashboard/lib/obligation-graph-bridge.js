@@ -8,24 +8,22 @@ const {
   PROVENANCE,
 } = require('./domain/classification');
 const {
+  COVERAGE_MODE,
+  liabilityCycleKey,
+  resolveAccountCreditPolicy,
+  resolvePaymentLink,
+} = require('./domain/credit-liability-policy');
+const {
+  billDurableIdentity,
+  buildBillCategoryIndex,
+  isBillBackedCategory,
+  recurringDurableIdentity,
+} = require('./domain/obligation-identities');
+const {
   inferRecurrenceSchedule,
   projectOccurrences,
 } = require('./recurrence');
 const { OBLIGATION_REASON } = require('./domain/obligation-graph');
-
-const BILL_CAT = /(util|electric|power|energy|\bgas\b|water|sewer|trash|internet|cable|phone|mobile|wireless|insuranc|rent|mortgage|\bloan|subscription|membership|fitness|gym|\bhealth|software|hosting|cloud|stream|donat|charit)/i;
-
-function recurringDurableIdentity(key) {
-  return `recurring:${key}`;
-}
-
-function billDurableIdentity(key, dueDate) {
-  return `bill:${key}|${dueDate}`;
-}
-
-function incomeDurableIdentity(key) {
-  return `income:${key}`;
-}
 
 function buildRecurringProjections(item, { windowStart, windowEnd, today }) {
   if (item.status !== 'active') return { projectedOccurrences: [], scheduleUncertain: false };
@@ -70,16 +68,16 @@ function buildIncomeProjections(stream, { windowStart, windowEnd, today }) {
   };
 }
 
-function buildBudgetReservations({ budgets, groups }) {
+function buildBudgetReservations({ budgets, billCategoryIds = new Set() }) {
   const reservations = [];
   const incompleteReasons = [];
   if (budgets?.supported === false) {
     incompleteReasons.push('budget_data_unavailable');
     return { reservations, incompleteReasons };
   }
-  for (const group of groups || budgets?.groups || []) {
+  for (const group of budgets?.groups || []) {
     for (const category of group.categories || []) {
-      if (BILL_CAT.test(`${group.name || ''} ${category.name || ''}`)) continue;
+      if (billCategoryIds.has(category.id)) continue;
       const remaining = Number(category.remaining);
       if (!Number.isFinite(remaining) || remaining <= 0) continue;
       reservations.push({
@@ -94,34 +92,67 @@ function buildBudgetReservations({ budgets, groups }) {
   return { reservations, incompleteReasons };
 }
 
-function buildCreditLiabilities({ accounts, recurringItems, operatingAccountIds }) {
+function buildCreditLiabilities({
+  accounts = [],
+  accountOverrides = {},
+  recurring = {},
+  operatingAccountIds = [],
+  financeDate,
+}) {
   const liabilities = [];
   const fundingAccountsByLiability = {};
+  const policies = {};
+  const recurringItems = [...(recurring.items || []), ...(recurring.hiddenItems || [])];
   const primaryOperating = [...operatingAccountIds][0] || null;
+
   for (const account of accounts || []) {
-    if (account.closed || account.hidden || account.role !== 'credit_card') continue;
-    const balanceCents = toCents(Number(account.balance) || 0);
-    if (balanceCents >= 0) continue;
-    const paymentRecurring = (recurringItems || []).find((item) =>
-      item.status === 'active'
-      && item.isBill
-      && /card|credit|payment/i.test(`${item.payee || ''} ${item.category || ''}`));
-    let paymentDueDate = null;
-    if (paymentRecurring?.nextRenewal) paymentDueDate = paymentRecurring.nextRenewal;
-    if (!paymentDueDate && paymentRecurring?.projectedOccurrences?.[0]?.date) {
-      paymentDueDate = paymentRecurring.projectedOccurrences[0].date;
+    const override = accountOverrides[account.id] || {};
+    const policy = resolveAccountCreditPolicy({ ...account, financeDate }, override);
+    policies[account.id] = policy;
+    if (policy.mode === COVERAGE_MODE.UNKNOWN) continue;
+    if (policy.excluded || !policy.eligible) continue;
+
+    const link = policy.paymentRecurringKey
+      ? resolvePaymentLink(recurringItems, policy.paymentRecurringKey)
+      : { linked: false, ambiguous: false, item: null };
+    if (policy.paymentRecurringKey && (!link.linked || link.ambiguous)) {
+      liabilities.push({
+        durableIdentity: `liability:credit:${account.id}`,
+        accountId: account.id,
+        name: account.name,
+        excluded: false,
+        eligible: true,
+        quarantineReasons: [OBLIGATION_REASON.liabilityUnresolved],
+        paymentRecurringKey: policy.paymentRecurringKey,
+      });
+      continue;
     }
-    if (primaryOperating) fundingAccountsByLiability[account.id] = primaryOperating;
+
+    const paymentDueDate = policy.paymentDueDate
+      || link.item?.nextRenewal
+      || link.item?.projectedOccurrences?.[0]?.date
+      || null;
+    const fundingAccountId = policy.fundingAccountId || primaryOperating;
+    if (fundingAccountId) fundingAccountsByLiability[account.id] = fundingAccountId;
+
     liabilities.push({
       durableIdentity: `liability:credit:${account.id}`,
       accountId: account.id,
       name: account.name,
-      statementBalanceCents: balanceCents,
+      excluded: false,
+      eligible: policy.eligible,
+      obligationCents: policy.obligationCents,
+      currentBalanceCents: policy.currentBalanceCents,
+      coverageKind: policy.coverageKind,
       paymentDueDate,
-      fundingAccountId: primaryOperating,
+      paymentRecurringKey: policy.paymentRecurringKey || null,
+      fundingAccountId,
+      cycleKey: paymentDueDate ? liabilityCycleKey(account.id, paymentDueDate) : null,
+      quarantineReasons: policy.quarantineReasons || [],
     });
   }
-  return { liabilities, fundingAccountsByLiability };
+
+  return { liabilities, fundingAccountsByLiability, policies };
 }
 
 function buildManualDebts(debts) {
@@ -149,21 +180,33 @@ function buildManualDebts(debts) {
   });
 }
 
-function buildBillOccurrences({ bills }) {
-  return (bills || []).map((bill) => ({
-    durableIdentity: billDurableIdentity(bill.key, bill.dueDate),
-    id: bill.id,
-    key: bill.key,
-    payee: bill.payee,
-    dueDate: bill.dueDate,
-    amountCents: toCents(Math.abs(Number(bill.amount) || 0)),
-    paid: !!bill.paid,
-    provenance: bill.matched ? 'known' : 'inferred',
-    scheduleUncertain: false,
-  }));
+function buildBillOccurrences({ bills, liabilityByPaymentKey = new Map() }) {
+  return (bills || []).map((bill) => {
+    const liability = liabilityByPaymentKey.get(bill.key);
+    return {
+      durableIdentity: billDurableIdentity(bill.key, bill.dueDate),
+      id: bill.id,
+      key: bill.key,
+      payee: bill.payee,
+      dueDate: bill.dueDate,
+      amountCents: toCents(Math.abs(Number(bill.amount) || 0)),
+      paid: !!bill.paid,
+      provenance: bill.matched ? 'known' : 'inferred',
+      scheduleUncertain: false,
+      liabilityAccountId: liability?.accountId || null,
+      liabilityCycleKey: liability?.cycleKey && liability?.paymentDueDate === bill.dueDate
+        ? liability.cycleKey
+        : null,
+    };
+  });
 }
 
-function buildGraphTransactionInputs(rows, catInfo, { windowStart, windowEnd, accountRolesById = {} }) {
+function buildGraphTransactionInputs(rows, catInfo, {
+  windowStart,
+  windowEnd,
+  accountRolesById = {},
+  creditAccountIds = new Set(),
+}) {
   const transferIndex = buildTransferIndex(rows);
   const transfers = [];
   const economicTransactions = [];
@@ -184,16 +227,20 @@ function buildGraphTransactionInputs(rows, catInfo, { windowStart, windowEnd, ac
         const dedupeKey = `transfer:${linkId}:${leaf.transferIdentity?.accountId || row.accountId}`;
         if (seenTransferKeys.has(dedupeKey)) continue;
         seenTransferKeys.add(dedupeKey);
+        const toAccountId = leaf.amount < 0
+          ? (leaf.transferIdentity?.counterpartAccountId || null)
+          : row.accountId;
         transfers.push({
           durableIdentity: `transfer:${linkId}`,
           linkId,
           date,
           amountCents: leaf.amount,
           fromAccountId: leaf.amount < 0 ? row.accountId : (leaf.transferIdentity?.counterpartAccountId || row.accountId),
-          toAccountId: leaf.amount < 0 ? (leaf.transferIdentity?.counterpartAccountId || null) : row.accountId,
+          toAccountId,
           label: `Transfer ${linkId}`,
           ambiguous: false,
           provenance: 'actual',
+          fundsLiabilityAccountId: toAccountId && creditAccountIds.has(toAccountId) ? toAccountId : null,
         });
         continue;
       }
@@ -262,11 +309,33 @@ function buildReimbursementExpectations({ reimb, linksAmbiguous = false, allocat
   return items;
 }
 
+function collectBillCategoryIds(recurring = {}, budgets = {}) {
+  const billIndex = buildBillCategoryIndex(recurring);
+  const ids = new Set([...billIndex.byCategoryId.keys()]);
+  for (const group of budgets?.groups || []) {
+    for (const category of group.categories || []) {
+      if (billIndex.byCategoryName.has(String(category.name || '').toLowerCase())) {
+        ids.add(category.id);
+      }
+    }
+  }
+  return ids;
+}
+
+function liabilityByPaymentKeyMap(liabilities = []) {
+  const map = new Map();
+  for (const liability of liabilities) {
+    if (liability.paymentRecurringKey) map.set(liability.paymentRecurringKey, liability);
+  }
+  return map;
+}
+
 function assembleObligationGraphInputs({
   financeDate,
   windowStart,
   windowEnd,
   accounts = [],
+  accountOverrides = {},
   recurring = {},
   income = {},
   bills = {},
@@ -289,8 +358,9 @@ function assembleObligationGraphInputs({
       isBill: !!item.isBill,
       forced: !!item.forced,
       status: item.status,
+      categoryId: item.categoryId || null,
       projectionUncertain: !!item.projectionUncertain,
-      scheduleUncertain: item.isBill ? false : projection.scheduleUncertain,
+      scheduleUncertain: item.isBill ? !!item.projectionUncertain : projection.scheduleUncertain,
       projectedOccurrences: item.isBill ? [] : projection.projectedOccurrences,
       provenance: item.forced ? 'manual' : 'inferred',
     });
@@ -300,7 +370,7 @@ function assembleObligationGraphInputs({
     const projection = buildIncomeProjections(stream, { windowStart, windowEnd, today: financeDate });
     return {
       key: stream.key,
-      durableIdentity: incomeDurableIdentity(stream.key),
+      durableIdentity: `income:${stream.key}`,
       payee: stream.payee,
       active: !!stream.active,
       scheduleUncertain: projection.scheduleUncertain,
@@ -309,13 +379,21 @@ function assembleObligationGraphInputs({
     };
   });
 
-  const { reservations: budgetReservations } = buildBudgetReservations({ budgets });
+  const billCategoryIds = collectBillCategoryIds(recurring, budgets);
+  const { reservations: budgetReservations } = buildBudgetReservations({ budgets, billCategoryIds });
   const operatingIds = new Set(operatingAccountIds);
-  const { liabilities: creditLiabilities, fundingAccountsByLiability } = buildCreditLiabilities({
+  const {
+    liabilities: creditLiabilities,
+    fundingAccountsByLiability,
+    policies: liabilityPolicies,
+  } = buildCreditLiabilities({
     accounts,
-    recurringItems: [...(recurring.items || []), ...(recurring.hiddenItems || [])],
+    accountOverrides,
+    recurring,
     operatingAccountIds: operatingIds,
+    financeDate,
   });
+  const liabilityByPaymentKey = liabilityByPaymentKeyMap(creditLiabilities);
 
   const linksAmbiguous = (reimbLinks || []).some((link) => link?.ambiguous === true);
   const allocationIncomplete = (reimbLinks || []).some((link) => link?.allocationIncomplete === true);
@@ -326,12 +404,14 @@ function assembleObligationGraphInputs({
     windowStart,
     windowEnd,
     recurringItems,
-    billOccurrences: buildBillOccurrences({ bills: bills.bills }),
+    billOccurrences: buildBillOccurrences({ bills: bills.bills, liabilityByPaymentKey }),
     incomeStreams,
     manualDebts: buildManualDebts(debts),
     creditLiabilities,
+    liabilityPolicies,
     fundingAccountsByLiability,
     operatingAccountIds: [...operatingIds],
+    billCategoryIds: [...billCategoryIds],
     budgetReservations,
     reimbursementExpectations: buildReimbursementExpectations({
       reimb,
@@ -347,7 +427,8 @@ function assembleObligationGraphInputs({
       toAccountId: transfer.toAccountId,
       label: transfer.label,
       ambiguous: !!transfer.ambiguous,
-      provenance: 'actual',
+      provenance: transfer.provenance || 'actual',
+      fundsLiabilityAccountId: transfer.fundsLiabilityAccountId || null,
     })),
     economicTransactions: (economicTransactions || []).map((txn) => ({
       durableIdentity: `txn:${txn.transactionId}`,
@@ -361,9 +442,9 @@ function assembleObligationGraphInputs({
 }
 
 module.exports = {
-  BILL_CAT,
   assembleObligationGraphInputs,
   billDurableIdentity,
+  buildBillCategoryIndex,
   buildBillOccurrences,
   buildBudgetReservations,
   buildCreditLiabilities,
@@ -372,7 +453,9 @@ module.exports = {
   buildManualDebts,
   buildRecurringProjections,
   buildReimbursementExpectations,
-  incomeDurableIdentity,
+  collectBillCategoryIds,
+  isBillBackedCategory,
   recurringDurableIdentity,
   OBLIGATION_REASON,
+  COVERAGE_MODE,
 };

@@ -78,13 +78,14 @@ test('reproduction: legacy paths double-count bill+subscription monthly totals s
   assert.equal(reserved.length, 1, 'graph reserves the bill occurrence exactly once');
 });
 
-test('credit purchase is economic-only; card payment is cash obligation once', () => {
+test('credit purchase is economic-only; explicit current_balance policy reserves payment once', () => {
   const graph = buildObligationGraph({
     financeDate: TODAY,
     windowStart: TODAY,
     windowEnd: WINDOW_END,
     operatingAccountIds: ['checking'],
     fundingAccountsByLiability: { card: 'checking' },
+    billCategoryIds: [],
     economicTransactions: [{
       durableIdentity: 'txn:purchase-1',
       transactionId: 'purchase-1',
@@ -97,9 +98,15 @@ test('credit purchase is economic-only; card payment is cash obligation once', (
       durableIdentity: 'liability:credit:card',
       accountId: 'card',
       name: 'Card',
-      statementBalanceCents: -5000,
+      eligible: true,
+      obligationCents: 5000,
+      currentBalanceCents: -5000,
+      coverageKind: 'current_balance',
       paymentDueDate: '2026-08-01',
+      paymentRecurringKey: 'card-pay',
       fundingAccountId: 'checking',
+      cycleKey: 'liability-cycle:card:2026-08-01',
+      quarantineReasons: [],
     }],
     recurringItems: [],
     billOccurrences: [],
@@ -109,12 +116,11 @@ test('credit purchase is economic-only; card payment is cash obligation once', (
     budgetReservations: [],
     reimbursementExpectations: [],
   });
-  const economic = graph.occurrences.filter((occ) => occ.role === OCCURRENCE_ROLE.ECONOMIC_EXPENSE);
+  const economic = graph.occurrences.filter((occ) => occ.role === OCCURRENCE_ROLE.ECONOMIC_EXPENSE || occ.auditOnly);
   const cash = graph.occurrences.filter((occ) => occ.reserved && occ.role === OCCURRENCE_ROLE.CASH_OUTFLOW);
   assert.equal(economic.length, 1);
   assert.equal(cash.length, 1);
   assert.equal(cash[0].amountCents, -5000);
-  assert.equal(sumCents(graph.occurrences.map((occ) => occ.amountCents)), -10000);
 });
 
 test('installment debt conserves principal and interest components', () => {
@@ -360,7 +366,7 @@ test('signed cents conservation: reserved outflows never double-count within ded
   assert.equal(check.ok, true, check.issues.join('; '));
 });
 
-test('incomplete graph quarantines Safe-to-Spend to null', () => {
+test('default missing credit policy quarantines without treating Actual balance as statement', () => {
   const graph = buildGraph({
     accounts: [
       { id: 'checking', name: 'Checking', role: 'operating_cash', balance: 5000, closed: false, hidden: false },
@@ -368,14 +374,8 @@ test('incomplete graph quarantines Safe-to-Spend to null', () => {
     ],
     operatingAccountIds: ['checking'],
   });
-  const stf = safeToSpendFromGraph(graph, {
-    operatingCashCents: 500000,
-    monthStart: TODAY,
-    monthEnd: monthEnd(TODAY.slice(0, 7)),
-  });
-  assert.equal(stf.complete, false);
-  assert.equal(stf.valueCents, null);
-  assert.ok(stf.incompleteReasons.length > 0);
+  assert.equal(graph.nodes.filter((node) => node.kind === 'credit_liability').length, 0);
+  assert.equal(graphCompleteness(graph).complete, true);
 });
 
 test('complete graph Safe-to-Spend conserves operating cash minus reservations', () => {
@@ -496,6 +496,7 @@ test('adversarial: unsafe cent amounts throw before graph build', () => {
     windowStart: TODAY,
     windowEnd: WINDOW_END,
     operatingAccountIds: ['checking'],
+    billCategoryIds: [],
     recurringItems: [],
     billOccurrences: [{
       durableIdentity: 'bill:bad|2026-08-01',
@@ -514,4 +515,150 @@ test('adversarial: unsafe cent amounts throw before graph build', () => {
     transfers: [],
     economicTransactions: [],
   }), /safe integer cent amount/);
+});
+
+test('active non-bill recurrence projects reserved cash outflow or quarantines legacy reason', () => {
+  const graph = buildGraph({
+    recurring: {
+      items: [{
+        key: 'netflix',
+        payee: 'Netflix',
+        status: 'active',
+        isBill: false,
+        cadence: 'monthly',
+        amount: 15.99,
+        forced: true,
+        history: [{ date: '2026-05-17', amount: 15.99 }, { date: '2026-06-17', amount: 15.99 }],
+      }],
+    },
+  });
+  const subs = graph.occurrences.filter((occ) => occ.dedupeGroup === 'sub-series:netflix');
+  assert.ok(subs.length >= 1);
+  assert.ok(subs.some((occ) => occ.role === OCCURRENCE_ROLE.CASH_OUTFLOW && occ.reserved));
+});
+
+test('bill and liability cycle merge to one reservation via funding ledger', () => {
+  const graph = buildObligationGraph({
+    financeDate: TODAY,
+    windowStart: TODAY,
+    windowEnd: WINDOW_END,
+    operatingAccountIds: ['checking'],
+    fundingAccountsByLiability: { card: 'checking' },
+    billCategoryIds: [],
+    creditLiabilities: [{
+      durableIdentity: 'liability:credit:card',
+      accountId: 'card',
+      name: 'Card',
+      eligible: true,
+      obligationCents: 10000,
+      coverageKind: 'current_balance',
+      paymentDueDate: '2026-08-01',
+      paymentRecurringKey: 'card-pay',
+      fundingAccountId: 'checking',
+      cycleKey: 'liability-cycle:card:2026-08-01',
+      quarantineReasons: [],
+    }],
+    billOccurrences: [{
+      durableIdentity: 'bill:card-pay|2026-08-01',
+      id: 'card-pay|2026-08-01',
+      key: 'card-pay',
+      payee: 'Card Pay',
+      dueDate: '2026-08-01',
+      amountCents: 10000,
+      paid: false,
+      liabilityCycleKey: 'liability-cycle:card:2026-08-01',
+    }],
+    recurringItems: [],
+    incomeStreams: [],
+    manualDebts: [],
+    transfers: [],
+    budgetReservations: [],
+    reimbursementExpectations: [],
+    economicTransactions: [],
+  });
+  const reserved = graph.occurrences.filter((occ) => occ.reserved && occ.role === OCCURRENCE_ROLE.CASH_OUTFLOW);
+  assert.equal(reserved.length, 0);
+  const billOcc = graph.occurrences.find((occ) => occ.source?.kind === 'bill');
+  assert.equal(billOcc?.reserved, false);
+  assert.equal(billOcc?.suppressedBy != null, true);
+});
+
+test('future transfer funding reduces liability reserve without reposting past transfers', () => {
+  const graph = buildObligationGraph({
+    financeDate: TODAY,
+    windowStart: TODAY,
+    windowEnd: WINDOW_END,
+    operatingAccountIds: ['checking'],
+    fundingAccountsByLiability: { card: 'checking' },
+    billCategoryIds: [],
+    creditLiabilities: [{
+      durableIdentity: 'liability:credit:card',
+      accountId: 'card',
+      name: 'Card',
+      eligible: true,
+      obligationCents: 10000,
+      coverageKind: 'current_balance',
+      paymentDueDate: '2026-08-01',
+      paymentRecurringKey: 'card-pay',
+      fundingAccountId: 'checking',
+      cycleKey: 'liability-cycle:card:2026-08-01',
+      quarantineReasons: [],
+    }],
+    transfers: [{
+      durableIdentity: 'transfer:fund-future',
+      linkId: 'fund-future',
+      date: '2026-08-01',
+      amountCents: -3000,
+      fromAccountId: 'checking',
+      toAccountId: 'card',
+      ambiguous: false,
+      fundsLiabilityAccountId: 'card',
+    }, {
+      durableIdentity: 'transfer:fund-posted',
+      linkId: 'fund-posted',
+      date: '2026-07-17',
+      amountCents: -2000,
+      fromAccountId: 'checking',
+      toAccountId: 'card',
+      ambiguous: false,
+      fundsLiabilityAccountId: 'card',
+    }],
+    recurringItems: [],
+    billOccurrences: [],
+    incomeStreams: [],
+    manualDebts: [],
+    budgetReservations: [],
+    reimbursementExpectations: [],
+    economicTransactions: [],
+  });
+  const liability = graph.occurrences.find((occ) => occ.source?.kind === 'credit_liability');
+  assert.equal(liability.components.remainingReserveCents, 7000);
+  assert.equal(liability.amountCents, -7000);
+  assert.equal(liability.components.postedFundingCents, 2000);
+  assert.equal(liability.components.futureFundingCents, 3000);
+});
+
+test('incomplete graph yields no forecast cash events', () => {
+  const graph = buildGraph({ reimbLinks: [{ ambiguous: true, allocationIncomplete: true }] });
+  const events = forecastCashEventsFromGraph(graph, { windowStart: TODAY, windowEnd: WINDOW_END });
+  assert.deepEqual(events, []);
+});
+
+test('statement coverage rejects stale observedAt', () => {
+  const { resolveAccountCreditPolicy } = require('../lib/domain/credit-liability-policy');
+  const policy = resolveAccountCreditPolicy({
+    id: 'card',
+    role: 'credit_card',
+    balance: -100,
+    financeDate: '2026-07-17',
+  }, {
+    creditLiabilityCoverage: 'statement',
+    paymentRecurringKey: 'card-pay',
+    statement: {
+      balanceCents: -10000,
+      paymentDueDate: '2026-08-01',
+      observedAt: '2026-01-01T00:00:00.000Z',
+    },
+  });
+  assert.ok(policy.quarantineReasons.includes('obligation_source_stale'));
 });

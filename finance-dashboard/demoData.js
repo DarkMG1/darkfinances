@@ -109,8 +109,12 @@ function buildSub(payee, category, amount, daysSinceLast, occ, priceFrom) {
   };
 }
 function activeSubs() {
+  const cardPayment = buildSub('Sapphire Card Payment', 'Transfer', 1240.3, 4, 6);
+  cardPayment.isBill = true;
+  cardPayment.key = recurKey('Sapphire Card Payment');
   return [
     buildSub('Skyline Apartments', 'Rent', 2100, 2, 12),
+    cardPayment,
     buildSub('Verizon Wireless', 'Phone', 85.0, 6, 11),
     buildSub('City Fiber Internet', 'Internet', 69.99, 14, 10),
     buildSub('Adobe Creative Cloud', 'Software', 54.99, 12, 9),
@@ -179,6 +183,13 @@ function today() {
     windowStart: financeDate,
     windowEnd: monthEndDate,
     accounts: allAccounts,
+    accountOverrides: {
+      'acc-credit': {
+        creditLiabilityCoverage: 'current_balance',
+        paymentRecurringKey: 'sapphire card payment',
+        fundingAccountId: 'acc-check',
+      },
+    },
     recurring: recurringData,
     income: incomeData,
     bills: upcoming,
@@ -203,11 +214,16 @@ function today() {
     goals: goals(),
     spendingCompleteness: currentSpending.current?.completeness,
     obligationGraph: graph,
+    liabilityPolicies: graphInputs.liabilityPolicies,
   });
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',
-    value: stfFromGraph.complete ? stfFromGraph.valueCents / 100 : null,
-    valueCents: stfFromGraph.valueCents,
+    value: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? stfFromGraph.valueCents / 100
+      : null,
+    valueCents: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? stfFromGraph.valueCents
+      : null,
     complete: incompleteReasons.length === 0,
     incompleteReasons,
     asOf,

@@ -3,6 +3,24 @@
 export type Nullish<T> = T | null | undefined;
 export type AccountRole = 'operating_cash' | 'protected_savings' | 'credit_card' | 'loan' | 'investment' | 'excluded' | 'unknown';
 
+export type CreditLiabilityCoverage = 'exclude' | 'current_balance' | 'statement';
+
+export interface AccountCreditStatementOverride {
+  balanceCents: number;
+  paymentDueDate: string;
+  observedAt: string;
+}
+
+export interface AccountOverrideEntry {
+  name?: string;
+  hidden?: boolean;
+  role?: AccountRole;
+  creditLiabilityCoverage?: CreditLiabilityCoverage;
+  paymentRecurringKey?: string;
+  fundingAccountId?: string;
+  statement?: AccountCreditStatementOverride;
+}
+
 export interface Account {
   id: string;
   name: string;

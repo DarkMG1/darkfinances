@@ -10,6 +10,8 @@ const OBLIGATION_REASON = Object.freeze({
   recurrenceUnresolved: 'obligation_recurrence_unresolved',
   fundingAccountMissing: 'obligation_funding_account_missing',
   liabilityUnresolved: 'obligation_liability_unresolved',
+  liabilityFundingMismatch: 'obligation_liability_funding_mismatch',
+  identityOverlapAmbiguous: 'obligation_identity_overlap_ambiguous',
   transferAmbiguous: 'obligation_transfer_ambiguous',
   reimbursementAllocationIncomplete: 'obligation_reimbursement_allocation_incomplete',
   sourceStale: 'obligation_source_stale',
@@ -21,8 +23,10 @@ const OBLIGATION_REASON = Object.freeze({
 const OBLIGATION_REASON_ORDER = Object.freeze([
   OBLIGATION_REASON.duplicateIdentity,
   OBLIGATION_REASON.occurrenceCapExceeded,
+  OBLIGATION_REASON.identityOverlapAmbiguous,
   OBLIGATION_REASON.recurrenceUnresolved,
   OBLIGATION_REASON.liabilityUnresolved,
+  OBLIGATION_REASON.liabilityFundingMismatch,
   OBLIGATION_REASON.fundingAccountMissing,
   OBLIGATION_REASON.transferAmbiguous,
   OBLIGATION_REASON.reimbursementAllocationIncomplete,
@@ -169,6 +173,8 @@ function buildObligationGraph(rawInput = {}) {
   for (const txn of input.economicTransactions) ingestEconomicTransaction(registry, state, txn, input);
 
   dedupeOverlappingSources(registry, state);
+  reconcileBillBudgetOverlap(registry, state, input);
+  reconcileLiabilityFundingLedger(registry, state, input);
 
   if (registry.duplicates.length) {
     state.incompleteReasons = mergeReasons([state.incompleteReasons, [OBLIGATION_REASON.duplicateIdentity]]);
@@ -179,7 +185,18 @@ function buildObligationGraph(rawInput = {}) {
 
   const nodes = sortByKeys(registry.nodes, ['durableIdentity', 'id']);
   const occurrences = sortByKeys(state.occurrences, ['date', 'id']);
-  const edges = sortByKeys(state.edges, ['id']);
+  const edges = sortByKeys(
+    (state.occurrences || [])
+      .flatMap((occ) => (occ.fundingLinks || []).map((link, index) => ({
+        id: stableEdgeId(occ.id, `${link.kind}:${link.accountId || index}`, EDGE_KIND.LIABILITY_TO_PAYMENT),
+        kind: link.kind === 'liability_funding' ? EDGE_KIND.TRANSFER_INTERNAL : EDGE_KIND.LIABILITY_TO_PAYMENT,
+        fromNodeId: occ.nodeId,
+        toAccountId: link.accountId || null,
+        amountCents: Math.abs(link.amountCents || occ.amountCents || 0),
+        explanationRef: occ.id,
+      }))),
+    ['id'],
+  );
 
   const graph = {
     version: OBLIGATION_GRAPH_VERSION,
@@ -206,6 +223,8 @@ function normalizeBuildInput(raw) {
     incomeStreams: sortByKeys(raw.incomeStreams || [], ['durableIdentity', 'key']),
     manualDebts: sortByKeys(raw.manualDebts || [], ['durableIdentity', 'id']),
     creditLiabilities: sortByKeys(raw.creditLiabilities || [], ['durableIdentity', 'accountId']),
+    liabilityPolicies: raw.liabilityPolicies || {},
+    billCategoryIds: new Set(raw.billCategoryIds || []),
     transfers: sortByKeys(raw.transfers || [], ['durableIdentity', 'linkId']),
     budgetReservations: sortByKeys(raw.budgetReservations || [], ['durableIdentity', 'categoryId']),
     reimbursementExpectations: sortByKeys(raw.reimbursementExpectations || [], ['durableIdentity', 'id']),
@@ -234,7 +253,7 @@ function ingestRecurring(registry, state, item, input) {
 
   for (const projected of item.projectedOccurrences || []) {
     if (projected.date < input.windowStart || projected.date > input.windowEnd) continue;
-    const role = OCCURRENCE_ROLE.ECONOMIC_EXPENSE;
+    const role = item.isBill ? OCCURRENCE_ROLE.ECONOMIC_EXPENSE : OCCURRENCE_ROLE.CASH_OUTFLOW;
     registerOccurrence(state, {
       id: stableOccurrenceId(durableIdentity, projected.date, role),
       nodeId: node.id,
@@ -242,10 +261,13 @@ function ingestRecurring(registry, state, item, input) {
       date: projected.date,
       amountCents: requireSafeCents(-Math.abs(projected.amountCents), 'projected.amountCents'),
       role,
-      reserved: false,
+      reserved: !item.isBill,
       paid: !!projected.paid,
+      auditOnly: !!item.isBill,
       source: { kind: SOURCE_KIND.RECURRING, key: item.key, provenance: projected.provenance || 'inferred' },
-      explanation: [`Recurring ${item.isBill ? 'bill (economic)' : 'subscription'} from ${item.key}`],
+      explanation: item.isBill
+        ? [`Recurring bill series ${item.key} (economic audit only; cash from bill occurrence)`]
+        : [`Subscription cash outflow ${item.key}`],
       dedupeGroup: item.isBill ? `bill-series:${item.key}` : `sub-series:${item.key}`,
     });
   }
@@ -260,13 +282,14 @@ function ingestBillOccurrence(registry, state, bill, input) {
     label: bill.payee || bill.key,
     source: { kind: SOURCE_KIND.BILL, id: bill.id, key: bill.key, provenance: bill.provenance || 'inferred' },
     incompleteReasons: [],
-    metadata: { dueDate: bill.dueDate },
+    metadata: { dueDate: bill.dueDate, liabilityAccountId: bill.liabilityAccountId || null },
   });
   if (bill.scheduleUncertain) {
     node.incompleteReasons = mergeReasons([node.incompleteReasons, [OBLIGATION_REASON.recurrenceUnresolved]]);
     return;
   }
   if (bill.dueDate < input.windowStart || bill.dueDate > input.windowEnd) return;
+  const dedupeGroup = bill.liabilityCycleKey || `bill-series:${bill.key}`;
   registerOccurrence(state, {
     id: stableOccurrenceId(durableIdentity, bill.dueDate, OCCURRENCE_ROLE.CASH_OUTFLOW),
     nodeId: node.id,
@@ -274,11 +297,16 @@ function ingestBillOccurrence(registry, state, bill, input) {
     date: bill.dueDate,
     amountCents: requireSafeCents(-Math.abs(bill.amountCents), 'bill.amountCents'),
     role: OCCURRENCE_ROLE.CASH_OUTFLOW,
-    reserved: !bill.paid,
+    reserved: !bill.paid && !bill.liabilityCycleKey,
     paid: !!bill.paid,
     source: { kind: SOURCE_KIND.BILL, id: bill.id, key: bill.key, provenance: bill.provenance || 'inferred' },
-    explanation: [`Bill due ${bill.dueDate} for ${bill.key}`],
-    dedupeGroup: `bill-series:${bill.key}`,
+    explanation: bill.liabilityCycleKey
+      ? [`Bill payment component for liability cycle ${bill.liabilityCycleKey}`]
+      : [`Bill due ${bill.dueDate} for ${bill.key}`],
+    dedupeGroup,
+    components: bill.liabilityCycleKey
+      ? { billCents: Math.abs(bill.amountCents), liabilityCycleKey: bill.liabilityCycleKey }
+      : undefined,
   });
 }
 
@@ -358,18 +386,32 @@ function ingestManualDebt(registry, state, debt, input) {
 }
 
 function ingestCreditLiability(registry, state, liability, input) {
+  if (liability.excluded) return;
   const durableIdentity = liability.durableIdentity || `liability:credit:${liability.accountId}`;
   const node = registerNode(registry, {
     id: stableNodeId(durableIdentity),
     durableIdentity,
     kind: NODE_KIND.CREDIT_LIABILITY,
     label: liability.name || liability.accountId,
-    source: { kind: SOURCE_KIND.CREDIT_LIABILITY, accountId: liability.accountId, provenance: 'actual' },
-    incompleteReasons: [],
-    metadata: { statementBalanceCents: liability.statementBalanceCents },
+    source: {
+      kind: SOURCE_KIND.CREDIT_LIABILITY,
+      accountId: liability.accountId,
+      provenance: liability.coverageKind || 'policy',
+      paymentRecurringKey: liability.paymentRecurringKey || null,
+    },
+    incompleteReasons: [...(liability.quarantineReasons || [])],
+    metadata: {
+      coverageKind: liability.coverageKind || null,
+      currentBalanceCents: liability.currentBalanceCents,
+      obligationCents: liability.obligationCents,
+      paymentDueDate: liability.paymentDueDate || null,
+      cycleKey: liability.cycleKey || null,
+    },
   });
-  const balanceCents = requireSafeCents(liability.statementBalanceCents, 'statementBalanceCents');
-  if (balanceCents >= 0) return;
+
+  if ((liability.quarantineReasons || []).length) return;
+  if (!liability.eligible || !Number.isSafeInteger(liability.obligationCents) || liability.obligationCents <= 0) return;
+
   const fundingAccountId = liability.fundingAccountId || input.fundingAccountsByLiability[liability.accountId];
   if (!fundingAccountId || !input.operatingAccountIds.has(fundingAccountId)) {
     node.incompleteReasons = mergeReasons([node.incompleteReasons, [
@@ -384,25 +426,38 @@ function ingestCreditLiability(registry, state, liability, input) {
     return;
   }
   if (dueDate < input.windowStart || dueDate > input.windowEnd) return;
+
+  const cycleKey = liability.cycleKey || `liability-cycle:${liability.accountId}:${dueDate}`;
   registerOccurrence(state, {
     id: stableOccurrenceId(durableIdentity, dueDate, OCCURRENCE_ROLE.CASH_OUTFLOW),
     nodeId: node.id,
     durableIdentity,
     date: dueDate,
-    amountCents: balanceCents,
+    amountCents: -liability.obligationCents,
     role: OCCURRENCE_ROLE.CASH_OUTFLOW,
     reserved: true,
     paid: false,
-    source: { kind: SOURCE_KIND.CREDIT_LIABILITY, accountId: liability.accountId, provenance: 'actual' },
-    explanation: [`Credit card statement balance for ${liability.accountId}`, 'Card purchase spending is economic-only; payment is cash obligation'],
-    dedupeGroup: `liability:credit:${liability.accountId}`,
-  });
-  state.edges.push({
-    id: stableEdgeId(node.id, stableNodeId(`funding:${fundingAccountId}`), EDGE_KIND.LIABILITY_TO_PAYMENT),
-    kind: EDGE_KIND.LIABILITY_TO_PAYMENT,
-    fromNodeId: node.id,
-    toAccountId: fundingAccountId,
-    amountCents: Math.abs(balanceCents),
+    source: {
+      kind: SOURCE_KIND.CREDIT_LIABILITY,
+      accountId: liability.accountId,
+      provenance: liability.coverageKind || 'policy',
+      paymentRecurringKey: liability.paymentRecurringKey || null,
+    },
+    explanation: [
+      liability.coverageKind === 'statement'
+        ? `Manual statement coverage for ${liability.accountId}`
+        : `Current balance coverage for ${liability.accountId}`,
+      'Card purchase spending is economic-only; payment is cash obligation',
+    ],
+    dedupeGroup: cycleKey,
+    components: {
+      liabilityCents: liability.obligationCents,
+      billCents: 0,
+      futureFundingCents: 0,
+      postedFundingCents: 0,
+      remainingReserveCents: liability.obligationCents,
+    },
+    fundingLinks: [{ kind: 'funding_account', accountId: fundingAccountId }],
   });
 }
 
@@ -433,16 +488,14 @@ function ingestTransfer(registry, state, transfer, input) {
     reserved: false,
     paid: false,
     source: { kind: SOURCE_KIND.TRANSFER, linkId: transfer.linkId, provenance: transfer.provenance || 'actual' },
-    explanation: ['Internal cash movement; excluded from economic spend double-count'],
+    explanation: [
+      'Internal cash movement; excluded from economic spend double-count',
+      ...(transfer.fundsLiabilityAccountId ? [`Funds liability account ${transfer.fundsLiabilityAccountId}`] : []),
+    ],
     dedupeGroup: `transfer:${transfer.linkId}`,
-  });
-  state.edges.push({
-    id: stableEdgeId(node.id, node.id, EDGE_KIND.TRANSFER_INTERNAL),
-    kind: EDGE_KIND.TRANSFER_INTERNAL,
-    fromNodeId: node.id,
-    fromAccountId: transfer.fromAccountId,
-    toAccountId: transfer.toAccountId,
-    amountCents: Math.abs(amountCents),
+    fundingLinks: transfer.fundsLiabilityAccountId
+      ? [{ kind: 'liability_funding', accountId: transfer.fundsLiabilityAccountId, amountCents: Math.abs(amountCents) }]
+      : [],
   });
 }
 
@@ -457,6 +510,10 @@ function ingestBudgetReservation(registry, state, budget, input) {
     incompleteReasons: budget.incompleteReasons || [],
   });
   if (!Number.isSafeInteger(budget.remainingCents) || budget.remainingCents <= 0) return;
+  if (input.billCategoryIds.has(budget.categoryId)) {
+    node.incompleteReasons = mergeReasons([node.incompleteReasons, [OBLIGATION_REASON.identityOverlapAmbiguous]]);
+    return;
+  }
   registerOccurrence(state, {
     id: stableOccurrenceId(durableIdentity, input.financeDate, OCCURRENCE_ROLE.CASH_OUTFLOW),
     nodeId: node.id,
@@ -528,10 +585,95 @@ function ingestEconomicTransaction(registry, state, txn, input) {
     role,
     reserved: false,
     paid: true,
+    auditOnly: true,
     source: { kind: SOURCE_KIND.TRANSACTION, transactionId: txn.transactionId, provenance: 'actual' },
     explanation: txn.explanation || ['Historical economic activity; not a cash reservation'],
     dedupeGroup: `txn:${txn.transactionId}`,
   });
+}
+
+function reconcileBillBudgetOverlap(registry, state, input) {
+  const overlap = state.occurrences.some((occ) =>
+    occ.reserved
+    && occ.source?.kind === SOURCE_KIND.BUDGET
+    && input.billCategoryIds.has(occ.source.categoryId));
+  if (overlap) {
+    state.incompleteReasons = mergeReasons([state.incompleteReasons, [OBLIGATION_REASON.identityOverlapAmbiguous]]);
+  }
+}
+
+function reconcileLiabilityFundingLedger(registry, state, input) {
+  const financeDate = input.financeDate;
+  const liabilityOccs = state.occurrences.filter((occ) =>
+    occ.reserved
+    && occ.source?.kind === SOURCE_KIND.CREDIT_LIABILITY
+    && occ.components?.liabilityCents);
+  const transferOccs = state.occurrences.filter((occ) =>
+    occ.role === OCCURRENCE_ROLE.INTERNAL_TRANSFER && !occ.reserved);
+
+  for (const liabilityOcc of liabilityOccs) {
+    const accountId = liabilityOcc.source.accountId;
+    const cycleKey = liabilityOcc.dedupeGroup;
+    const billOcc = state.occurrences.find((occ) =>
+      occ.components?.liabilityCycleKey === cycleKey
+      || (occ.source?.kind === SOURCE_KIND.BILL
+        && occ.date === liabilityOcc.date
+        && occ.source?.key === liabilityOcc.source?.paymentRecurringKey));
+    const billCents = billOcc ? Math.abs(billOcc.amountCents) : 0;
+
+    let postedFundingCents = 0;
+    let futureFundingCents = 0;
+    for (const transfer of transferOccs) {
+      const link = (transfer.fundingLinks || []).find((item) => item.accountId === accountId);
+      if (!link) continue;
+      const amount = Math.abs(link.amountCents || transfer.amountCents || 0);
+      if (transfer.date <= financeDate) postedFundingCents = sumCents([postedFundingCents, amount]);
+      else if (transfer.date === liabilityOcc.date || transfer.date <= liabilityOcc.date) {
+        futureFundingCents = sumCents([futureFundingCents, amount]);
+      }
+    }
+
+    const obligationCents = liabilityOcc.components.liabilityCents;
+    const remainingReserveCents = sumCents([obligationCents, -billCents, -futureFundingCents]);
+    liabilityOcc.components = {
+      liabilityCents: obligationCents,
+      billCents,
+      futureFundingCents,
+      postedFundingCents,
+      remainingReserveCents,
+    };
+    liabilityOcc.explanation = [
+      ...(liabilityOcc.explanation || []),
+      `Funding ledger: obligation ${obligationCents}c, bill ${billCents}c, future funding ${futureFundingCents}c, posted ${postedFundingCents}c (already in operating cash)`,
+    ];
+
+    if (billCents > obligationCents || remainingReserveCents < 0) {
+      state.incompleteReasons = mergeReasons([state.incompleteReasons, [OBLIGATION_REASON.liabilityFundingMismatch]]);
+      const node = registry.nodes.find((item) => item.id === liabilityOcc.nodeId);
+      if (node) {
+        node.incompleteReasons = mergeReasons([node.incompleteReasons, [OBLIGATION_REASON.liabilityFundingMismatch]]);
+      }
+      liabilityOcc.reserved = false;
+      continue;
+    }
+
+    if (billOcc && billOcc.date !== liabilityOcc.date) {
+      state.incompleteReasons = mergeReasons([state.incompleteReasons, [OBLIGATION_REASON.liabilityFundingMismatch]]);
+      continue;
+    }
+
+    if (billOcc) {
+      billOcc.reserved = false;
+      billOcc.suppressedBy = liabilityOcc.id;
+      billOcc.explanation = [...(billOcc.explanation || []), 'Merged into liability-cycle funding ledger'];
+    }
+
+    liabilityOcc.amountCents = -remainingReserveCents;
+    if (remainingReserveCents === 0) {
+      liabilityOcc.reserved = false;
+      liabilityOcc.explanation = [...(liabilityOcc.explanation || []), 'Fully funded by bill and scheduled transfers'];
+    }
+  }
 }
 
 function dedupeOverlappingSources(registry, state) {
@@ -574,8 +716,11 @@ function reservedOutflowCents(graph, window) {
 }
 
 function forecastCashEventsFromGraph(graph, { windowStart, windowEnd }) {
+  const completeness = graphCompleteness(graph);
+  if (!completeness.complete) return [];
   const events = [];
   for (const occ of graph.occurrences || []) {
+    if (occ.auditOnly) continue;
     if (occ.date < windowStart || occ.date > windowEnd) continue;
     if (occ.role === OCCURRENCE_ROLE.INTERNAL_TRANSFER) continue;
     if (occ.role === OCCURRENCE_ROLE.ECONOMIC_EXPENSE || occ.role === OCCURRENCE_ROLE.ECONOMIC_INCOME) continue;
@@ -722,8 +867,8 @@ module.exports = {
   MAX_OCCURRENCES,
   OBLIGATION_REASON,
   OBLIGATION_REASON_ORDER,
-  SOURCE_KIND,
   NODE_KIND,
+  SOURCE_KIND,
   EDGE_KIND,
   OCCURRENCE_ROLE,
   buildObligationGraph,

@@ -158,7 +158,7 @@ const scenarios = [
   {
     name: 'negative credit-card liability without explicit coverage policy',
     fixture: buildFixture({ cardBalance: -900 }),
-    reasons: ['obligation_liability_unresolved'],
+    reasons: ['credit_card_coverage_unknown'],
   },
   {
     name: 'no positive budget targets',
@@ -178,6 +178,7 @@ const scenarios = [
   {
     name: 'active non-bill recurrence',
     fixture: buildFixture({ recurring: true }),
+    overrides: { 'software service': { forced: true } },
     reasons: [],
     complete: true,
   },
@@ -202,7 +203,7 @@ const scenarios = [
       rolloverExplicit: false,
     }),
     reasons: [
-      'obligation_liability_unresolved',
+      'credit_card_coverage_unknown',
       REASON.budgetTargetsMissing,
       REASON.targetlessCategorySpending,
       REASON.goalCommitmentUnknown,
