@@ -724,7 +724,7 @@ app.use((req, res, next) => {
     || req.path.startsWith('/login')
     || req.path.startsWith('/auth/')
     || isVersionedApiPath(req.path)
-    || isPublicBrowserAsset(req.path, browserAssetInventory)
+    || isPublicBrowserAsset(req.path)
   ) return next();
   requireAuth(req, res, next);
 });

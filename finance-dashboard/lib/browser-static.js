@@ -260,15 +260,18 @@ function loadBrowserAssetInventory(options = {}) {
   });
 }
 
-function isPublicBrowserAsset(requestPath, inventory = null) {
+const PUBLIC_BROWSER_PREFIXES = Object.freeze(['js/', 'css/', 'vendor/']);
+const PUBLIC_BROWSER_EXACT = Object.freeze([
+  MANIFEST_RELATIVE,
+  'login.html',
+]);
+
+function isPublicBrowserAsset(requestPath) {
   if (typeof requestPath !== 'string') return false;
   const normalized = normalizePublicPath(requestPath);
   if (!normalized) return false;
-  if (inventory) return inventory.assets.has(normalized);
-  return normalized.startsWith('js/')
-    || normalized.startsWith('css/')
-    || normalized.startsWith('vendor/')
-    || normalized === MANIFEST_RELATIVE;
+  if (PUBLIC_BROWSER_EXACT.includes(normalized)) return true;
+  return PUBLIC_BROWSER_PREFIXES.some((prefix) => normalized.startsWith(prefix));
 }
 
 function sendBrowserAsset(req, res, inventory, relativePath) {
@@ -301,6 +304,8 @@ module.exports = {
   PUBLIC_ROOT,
   PAGE_ASSETS,
   VENDOR_ASSETS,
+  PUBLIC_BROWSER_EXACT,
+  PUBLIC_BROWSER_PREFIXES,
   buildBrowserManifest,
   cacheControlFor,
   contentTypeFor,

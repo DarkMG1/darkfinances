@@ -11,6 +11,7 @@ const {
   contentTypeFor,
   createBrowserStaticMiddleware,
   expectedManifestAssetPaths,
+  isPublicBrowserAsset,
   listModuleFiles,
   loadBrowserAssetInventory,
   normalizePublicPath,
@@ -304,6 +305,22 @@ test('browser static middleware serves verified immutable bytes after on-disk ta
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
+});
+
+test('isPublicBrowserAsset uses explicit prefix allowlist, not inventory membership', () => {
+  assert.equal(isPublicBrowserAsset('/index.html'), false);
+  assert.equal(isPublicBrowserAsset('/login.html'), true);
+  assert.equal(isPublicBrowserAsset('/login'), false);
+  assert.equal(isPublicBrowserAsset('/login/extra'), false);
+  assert.equal(isPublicBrowserAsset('/js/app.js'), true);
+  assert.equal(isPublicBrowserAsset('/css/dashboard.css'), true);
+  assert.equal(isPublicBrowserAsset('/css/login.css'), true);
+  assert.equal(isPublicBrowserAsset('/vendor/chart.umd.js'), true);
+  assert.equal(isPublicBrowserAsset('/vendor/chart-js.manifest.json'), true);
+  assert.equal(isPublicBrowserAsset('/browser-manifest.json'), true);
+  assert.equal(isPublicBrowserAsset('/demo'), false);
+  assert.equal(isPublicBrowserAsset('/'), false);
+  assert.equal(isPublicBrowserAsset('/js/../index.html'), false);
 });
 
 test('browser static middleware blocks traversal and serves typed assets with cache policy', async () => {

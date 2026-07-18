@@ -47,9 +47,14 @@ function readRootLockEntry(lockfilePath = path.join(REPO_ROOT, 'package-lock.jso
   return entry;
 }
 
-function resolveInstalledSourcePath() {
+function resolveInstalledSourcePath({
+  dashboardRoot = DASHBOARD_ROOT,
+  repoRoot = REPO_ROOT,
+  sourcePath = null,
+} = {}) {
+  if (sourcePath) return path.resolve(sourcePath);
   try {
-    const entryPath = require.resolve('chart.js', { paths: [DASHBOARD_ROOT, REPO_ROOT] });
+    const entryPath = require.resolve('chart.js', { paths: [dashboardRoot, repoRoot] });
     return path.join(path.dirname(entryPath), '..', SOURCE_RELATIVE);
   } catch {
     return null;
@@ -81,6 +86,9 @@ function verifyChartJsAsset({
   assetPath = ASSET_PATH,
   lockfilePath = path.join(REPO_ROOT, 'package-lock.json'),
   requireInstalledPackage = false,
+  sourcePath = null,
+  dashboardRoot = DASHBOARD_ROOT,
+  repoRoot = REPO_ROOT,
 } = {}) {
   const manifest = loadManifest(manifestPath);
   assertManifestShape(manifest);
@@ -118,7 +126,7 @@ function verifyChartJsAsset({
     throw new Error(`committed chart.js asset digest does not match manifest sha256`);
   }
 
-  const installedSourcePath = resolveInstalledSourcePath();
+  const installedSourcePath = resolveInstalledSourcePath({ dashboardRoot, repoRoot, sourcePath });
   if (installedSourcePath) {
     if (!fs.existsSync(installedSourcePath)) {
       throw new Error(`installed chart.js source missing at ${manifest.sourcePath}`);
@@ -175,9 +183,12 @@ function pinChartJsAsset({
   assetPath = ASSET_PATH,
   lockfilePath = path.join(REPO_ROOT, 'package-lock.json'),
   noticePath = NOTICE_PATH,
+  sourcePath = null,
+  dashboardRoot = DASHBOARD_ROOT,
+  repoRoot = REPO_ROOT,
 } = {}) {
   const lockEntry = readRootLockEntry(lockfilePath);
-  const installedSourcePath = resolveInstalledSourcePath();
+  const installedSourcePath = resolveInstalledSourcePath({ dashboardRoot, repoRoot, sourcePath });
   if (!installedSourcePath || !fs.existsSync(installedSourcePath)) {
     throw new Error('chart.js must be installed before pinning the browser asset');
   }
@@ -209,7 +220,15 @@ function pinChartJsAsset({
 
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   fs.writeFileSync(noticePath, `${buildNotice(manifest)}\n`);
-  verifyChartJsAsset({ manifestPath, assetPath, lockfilePath, requireInstalledPackage: true });
+  verifyChartJsAsset({
+    manifestPath,
+    assetPath,
+    lockfilePath,
+    requireInstalledPackage: true,
+    sourcePath: installedSourcePath,
+    dashboardRoot,
+    repoRoot,
+  });
   return manifest;
 }
 
