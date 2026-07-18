@@ -22,21 +22,18 @@ function budgetDedupeGroup(categoryId) {
 
 function buildBillCategoryIndex(recurring = {}) {
   const byCategoryId = new Map();
-  const byCategoryName = new Map();
   for (const item of [...(recurring.items || []), ...(recurring.hiddenItems || [])]) {
     if (!item.isBill || item.status !== 'active') continue;
     if (item.categoryId) byCategoryId.set(item.categoryId, item.key);
-    if (item.category) byCategoryName.set(String(item.category).toLowerCase(), item.key);
   }
-  return { byCategoryId, byCategoryName };
+  return { byCategoryId };
 }
 
 function billRecurringKeyForCategory(category, billIndex) {
   if (category.id && billIndex.byCategoryId.has(category.id)) {
     return billIndex.byCategoryId.get(category.id);
   }
-  const byName = billIndex.byCategoryName.get(String(category.name || '').toLowerCase());
-  return byName || null;
+  return null;
 }
 
 function isBillBackedCategory(category, billIndex) {

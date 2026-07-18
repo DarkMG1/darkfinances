@@ -7,6 +7,8 @@ const {
   OBLIGATION_GRAPH_VERSION,
   OBLIGATION_REASON,
   OCCURRENCE_ROLE,
+  EDGE_KIND,
+  PARTITION_KIND,
   buildObligationGraph,
   forecastCashEventsFromGraph,
   graphCompleteness,
@@ -14,6 +16,10 @@ const {
   verifyGraphInvariants,
   stableOccurrenceId,
 } = require('../lib/domain/obligation-graph');
+const {
+  computePartition,
+  verifyCyclePartitionInvariants,
+} = require('../lib/domain/liability-cycle-partition');
 const {
   assembleObligationGraphInputs,
   billDurableIdentity,
@@ -537,7 +543,7 @@ test('active non-bill recurrence projects reserved cash outflow or quarantines l
   assert.ok(subs.some((occ) => occ.role === OCCURRENCE_ROLE.CASH_OUTFLOW && occ.reserved));
 });
 
-test('bill and liability cycle merge to one reservation via funding ledger', () => {
+test('bill and liability cycle partition reserves bill remainder exactly once', () => {
   const graph = buildObligationGraph({
     financeDate: TODAY,
     windowStart: TODAY,
@@ -551,6 +557,7 @@ test('bill and liability cycle merge to one reservation via funding ledger', () 
       name: 'Card',
       eligible: true,
       obligationCents: 10000,
+      currentBalanceCents: -10000,
       coverageKind: 'current_balance',
       paymentDueDate: '2026-08-01',
       paymentRecurringKey: 'card-pay',
@@ -566,6 +573,7 @@ test('bill and liability cycle merge to one reservation via funding ledger', () 
       dueDate: '2026-08-01',
       amountCents: 10000,
       paid: false,
+      liabilityLinked: true,
       liabilityCycleKey: 'liability-cycle:card:2026-08-01',
     }],
     recurringItems: [],
@@ -577,13 +585,19 @@ test('bill and liability cycle merge to one reservation via funding ledger', () 
     economicTransactions: [],
   });
   const reserved = graph.occurrences.filter((occ) => occ.reserved && occ.role === OCCURRENCE_ROLE.CASH_OUTFLOW);
-  assert.equal(reserved.length, 0);
+  assert.equal(reserved.length, 1);
+  assert.equal(reserved[0].partition, PARTITION_KIND.BILL_REMAINDER);
+  assert.equal(reserved[0].amountCents, -10000);
   const billOcc = graph.occurrences.find((occ) => occ.source?.kind === 'bill');
   assert.equal(billOcc?.reserved, false);
-  assert.equal(billOcc?.suppressedBy != null, true);
+  assert.equal(billOcc?.auditOnly, true);
+  const cycle = graph.cyclePartitions[0];
+  assert.equal(cycle.adjustedObligationCents, 10000);
+  assert.equal(cycle.reserved.billRemainderComponentCents, 10000);
+  assert.equal(verifyGraphInvariants(graph).ok, true);
 });
 
-test('future transfer funding reduces liability reserve without reposting past transfers', () => {
+test('future transfer partition reserves explicit cash outflow components without reposting past transfers', () => {
   const graph = buildObligationGraph({
     financeDate: TODAY,
     windowStart: TODAY,
@@ -597,6 +611,7 @@ test('future transfer funding reduces liability reserve without reposting past t
       name: 'Card',
       eligible: true,
       obligationCents: 10000,
+      currentBalanceCents: -10000,
       coverageKind: 'current_balance',
       paymentDueDate: '2026-08-01',
       paymentRecurringKey: 'card-pay',
@@ -631,11 +646,172 @@ test('future transfer funding reduces liability reserve without reposting past t
     reimbursementExpectations: [],
     economicTransactions: [],
   });
-  const liability = graph.occurrences.find((occ) => occ.source?.kind === 'credit_liability');
-  assert.equal(liability.components.remainingReserveCents, 7000);
-  assert.equal(liability.amountCents, -7000);
-  assert.equal(liability.components.postedFundingCents, 2000);
-  assert.equal(liability.components.futureFundingCents, 3000);
+  const reserved = graph.occurrences.filter((occ) => occ.reserved && occ.partition);
+  assert.equal(reserved.length, 2);
+  const future = reserved.find((occ) => occ.partition === PARTITION_KIND.FUTURE_TRANSFER);
+  const residual = reserved.find((occ) => occ.partition === PARTITION_KIND.RESIDUAL_LIABILITY);
+  assert.equal(future.amountCents, -3000);
+  assert.equal(residual.amountCents, -7000);
+  assert.equal(graph.cyclePartitions[0].postedPaymentCents, 0);
+  assert.equal(graph.cyclePartitions[0].adjustedObligationCents, 10000);
+  assert.equal(
+    sumCents(reserved.map((occ) => -occ.amountCents)),
+    graph.cyclePartitions[0].adjustedObligationCents,
+  );
+  assert.ok(graph.edges.some((edge) => edge.kind === EDGE_KIND.FUNDING_PARTITION));
+});
+
+test('payment key link with bill due mismatch quarantines instead of double reserving', () => {
+  const graph = buildObligationGraph({
+    financeDate: TODAY,
+    windowStart: TODAY,
+    windowEnd: WINDOW_END,
+    operatingAccountIds: ['checking'],
+    fundingAccountsByLiability: { card: 'checking' },
+    billCategoryIds: [],
+    creditLiabilities: [{
+      durableIdentity: 'liability:credit:card',
+      accountId: 'card',
+      name: 'Card',
+      eligible: true,
+      obligationCents: 10000,
+      currentBalanceCents: -10000,
+      coverageKind: 'current_balance',
+      paymentDueDate: '2026-08-01',
+      paymentRecurringKey: 'card-pay',
+      fundingAccountId: 'checking',
+      cycleKey: 'liability-cycle:card:2026-08-01',
+      quarantineReasons: [],
+    }],
+    billOccurrences: [{
+      durableIdentity: 'bill:card-pay|2026-08-05',
+      id: 'card-pay|2026-08-05',
+      key: 'card-pay',
+      payee: 'Card Pay',
+      dueDate: '2026-08-05',
+      amountCents: 10000,
+      paid: false,
+      liabilityLinked: true,
+      liabilityCycleKey: null,
+    }],
+    recurringItems: [],
+    incomeStreams: [],
+    manualDebts: [],
+    transfers: [],
+    budgetReservations: [],
+    reimbursementExpectations: [],
+    economicTransactions: [],
+  });
+  assert.equal(graphCompleteness(graph).complete, false);
+  assert.ok(graph.cyclePartitions[0].quarantined);
+  assert.equal(graph.occurrences.filter((occ) => occ.reserved && occ.partition).length, 0);
+});
+
+test('statement coverage reduces obligation by posted payments after observedAt only', () => {
+  const graph = buildObligationGraph({
+    financeDate: TODAY,
+    windowStart: TODAY,
+    windowEnd: WINDOW_END,
+    operatingAccountIds: ['checking'],
+    fundingAccountsByLiability: { card: 'checking' },
+    billCategoryIds: [],
+    creditLiabilities: [{
+      durableIdentity: 'liability:credit:card',
+      accountId: 'card',
+      name: 'Card',
+      eligible: true,
+      obligationCents: 10000,
+      currentBalanceCents: -12000,
+      coverageKind: 'statement',
+      paymentDueDate: '2026-08-01',
+      paymentRecurringKey: 'card-pay',
+      fundingAccountId: 'checking',
+      observedAt: '2026-07-01T00:00:00.000Z',
+      cycleKey: 'liability-cycle:card:2026-08-01',
+      quarantineReasons: [],
+    }],
+    transfers: [{
+      durableIdentity: 'transfer:posted-pay',
+      linkId: 'posted-pay',
+      date: '2026-07-10',
+      amountCents: -2500,
+      fromAccountId: 'checking',
+      toAccountId: 'card',
+      ambiguous: false,
+      fundsLiabilityAccountId: 'card',
+    }],
+    recurringItems: [],
+    billOccurrences: [],
+    incomeStreams: [],
+    manualDebts: [],
+    budgetReservations: [],
+    reimbursementExpectations: [],
+    economicTransactions: [],
+  });
+  assert.equal(graph.cyclePartitions[0].adjustedObligationCents, 7500);
+  const reserved = graph.occurrences.filter((occ) => occ.reserved && occ.partition);
+  assert.equal(sumCents(reserved.map((occ) => -occ.amountCents)), 7500);
+});
+
+test('partition math exact cents conservation', () => {
+  const partition = computePartition({
+    adjustedObligationCents: 10001,
+    billCents: 4000,
+    futureTransferCents: 3000,
+  });
+  assert.deepEqual(partition, {
+    futureComponentCents: 3000,
+    billRemainderComponentCents: 1000,
+    residualComponentCents: 6001,
+    totalReservedCents: 10001,
+  });
+  assert.equal(verifyCyclePartitionInvariants([{
+    cycleKey: 'x',
+    adjustedObligationCents: 10001,
+    quarantined: false,
+    reserved: {
+      futureComponentCents: 3000,
+      billRemainderComponentCents: 1000,
+      residualComponentCents: 6001,
+    },
+  }]).ok, true);
+});
+
+test('no schedule evidence reserves full adjusted obligation once', () => {
+  const graph = buildObligationGraph({
+    financeDate: TODAY,
+    windowStart: TODAY,
+    windowEnd: WINDOW_END,
+    operatingAccountIds: ['checking'],
+    fundingAccountsByLiability: { card: 'checking' },
+    billCategoryIds: [],
+    creditLiabilities: [{
+      durableIdentity: 'liability:credit:card',
+      accountId: 'card',
+      name: 'Card',
+      eligible: true,
+      obligationCents: 4321,
+      currentBalanceCents: -4321,
+      coverageKind: 'current_balance',
+      paymentDueDate: '2026-08-01',
+      paymentRecurringKey: 'card-pay',
+      fundingAccountId: 'checking',
+      cycleKey: 'liability-cycle:card:2026-08-01',
+      quarantineReasons: [],
+    }],
+    recurringItems: [],
+    billOccurrences: [],
+    incomeStreams: [],
+    manualDebts: [],
+    transfers: [],
+    budgetReservations: [],
+    reimbursementExpectations: [],
+    economicTransactions: [],
+  });
+  const reserved = graph.occurrences.filter((occ) => occ.reserved && occ.partition);
+  assert.equal(reserved.length, 1);
+  assert.equal(reserved[0].partition, PARTITION_KIND.RESIDUAL_LIABILITY);
+  assert.equal(reserved[0].amountCents, -4321);
 });
 
 test('incomplete graph yields no forecast cash events', () => {

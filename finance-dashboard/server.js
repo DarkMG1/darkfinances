@@ -1007,9 +1007,29 @@ async function deleteEventH(req, operation) {
 }
 async function setAccountOverrideH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'account id');
-  const { name, hidden, role } = parse(schemas.accountOverride, req.body, 'account override');
+  const body = parse(schemas.accountOverride, req.body, 'account override');
+  const {
+    name,
+    hidden,
+    role,
+    creditLiabilityCoverage,
+    paymentRecurringKey,
+    fundingAccountId,
+    statement,
+    clearCreditLiability,
+  } = body;
   return runActualProjectionMutation(
-    () => applyLocal(operation, () => data.setAccountOverride({ id, name, hidden, role })),
+    () => applyLocal(operation, () => data.setAccountOverride({
+      id,
+      name,
+      hidden,
+      role,
+      creditLiabilityCoverage,
+      paymentRecurringKey,
+      fundingAccountId,
+      statement,
+      clearCreditLiability,
+    })),
     'accounts', 'today',
   );
 }

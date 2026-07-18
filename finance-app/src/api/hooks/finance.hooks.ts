@@ -7,7 +7,9 @@ import { useServerConfig } from '@/state/server';
 import { API_ENDPOINTS } from '@/api/generated/endpoints';
 import {
   Account,
+  AccountCreditStatementOverride,
   AccountRole,
+  CreditLiabilityCoverage,
   Bills,
   Budgets,
   CategorizeResult,
@@ -985,6 +987,11 @@ export interface SetAccountOverrideVars {
   name?: string;
   hidden?: boolean;
   role?: AccountRole | null;
+  creditLiabilityCoverage?: CreditLiabilityCoverage | null;
+  paymentRecurringKey?: string | null;
+  fundingAccountId?: string | null;
+  statement?: AccountCreditStatementOverride | null;
+  clearCreditLiability?: boolean;
 }
 export function useSetAccountOverride() {
   const qc = useQueryClient();

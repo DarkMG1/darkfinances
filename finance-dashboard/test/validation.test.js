@@ -47,6 +47,15 @@ test('split validation bounds legs and accepts exact signed values', () => {
 test('path identifiers included by the native mutation client remain compatible', () => {
   assert.equal(parse(schemas.recurringOverride, { key: 'merchant', hidden: true }).hidden, true);
   assert.equal(parse(schemas.accountOverride, { id: 'account', name: 'Checking' }).name, 'Checking');
+  assert.deepEqual(parse(schemas.accountOverride, {
+    creditLiabilityCoverage: 'statement',
+    paymentRecurringKey: 'card-pay',
+    statement: {
+      balanceCents: -10000,
+      paymentDueDate: '2026-08-01',
+      observedAt: '2026-07-01T00:00:00.000Z',
+    },
+  }).paymentRecurringKey, 'card-pay');
   assert.equal(parse(schemas.setCategory, {
     id: 'txn',
     categoryId: 'category',

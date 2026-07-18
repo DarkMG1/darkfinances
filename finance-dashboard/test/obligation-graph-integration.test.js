@@ -31,7 +31,7 @@ for (const [env, filename] of Object.entries({
 })) process.env[env] = path.join(dir, filename);
 
 const fixtures = require(fixturePath);
-const { getToday, getForecast, resetApi } = require('../dataModule');
+const { getToday, getForecast, resetApi, setAccountOverride } = require('../dataModule');
 const { SAFE_TO_SPEND_REASON } = require('../lib/safe-to-spend');
 
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -39,6 +39,53 @@ test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
+
+function addDays(date, days) {
+  const [year, month, day] = date.split('-').map(Number);
+  const value = new Date(Date.UTC(year, month - 1, day + days));
+  return value.toISOString().slice(0, 10);
+}
+
+function withCreditCardPaymentHistory(fixture) {
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());
+  const paymentDates = [addDays(today, -65), addDays(today, -35), addDays(today, -5)];
+  const loanCategory = { id: 'loan-payment', name: 'Loan Payment' };
+  fixture.categoryGroups = fixture.categoryGroups.map((group) => {
+    if (group.name !== 'Everyday Spending') return group;
+    return { ...group, categories: [...group.categories, { id: loanCategory.id, name: loanCategory.name }] };
+  });
+  fixture.budgetMonth.categoryGroups = fixture.budgetMonth.categoryGroups.map((group) => {
+    if (group.name !== 'Everyday Spending') return group;
+    return {
+      ...group,
+      categories: [
+        ...group.categories,
+        {
+          id: loanCategory.id,
+          name: loanCategory.name,
+          budgeted: 90000,
+          spent: 0,
+          balance: 90000,
+        },
+      ],
+    };
+  });
+  fixture.payees.push({ id: 'credit-card-payment', name: 'Credit Card Payment' });
+  for (const [index, date] of paymentDates.entries()) {
+    fixture.transactions.push({
+      id: `credit-card-payment-${index}`,
+      account: 'acc-check',
+      date,
+      amount: -90000,
+      category: loanCategory.id,
+      payee: 'credit-card-payment',
+      cleared: true,
+    });
+  }
+  return fixture;
+}
+
+const CREDIT_CARD_PAYMENT_KEY = 'credit card payment';
 
 async function bootstrap(fixture, overrides = {}, accountOverrides = {}) {
   fixtures.configure(fixture);
@@ -75,20 +122,49 @@ test('getToday and getForecast share legacy recurrence reasons and withhold fore
 });
 
 test('explicit current_balance policy produces parity between graph reservations and Safe-to-Spend', async () => {
-  const fixture = fixtures.buildFixture({ cardBalance: -900 });
+  const fixture = withCreditCardPaymentHistory(fixtures.buildFixture({ cardBalance: -900 }));
   await bootstrap(fixture, {}, {
     'acc-credit': {
       role: 'credit_card',
       creditLiabilityCoverage: 'current_balance',
-      paymentRecurringKey: 'credit-card-payment',
+      paymentRecurringKey: CREDIT_CARD_PAYMENT_KEY,
       fundingAccountId: 'acc-check',
     },
   });
   writeJson(process.env.RECURRING_OVERRIDES_PATH, {
-    'credit card payment': { forced: true, isBill: true },
+    [CREDIT_CARD_PAYMENT_KEY]: { forced: true, isBill: true },
   });
   const today = await getToday();
   assert.equal(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.creditCardCoverageUnknown), false);
+  assert.equal(today.liquidity.safeToSpend.complete, true);
+  const card = today.accounts.find((account) => account.id === 'acc-credit');
+  assert.equal(card.creditLiabilityPolicy?.coverageKind, 'current_balance');
+  assert.equal(card.creditLiabilityPolicy?.eligible, true);
+  assert.ok(card.creditLiabilityPolicy?.obligationCents > 0);
+});
+
+test('setAccountOverride credit policy round-trips through persisted overrides', async () => {
+  const fixture = fixtures.buildFixture({ cardBalance: -500 });
+  await bootstrap(fixture, {}, { 'acc-credit': { role: 'credit_card' } });
+  await setAccountOverride({
+    id: 'acc-credit',
+    creditLiabilityCoverage: 'current_balance',
+    paymentRecurringKey: CREDIT_CARD_PAYMENT_KEY,
+    fundingAccountId: 'acc-check',
+  });
+  writeJson(process.env.RECURRING_OVERRIDES_PATH, {
+    'credit card payment': { forced: true, isBill: true },
+  });
+  resetApi();
+  const today = await getToday();
+  const card = today.accounts.find((account) => account.id === 'acc-credit');
+  assert.equal(card.creditLiability?.coverage, 'current_balance');
+  assert.equal(card.creditLiabilityPolicy?.eligible, true);
+  await setAccountOverride({ id: 'acc-credit', clearCreditLiability: true });
+  resetApi();
+  const cleared = await getToday();
+  const clearedCard = cleared.accounts.find((account) => account.id === 'acc-credit');
+  assert.equal(clearedCard.creditLiability, null);
 });
 
 test('default credit-card policy keeps credit_card_coverage_unknown for old clients', async () => {

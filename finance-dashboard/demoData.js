@@ -7,6 +7,7 @@ const { metricValue } = require('./lib/metric-provenance');
 const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
 const {
   buildObligationGraph,
+  forecastCashEventsFromGraph,
   graphSummary,
   safeToSpendFromGraph,
 } = require('./lib/domain/obligation-graph');
@@ -650,49 +651,111 @@ function investments() {
 }
 function forecast(days = 90) {
   const start = financeAnchor();
-  const end = addDays(start, days);
-  const base = accounts().filter((a) => !a.offbudget && a.balance > 0).reduce((s, a) => s + a.balance, 0);
-  const events = [
-    { date: addDays(start, 7), label: 'Acme Corp Payroll', amount: 3250, kind: 'income' },
-    { date: addDays(start, 13), label: 'Skyline Apartments', amount: -2100, kind: 'bill' },
-    { date: addDays(start, 21), label: 'Budgeted spending', amount: -950, kind: 'budget' },
-    { date: addDays(start, 28), label: 'Alex reimbursement', amount: 142.5, kind: 'reimbursement' },
-  ].filter((e) => e.date <= end);
+  const horizonDays = Math.min(180, Math.max(30, Number(days) || 90));
+  const end = addDays(start, horizonDays);
+  const allAccounts = accounts();
+  const cash = allAccounts.filter((account) => account.role === 'operating_cash');
+  const startBalance = round2(cash.reduce((sum, account) => sum + account.balance, 0));
+  const recurringData = recurring();
+  const incomeData = income();
+  const upcoming = bills();
+  const graphTxnInputs = buildGraphTransactionInputs(
+    transactions().map((t) => actualRowFromDemoTransaction(t)),
+    demoCategoryInfo(),
+    {
+      windowStart: start,
+      windowEnd: end,
+      accountRolesById: Object.fromEntries(allAccounts.map((account) => [account.id, account.role])),
+    },
+  );
+  const graphInputs = assembleObligationGraphInputs({
+    financeDate: start,
+    windowStart: start,
+    windowEnd: end,
+    accounts: allAccounts,
+    accountOverrides: {
+      'acc-credit': {
+        creditLiabilityCoverage: 'current_balance',
+        paymentRecurringKey: 'sapphire card payment',
+        fundingAccountId: 'acc-check',
+      },
+    },
+    recurring: recurringData,
+    income: incomeData,
+    bills: { bills: upcoming.bills.filter((bill) => bill.dueDate <= end) },
+    budgets: { supported: false },
+    reimb: { totalOwed: 0 },
+    operatingAccountIds: cash.map((account) => account.id),
+    transfers: graphTxnInputs.transfers,
+    economicTransactions: graphTxnInputs.economicTransactions,
+  });
+  const graph = buildObligationGraph(graphInputs);
+  const graphEvents = graph.completeness?.complete
+    ? forecastCashEventsFromGraph(graph, { windowStart: start, windowEnd: end })
+    : [];
+  const events = graphEvents.map((event) => ({
+    date: event.date,
+    label: event.label,
+    amount: round2(event.amountCents / 100),
+    kind: event.kind,
+    sourceId: event.sourceId || null,
+    provenance: event.provenance || 'inferred',
+  })).sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
+  const byDate = new Map();
+  for (const event of events) {
+    const cents = Math.round(event.amount * 100);
+    const cur = byDate.get(event.date) || { date: event.date, inflow: 0, outflow: 0 };
+    if (cents >= 0) cur.inflow = round2(cur.inflow + event.amount);
+    else cur.outflow = round2(cur.outflow + Math.abs(event.amount));
+    byDate.set(event.date, cur);
+  }
   const points = [];
-  let bal = base;
-  for (let d = 0; d <= days; d += Math.max(1, Math.round(days / 12))) {
+  let running = startBalance;
+  const step = Math.max(1, Math.round(horizonDays / 12));
+  for (let d = 0; d <= horizonDays; d += step) {
     const date = addDays(start, d);
-    const todays = events.filter((e) => e.date <= date);
-    bal = round2(base + todays.reduce((s, e) => s + e.amount, 0) - d * 22);
-    points.push({ date, balance: bal, inflow: round2(todays.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)), outflow: round2(Math.abs(todays.filter((e) => e.amount < 0).reduce((s, e) => s + e.amount, 0))) });
+    for (const event of events) {
+      if (event.date > addDays(start, d - step) && event.date <= date) running = round2(running + event.amount);
+    }
+    const dayTotals = byDate.get(date) || { inflow: 0, outflow: 0 };
+    points.push({ date, balance: running, inflow: dayTotals.inflow, outflow: dayTotals.outflow });
+  }
+  if (points.length === 0 || points[points.length - 1].date !== end) {
+    points.push({ date: end, balance: running, inflow: 0, outflow: 0 });
   }
   const lowest = points.reduce((a, p) => (p.balance < a.balance ? p : a), points[0]);
-  const genericBudgetTarget = 950;
+  const warnings = [];
+  if (!graph.completeness?.complete) {
+    warnings.push('Obligation graph incomplete; scheduled cash events withheld.');
+  }
+  if (lowest.balance < 1000) warnings.push('Projected cash gets low this period.');
   return {
     generatedAt: new Date().toISOString(),
-    range: { start, end, days },
-    startBalance: round2(base),
+    range: { start, end, days: horizonDays },
+    startBalance,
     endingBalance: points[points.length - 1].balance,
     lowest: { date: lowest.date, balance: lowest.balance },
     totals: {
-      inflow: round2(events.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)),
-      outflow: round2(Math.abs(events.filter((e) => e.amount < 0).reduce((s, e) => s + e.amount, 0))),
+      inflow: round2(events.filter((event) => event.amount > 0).reduce((sum, event) => sum + event.amount, 0)),
+      outflow: round2(Math.abs(events.filter((event) => event.amount < 0).reduce((sum, event) => sum + event.amount, 0))),
     },
     points,
     events,
     assumptions: {
-      liquidAccounts: accounts().filter((a) => !a.offbudget && a.balance > 0).map((a) => ({ id: a.id, name: a.name })),
-      genericBudgetTarget,
+      liquidAccounts: cash.map((account) => ({ id: account.id, name: account.name })),
+      obligationGraph: graphSummary(graph),
+      graphDriven: true,
+      genericBudgetTarget: 0,
       genericBudget: {
-        target: genericBudgetTarget,
-        remaining: genericBudgetTarget,
+        target: 0,
+        remaining: 0,
         complete: true,
         incompleteReasons: [],
       },
       billsExcludedFromGenericBudget: true,
       reimbursementsIncluded: false,
     },
-    warnings: lowest.balance < 1000 ? ['Projected cash gets low this period.'] : [],
+    warnings,
   };
 }
 function reports() {

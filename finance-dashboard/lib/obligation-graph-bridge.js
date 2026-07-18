@@ -107,7 +107,11 @@ function buildCreditLiabilities({
 
   for (const account of accounts || []) {
     const override = accountOverrides[account.id] || {};
-    const policy = resolveAccountCreditPolicy({ ...account, financeDate }, override);
+    const policy = resolveAccountCreditPolicy({
+      ...account,
+      financeDate,
+      role: override.role || account.role || 'unknown',
+    }, override);
     policies[account.id] = policy;
     if (policy.mode === COVERAGE_MODE.UNKNOWN) continue;
     if (policy.excluded || !policy.eligible) continue;
@@ -147,6 +151,7 @@ function buildCreditLiabilities({
       paymentDueDate,
       paymentRecurringKey: policy.paymentRecurringKey || null,
       fundingAccountId,
+      observedAt: policy.observedAt || null,
       cycleKey: paymentDueDate ? liabilityCycleKey(account.id, paymentDueDate) : null,
       quarantineReasons: policy.quarantineReasons || [],
     });
@@ -194,6 +199,7 @@ function buildBillOccurrences({ bills, liabilityByPaymentKey = new Map() }) {
       provenance: bill.matched ? 'known' : 'inferred',
       scheduleUncertain: false,
       liabilityAccountId: liability?.accountId || null,
+      liabilityLinked: !!liability,
       liabilityCycleKey: liability?.cycleKey && liability?.paymentDueDate === bill.dueDate
         ? liability.cycleKey
         : null,
@@ -314,7 +320,7 @@ function collectBillCategoryIds(recurring = {}, budgets = {}) {
   const ids = new Set([...billIndex.byCategoryId.keys()]);
   for (const group of budgets?.groups || []) {
     for (const category of group.categories || []) {
-      if (billIndex.byCategoryName.has(String(category.name || '').toLowerCase())) {
+      if (billIndex.byCategoryId.has(category.id)) {
         ids.add(category.id);
       }
     }

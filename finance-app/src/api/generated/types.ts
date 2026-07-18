@@ -21,6 +21,25 @@ export interface AccountOverrideEntry {
   statement?: AccountCreditStatementOverride;
 }
 
+export interface AccountCreditLiabilityOverride {
+  coverage: CreditLiabilityCoverage | null;
+  paymentRecurringKey: string | null;
+  fundingAccountId: string | null;
+  statement: AccountCreditStatementOverride | null;
+}
+
+export interface AccountCreditLiabilityPolicy {
+  mode: 'unknown' | 'exclude' | 'current_balance' | 'statement';
+  eligible: boolean;
+  coverageKind: 'current_balance' | 'statement' | null;
+  paymentRecurringKey: string | null;
+  fundingAccountId: string | null;
+  obligationCents: number | null;
+  paymentDueDate: string | null;
+  observedAt: string | null;
+  quarantineReasons: string[];
+}
+
 export interface Account {
   id: string;
   name: string;
@@ -29,6 +48,8 @@ export interface Account {
   hidden?: boolean;
   role: AccountRole;
   roleSource: 'explicit' | 'unknown';
+  creditLiability?: AccountCreditLiabilityOverride | null;
+  creditLiabilityPolicy?: AccountCreditLiabilityPolicy | null;
 }
 
 export interface ManualAsset {

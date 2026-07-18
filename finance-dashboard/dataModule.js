@@ -143,6 +143,12 @@ const {
   sumOperatingCashBalanceCents,
 } = require('./lib/domain/forecast-money');
 const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
+const {
+  mergeAccountOverrideEntry,
+  validEntry,
+  validateCreditOverrideCrossFields,
+} = require('./lib/account-overrides-schema');
+const { resolveAccountCreditPolicy, COVERAGE_MODE } = require('./lib/domain/credit-liability-policy');
 const { metricValue } = require('./lib/metric-provenance');
 const {
   SAFE_TO_SPEND_INPUTS,
@@ -156,6 +162,7 @@ const {
   safeToSpendFromGraph,
 } = require('./lib/domain/obligation-graph');
 const { assembleObligationGraphInputs, buildGraphTransactionInputs, collectBillCategoryIds } = require('./lib/obligation-graph-bridge');
+const { verifyCyclePartitionInvariants } = require('./lib/domain/liability-cycle-partition');
 const {
   AccountNotFoundError,
   TransactionNotFoundError,
@@ -776,40 +783,82 @@ async function getAccounts() {
     return Promise.all(
       accounts.map(async (a) => {
         const ov = overrides[a.id] || {};
+        const financeDate = todayYMD();
+        const balanceCents = await api.getAccountBalance(a.id);
+        const creditPolicy = resolveAccountCreditPolicy({
+          ...a,
+          financeDate,
+          role: ov.role || 'unknown',
+          hidden: !!ov.hidden,
+          balance: balanceCents / 100,
+        }, ov);
         return {
           id: a.id,
           name: ov.name || a.name, // display rename (Actual name untouched)
           offbudget: !!a.offbudget,
-          balance: (await api.getAccountBalance(a.id)) / 100,
+          balance: balanceCents / 100,
           hidden: !!ov.hidden,
           role: ov.role || 'unknown',
           roleSource: ov.role ? 'explicit' : 'unknown',
+          creditLiability: ov.creditLiabilityCoverage || ov.paymentRecurringKey || ov.fundingAccountId || ov.statement
+            ? {
+              coverage: ov.creditLiabilityCoverage || null,
+              paymentRecurringKey: ov.paymentRecurringKey || null,
+              fundingAccountId: ov.fundingAccountId || null,
+              statement: ov.statement || null,
+            }
+            : null,
+          creditLiabilityPolicy: creditPolicy.excluded && creditPolicy.mode === COVERAGE_MODE.EXCLUDE
+            ? { mode: 'exclude', eligible: false, quarantineReasons: [] }
+            : {
+              mode: creditPolicy.mode,
+              eligible: creditPolicy.eligible,
+              coverageKind: creditPolicy.coverageKind || null,
+              paymentRecurringKey: creditPolicy.paymentRecurringKey || null,
+              fundingAccountId: creditPolicy.fundingAccountId || null,
+              obligationCents: creditPolicy.obligationCents ?? null,
+              paymentDueDate: creditPolicy.paymentDueDate || null,
+              observedAt: creditPolicy.observedAt || null,
+              quarantineReasons: creditPolicy.quarantineReasons || [],
+            },
         };
       })
     );
   });
 }
 
-function setAccountOverride({ id, name, hidden, role } = {}) {
+function setAccountOverride({
+  id,
+  name,
+  hidden,
+  role,
+  creditLiabilityCoverage,
+  paymentRecurringKey,
+  fundingAccountId,
+  statement,
+  clearCreditLiability,
+} = {}) {
   if (!id) throw new Error('id required');
   const store = readAccountOverrides(ACCOUNT_OVERRIDES_PATH);
   const overrides = store.accounts;
-  const cur = overrides[id] || {};
-  if (name !== undefined) {
-    const trimmed = (name || '').trim();
-    if (trimmed) cur.name = trimmed;
-    else delete cur.name; // empty resets to the Actual name
+  const cur = mergeAccountOverrideEntry(overrides[id] || {}, {
+    name,
+    hidden,
+    role,
+    creditLiabilityCoverage,
+    paymentRecurringKey,
+    fundingAccountId,
+    statement,
+    clearCreditLiability,
+  });
+  if (Object.keys(cur).length) {
+    const cross = validateCreditOverrideCrossFields(cur);
+    if (!cross.ok) throw new Error(cross.issues.join('; '));
+    if (!validEntry(cur)) throw new Error('invalid account override');
+    overrides[id] = cur;
+  } else {
+    delete overrides[id];
   }
-  if (hidden !== undefined) {
-    if (hidden) cur.hidden = true;
-    else delete cur.hidden;
-  }
-  if (role !== undefined) {
-    if (role === null || role === 'unknown') delete cur.role;
-    else cur.role = role;
-  }
-  if (Object.keys(cur).length) overrides[id] = cur;
-  else delete overrides[id];
   writeAccountOverrides(ACCOUNT_OVERRIDES_PATH, store);
   return { ok: true, id, override: overrides[id] || null };
 }
@@ -3609,6 +3658,26 @@ function enrichReimbLinksForGraph(links) {
   });
 }
 
+function assertObligationGraphIntegration(graph) {
+  if (!graph?.completeness?.complete) return;
+  const cycleCheck = verifyCyclePartitionInvariants(graph.cyclePartitions || []);
+  if (!cycleCheck.ok) {
+    throw new Error(`obligation graph cycle partitions: ${cycleCheck.issues.join('; ')}`);
+  }
+  const reservedByCycle = new Map();
+  for (const occ of graph.occurrences || []) {
+    if (!occ.reserved || !occ.cycleKey) continue;
+    reservedByCycle.set(occ.cycleKey, sumCents([reservedByCycle.get(occ.cycleKey) || 0, -occ.amountCents]));
+  }
+  for (const cycle of graph.cyclePartitions || []) {
+    if (cycle.quarantined || cycle.adjustedObligationCents <= 0) continue;
+    const reserved = reservedByCycle.get(cycle.cycleKey) || 0;
+    if (reserved !== cycle.adjustedObligationCents) {
+      throw new Error(`cycle ${cycle.cycleKey} reserved ${reserved} != adjusted ${cycle.adjustedObligationCents}`);
+    }
+  }
+}
+
 async function buildObligationGraphBundle({
   financeDate,
   windowStart,
@@ -3669,6 +3738,7 @@ async function buildObligationGraphBundle({
     economicTransactions: txnInputs.economicTransactions,
   });
   const graph = buildObligationGraph(inputs);
+  assertObligationGraphIntegration(graph);
   return {
     graph,
     inputs,
