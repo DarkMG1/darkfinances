@@ -43,11 +43,9 @@ test('mutation hooks unlock on settled and guard stale profile callbacks', () =>
   for (const rel of ['useMutationForm.ts', 'useMutationAction.ts', 'useMutationScreen.ts']) {
     const source = fs.readFileSync(path.join(root, 'src/hooks', rel), 'utf8');
     assert.match(source, /onSettled/, `${rel} must unlock in onSettled`);
+    assert.match(source, /useMutationHookIdentity/, `${rel} must use shared identity hook`);
+    assert.match(source, /isDispatchTokenCurrent\(token\)/, `${rel} must guard callbacks with dispatch token`);
   }
-  const form = fs.readFileSync(path.join(root, 'src/hooks/useMutationForm.ts'), 'utf8');
-  assert.match(form, /capturedScope !== scopeDigest/);
-  const screen = fs.readFileSync(path.join(root, 'src/hooks/useMutationScreen.ts'), 'utf8');
-  assert.match(screen, /capturedGeneration !== generationRef\.current/);
 });
 
 test('goals sheet blocks dismiss while locked and uses one live region', () => {
@@ -71,10 +69,30 @@ test('add transaction and split editor block hardware back while submitting', ()
   }
 });
 
-test('transaction detail blocks route back while mutation screen locked', () => {
+test('transaction detail blocks route back while mutation screen locked and confirms dirty notes discard', () => {
   const source = fs.readFileSync(path.join(root, 'src/app/transaction/[id].tsx'), 'utf8');
   assert.match(source, /beforeRemove/);
-  assert.match(source, /screen\.isLocked/);
+  assert.match(source, /screen\.isLocked|modalLocked/);
+  assert.match(source, /requestLeave/);
+  assert.match(source, /Discard unsaved changes\?/);
+  assert.match(source, /allowBackRef/);
+});
+
+test('split editor confirms dirty discard on cancel and hardware back', () => {
+  const source = fs.readFileSync(path.join(root, 'src/app/split/[id].tsx'), 'utf8');
+  assert.match(source, /requestSplitExit/);
+  assert.match(source, /beforeRemove/);
+  assert.match(source, /allowExitRef/);
+  assert.match(source, /snapshotSplitEditor/);
+});
+
+test('client validation haptic is owned by mutation outcome gate', () => {
+  const source = fs.readFileSync(path.join(root, 'src/lib/haptics.ts'), 'utf8');
+  const fn = source.match(/export function hapticClientValidationRejected\(\)[\s\S]*?\n\}/)?.[0] ?? '';
+  assert.match(fn, /mutationOutcomeHaptics\.emitClientValidationError/);
+  assert.doesNotMatch(fn, /haptics\.warning\(\)/);
+  const screen = fs.readFileSync(path.join(root, 'src/hooks/useMutationScreen.ts'), 'utf8');
+  assert.match(screen, /hapticClientValidationRejected\(\)/);
 });
 
 test('transaction link allocation surfaces inline field errors', () => {

@@ -31,7 +31,7 @@ import { ReimbLinkEndpoint, ReimbTxnRef, Transaction } from '@/api/generated/typ
 import { Card, CardTitle, TagChips } from '@/components/ui';
 import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
 import { useMutationScreen } from '@/hooks/useMutationScreen';
-import { haptics, hapticClientValidationRejected } from '@/lib/haptics';
+import { haptics } from '@/lib/haptics';
 import { formatAllocationDollars, parseStrictAllocationDollars } from '@/lib/allocation-parse';
 import { CapturedReceipt, pickReceiptFromLibrary, scanReceiptFromCamera } from '@/lib/receipts';
 import { categoryIcon } from '@/theme/categoryIcons';
@@ -179,13 +179,7 @@ export default function TransactionDetail() {
   const payeeAction = screen.bind({ key: 'payee', mutation: setPayee, mutationLabel: 'Rename payee' });
   const notesAction = screen.bind({ key: 'notes', mutation: setNotes, mutationLabel: 'Save notes', fieldOrder: ['notes'] });
   const modalLocked = screen.isLocked;
-  useEffect(() => {
-    const unsub = navigation.addListener('beforeRemove', (e) => {
-      if (!screen.isLocked) return;
-      e.preventDefault();
-    });
-    return unsub;
-  }, [navigation, screen.isLocked]);
+  const allowBackRef = useRef(false);
   const requestModalClose = (close: () => void) => {
     if (modalLocked) return;
     close();
@@ -228,7 +222,6 @@ export default function TransactionDetail() {
     const cents = parseStrictAllocationDollars(allocationText);
     if (cents == null || cents <= 0) {
       screen.reportClientValidation('Enter a positive dollar amount with at most two decimal places (e.g. 20.00).', { allocationCents: 'Invalid allocation amount.' }, ['allocationCents']);
-      hapticClientValidationRejected();
       return;
     }
     if (suggestedAllocationCents == null) {
@@ -237,7 +230,6 @@ export default function TransactionDetail() {
     }
     if (cents > suggestedAllocationCents) {
       screen.reportClientValidation(`This link can allocate at most ${fmtPos(suggestedAllocationCents / 100)} based on remaining capacity on both sides.`, { allocationCents: 'Allocation exceeds remaining capacity.' }, ['allocationCents']);
-      hapticClientValidationRejected();
       return;
     }
     const ref: ReimbTxnRef = {
@@ -453,7 +445,6 @@ export default function TransactionDetail() {
     const next = (picked || dateText || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(next)) {
       screen.reportClientValidation('Use the format YYYY-MM-DD, e.g. 2026-06-30.', { date: 'Invalid date format.' }, ['date']);
-      hapticClientValidationRejected();
       return;
     }
     if (next === currentDate) { setDating(false); return; }
@@ -509,6 +500,60 @@ export default function TransactionDetail() {
   const allocationFieldError = screen.activeKey === 'link'
     ? (screen.outcome?.fieldErrors?.allocationCents as string | undefined)
     : undefined;
+
+  const requestLeave = (leave: () => void) => {
+    if (modalLocked) return;
+    if (!dirty) {
+      leave();
+      return;
+    }
+    Alert.alert(
+      'Discard unsaved changes?',
+      'Your note and tag edits will be lost.',
+      [
+        { text: 'Keep editing', style: 'cancel' },
+        {
+          text: 'Discard',
+          style: 'destructive',
+          onPress: () => {
+            allowBackRef.current = true;
+            leave();
+          },
+        },
+      ],
+    );
+  };
+
+  useEffect(() => {
+    const unsub = navigation.addListener('beforeRemove', (e) => {
+      if (allowBackRef.current) {
+        allowBackRef.current = false;
+        return;
+      }
+      if (modalLocked) {
+        e.preventDefault();
+        return;
+      }
+      if (!dirty) return;
+      e.preventDefault();
+      Alert.alert(
+        'Discard unsaved changes?',
+        'Your note and tag edits will be lost.',
+        [
+          { text: 'Keep editing', style: 'cancel' },
+          {
+            text: 'Discard',
+            style: 'destructive',
+            onPress: () => {
+              allowBackRef.current = true;
+              navigation.dispatch(e.data.action);
+            },
+          },
+        ],
+      );
+    });
+    return unsub;
+  }, [baseRaws, baseText, dirty, modalLocked, navigation]);
 
   useEffect(() => {
     if (screen.activeKey !== 'link' || screen.outcome?.firstField !== 'allocationCents') return;
@@ -627,7 +672,7 @@ export default function TransactionDetail() {
           ) : (
             <Text style={styles.topDate}>{fmtMenuDay(currentDate)}</Text>
           )}
-          <Pressable onPress={() => requestModalClose(() => router.back())} disabled={modalLocked} hitSlop={10} style={({ pressed }) => [styles.topSide, styles.closeBtn, pressed && { opacity: 0.65 }, modalLocked && { opacity: 0.35 }]}>
+          <Pressable onPress={() => requestLeave(() => router.back())} disabled={modalLocked} hitSlop={10} style={({ pressed }) => [styles.topSide, styles.closeBtn, pressed && { opacity: 0.65 }, modalLocked && { opacity: 0.35 }]}>
             <SymbolView name="xmark" tintColor={colors.text} size={18} resizeMode="scaleAspectFit" />
           </Pressable>
         </View>

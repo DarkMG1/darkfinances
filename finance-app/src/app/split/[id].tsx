@@ -13,6 +13,21 @@ import { colors, fmtPos } from '@/theme/colors';
 type Mode = 'equal' | 'specific' | 'percent';
 type Leg = { key: string; id?: string; catId: string | null; catName: string; name: string; notes: string; showNote: boolean; amt: string; pct: string };
 
+function snapshotSplitEditor(mode: Mode, legs: Leg[]) {
+  return JSON.stringify({
+    mode,
+    legs: legs.map((l) => ({
+      id: l.id ?? null,
+      catId: l.catId,
+      catName: l.catName,
+      name: l.name,
+      notes: l.notes,
+      amt: l.amt,
+      pct: l.pct,
+    })),
+  });
+}
+
 const MODE_LABEL: Record<Mode, string> = {
   equal: 'by equal amounts',
   specific: 'by specific amounts',
@@ -63,6 +78,8 @@ export default function SplitEditor() {
   const [catPick, setCatPick] = useState<number | null>(null);
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const inited = useRef(false);
+  const [baselineSnapshot, setBaselineSnapshot] = useState<string | null>(null);
+  const allowExitRef = useRef(false);
 
   const legFieldOrder = useMemo(() => legs.map((_, i) => `leg-${i}`), [legs]);
   const unsplitAction = useMutationAction({
@@ -130,12 +147,66 @@ export default function SplitEditor() {
   }, [legs, splitAction.outcome]);
 
   useEffect(() => {
+    if (!inited.current || baselineSnapshot != null) return;
+    setBaselineSnapshot(snapshotSplitEditor(mode, legs));
+  }, [baselineSnapshot, legs, mode]);
+
+  const isDirty = baselineSnapshot != null
+    && snapshotSplitEditor(mode, legs) !== baselineSnapshot;
+
+  const requestSplitExit = (exit: () => void) => {
+    if (mutationLocked) return;
+    if (!isDirty) {
+      exit();
+      return;
+    }
+    Alert.alert(
+      'Discard unsaved changes?',
+      'Your split edits will be lost.',
+      [
+        { text: 'Keep editing', style: 'cancel' },
+        {
+          text: 'Discard',
+          style: 'destructive',
+          onPress: () => {
+            allowExitRef.current = true;
+            exit();
+          },
+        },
+      ],
+    );
+  };
+
+  useEffect(() => {
     const unsub = navigation.addListener('beforeRemove', (e) => {
-      if (!mutationLocked) return;
+      if (allowExitRef.current) {
+        allowExitRef.current = false;
+        return;
+      }
+      if (mutationLocked) {
+        e.preventDefault();
+        return;
+      }
+      if (!isDirty) return;
       e.preventDefault();
+      Alert.alert(
+        'Discard unsaved changes?',
+        'Your split edits will be lost.',
+        [
+          { text: 'Keep editing', style: 'cancel' },
+          {
+            text: 'Discard',
+            style: 'destructive',
+            onPress: () => {
+              allowExitRef.current = true;
+              navigation.dispatch(e.data.action);
+            },
+          },
+        ],
+      );
     });
     return unsub;
-  }, [mutationLocked, navigation]);
+  }, [isDirty, mutationLocked, navigation]);
 
   const amounts = useMemo(() => computeAmounts(legs, mode, total), [legs, mode, total]);
   const master = amounts[0] ?? 0;
@@ -227,7 +298,7 @@ export default function SplitEditor() {
           light "glass" capsules on iOS 26; this keeps the app's dark styling. */}
       <Stack.Screen options={{ headerShown: false }} />
       <View style={[styles.topBar, { paddingTop: Math.max(insets.top, 8) + 6 }]}>
-        <Pressable testID="split-cancel-button" onPress={() => { if (!mutationLocked) router.back(); }} disabled={mutationLocked} hitSlop={12} style={({ pressed }) => [pressed && !mutationLocked && { opacity: 0.6 }, mutationLocked && { opacity: 0.35 }]}>
+        <Pressable testID="split-cancel-button" onPress={() => requestSplitExit(() => router.back())} disabled={mutationLocked} hitSlop={12} style={({ pressed }) => [pressed && !mutationLocked && { opacity: 0.6 }, mutationLocked && { opacity: 0.35 }]}>
           <Text style={styles.topCancel}>Cancel</Text>
         </Pressable>
         <Text style={styles.topTitle}>Split</Text>

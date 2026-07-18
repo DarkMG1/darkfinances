@@ -9,10 +9,11 @@ import {
   getMutationFormDraft,
   setMutationFormDraft,
 } from '@/lib/mutation-form-draft-store';
+import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
 import { hapticClientValidationRejected } from '@/lib/haptics';
-import { getProfileGeneration } from '@/lib/notification-reconciliation';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
-import { useServerConfig } from '@/state/server';
+import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
+import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
 
 export type MutationFormPhase = 'idle' | 'submitting' | 'reconciling' | 'success' | 'error';
 
@@ -77,24 +78,29 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   persistDraft = true,
   fieldRefs = {},
 }: UseMutationFormOptions<TFields, TVariables>): UseMutationFormResult<TFields> {
-  const { scope, demo } = useServerConfig();
-  const scopeDigest = demo ? 'demo' : scope;
-  const profileGeneration = demo ? 0 : getProfileGeneration();
+  const identity = useMutationHookIdentity({ formId });
+  const {
+    scopeDigest,
+    profileGeneration,
+    dispatchPending,
+    setDispatchPending,
+    captureDispatchToken,
+    isDispatchTokenCurrent,
+  } = identity;
+  const pendingLockRef = identity.pendingLockRef as React.MutableRefObject<boolean>;
+
   const [phase, setPhase] = useState<MutationFormPhase>('idle');
   const [outcome, setOutcome] = useState<MappedMutationOutcome | null>(null);
   const [announce, setAnnounce] = useState('');
-  const [dispatchPending, setDispatchPending] = useState(false);
   const [activitySeq, setActivitySeq] = useState(0);
   const [baseline, setBaseline] = useState(fields);
   const closedRef = useRef(false);
   const variablesRef = useRef<TVariables | null>(null);
-  const pendingLockRef = useRef(false);
-  const activitySeqRef = useRef(0);
 
   const bumpActivity = useCallback(() => {
-    activitySeqRef.current += 1;
-    setActivitySeq(activitySeqRef.current);
-    return activitySeqRef.current;
+    const seq = nextMutationActivationSeq();
+    setActivitySeq(seq);
+    return seq;
   }, []);
 
   useEffect(() => {
@@ -139,25 +145,21 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     }
   }, [fieldOrder, fieldRefs, outcome]);
 
-  const handleError = useCallback(async (
-    error: FinanceError,
-    capturedScope: string,
-    capturedGeneration: number,
-  ) => {
-    if (capturedScope !== scopeDigest || capturedGeneration !== profileGeneration) return;
+  const handleError = useCallback(async (error: FinanceError, token: MutationDispatchToken) => {
+    if (!isDispatchTokenCurrent(token)) return;
     const mapped = mapMutationApiError(error, { fieldPathOverrides, fieldOrder, mutationLabel });
     setOutcome(mapped);
     setPhase('error');
     setAnnounce(mapped.announce);
     if (mapped.requiresRefetch) {
       const ok = await runStaleRefetch(onRefetch);
-      if (capturedScope !== scopeDigest || capturedGeneration !== profileGeneration) return;
+      if (!isDispatchTokenCurrent(token)) return;
       if (ok && (mapped.kind === 'conflict_stale' || mapped.kind === 'conflict_saga' || mapped.kind === 'conflict_ownership')) {
         setOutcome({ ...mapped, summary: staleConflictNotice(mapped.summary) });
       }
     }
     requestAnimationFrame(() => focusFirstInvalid());
-  }, [fieldOrder, fieldPathOverrides, focusFirstInvalid, mutationLabel, onRefetch, profileGeneration, scopeDigest]);
+  }, [fieldOrder, fieldPathOverrides, focusFirstInvalid, isDispatchTokenCurrent, mutationLabel, onRefetch]);
 
   const finalizeDismiss = useCallback((onConfirmed?: () => void) => {
     clearMutationFormDraft(scopeDigest, formId, profileGeneration);
@@ -170,8 +172,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   }, [fields, formId, profileGeneration, scopeDigest]);
 
   const runMutation = useCallback((variables: TVariables) => {
-    const capturedScope = scopeDigest;
-    const capturedGeneration = profileGeneration;
+    const token = captureDispatchToken();
     variablesRef.current = variables;
     closedRef.current = false;
     pendingLockRef.current = true;
@@ -181,26 +182,36 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     setOutcome(null);
     mutation.mutate(variables, {
       onSuccess: () => {
-        if (capturedScope !== scopeDigest || capturedGeneration !== profileGeneration) return;
+        if (!isDispatchTokenCurrent(token)) return;
         variablesRef.current = null;
         setPhase('success');
         setAnnounce(`${mutationLabel} succeeded.`);
-        clearMutationFormDraft(capturedScope, formId, capturedGeneration);
+        clearMutationFormDraft(token.scope, formId, token.generation);
         if (!closedRef.current) {
           closedRef.current = true;
           onSuccessClose?.();
         }
       },
       onError: (error) => {
-        void handleError(error, capturedScope, capturedGeneration);
+        void handleError(error, token);
       },
       onSettled: () => {
-        if (capturedScope !== scopeDigest || capturedGeneration !== profileGeneration) return;
+        if (!isDispatchTokenCurrent(token)) return;
         pendingLockRef.current = false;
         setDispatchPending(false);
       },
     });
-  }, [bumpActivity, formId, handleError, mutation, mutationLabel, onSuccessClose, profileGeneration, scopeDigest]);
+  }, [
+    bumpActivity,
+    captureDispatchToken,
+    formId,
+    handleError,
+    isDispatchTokenCurrent,
+    mutation,
+    mutationLabel,
+    onSuccessClose,
+    setDispatchPending,
+  ]);
 
   const submit = useCallback(() => {
     if (pendingLockRef.current || mutation.isPending || phase === 'submitting' || phase === 'reconciling') return;

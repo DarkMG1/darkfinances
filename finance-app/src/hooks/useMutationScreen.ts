@@ -1,9 +1,13 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { UseMutationResult } from '@tanstack/react-query';
 import type { FinanceError } from '@/api/client/requests';
 import { mapClientValidationOutcome, mapMutationApiError } from '@/lib/mutation-form-errors';
 import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
+import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
+import { hapticClientValidationRejected } from '@/lib/haptics';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
+import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
+import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
 
 export type RefetchStaleData = () => void | boolean | Promise<boolean | void | unknown>;
 
@@ -47,15 +51,20 @@ export interface UseMutationScreenResult {
 }
 
 export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMutationScreenResult {
+  const {
+    identityKey,
+    pendingLockRef,
+    captureDispatchToken,
+    isDispatchTokenCurrent,
+    setDispatchPending,
+  } = useMutationHookIdentity({ pendingLockKind: 'counter' });
+  const pendingLockCountRef = pendingLockRef as React.MutableRefObject<number>;
+
   const [outcome, setOutcome] = useState<MappedMutationOutcome | null>(null);
   const [announce, setAnnounce] = useState('');
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [pendingKeys, setPendingKeys] = useState<Set<string>>(() => new Set());
   const [activitySeq, setActivitySeq] = useState(0);
-
-  const pendingLockRef = useRef(0);
-  const activitySeqRef = useRef(0);
-  const generationRef = useRef(0);
 
   const registryRef = useRef(new Map<string, {
     mutation: UseMutationResult<unknown, FinanceError, unknown>;
@@ -70,10 +79,25 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
   }>());
 
   const bumpActivity = useCallback(() => {
-    activitySeqRef.current += 1;
-    setActivitySeq(activitySeqRef.current);
-    return activitySeqRef.current;
+    const seq = nextMutationActivationSeq();
+    setActivitySeq(seq);
+    return seq;
   }, []);
+
+  useEffect(() => {
+    // Profile identity reset clears stale screen mutation UI.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional reset on identity change
+    setOutcome(null);
+    setAnnounce('');
+    setActiveKey(null);
+    for (const entry of registryRef.current.values()) {
+      entry.lastVars = null;
+      entry.lastSuccess = undefined;
+      entry.lastSettled = undefined;
+      entry.lastError = undefined;
+      entry.rollback = undefined;
+    }
+  }, [identityKey]);
 
   const markPending = useCallback((key: string, pending: boolean) => {
     setPendingKeys((prev) => {
@@ -88,9 +112,9 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     key: string,
     error: FinanceError,
     entry: NonNullable<ReturnType<typeof registryRef.current.get>>,
-    capturedGeneration: number,
+    token: MutationDispatchToken,
   ) => {
-    if (capturedGeneration !== generationRef.current) return;
+    if (!isDispatchTokenCurrent(token)) return;
     entry.lastError?.(error);
     entry.rollback?.();
     const mapped = mapMutationApiError(error, {
@@ -103,12 +127,12 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     setAnnounce(mapped.announce);
     if (mapped.requiresRefetch) {
       const ok = await runStaleRefetch(options.onRefetchStale);
-      if (capturedGeneration !== generationRef.current) return;
+      if (!isDispatchTokenCurrent(token)) return;
       if (ok && (mapped.kind === 'conflict_stale' || mapped.kind === 'conflict_saga' || mapped.kind === 'conflict_ownership')) {
         setOutcome({ ...mapped, summary: staleConflictNotice(mapped.summary) });
       }
     }
-  }, [options]);
+  }, [isDispatchTokenCurrent, options]);
 
   const dispatch = useCallback((
     key: string,
@@ -116,10 +140,11 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     runOptions?: MutationScreenRunOptions,
   ) => {
     const entry = registryRef.current.get(key);
-    if (!entry || pendingLockRef.current > 0) return;
+    if (!entry || pendingLockCountRef.current > 0) return;
 
-    const capturedGeneration = generationRef.current;
-    pendingLockRef.current += 1;
+    const token = captureDispatchToken();
+    pendingLockCountRef.current += 1;
+    setDispatchPending(true);
     bumpActivity();
     entry.lastVars = variables;
     entry.lastSuccess = runOptions?.onSuccess;
@@ -133,7 +158,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
 
     entry.mutation.mutate(variables, {
       onSuccess: (data) => {
-        if (capturedGeneration !== generationRef.current) return;
+        if (!isDispatchTokenCurrent(token)) return;
         entry.lastVars = null;
         entry.lastSuccess = undefined;
         entry.lastSettled = undefined;
@@ -145,17 +170,18 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
         runOptions?.onSuccess?.(data);
       },
       onError: (error) => {
-        void handleError(key, error, entry, capturedGeneration);
+        void handleError(key, error, entry, token);
       },
       onSettled: () => {
-        pendingLockRef.current = Math.max(0, pendingLockRef.current - 1);
+        pendingLockCountRef.current = Math.max(0, pendingLockCountRef.current - 1);
         markPending(key, false);
-        if (capturedGeneration === generationRef.current) {
+        if (pendingLockCountRef.current === 0) setDispatchPending(false);
+        if (isDispatchTokenCurrent(token)) {
           runOptions?.onSettled?.();
         }
       },
     });
-  }, [bumpActivity, handleError, markPending]);
+  }, [bumpActivity, captureDispatchToken, handleError, isDispatchTokenCurrent, markPending, setDispatchPending]);
 
   const bind = useCallback(<TVariables,>(actionOptions: MutationScreenActionOptions<TVariables>): MutationScreenAction<TVariables> => {
     const existing = registryRef.current.get(actionOptions.key);
@@ -215,6 +241,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     setActiveKey(null);
     setOutcome({ ...mapped, summary });
     setAnnounce(summary);
+    hapticClientValidationRejected();
   }, [bumpActivity]);
 
   return useMemo(() => ({
