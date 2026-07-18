@@ -584,7 +584,10 @@
       categoryFilter: null,   // category name
       txnFilter: 'all',
       txnPage: 50,
-      netWorth: null,         // live net worth from account balances (source of truth)
+      netWorth: null,         // live net worth from server projection (source of truth)
+      netWorthAuthoritative: false,
+      netWorthHasServerMetric: false,
+      netWorthIncompleteReasons: [],
       trendFirstNW: null,     // first net-worth point of the loaded trend window
       trendMonths: null,
     };
@@ -657,11 +660,25 @@
 
     // ---- Accounts + Net Worth -------------------------------------------------
     async function loadAccounts() {
+      let hasServerNetWorthMetric = false;
+      try {
+        const todayPayload = await (await fetch('/api/v1/today')).json();
+        const metric = todayPayload?.data?.metrics?.netWorth;
+        hasServerNetWorthMetric = metric != null && typeof metric.complete === 'boolean';
+        state.netWorthHasServerMetric = hasServerNetWorthMetric;
+        if (hasServerNetWorthMetric) {
+          state.netWorthAuthoritative = metric.complete === true && metric.value != null;
+          state.netWorthIncompleteReasons = metric.complete === false ? (metric.incompleteReasons || []) : [];
+          if (state.netWorthAuthoritative) state.netWorth = metric.value;
+        }
+      } catch (_) { /* keep local fallback when server metric absent */ }
       accounts = (await (await fetch('/api/accounts')).json()).filter((account) => !account.hidden);
+      const hasInclusion = accounts.some((account) => account.inclusion);
       let totalAssets = 0, totalLiabilities = 0;
       const grid = document.getElementById('accountsGrid');
       grid.innerHTML = '';
       accounts.forEach(a => {
+        if (hasInclusion && !a.inclusion?.netWorth) return;
         if (a.balance > 0) totalAssets += a.balance; else totalLiabilities += a.balance;
         const [type, cls] = accountBadge(a.name);
         const active = state.accountFilter && state.accountFilter.id === a.id;
@@ -673,13 +690,28 @@
         div.onclick = () => toggleAccountFilter(a);
         grid.appendChild(div);
       });
-      const netWorth = totalAssets + totalLiabilities;
+      const netWorth = state.netWorthAuthoritative
+        ? state.netWorth
+        : (state.netWorthHasServerMetric ? null : (totalAssets + totalLiabilities));
       state.netWorth = netWorth;
       const nwEl = document.getElementById('netWorth');
-      nwEl.textContent = fmt(netWorth);
-      nwEl.style.color = netWorth >= 0 ? 'var(--text)' : 'var(--red)';
+      if (state.netWorthAuthoritative && netWorth != null) {
+        nwEl.textContent = fmt(netWorth);
+      } else if (state.netWorthHasServerMetric && (state.netWorthIncompleteReasons || []).length) {
+        nwEl.textContent = 'Unavailable';
+      } else if (netWorth != null) {
+        nwEl.textContent = fmt(netWorth);
+      } else {
+        nwEl.textContent = 'Unavailable';
+      }
+      nwEl.style.color = netWorth != null && netWorth >= 0 ? 'var(--text)' : 'var(--red)';
+      const aggregatesUnavailable = state.netWorthHasServerMetric && (state.netWorthIncompleteReasons || []).length;
       document.getElementById('netWorthBreakdown').textContent =
-        `${fmtPos(totalAssets)} assets  ·  ${fmtPos(Math.abs(totalLiabilities))} liabilities`;
+        state.netWorthAuthoritative
+          ? `${fmtPos(totalAssets)} assets · ${fmtPos(Math.abs(totalLiabilities))} liabilities · server projection`
+          : (aggregatesUnavailable
+            ? 'Asset/liability breakdown unavailable — server projection incomplete'
+            : `${fmtPos(totalAssets)} assets · ${fmtPos(Math.abs(totalLiabilities))} liabilities · local estimate (inclusion-aware)`);
       renderNetWorthChange();
     }
 
@@ -688,6 +720,10 @@
     function renderNetWorthChange() {
       const ch = document.getElementById('netWorthChange');
       if (!ch || state.netWorth == null || state.trendFirstNW == null || state.trendMonths == null) return;
+      if (state.netWorthHasServerMetric && (state.netWorthIncompleteReasons || []).length) {
+        ch.textContent = '';
+        return;
+      }
       const diff = state.netWorth - state.trendFirstNW;
       ch.textContent = `${diff >= 0 ? '▲' : '▼'} ${fmt(Math.abs(diff))} over ${state.trendMonths} mo`;
       ch.style.color = diff >= 0 ? 'var(--green)' : 'var(--red)';
@@ -749,6 +785,11 @@
         const response = await fetch('/api/v1/today');
         if (!response.ok) throw new Error('Today unavailable');
         const payload = await response.json();
+        const metric = payload?.data?.metrics?.netWorth;
+        state.netWorthHasServerMetric = metric != null && typeof metric.complete === 'boolean';
+        state.netWorthAuthoritative = metric?.complete === true && metric?.value != null;
+        state.netWorth = state.netWorthAuthoritative ? metric.value : (state.netWorthHasServerMetric ? null : state.netWorth);
+        state.netWorthIncompleteReasons = metric?.complete === false ? (metric.incompleteReasons || []) : [];
         renderSafeToSpend(payload?.data?.liquidity?.safeToSpend, payload);
         renderGoalAdvisory(payload?.data?.liquidity?.goalAdvisory);
       } catch (error) {

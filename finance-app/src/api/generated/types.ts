@@ -3,6 +3,17 @@
 export type Nullish<T> = T | null | undefined;
 export type AccountRole = 'operating_cash' | 'protected_savings' | 'credit_card' | 'loan' | 'investment' | 'excluded' | 'unknown';
 
+export interface SplitwiseMirrorIdentity {
+  status: 'valid' | 'disagreement' | 'invalid' | 'migration_required' | 'not_configured';
+  configuredSources: {
+    env: string | null;
+    saga: string | null;
+    owesConfig: string | null;
+  };
+  legacyNameCandidates: string[];
+  migrationRequired: boolean;
+}
+
 export type CreditLiabilityCoverage = 'exclude' | 'current_balance' | 'statement';
 
 export interface AccountCreditStatementOverride {
@@ -49,6 +60,14 @@ export interface Account {
   hidden?: boolean;
   role: AccountRole;
   roleSource: 'explicit' | 'unknown';
+  inclusion?: {
+    netWorth: boolean;
+    operatingCash: boolean;
+    liquidCash: boolean;
+    spending: boolean;
+    obligations: boolean;
+    forecast: boolean;
+  };
   creditLiability?: AccountCreditLiabilityOverride | null;
   creditLiabilityPolicy?: AccountCreditLiabilityPolicy | null;
 }
@@ -62,9 +81,13 @@ export interface ManualAsset {
 }
 export interface ManualAssets {
   items: ManualAsset[];
-  assets: number;
-  liabilities: number;
-  net: number;
+  assets: number | null;
+  liabilities: number | null;
+  net: number | null;
+  complete?: boolean;
+  incompleteReasons?: string[];
+  assetCents?: number | null;
+  liabilityCents?: number | null;
 }
 
 export interface InvestmentHolding {
@@ -224,6 +247,10 @@ export interface Spending {
   prev: SpendSummary;
   month: string;
   completeness?: ProjectionCompleteness;
+  scope?: {
+    accountProjectionRevision?: string;
+    spendingIncludedAccountIds?: string[];
+  };
 }
 
 export interface TrendMonth {
@@ -244,9 +271,19 @@ export interface Trends {
     includesClosedAccountHistory: boolean;
     includesManualAssets: boolean;
     excludedHiddenAccounts: boolean;
+    excludedRoles?: string[];
     queriedFrom?: string;
     queriedTo?: string;
     netWorthHistoryComplete?: boolean;
+    netWorthIncludedRoles?: AccountRole[];
+    netWorthIncludedAccountIds?: string[];
+    accountProjectionRevision?: string;
+    splitwiseMirrorAccountId?: string | null;
+    splitwiseMirrorExcludedFromNetWorth?: boolean;
+    splitwiseMirrorIdentity?: SplitwiseMirrorIdentity | null;
+    spendingIncludedAccountIds?: string[];
+    spendingProjectionComplete?: boolean;
+    demoSyntheticHistory?: boolean;
     months?: number;
   };
 }
@@ -951,20 +988,21 @@ export interface GoalAccountSummary {
   accountId: string;
   role: string | null;
   accountStatus: string;
-  capacityCents: number;
+  capacityCents: number | null;
   allocatedCents: number;
-  unallocatedCents: number;
-  overAllocatedCents: number;
+  unallocatedCents: number | null;
+  overAllocatedCents: number | null;
   goalIds: string[];
-  capacity: number;
+  capacity: number | null;
   allocated: number;
-  unallocated: number;
-  overAllocated: number;
+  unallocated: number | null;
+  overAllocated: number | null;
 }
 
 export interface GoalAdvisory {
-  complete: true;
+  complete: boolean;
   advisoryOnly: true;
+  incompleteReasons?: string[];
   totalRemainingCents: number;
   monthlyPressureCents: number;
   overAllocatedAccounts: GoalAccountSummary[];
@@ -1136,6 +1174,19 @@ export interface Today {
   incompleteReasons: string[];
   health: NonNullable<Ping['actual']>;
   accounts: Account[];
+  metrics?: {
+    netWorth: MetricValue;
+    liquidCash: MetricValue;
+    operatingCash: MetricValue;
+  };
+  scope?: {
+    accountProjectionRevision?: string;
+    netWorthIncludedAccountIds?: string[];
+    splitwiseMirrorAccountId?: string | null;
+    splitwiseMirrorIdentity?: SplitwiseMirrorIdentity | null;
+    netWorthIncludesManualAssets?: boolean;
+    netWorthHistoryScope?: string;
+  };
   spending: Spending;
   liquidity: { safeToSpend: MetricValue; goalAdvisory?: GoalAdvisory | null };
   obligationGraph?: ObligationGraphView;

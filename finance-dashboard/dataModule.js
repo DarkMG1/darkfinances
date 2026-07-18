@@ -146,6 +146,20 @@ const {
 } = require('./lib/domain/forecast-money');
 const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
 const {
+  ACCOUNT_METRIC,
+  ACCOUNT_PROJECTION_REASON,
+  attachInclusionToAccountRow,
+  buildBalanceMetric,
+  buildNetWorthMetric,
+  detectDuplicateAccountIds,
+  NET_WORTH_ROLES,
+  normalizeBalanceCents,
+  projectAccounts,
+  sumIncludedBalanceCents,
+} = require('./lib/account-projection');
+const { resolveSplitwiseMirrorIdentity } = require('./lib/splitwise-mirror-account');
+const { validateManualAssetsStore } = require('./lib/manual-assets-projection');
+const {
   mergeAccountOverrideEntry,
   validEntry,
   validateCreditOverrideCrossFields,
@@ -807,59 +821,142 @@ async function classifiedOnBudgetLeaves(api, start, end, catInfo, { accountFilte
   return leaves;
 }
 
+async function loadAccountBalancesById(api, accountsRaw) {
+  const balancesById = {};
+  const balanceUnavailableIds = new Set();
+  const hasBalanceApi = typeof api.getAccountBalance === 'function';
+  let abortError = null;
+  await Promise.all((accountsRaw || []).map(async (account) => {
+    try {
+      let raw;
+      if (hasBalanceApi) {
+        raw = await api.getAccountBalance(account.id);
+      } else if (account.balance !== undefined && account.balance !== null) {
+        raw = account.balance;
+      } else {
+        balanceUnavailableIds.add(account.id);
+        balancesById[account.id] = null;
+        return;
+      }
+      const normalized = normalizeBalanceCents(raw);
+      if (normalized.ok) {
+        balancesById[account.id] = normalized.cents;
+      } else {
+        balanceUnavailableIds.add(account.id);
+        balancesById[account.id] = null;
+      }
+    } catch (error) {
+      if (isQueryAbortedError(error) || error instanceof QueryRangeExceededError) {
+        abortError = error;
+        return;
+      }
+      balanceUnavailableIds.add(account.id);
+      balancesById[account.id] = null;
+    }
+  }));
+  if (abortError) throw abortError;
+  return { balancesById, balanceUnavailableIds };
+}
+
+function resolveSplitwiseMirrorAccountIdentity(accountsRaw) {
+  return resolveSplitwiseMirrorIdentity({
+    accountsRaw,
+    bulkSagasPath: BULK_OPERATION_SAGAS_PATH,
+    owesConfigPath: OWES_CONFIG_PATH,
+    env: process.env,
+    accountName: process.env.SPLITWISE_ACCOUNT_NAME || 'Splitwise',
+  });
+}
+
+async function loadAccountProjectionInputs(api) {
+  const accountsRaw = await api.getAccounts();
+  const overrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
+  const splitwiseMirrorIdentity = resolveSplitwiseMirrorAccountIdentity(accountsRaw);
+  const splitwiseMirrorAccountId = splitwiseMirrorIdentity.status === 'valid'
+    ? splitwiseMirrorIdentity.accountId
+    : null;
+  const duplicateAccountIds = detectDuplicateAccountIds(accountsRaw);
+  const { balancesById, balanceUnavailableIds } = await loadAccountBalancesById(api, accountsRaw);
+  return {
+    accountsRaw,
+    overrides,
+    splitwiseMirrorAccountId,
+    splitwiseMirrorIdentity,
+    balancesById,
+    balanceUnavailableIds,
+    duplicateAccountIds,
+  };
+}
+
+async function buildAccountProjection(api, metric, { financeDate = todayYMD(), inputs = null } = {}) {
+  const base = inputs || await loadAccountProjectionInputs(api);
+  return projectAccounts({
+    accountsRaw: base.accountsRaw,
+    balancesById: base.balancesById,
+    balanceUnavailableIds: base.balanceUnavailableIds,
+    duplicateAccountIds: base.duplicateAccountIds,
+    overrides: base.overrides,
+    metric,
+    splitwiseMirrorAccountId: base.splitwiseMirrorAccountId,
+    splitwiseMirrorIdentity: base.splitwiseMirrorIdentity,
+    financeDate,
+  });
+}
+
+function accountDisplayNamesFromOverrides(overrides = {}) {
+  return Object.fromEntries(
+    Object.entries(overrides)
+      .filter(([, entry]) => typeof entry?.name === 'string' && entry.name.trim())
+      .map(([id, entry]) => [id, entry.name.trim()]),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Core getters (mirror legacy endpoints)
 // ---------------------------------------------------------------------------
-async function getAccounts() {
+async function getAccounts({ projectionInputs = null } = {}) {
   return withApi(async (api) => {
-    // Hide the "Splitwise" spend-attribution ledger: its expenses count as spend
-    // (read straight from Actual), but it isn't real cash, so it must stay out of
-    // the account list + the app's net-worth sum.
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed && (a.name || '').toLowerCase() !== SW_ACCOUNT_NAME.toLowerCase());
+    const projection = await buildAccountProjection(api, ACCOUNT_METRIC.displayList, { inputs: projectionInputs });
     const overrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
+    const financeDate = todayYMD();
     return Promise.all(
-      accounts.map(async (a) => {
-        const ov = overrides[a.id] || {};
-        const financeDate = todayYMD();
-        const balanceCents = await api.getAccountBalance(a.id);
-        const creditPolicy = resolveAccountCreditPolicy({
-          ...a,
-          financeDate,
-          role: ov.role || 'unknown',
-          hidden: !!ov.hidden,
-          balance: balanceCents / 100,
-        }, ov);
-        return {
-          id: a.id,
-          name: ov.name || a.name, // display rename (Actual name untouched)
-          offbudget: !!a.offbudget,
-          balance: balanceCents / 100,
-          hidden: !!ov.hidden,
-          role: ov.role || 'unknown',
-          roleSource: ov.role ? 'explicit' : 'unknown',
-          creditLiability: ov.creditLiabilityCoverage || ov.paymentRecurringKey || ov.fundingAccountId || ov.statement
-            ? {
-              coverage: ov.creditLiabilityCoverage || null,
-              paymentRecurringKey: ov.paymentRecurringKey || null,
-              fundingAccountId: ov.fundingAccountId || null,
-              statement: ov.statement || null,
-            }
-            : null,
-          creditLiabilityPolicy: creditPolicy.excluded && creditPolicy.mode === COVERAGE_MODE.EXCLUDE
-            ? { mode: 'exclude', eligible: false, quarantineReasons: [] }
-            : {
-              mode: creditPolicy.mode,
-              eligible: creditPolicy.eligible,
-              coverageKind: creditPolicy.coverageKind || null,
-              paymentRecurringKey: creditPolicy.paymentRecurringKey || null,
-              fundingAccountId: creditPolicy.fundingAccountId || null,
-              obligationCents: creditPolicy.obligationCents ?? null,
-              paymentDueDate: creditPolicy.paymentDueDate || null,
-              observedAt: creditPolicy.observedAt || null,
-              quarantineReasons: creditPolicy.quarantineReasons || [],
-            },
-        };
-      })
+      projection.accounts
+        .filter((row) => projection.includedIds.has(row.id))
+        .map(async (row) => {
+          const ov = overrides[row.id] || {};
+          const rawAccount = { id: row.id, name: row.actualName, offbudget: row.offbudget, closed: row.closed };
+          const creditPolicy = resolveAccountCreditPolicy({
+            ...rawAccount,
+            financeDate,
+            role: row.role,
+            hidden: row.hidden,
+            balance: row.balance,
+          }, ov);
+          const creditExtras = {
+            creditLiability: ov.creditLiabilityCoverage || ov.paymentRecurringKey || ov.fundingAccountId || ov.statement
+              ? {
+                coverage: ov.creditLiabilityCoverage || null,
+                paymentRecurringKey: ov.paymentRecurringKey || null,
+                fundingAccountId: ov.fundingAccountId || null,
+                statement: ov.statement || null,
+              }
+              : null,
+            creditLiabilityPolicy: creditPolicy.excluded && creditPolicy.mode === COVERAGE_MODE.EXCLUDE
+              ? { mode: 'exclude', eligible: false, quarantineReasons: [] }
+              : {
+                mode: creditPolicy.mode,
+                eligible: creditPolicy.eligible,
+                coverageKind: creditPolicy.coverageKind || null,
+                paymentRecurringKey: creditPolicy.paymentRecurringKey || null,
+                fundingAccountId: creditPolicy.fundingAccountId || null,
+                obligationCents: creditPolicy.obligationCents ?? null,
+                paymentDueDate: creditPolicy.paymentDueDate || null,
+                observedAt: creditPolicy.observedAt || null,
+                quarantineReasons: creditPolicy.quarantineReasons || [],
+              },
+          };
+          return attachInclusionToAccountRow(row, creditExtras);
+        }),
     );
   });
 }
@@ -904,11 +1001,18 @@ function setAccountOverride({
 // Manual (off-Actual) assets & liabilities that roll into net worth
 // ---------------------------------------------------------------------------
 function getManualAssets() {
-  const store = readJsonSafe(MANUAL_ASSETS_PATH, { items: [] });
-  const items = Array.isArray(store.items) ? store.items : [];
-  const assets = round2(items.filter((i) => i.kind !== 'liability').reduce((s, i) => s + (Number(i.value) || 0), 0));
-  const liabilities = round2(items.filter((i) => i.kind === 'liability').reduce((s, i) => s + (Number(i.value) || 0), 0));
-  return { items, assets, liabilities, net: round2(assets - liabilities) };
+  const store = readJsonSafe(MANUAL_ASSETS_PATH, null);
+  const validated = validateManualAssetsStore(store);
+  return {
+    items: validated.items,
+    assets: validated.assets,
+    liabilities: validated.liabilities,
+    net: validated.net,
+    complete: validated.complete,
+    incompleteReasons: validated.incompleteReasons,
+    assetCents: validated.assetCents,
+    liabilityCents: validated.liabilityCents,
+  };
 }
 
 function saveManualAsset({ id, name, value, kind } = {}) {
@@ -1052,7 +1156,9 @@ async function getTransactions({ accountId, start, end, category, bucket, budget
       },
       includeClosed: false,
     });
-    const { accounts, catInfo, payeeMap, accountMap } = ctx;
+    const { accounts, catInfo, payeeMap, accountMap: rawAccountMap } = ctx;
+    const displayNames = accountDisplayNamesFromOverrides(readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts);
+    const accountMap = { ...rawAccountMap, ...displayNames };
     const catMap = Object.fromEntries(Object.entries(catInfo).map(([id, info]) => [id, info.name]));
 
     let all = [];
@@ -1199,13 +1305,14 @@ async function onBudgetLeavesPartitioned(api, {
   prevEnd,
   catInfo,
   ctx,
+  accountFilter,
 }) {
   const [current, previous] = await classifiedOnBudgetLeavesForWindows(api, [
     { start: curStart, end: curEnd },
     { start: prevStart, end: prevEnd },
-  ], catInfo);
+  ], catInfo, { accountFilter });
   const context = ctx || await loadLedgerReadContext(api, {
-    accountFilter: (a) => !a.closed && !a.offbudget,
+    accountFilter: accountFilter || ((a) => !a.closed && !a.offbudget),
     includeClosed: false,
   });
   return { current, previous, context };
@@ -1246,6 +1353,7 @@ async function getSpending({ month, start, end } = {}) {
 
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
+    const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution);
     const { current: currentLeaves, previous: previousLeaves } = await onBudgetLeavesPartitioned(api, {
       scanStart: prev.start,
       scanEnd: curEnd,
@@ -1254,14 +1362,26 @@ async function getSpending({ month, start, end } = {}) {
       prevStart: prev.start,
       prevEnd: prev.end,
       catInfo,
+      accountFilter: spendingProjection.accountFilter,
     });
     const current = summarize(currentLeaves);
     const previous = summarize(previousLeaves);
+    const spendingCompleteness = mergeProjectionCompleteness([current.completeness, previous.completeness]);
+    if (spendingProjection.incompleteReasons.length) {
+      spendingCompleteness.complete = false;
+      spendingCompleteness.incompleteReasons = [
+        ...new Set([...(spendingCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+      ];
+    }
     return {
       current,
       prev: previous,
       month: monthKey,
-      completeness: mergeProjectionCompleteness([current.completeness, previous.completeness]),
+      completeness: spendingCompleteness,
+      scope: {
+        accountProjectionRevision: spendingProjection.revision,
+        spendingIncludedAccountIds: [...spendingProjection.includedIds],
+      },
     };
   });
 }
@@ -1273,11 +1393,19 @@ async function getTrends({ months = 12, endMonth } = {}) {
   const config = loadQueryScalingConfig();
   const boundedMonths = Math.max(3, Math.min(config.maxTrendsMonths, Number(months) || 12));
   return withApi(async (api) => {
-    const accountOverrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
+    const projectionInputs = await loadAccountProjectionInputs(api);
+    const nwProjection = await buildAccountProjection(api, ACCOUNT_METRIC.netWorthHistory, { inputs: projectionInputs });
+    const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution, { inputs: projectionInputs });
+    const ledgerAccountIds = new Set([
+      ...nwProjection.includedIds,
+      ...spendingProjection.includedIds,
+    ]);
     const ctx = await loadLedgerReadContext(api, {
-      accountFilter: (account) => !accountOverrides[account.id]?.hidden,
+      accountFilter: (account) => ledgerAccountIds.has(account.id),
+      includeClosed: true,
     });
     const { catInfo, accounts } = ctx;
+    const splitwiseMirrorAccountId = nwProjection.splitwiseMirrorAccountId;
     const [financeYear, financeMonth] = String(endMonth || todayYMD().slice(0, 7)).split('-').map(Number);
 
     const buckets = [];
@@ -1313,13 +1441,11 @@ async function getTrends({ months = 12, endMonth } = {}) {
     }
     const trendTransferIndex = buildTransferIndex(trendRows);
     for (const { account: a, transactions: txns } of batches) {
-      // The "Splitwise" account is a spend-attribution ledger (my share of items a
-      // friend paid), not real cash — count its expenses toward monthly spend but
-      // keep it out of net worth so a growing share balance can't sink it.
-      const isSwLedger = (a.name || '').toLowerCase() === SW_ACCOUNT_NAME.toLowerCase();
+      const countsForNetWorth = nwProjection.includedIds.has(a.id);
+      const countsForSpend = spendingProjection.includedIds.has(a.id);
       for (const t of txns) {
-        if (!isSwLedger) contributions.push({ date: t.date, amount: t.amount });
-        if (a.offbudget) continue;
+        if (countsForNetWorth) contributions.push({ date: t.date, amount: t.amount });
+        if (!countsForSpend || a.offbudget) continue;
         const b = byKey[t.date.slice(0, 7)];
         if (!b) continue;
         for (const lf of classifyTransactionLeaves(t, catInfo, {
@@ -1345,22 +1471,37 @@ async function getTrends({ months = 12, endMonth } = {}) {
     contributions.sort((x, y) => (x.date < y.date ? -1 : 1));
     let idx = 0;
     let run = 0;
+    const nwHistoryComplete = netWorthWindow.complete && nwProjection.incompleteReasons.length === 0;
+    const spendingSeriesComplete = spendingProjection.incompleteReasons.length === 0;
     const series = buckets.map((b) => {
       while (idx < contributions.length && contributions[idx].date <= b.end) {
         run += contributions[idx].amount;
         idx++;
       }
-      const complete = b.transferIncompleteCount === 0;
+      const transferComplete = b.transferIncompleteCount === 0;
+      const monthSeriesComplete = transferComplete && spendingSeriesComplete;
       const monthCompleteness = projectionCompletenessFromLeaves(b.transferIncompleteLeaves);
+      if (!nwHistoryComplete && nwProjection.incompleteReasons.length) {
+        monthCompleteness.complete = false;
+        monthCompleteness.incompleteReasons = [
+          ...new Set([...(monthCompleteness.incompleteReasons || []), ...nwProjection.incompleteReasons]),
+        ];
+      }
+      if (!spendingSeriesComplete && spendingProjection.incompleteReasons.length) {
+        monthCompleteness.complete = false;
+        monthCompleteness.incompleteReasons = [
+          ...new Set([...(monthCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+        ];
+      }
       return {
         month: b.key,
-        netWorth: netWorthWindow.complete ? d2(run) : null,
-        complete,
-        spend: complete ? d2(b.expense) : null,
-        income: complete ? d2(b.income) : null,
-        knownSpendSubtotal: complete ? undefined : d2(b.knownExpense),
-        knownIncomeSubtotal: complete ? undefined : d2(b.knownIncome),
-        net: complete ? d2(b.income - b.expense) : null,
+        netWorth: nwHistoryComplete ? d2(run) : null,
+        complete: transferComplete && spendingSeriesComplete,
+        spend: monthSeriesComplete ? d2(b.expense) : null,
+        income: monthSeriesComplete ? d2(b.income) : null,
+        knownSpendSubtotal: monthSeriesComplete ? undefined : d2(b.knownExpense),
+        knownIncomeSubtotal: monthSeriesComplete ? undefined : d2(b.knownIncome),
+        net: monthSeriesComplete ? d2(b.income - b.expense) : null,
         completeness: monthCompleteness,
       };
     });
@@ -1371,10 +1512,19 @@ async function getTrends({ months = 12, endMonth } = {}) {
         includesClosedAccountHistory: true,
         includesManualAssets: false,
         excludedHiddenAccounts: true,
+        excludedRoles: ['excluded'],
         queriedFrom: netWorthWindow.start,
         queriedTo: lastEnd,
-        netWorthHistoryComplete: netWorthWindow.complete,
+        netWorthHistoryComplete: nwHistoryComplete,
+        netWorthIncludedRoles: [...NET_WORTH_ROLES],
         months: boundedMonths,
+        accountProjectionRevision: nwProjection.revision,
+        netWorthIncludedAccountIds: [...nwProjection.includedIds],
+        spendingIncludedAccountIds: [...spendingProjection.includedIds],
+        spendingProjectionComplete: spendingSeriesComplete,
+        splitwiseMirrorAccountId,
+        splitwiseMirrorExcludedFromNetWorth: !!splitwiseMirrorAccountId,
+        splitwiseMirrorIdentity: nwProjection.scope?.splitwiseMirrorIdentity || null,
       },
     };
   });
@@ -3349,13 +3499,21 @@ async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) 
   const start = `${m}-01`;
   const [year, monthNum] = m.split('-').map(Number);
   const end = m === todayYMD().slice(0, 7) ? todayYMD() : monthRange(year, monthNum - 1).end;
+  const reviewExcludedAccountIds = new Set(
+    Object.entries(readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts)
+      .filter(([, override]) => override.hidden || override.role === 'excluded')
+      .map(([id]) => id),
+  );
   const classifiedLeavesPromise = preclassifiedLeaves
     ? Promise.resolve(preclassifiedLeaves)
     : withApi(async (api) => {
       const groups = await api.getCategoryGroups();
-      return classifiedOnBudgetLeaves(api, start, end, buildCatInfo(groups));
+      const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution);
+      return classifiedOnBudgetLeaves(api, start, end, buildCatInfo(groups), {
+        accountFilter: spendingProjection.accountFilter,
+      });
     });
-  const [txns, insights, recurring, repayments, recon, receipts, classifiedLeaves] = await Promise.all([
+  const [txnsRaw, insights, recurring, repayments, recon, receipts, classifiedLeaves] = await Promise.all([
     getTransactions({ start, end, collapse: true }),
     getInsights({ month: m }),
     getRecurring({}),
@@ -3364,6 +3522,7 @@ async function getReview({ month, classifiedLeaves: preclassifiedLeaves } = {}) 
     Promise.resolve(getReceipts()),
     classifiedLeavesPromise,
   ]);
+  const txns = txnsRaw.filter((txn) => !reviewExcludedAccountIds.has(txn.accountId));
 
   const tasks = [];
   const seen = new Set();
@@ -4071,8 +4230,13 @@ async function getForecast({ days = 90 } = {}) {
   const forecastBundle = await withApi(async (api) => {
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
-    const rows = await fetchOnBudgetRows(api, today, horizon);
-    return { catInfo, rows };
+    const projectionInputs = await loadAccountProjectionInputs(api);
+    const forecastProjection = await buildAccountProjection(api, ACCOUNT_METRIC.forecastCash, { inputs: projectionInputs });
+    const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution, { inputs: projectionInputs });
+    const rows = await fetchOnBudgetRows(api, today, horizon, {
+      accountFilter: spendingProjection.accountFilter,
+    });
+    return { catInfo, rows, forecastProjection };
   });
   const [accounts, income, recurring, budgets, reimb] = await Promise.all([
     getAccounts(),
@@ -4081,15 +4245,20 @@ async function getForecast({ days = 90 } = {}) {
     getBudgets({}),
     getReimbursement({}),
   ]);
-  const { catInfo, rows } = forecastBundle;
+  const { catInfo, rows, forecastProjection } = forecastBundle;
   const bills = await getBills({ days: horizonDays, recurring });
-  const liquidAccounts = accountsForMetric(accounts.filter((account) => !account.hidden), 'operating_cash');
-  const startBalanceCents = sumOperatingCashBalanceCents(liquidAccounts);
+  const liquidAccounts = accounts.filter((account) => account.inclusion?.forecast);
+  const operatingProjectionComplete = forecastProjection.incompleteReasons.length === 0;
+  let startBalanceCents = null;
+  if (operatingProjectionComplete) {
+    startBalanceCents = sumOperatingCashBalanceCents(liquidAccounts);
+  }
+  const obligationAccounts = accounts.filter((account) => account.inclusion?.obligations);
   const { graph } = await buildObligationGraphBundle({
     financeDate: today,
     windowStart: today,
     windowEnd: horizon,
-    accounts,
+    accounts: obligationAccounts,
     recurring,
     income,
     bills,
@@ -4128,6 +4297,9 @@ async function getForecast({ days = 90 } = {}) {
   );
   const genericBudget = buildForecastGenericBudgetContext(genericCategories);
   const forecastWarnings = [...genericBudget.warnings];
+  if (!operatingProjectionComplete) {
+    forecastWarnings.push('Operating cash projection incomplete; forecast start balance withheld.');
+  }
   if (!graphCompleteness.complete) {
     forecastWarnings.push('Obligation graph incomplete; scheduled cash events withheld.');
     for (const reason of graphCompleteness.incompleteReasons || []) {
@@ -4164,12 +4336,14 @@ async function getForecast({ days = 90 } = {}) {
   }
   const points = [];
   let balanceCents = startBalanceCents;
-  let lowest = { date: today, balance: fromCents(startBalanceCents) };
+  let lowest = startBalanceCents == null
+    ? { date: today, balance: null }
+    : { date: today, balance: fromCents(startBalanceCents) };
   for (let i = 0; i <= horizonDays; i++) {
     const date = addDays(today, i);
     const day = byDate.get(date);
-    if (day) balanceCents = sumCents([balanceCents, day.inflowCents, -day.outflowCents]);
-    const balance = fromCents(balanceCents);
+    if (day && balanceCents != null) balanceCents = sumCents([balanceCents, day.inflowCents, -day.outflowCents]);
+    const balance = balanceCents == null ? null : fromCents(balanceCents);
     const p = {
       date,
       balance,
@@ -4177,14 +4351,14 @@ async function getForecast({ days = 90 } = {}) {
       outflow: day ? fromCents(day.outflowCents) : 0,
     };
     points.push(p);
-    if (p.balance < lowest.balance) lowest = { date, balance };
+    if (balance != null && (lowest.balance == null || p.balance < lowest.balance)) lowest = { date, balance };
   }
   const totalInflowCents = sumCents(eventRows.filter((e) => e.amountCents > 0).map((e) => e.amountCents));
   const totalOutflowCents = sumCents(eventRows.filter((e) => e.amountCents < 0).map((e) => -e.amountCents));
   return {
     generatedAt: new Date().toISOString(),
     range: { start: today, end: horizon, days: horizonDays },
-    startBalance: fromCents(startBalanceCents),
+    startBalance: startBalanceCents == null ? null : fromCents(startBalanceCents),
     endingBalance: points[points.length - 1].balance,
     lowest,
     totals: {
@@ -4195,6 +4369,9 @@ async function getForecast({ days = 90 } = {}) {
     events: events.slice(0, 200),
     assumptions: {
       liquidAccounts: liquidAccounts.map((account) => ({ id: account.id, name: account.name })),
+      accountProjectionRevision: forecastProjection.revision,
+      operatingCashComplete: forecastProjection.incompleteReasons.length === 0,
+      operatingCashIncompleteReasons: forecastProjection.incompleteReasons,
       genericBudgetTarget: genericBudget.assumptions.genericBudgetTarget,
       genericBudget: {
         target: genericBudget.assumptions.target,
@@ -4212,7 +4389,8 @@ async function getForecast({ days = 90 } = {}) {
     },
     possibleReimbursement,
     warnings: [
-      ...(lowest.balance < 0 ? [`Projected cash drops below $0 on ${lowest.date}`] : []),
+      ...(startBalanceCents == null ? ['Operating cash start balance unavailable; forecast curve withheld.'] : []),
+      ...(lowest.balance != null && lowest.balance < 0 ? [`Projected cash drops below $0 on ${lowest.date}`] : []),
       ...(possibleReimbursement ? ['Possible reimbursements are shown separately and are not counted as guaranteed cash.'] : []),
       ...forecastWarnings,
     ],
@@ -4233,47 +4411,79 @@ async function getToday() {
     const monthEndDate = monthRange(financeYear, financeMonth - 1).end;
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
-    const rows = await fetchOnBudgetRows(api, prev.start, monthEndDate);
+    const projectionInputs = await loadAccountProjectionInputs(api);
+    const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution, { inputs: projectionInputs });
+    const nwProjection = await buildAccountProjection(api, ACCOUNT_METRIC.netWorthLive, { inputs: projectionInputs });
+    const operatingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.operatingCash, { inputs: projectionInputs });
+    const liquidProjection = await buildAccountProjection(api, ACCOUNT_METRIC.liquidCash, { inputs: projectionInputs });
+    const goalsBundle = await materializeGoals(api, { projectionInputs });
+    const rows = await fetchOnBudgetRows(api, prev.start, monthEndDate, {
+      accountFilter: spendingProjection.accountFilter,
+    });
     const transferIndex = buildTransferIndex(rows);
     const classifyWindow = (start, end) => classifyLeavesInDateRange(rows, catInfo, start, end, transferIndex);
     const currentLeaves = classifyWindow(cur.start, curEnd);
     const previousLeaves = classifyWindow(prev.start, prev.end);
     const current = summarize(currentLeaves);
     const previous = summarize(previousLeaves);
+    let spendingCompleteness = mergeProjectionCompleteness([current.completeness, previous.completeness]);
+    if (spendingProjection.incompleteReasons.length) {
+      spendingCompleteness = {
+        ...spendingCompleteness,
+        complete: false,
+        incompleteReasons: [
+          ...new Set([...(spendingCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+        ],
+      };
+    }
     return {
       spending: {
         current,
         prev: previous,
         month,
-        completeness: mergeProjectionCompleteness([current.completeness, previous.completeness]),
+        completeness: spendingCompleteness,
       },
       classifiedLeaves: currentLeaves,
       txnContext: { rows, catInfo },
+      projections: {
+        spending: spendingProjection,
+        netWorth: nwProjection,
+        operating: operatingProjection,
+        liquid: liquidProjection,
+      },
+      goalsBundle,
+      projectionInputs,
     };
   });
   const spending = spendingBundle.spending;
-  const [accounts, budgets, recurring, goalsBundle, income, review, recent, reimb] = await Promise.all([
-    getAccounts(),
+  const [accounts, budgets, recurring, income, review, recent, reimb] = await Promise.all([
+    getAccounts({ projectionInputs: spendingBundle.projectionInputs }),
     getBudgets({ month }),
     getRecurring({}),
-    getGoalsWithAdvisory(),
     getIncome({}),
     getReview({ month, classifiedLeaves: spendingBundle.classifiedLeaves }),
     getTransactions({ start: addDays(financeDate, -14), end: financeDate, collapse: true }),
     getReimbursement({}),
   ]);
-  const goals = goalsBundle.goals;
-  const goalAdvisory = goalsBundle.goalAdvisory;
+  const goals = spendingBundle.goalsBundle.goals;
+  const goalAdvisory = spendingBundle.goalsBundle.goalAdvisory;
   const bills = await getBills({ days: 45, recurring });
+  const manualAssets = getManualAssets();
+  const { projections } = spendingBundle;
 
+  const operatingAccounts = accounts.filter((account) => account.inclusion?.operatingCash);
   const visibleAccounts = accounts.filter((account) => !account.hidden);
-  const operatingAccounts = accountsForMetric(visibleAccounts, 'operating_cash');
-  const cashCents = Math.round(operatingAccounts.reduce((sum, account) => sum + account.balance, 0) * 100);
+  const obligationAccounts = accounts.filter((account) => account.inclusion?.obligations);
+  const operatingProjectionComplete = projections.operating.incompleteReasons.length === 0;
+  let cashCents = null;
+  if (operatingProjectionComplete) {
+    cashCents = sumIncludedBalanceCents(projections.operating);
+  }
   const { graph, summary: obligationSummary, liabilityPolicies } = await buildObligationGraphBundle({
     financeDate,
     windowStart: financeDate,
     windowEnd: monthEndDate,
-    accounts,
+    accounts: obligationAccounts,
     recurring,
     income,
     bills,
@@ -4283,11 +4493,13 @@ async function getToday() {
     operatingAccounts,
     txnContext: spendingBundle.txnContext,
   });
-  const stfFromGraph = safeToSpendFromGraph(graph, {
-    operatingCashCents: cashCents,
-    monthStart: financeDate,
-    monthEnd: monthEndDate,
-  });
+  const stfFromGraph = Number.isSafeInteger(cashCents)
+    ? safeToSpendFromGraph(graph, {
+      operatingCashCents: cashCents,
+      monthStart: financeDate,
+      monthEnd: monthEndDate,
+    })
+    : { valueCents: null, method: 'obligation-graph', reservations: [] };
   const incompleteReasons = safeToSpendIncompleteReasons({
     accounts,
     visibleAccounts,
@@ -4298,24 +4510,51 @@ async function getToday() {
     obligationGraph: graph,
     liabilityPolicies,
   });
+  if (!operatingProjectionComplete) {
+    for (const reason of projections.operating.incompleteReasons) {
+      if (!incompleteReasons.includes(reason)) incompleteReasons.push(reason);
+    }
+  }
+  const safeToSpendComplete = incompleteReasons.length === 0 && operatingProjectionComplete;
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',
-    value: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+    value: safeToSpendComplete && Number.isSafeInteger(stfFromGraph.valueCents)
       ? fromCents(stfFromGraph.valueCents)
       : null,
-    valueCents: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+    valueCents: safeToSpendComplete && Number.isSafeInteger(stfFromGraph.valueCents)
       ? stfFromGraph.valueCents
       : null,
-    complete: incompleteReasons.length === 0,
+    complete: safeToSpendComplete,
     asOf,
     financeDate,
-    sources: operatingAccounts.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
+    sources: safeToSpendComplete
+      ? operatingAccounts.map((account) => ({ type: 'actual-account', id: account.id, role: account.role }))
+      : [],
     method: stfFromGraph.method,
     excludes: ['protected savings', 'investments', 'credit availability', 'possible reimbursements', 'unfunded goals'],
     incompleteReasons,
   });
+  const operatingCash = buildBalanceMetric({
+    projection: projections.operating,
+    metric: 'operating_cash',
+    asOf,
+    financeDate,
+  });
+  const liquidCash = buildBalanceMetric({
+    projection: projections.liquid,
+    metric: 'liquid_cash',
+    asOf,
+    financeDate,
+  });
+  const netWorth = buildNetWorthMetric({
+    projection: projections.netWorth,
+    manualAssets,
+    asOf,
+    financeDate,
+    metric: 'net_worth',
+  });
   const revision = crypto.createHash('sha256')
-    .update(`${apiHealth.lastSyncAt || apiHealth.initializedAt || ''}\0${financeDate}`)
+    .update(`${apiHealth.lastSyncAt || apiHealth.initializedAt || ''}\0${financeDate}\0${projections.netWorth.revision}`)
     .digest('hex')
     .slice(0, 16);
 
@@ -4327,6 +4566,19 @@ async function getToday() {
     incompleteReasons: [...new Set([...safeToSpend.incompleteReasons, ...(spending.current?.completeness?.complete === false ? spending.current.completeness.incompleteReasons : [])])],
     health: getHealth(),
     accounts,
+    metrics: {
+      netWorth,
+      liquidCash,
+      operatingCash,
+    },
+    scope: {
+      accountProjectionRevision: projections.netWorth.revision,
+      netWorthIncludedAccountIds: [...projections.netWorth.includedIds],
+      splitwiseMirrorAccountId: projections.netWorth.splitwiseMirrorAccountId,
+      splitwiseMirrorIdentity: projections.netWorth.scope?.splitwiseMirrorIdentity || null,
+      netWorthIncludesManualAssets: true,
+      netWorthHistoryScope: 'live_balances',
+    },
     spending,
     liquidity: { safeToSpend, goalAdvisory },
     obligationGraph: {
@@ -5957,24 +6209,29 @@ async function setTransactionDate({ id, date, isLeg }) {
 // Savings goals — funded allocations; linked accounts are capacity constraints,
 // never balances that multiple goals may each claim in full.
 // ---------------------------------------------------------------------------
-async function materializeGoals(api) {
+async function materializeGoals(api, { projectionInputs = null } = {}) {
   const financeDate = todayYMD();
   const storedGoals = readJsonSafe(GOALS_PATH, []);
-  const accounts = await api.getAccounts();
-  const openAccounts = accounts.filter((a) => !a.closed);
-  const bals = await Promise.all(openAccounts.map((a) => api.getAccountBalance(a.id)));
-  const balanceCentsById = new Map();
-  openAccounts.forEach((a, i) => { balanceCentsById.set(a.id, bals[i]); });
-  const accountRoles = readAccountOverrides(ACCOUNT_OVERRIDES_PATH);
-  const accountsWithRoles = accounts.map((account) => {
-    const override = accountRoles.accounts?.[account.id];
+  const inputs = projectionInputs || await loadAccountProjectionInputs(api);
+  const { accountsRaw, balancesById, balanceUnavailableIds, overrides } = inputs;
+  const accountsWithRoles = (accountsRaw || []).map((account) => {
+    const override = overrides[account.id] || {};
     return {
       ...account,
       role: override?.role || account.role || 'unknown',
-      hidden: !!override?.hidden || !!account.hidden,
+      hidden: !!override?.hidden,
       closed: !!account.closed,
     };
   });
+  const balanceCentsById = new Map();
+  for (const account of accountsRaw || []) {
+    const cents = balancesById[account.id];
+    if (Number.isSafeInteger(cents)) balanceCentsById.set(account.id, cents);
+    else if (balanceUnavailableIds.has(account.id)) balanceCentsById.set(account.id, null);
+  }
+  const balanceIncompleteReasons = balanceUnavailableIds.size
+    ? [ACCOUNT_PROJECTION_REASON.accountBalanceUnavailable]
+    : [];
   const normalizedGoals = storedGoals.map((g) => {
     const current = Math.max(0, Number(g.current) || 0);
     return {
@@ -5988,6 +6245,7 @@ async function materializeGoals(api) {
     accounts: accountsWithRoles,
     balanceCentsById,
     financeDate,
+    balanceIncompleteReasons,
   });
   const goals = enriched.goals.map((goal) => {
     const accountId = goal.accountId;
@@ -5998,14 +6256,16 @@ async function materializeGoals(api) {
       ...goal,
       pct: goal.target > 0 ? Math.min(999, Math.round((goal.current / goal.target) * 100)) : null,
       fundingSource: accountId ? 'allocated-account' : 'manual',
-      availableInAccount: linkedOpen && balCents != null ? Math.max(0, fromCents(Math.max(0, balCents))) : null,
+      availableInAccount: linkedOpen && Number.isSafeInteger(balCents)
+        ? Math.max(0, fromCents(Math.max(0, balCents)))
+        : null,
     };
   });
   return { goals, goalAdvisory: enriched.goalAdvisory };
 }
 
-async function getGoalsWithAdvisory() {
-  return withApi(async (api) => materializeGoals(api));
+async function getGoalsWithAdvisory(options = {}) {
+  return withApi(async (api) => materializeGoals(api, options));
 }
 
 async function getGoals() {
@@ -6359,6 +6619,7 @@ module.exports = {
   setTransactionNotes,
   setTransactionDate,
   getGoals,
+  getGoalsWithAdvisory,
   saveGoal,
   deleteGoal,
 };

@@ -15,6 +15,9 @@ test('useSetAccountOverride invalidates today and forecast derived reads', () =>
   assert.match(hooks, /ACCOUNT_OVERRIDE_DERIVED_KEYS/);
   assert.match(hooks, /API_ENDPOINTS\.today\.key/);
   assert.match(hooks, /API_ENDPOINTS\.forecast\.key/);
+  assert.match(hooks, /API_ENDPOINTS\.trends\.key/);
+  assert.match(hooks, /API_ENDPOINTS\.spending\.key/);
+  assert.match(hooks, /API_ENDPOINTS\.review\.key/);
   assert.match(hooks, /invalidateKeys\(qc, ACCOUNT_OVERRIDE_DERIVED_KEYS\)/);
 });
 

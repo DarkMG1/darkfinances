@@ -1100,7 +1100,7 @@ async function setAccountOverrideH(req, operation) {
       statement,
       clearCreditLiability,
     })),
-    'accounts', 'today',
+    'accounts', 'today', 'forecast', 'trends', 'spending', 'goals', 'review', 'reports', 'insights',
   );
 }
 async function setReviewDispositionH(req, operation) {

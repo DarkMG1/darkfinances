@@ -29,6 +29,13 @@ const {
   renewalWindow,
 } = require('./lib/recurrence');
 const { projectAllocationLedger } = require('./lib/reimbursement-export-ledger');
+const {
+  ACCOUNT_METRIC,
+  attachInclusionToAccountRow,
+  buildBalanceMetric,
+  buildNetWorthMetric,
+  projectAccounts,
+} = require('./lib/account-projection');
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const anchorDate = () => (process.env.DEMO_FINANCE_NOW ? new Date(process.env.DEMO_FINANCE_NOW) : new Date());
@@ -56,7 +63,24 @@ const ACCOUNTS = [
   { id: 'acc-invest', name: 'Brokerage', offbudget: true, balance: 32160.75, role: 'investment', roleSource: 'explicit' },
   { id: 'acc-roth', name: 'Roth IRA', offbudget: true, balance: 21300.00, role: 'investment', roleSource: 'explicit' },
 ];
-const accounts = () => ACCOUNTS.map((a) => ({ ...a }));
+const accounts = () => {
+  const projection = demoAccountProjection(ACCOUNT_METRIC.displayList);
+  return projection.accounts.map((row) => attachInclusionToAccountRow(row));
+};
+
+function demoAccountProjection(metric) {
+  const raw = ACCOUNTS.map((account) => ({ ...account, closed: false }));
+  const balancesById = Object.fromEntries(
+    raw.map((account) => [account.id, Math.round(account.balance * 100)]),
+  );
+  return projectAccounts({
+    accountsRaw: raw,
+    balancesById,
+    overrides: {},
+    metric,
+    splitwiseMirrorAccountId: null,
+  });
+}
 
 // ---- Categories -----------------------------------------------------------
 const CATS = [
@@ -164,8 +188,15 @@ function today() {
   const financeDate = financeAnchor();
   const monthEndDate = monthEnd(financeDate.slice(0, 7));
   const allAccounts = accounts();
-  const cash = allAccounts.filter((account) => account.role === 'operating_cash');
-  const cashCents = Math.round(cash.reduce((sum, account) => sum + account.balance, 0) * 100);
+  const manualAssetTotals = manualAssets();
+  const operatingProjection = demoAccountProjection(ACCOUNT_METRIC.operatingCash);
+  const liquidProjection = demoAccountProjection(ACCOUNT_METRIC.liquidCash);
+  const netWorthProjection = demoAccountProjection(ACCOUNT_METRIC.netWorthLive);
+  const cash = allAccounts.filter((account) => account.inclusion?.operatingCash);
+  const cashCents = operatingProjection.accounts
+    .filter((row) => operatingProjection.includedIds.has(row.id))
+    .reduce((sum, row) => sum + row.balanceCents, 0);
+  const obligationAccounts = allAccounts.filter((account) => account.inclusion?.obligations);
   const upcoming = bills();
   const recurringData = recurring();
   const incomeData = income();
@@ -184,7 +215,7 @@ function today() {
     financeDate,
     windowStart: financeDate,
     windowEnd: monthEndDate,
-    accounts: allAccounts,
+    accounts: obligationAccounts,
     accountOverrides: {
       'acc-credit': {
         creditLiabilityCoverage: 'current_balance',
@@ -233,10 +264,29 @@ function today() {
     method: stfFromGraph.method,
     excludes: ['possible reimbursements'],
   });
+  const operatingCash = buildBalanceMetric({
+    projection: operatingProjection,
+    metric: 'operating_cash',
+    asOf,
+    financeDate,
+  });
+  const liquidCash = buildBalanceMetric({
+    projection: liquidProjection,
+    metric: 'liquid_cash',
+    asOf,
+    financeDate,
+  });
+  const netWorth = buildNetWorthMetric({
+    projection: netWorthProjection,
+    manualAssets: manualAssetTotals,
+    asOf,
+    financeDate,
+    metric: 'net_worth',
+  });
   return {
     asOf,
     financeDate,
-    revision: `demo-${currentMonth()}`,
+    revision: `demo-${currentMonth()}-${netWorthProjection.revision}`,
     complete: safeToSpend.complete && currentSpending.current?.completeness?.complete !== false,
     incompleteReasons: [...new Set([
       ...safeToSpend.incompleteReasons,
@@ -244,6 +294,13 @@ function today() {
     ])],
     health: { ready: true, initializedAt: asOf, lastSyncAt: asOf, lastErrorAt: null, lastError: null },
     accounts: allAccounts,
+    metrics: { netWorth, liquidCash, operatingCash },
+    scope: {
+      accountProjectionRevision: netWorthProjection.revision,
+      netWorthIncludedAccountIds: [...netWorthProjection.includedIds],
+      netWorthIncludesManualAssets: true,
+      netWorthHistoryScope: 'live_balances',
+    },
     spending: currentSpending,
     liquidity: { safeToSpend, goalAdvisory: buildDemoGoalAdvisory() },
     obligationGraph: {
@@ -418,6 +475,7 @@ function trends(n = 12) {
   const out = [];
   let nw = 59000;
   const anchorMonth = currentMonth();
+  const bounded = Math.min(36, Math.max(3, Number(n) || 12));
   for (let i = 35; i >= 0; i--) {
     const month = shiftMonth(anchorMonth, -i);
     const rnd = mulberry32(1000 + i);
@@ -427,7 +485,22 @@ function trends(n = 12) {
     nw += net * 0.22 + (rnd() * 240 - 60);
     out.push({ month, netWorth: round2(nw), spend: round2(spend), income: round2(income), net: round2(net) });
   }
-  return { months: out.slice(36 - Math.min(36, Math.max(3, n))) };
+  const netWorthProjection = demoAccountProjection(ACCOUNT_METRIC.netWorthHistory);
+  return {
+    months: out.slice(36 - bounded),
+    scope: {
+      includesClosedAccountHistory: true,
+      includesManualAssets: false,
+      excludedHiddenAccounts: true,
+      excludedRoles: ['excluded'],
+      netWorthHistoryComplete: true,
+      accountProjectionRevision: netWorthProjection.revision,
+      netWorthIncludedAccountIds: [...netWorthProjection.includedIds],
+      netWorthIncludedRoles: ['operating_cash', 'protected_savings', 'credit_card', 'loan', 'investment'],
+      months: bounded,
+      demoSyntheticHistory: true,
+    },
+  };
 }
 
 // ---- Budgets --------------------------------------------------------------

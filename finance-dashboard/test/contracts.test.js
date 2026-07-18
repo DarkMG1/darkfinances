@@ -112,6 +112,37 @@ test('legacy web reimbursement renders MetricValue totals without NaN or fabrica
   assert.match(appReimbursement, /grandLowerBound != null \?/);
 });
 
+test('generated contract includes account projection metric and inclusion types', () => {
+  assert.match(generatedTypes, /inclusion\?: \{/);
+  assert.match(generatedTypes, /metrics\?: \{/);
+  assert.match(generatedTypes, /netWorth: MetricValue/);
+  assert.match(generatedTypes, /accountProjectionRevision\?: string/);
+  assert.match(generatedTypes, /netWorthIncludedAccountIds\?: string\[\]/);
+});
+
+test('clients prefer authoritative server net worth and withhold local fallback when server metric is incomplete', () => {
+  const home = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'index.tsx'), 'utf8');
+  const networth = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'networth.tsx'), 'utf8');
+  const widget = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'components', 'widget-sync.tsx'), 'utf8');
+  assert.match(home, /resolveNetWorthAggregateDisplay/);
+  assert.match(networth, /resolveNetWorthAggregateDisplay/);
+  assert.match(widget, /resolveWidgetNetWorthDecision/);
+  assert.match(widget, /clearFinanceWidget/);
+  assert.match(browser, /aggregatesUnavailable/);
+  assert.match(browser, /inclusion\?\.netWorth/);
+});
+
+test('generated contract includes splitwise mirror identity and manual asset completeness', () => {
+  assert.match(generatedTypes, /export interface SplitwiseMirrorIdentity/);
+  assert.match(generatedTypes, /splitwiseMirrorIdentity\?: SplitwiseMirrorIdentity/);
+  assert.match(generatedTypes, /complete\?: boolean;/);
+});
+
+test('server account override invalidation includes insights', () => {
+  const server = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /'accounts', 'today', 'forecast', 'trends', 'spending', 'goals', 'review', 'reports', 'insights'/);
+});
+
 test('generated contract includes goal feasibility and advisory types', () => {
   assert.match(generatedTypes, /export interface GoalFeasibility/);
   assert.match(generatedTypes, /export interface GoalAdvisory/);

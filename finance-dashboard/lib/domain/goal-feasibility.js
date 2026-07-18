@@ -45,14 +45,35 @@ function accountStatusForGoal(account, { accountId }) {
   };
 }
 
-function accountAllocationSummary({ goals, accountId, balanceCents, role = null, accountStatus = 'linked' }) {
+function accountAllocationSummary({
+  goals,
+  accountId,
+  balanceCents,
+  role = null,
+  accountStatus = 'linked',
+  balanceUnavailable = false,
+}) {
   const linked = (goals || []).filter((goal) => goal.accountId === accountId);
   const allocatedCents = sumCents(linked.map((goal) => toCents(goal.current ?? 0)));
+  if (balanceUnavailable || !Number.isSafeInteger(balanceCents)) {
+    return {
+      accountId,
+      role,
+      accountStatus,
+      balanceUnavailable: true,
+      capacityCents: null,
+      allocatedCents,
+      unallocatedCents: null,
+      overAllocatedCents: null,
+      goalIds: linked.map((goal) => goal.id),
+    };
+  }
   const capacityCents = Math.max(0, balanceCents);
   return {
     accountId,
     role,
     accountStatus,
+    balanceUnavailable: false,
     capacityCents,
     allocatedCents,
     unallocatedCents: Math.max(0, capacityCents - allocatedCents),
@@ -72,10 +93,14 @@ function enrichGoalFeasibility(goal, {
     ? ceilDiv(remainingCents, pressure.months)
     : null;
   const linked = Boolean(goal.accountId);
-  const overAllocatedCents = linked && accountSummary ? accountSummary.overAllocatedCents : 0;
+  const overAllocatedCents = linked && accountSummary && !accountSummary.balanceUnavailable
+    ? accountSummary.overAllocatedCents
+    : 0;
   const status = accountStatus?.status ?? (linked ? 'linked' : 'manual');
   let feasible = null;
   if (!linked) {
+    feasible = null;
+  } else if (accountSummary?.balanceUnavailable) {
     feasible = null;
   } else if (accountStatus?.missing || accountStatus?.closed || status === 'excluded') {
     feasible = false;
@@ -88,8 +113,8 @@ function enrichGoalFeasibility(goal, {
     deadlineOverdue: pressure.overdue,
     accountStatus: status,
     accountRole: accountStatus?.role ?? accountSummary?.role ?? null,
-    overAllocated: linked && overAllocatedCents > 0,
-    overAllocatedCents: linked ? overAllocatedCents : 0,
+    overAllocated: linked && !accountSummary?.balanceUnavailable && overAllocatedCents > 0,
+    overAllocatedCents: linked && !accountSummary?.balanceUnavailable ? overAllocatedCents : 0,
     feasible,
     advisoryOnly: true,
   };
@@ -100,18 +125,30 @@ function buildAccountSummaries({ goals, accountsById, balanceCentsById }) {
   return accountIds.map((accountId) => {
     const account = accountsById.get(accountId) || null;
     const status = accountStatusForGoal(account, { accountId });
-    const balanceCents = balanceCentsById.get(accountId) ?? 0;
+    const rawBalance = balanceCentsById.get(accountId);
+    const balanceUnavailable = balanceCentsById.has(accountId) && !Number.isSafeInteger(rawBalance);
+    if (status.missing || status.closed) {
+      return accountAllocationSummary({
+        goals,
+        accountId,
+        balanceCents: 0,
+        role: status.role,
+        accountStatus: status.status,
+        balanceUnavailable: false,
+      });
+    }
     return accountAllocationSummary({
       goals,
       accountId,
-      balanceCents: status.missing || status.closed ? 0 : balanceCents,
+      balanceCents: Number.isSafeInteger(rawBalance) ? rawBalance : null,
       role: status.role,
       accountStatus: status.status,
+      balanceUnavailable,
     });
   });
 }
 
-function buildGoalAdvisory({ goals, accountSummaries }) {
+function buildGoalAdvisory({ goals, accountSummaries, incompleteReasons = [] }) {
   const totalRemainingCents = sumCents((goals || []).map((goal) => {
     if (Number.isSafeInteger(goal.feasibility?.remainingCents)) return goal.feasibility.remainingCents;
     return goalRemainingCents(goal);
@@ -121,10 +158,16 @@ function buildGoalAdvisory({ goals, accountSummaries }) {
       .map((goal) => goal.feasibility?.monthlyRequiredCents ?? null)
       .filter((value) => Number.isSafeInteger(value)),
   );
-  const overAllocatedAccounts = (accountSummaries || []).filter((summary) => summary.overAllocatedCents > 0);
+  const overAllocatedAccounts = (accountSummaries || []).filter(
+    (summary) => !summary.balanceUnavailable && summary.overAllocatedCents > 0,
+  );
+  const normalizedReasons = [...new Set(
+    (incompleteReasons || []).filter((reason) => typeof reason === 'string' && reason.length > 0),
+  )];
   return {
-    complete: true,
+    complete: normalizedReasons.length === 0,
     advisoryOnly: true,
+    incompleteReasons: normalizedReasons,
     totalRemainingCents,
     monthlyPressureCents: monthlyPressureCents || 0,
     overAllocatedAccounts,
@@ -137,6 +180,7 @@ function enrichGoalsResponse({
   accounts = [],
   balanceCentsById = new Map(),
   financeDate,
+  balanceIncompleteReasons = [],
 }) {
   const accountsById = new Map((accounts || []).map((account) => [account.id, account]));
   const accountSummaries = buildAccountSummaries({ goals, accountsById, balanceCentsById });
@@ -166,14 +210,15 @@ function enrichGoalsResponse({
     goals: enrichedGoals,
     accountSummaries: accountSummaries.map((summary) => ({
       ...summary,
-      capacity: fromCents(summary.capacityCents),
+      capacity: summary.capacityCents == null ? null : fromCents(summary.capacityCents),
       allocated: fromCents(summary.allocatedCents),
-      unallocated: fromCents(summary.unallocatedCents),
-      overAllocated: fromCents(summary.overAllocatedCents),
+      unallocated: summary.unallocatedCents == null ? null : fromCents(summary.unallocatedCents),
+      overAllocated: summary.overAllocatedCents == null ? null : fromCents(summary.overAllocatedCents),
     })),
     goalAdvisory: buildGoalAdvisory({
       goals: enrichedGoals,
       accountSummaries,
+      incompleteReasons: balanceIncompleteReasons,
     }),
   };
 }

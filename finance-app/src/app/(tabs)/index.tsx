@@ -11,6 +11,7 @@ import { Account } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { useFinanceToday } from '@/lib/date-only';
+import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -64,11 +65,24 @@ export default function Overview() {
   ]);
 
   const accts = (today.data?.accounts ?? []).filter((a) => !a.hidden);
-  const acctAssets = accts.filter((a) => a.balance > 0).reduce((s, a) => s + a.balance, 0);
-  const acctLiab = accts.filter((a) => a.balance < 0).reduce((s, a) => s + a.balance, 0);
-  const assets = acctAssets + (manual.data?.assets ?? 0);
-  const liabilities = acctLiab - (manual.data?.liabilities ?? 0);
-  const netWorth = assets + liabilities;
+  const hasInclusion = accountsHaveInclusion(accts);
+  const manualComplete = manual.data?.complete !== false;
+  const acctAssets = accts.filter((a) => (hasInclusion ? !!a.inclusion?.netWorth && a.balance > 0 : a.balance > 0)).reduce((s, a) => s + a.balance, 0);
+  const acctLiab = accts.filter((a) => (hasInclusion ? !!a.inclusion?.netWorth && a.balance < 0 : a.balance < 0)).reduce((s, a) => s + a.balance, 0);
+  const assets = acctAssets + (manualComplete ? (manual.data?.assets ?? 0) : 0);
+  const liabilities = acctLiab - (manualComplete ? (manual.data?.liabilities ?? 0) : 0);
+  const fallbackNetWorth = assets + liabilities;
+  const resolvedNetWorth = resolveMoneyMetric(today.data?.metrics?.netWorth, fallbackNetWorth);
+  const netWorthAuthoritative = resolvedNetWorth.authoritative;
+  const netWorthIncompleteReasons = resolvedNetWorth.reasons;
+  const netWorth = netWorthAuthoritative && resolvedNetWorth.value != null
+    ? resolvedNetWorth.value
+    : (resolvedNetWorth.unavailable ? 0 : (resolvedNetWorth.value ?? fallbackNetWorth));
+  const aggregateDisplay = resolveNetWorthAggregateDisplay({
+    resolved: resolvedNetWorth,
+    assets,
+    liabilities,
+  });
 
   const financeToday = useFinanceToday();
   const curMonth = financeToday.slice(0, 7);
@@ -87,11 +101,18 @@ export default function Overview() {
   // "This month" net-worth change ≈ now vs the previous monthly snapshot. Based on
   // synced accounts only, since manual assets have no monthly history.
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
-  const nwDelta = prevNW != null ? acctAssets + acctLiab - prevNW : null;
+  const acctNetWorth = acctAssets + acctLiab;
+  const nwDelta = resolvedNetWorth.unavailable || prevNW == null ? null : acctNetWorth - prevNW;
 
-  const cash = accts.filter((a) => a.role === 'operating_cash' || a.role === 'protected_savings');
-  const credit = accts.filter((a) => a.role === 'credit_card' || a.role === 'loan');
-  const invest = accts.filter((a) => a.role === 'investment' || a.role === 'excluded' || a.role === 'unknown');
+  const cash = hasInclusion
+    ? accts.filter((a) => a.inclusion?.liquidCash)
+    : accts.filter((a) => a.role === 'operating_cash' || a.role === 'protected_savings');
+  const credit = hasInclusion
+    ? accts.filter((a) => a.inclusion?.netWorth && (a.role === 'credit_card' || a.role === 'loan'))
+    : accts.filter((a) => a.role === 'credit_card' || a.role === 'loan');
+  const invest = hasInclusion
+    ? accts.filter((a) => a.inclusion?.netWorth && (a.role === 'investment' || a.role === 'excluded' || a.role === 'unknown'))
+    : accts.filter((a) => a.role === 'investment' || a.role === 'excluded' || a.role === 'unknown');
   const groups: { title: string; items: Account[] }[] = [
     { title: 'Cash', items: cash },
     { title: 'Credit & Loans', items: credit },
@@ -191,14 +212,23 @@ export default function Overview() {
           {widgets.netWorth ? (
             <Pressable testID="home-networth-hero" onPress={() => { haptics.tap(); router.push('/networth' as never); }} style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}>
               <Text style={styles.heroLabel}>NET WORTH</Text>
-              <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>{fmtMoney(netWorth)}</Text>
+              <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>
+                {netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth))}
+              </Text>
+              {!netWorthAuthoritative && netWorthIncompleteReasons.length ? (
+                <Text style={styles.heroSub}>Local estimate hidden — server projection incomplete</Text>
+              ) : null}
               <View style={styles.heroMetaRow}>
                 {nwDelta != null ? (
                   <Text style={[styles.heroDelta, { color: nwDelta >= 0 ? colors.green : colors.red }]}>
                     {nwDelta >= 0 ? '▲' : '▼'} {fmtPos(Math.abs(nwDelta))} this month
                   </Text>
                 ) : null}
-                <Text style={styles.heroSub}>{fmtPos(assets)} assets · {fmtPos(Math.abs(liabilities))} liabilities · details ›</Text>
+                {aggregateDisplay.showAggregates ? (
+                  <Text style={styles.heroSub}>{fmtPos(aggregateDisplay.assets!)} assets · {fmtPos(Math.abs(aggregateDisplay.liabilities!))} liabilities · details ›</Text>
+                ) : (
+                  <Text style={styles.heroSub}>{aggregateDisplay.unavailableLabel} · details ›</Text>
+                )}
               </View>
             </Pressable>
           ) : null}

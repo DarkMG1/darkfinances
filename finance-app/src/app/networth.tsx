@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
 import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
-import { useAccounts, useDeleteManualAsset, useManualAssets, useSaveManualAsset, useTrends } from '@/api/hooks/finance.hooks';
+import { useAccounts, useDeleteManualAsset, useManualAssets, useSaveManualAsset, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { Account, ManualAsset } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
 import { Avatar, Card, ErrorState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { AreaChart } from '@/components/charts';
 import { haptics } from '@/lib/haptics';
+import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
 import { colors, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -28,6 +29,7 @@ export default function NetWorthScreen() {
   const [edit, setEdit] = useState<EditState>(null);
 
   const accounts = useAccounts();
+  const today = useToday();
   const trends = useTrends(months);
   const manual = useManualAssets();
   const saveManual = useSaveManualAsset();
@@ -36,29 +38,44 @@ export default function NetWorthScreen() {
   const accts = accounts.data ?? [];
   const visible = accts.filter((a) => !a.hidden);
   const hiddenAccts = accts.filter((a) => a.hidden);
-  const assetsList = visible.filter((a) => a.balance >= 0).sort((a, b) => b.balance - a.balance);
-  const liabList = visible.filter((a) => a.balance < 0).sort((a, b) => a.balance - b.balance);
+  const hasInclusion = accountsHaveInclusion(accts);
+  const nwIncluded = (a: Account) => (hasInclusion ? !!a.inclusion?.netWorth : true);
+  const assetsList = visible.filter((a) => nwIncluded(a) && a.balance >= 0).sort((a, b) => b.balance - a.balance);
+  const liabList = visible.filter((a) => nwIncluded(a) && a.balance < 0).sort((a, b) => a.balance - b.balance);
 
   const manualItems = manual.data?.items ?? [];
-  const manualAssetTotal = manual.data?.assets ?? 0;
-  const manualLiabTotal = manual.data?.liabilities ?? 0;
+  const manualComplete = manual.data?.complete !== false;
+  const manualAssetTotal = manualComplete ? (manual.data?.assets ?? 0) : 0;
+  const manualLiabTotal = manualComplete ? (manual.data?.liabilities ?? 0) : 0;
 
   const acctAssets = assetsList.reduce((s, a) => s + a.balance, 0);
-  const acctLiab = liabList.reduce((s, a) => s + a.balance, 0); // negative
+  const acctLiab = liabList.reduce((s, a) => s + a.balance, 0);
+  const fallbackNetWorth = acctAssets + manualAssetTotal + acctLiab - manualLiabTotal;
+  const resolvedNetWorth = resolveMoneyMetric(today.data?.metrics?.netWorth, fallbackNetWorth);
+  const netWorthAuthoritative = resolvedNetWorth.authoritative;
+  const netWorthIncompleteReasons = resolvedNetWorth.reasons;
+  const netWorth = netWorthAuthoritative && resolvedNetWorth.value != null
+    ? resolvedNetWorth.value
+    : (resolvedNetWorth.unavailable ? 0 : (resolvedNetWorth.value ?? fallbackNetWorth));
   const assets = acctAssets + manualAssetTotal;
-  const liabilities = acctLiab - manualLiabTotal; // negative
-  const netWorth = assets + liabilities;
+  const liabilities = acctLiab - manualLiabTotal;
+  const aggregateDisplay = resolveNetWorthAggregateDisplay({
+    resolved: resolvedNetWorth,
+    assets,
+    liabilities,
+  });
+  const breakdownUnavailable = !aggregateDisplay.showAggregates;
 
   const nwHist = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
   // Manual assets have no history, so base "this month" on synced accounts only.
   const acctNetWorth = acctAssets + acctLiab;
-  const nwDelta = prevNW != null ? acctNetWorth - prevNW : null;
+  const nwDelta = breakdownUnavailable || prevNW == null ? null : acctNetWorth - prevNW;
   const nwPoints = nwHist.map((m) => ({ value: m.netWorth as number, label: m.month }));
-  const totalAbs = assets + Math.abs(liabilities);
+  const totalAbs = breakdownUnavailable ? 0 : assets + Math.abs(liabilities);
   const assetPct = totalAbs > 0 ? (assets / totalAbs) * 100 : 100;
 
-  const onRefresh = () => Promise.all([accounts.refetch(), trends.refetch(), manual.refetch()]);
+  const onRefresh = () => Promise.all([accounts.refetch(), today.refetch(), trends.refetch(), manual.refetch()]);
 
   const openNew = (kind: 'asset' | 'liability') => { haptics.tap(); setEdit({ name: '', value: '', kind }); };
   const openEdit = (m: ManualAsset) => { haptics.tap(); setEdit({ id: m.id, name: m.name, value: String(m.value), kind: m.kind }); };
@@ -88,7 +105,7 @@ export default function NetWorthScreen() {
       <Avatar label={a.name} size={36} />
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text style={styles.name} numberOfLines={1}>{a.name}</Text>
-        {netWorth !== 0 ? <Text style={styles.sub}>{Math.round((Math.abs(a.balance) / Math.abs(netWorth)) * 100)}% of net worth</Text> : null}
+        {netWorthAuthoritative && !breakdownUnavailable && netWorth !== 0 ? <Text style={styles.sub}>{Math.round((Math.abs(a.balance) / Math.abs(netWorth)) * 100)}% of net worth</Text> : null}
       </View>
       <Text style={[styles.amt, { color: a.balance < 0 ? colors.red : colors.text }]}>{fmtMoney(a.balance)}</Text>
       <Text style={styles.chev}>›</Text>
@@ -120,7 +137,12 @@ export default function NetWorthScreen() {
         <>
           <View style={styles.hero}>
             <Text style={styles.heroLabel}>NET WORTH</Text>
-            <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>{fmtMoney(netWorth)}</Text>
+            <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>
+              {netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth))}
+            </Text>
+            {!netWorthAuthoritative && netWorthIncompleteReasons.length ? (
+              <Text style={styles.delta}>Server projection incomplete — local sum not shown as authoritative</Text>
+            ) : null}
             {nwDelta != null ? (
               <Text style={[styles.delta, { color: nwDelta >= 0 ? colors.green : colors.red }]}>
                 {nwDelta >= 0 ? '▲' : '▼'} {fmtPos(Math.abs(nwDelta))} this month
@@ -148,13 +170,21 @@ export default function NetWorthScreen() {
 
           <Card style={{ marginBottom: 16 }}>
             <View style={styles.splitHead}>
-              <Text style={styles.splitText}>Assets <Text style={{ color: colors.green }}>{fmtPos(assets)}</Text></Text>
-              <Text style={styles.splitText}><Text style={{ color: colors.red }}>{fmtPos(Math.abs(liabilities))}</Text> Liabilities</Text>
+              <Text style={styles.splitText}>
+                Assets <Text style={{ color: colors.green }}>{breakdownUnavailable ? '—' : fmtPos(assets)}</Text>
+              </Text>
+              <Text style={styles.splitText}>
+                <Text style={{ color: colors.red }}>{breakdownUnavailable ? '—' : fmtPos(Math.abs(liabilities))}</Text> Liabilities
+              </Text>
             </View>
-            <View style={styles.splitBar}>
-              <View style={{ flex: Math.max(assetPct, 0.0001), backgroundColor: colors.green }} />
-              <View style={{ flex: Math.max(100 - assetPct, 0.0001), backgroundColor: colors.red }} />
-            </View>
+            {!breakdownUnavailable ? (
+              <View style={styles.splitBar}>
+                <View style={{ flex: Math.max(assetPct, 0.0001), backgroundColor: colors.green }} />
+                <View style={{ flex: Math.max(100 - assetPct, 0.0001), backgroundColor: colors.red }} />
+              </View>
+            ) : (
+              <Text style={styles.delta}>Asset/liability breakdown unavailable while projection is incomplete</Text>
+            )}
           </Card>
 
           <View style={styles.deepLinks}>
