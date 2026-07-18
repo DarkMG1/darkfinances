@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useNavigation, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -60,10 +60,22 @@ export default function AddTransaction() {
     categoryId,
   }), [amount, categoryId, date, kind, notes, payee, selectedAccount]);
 
+  const applyFields = useCallback((updater: React.SetStateAction<typeof fields>) => {
+    const prev = fields;
+    const next = typeof updater === 'function' ? updater(prev) : updater;
+    if (next.kind !== undefined) setKind(next.kind as Kind);
+    if (next.amount !== undefined) setAmount(String(next.amount));
+    if (next.payee !== undefined) setPayee(String(next.payee));
+    if (next.date !== undefined) setDate(String(next.date));
+    if (next.notes !== undefined) setNotes(String(next.notes));
+    if (next.accountId !== undefined) setAccountId(next.accountId as string | null);
+    if (next.categoryId !== undefined) setCategoryId(next.categoryId as string | null);
+  }, [fields, setDate]);
+
   const form = useMutationForm({
     formId: 'add-transaction',
     fields,
-    setFields: () => {},
+    setFields: applyFields,
     persistDraft: false,
     mutation: create,
     mutationLabel: 'Add transaction',

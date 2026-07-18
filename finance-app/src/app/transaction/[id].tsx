@@ -389,10 +389,20 @@ export default function TransactionDetail() {
     ]);
   };
   const removeReceipt = (id: string) => {
+    if (modalLocked || deleteReceiptAction.isPending) return;
     Alert.alert('Delete receipt', 'Remove this receipt image?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => deleteReceiptAction.run({ id }, { onSuccess: () => { setViewerId(null); } }) },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => deleteReceiptAction.run({ id }, { onSuccess: () => { setViewerId(null); } }),
+      },
     ]);
+  };
+  const receiptDeleting = deleteReceiptAction.isPending;
+  const closeReceiptViewer = () => {
+    if (receiptDeleting) return;
+    setViewerId(null);
   };
 
   // See History (N) — merchant monthly history. Shared query key with the merchant
@@ -804,7 +814,7 @@ export default function TransactionDetail() {
                       : ''}
                 </Text>
               </Pressable>
-              <Pressable testID={`transaction-linked-unlink-${t.id}`} hitSlop={10} onPress={() => removeLink(t)} disabled={delLink.isPending} style={({ pressed }) => pressed && { opacity: 0.5 }} accessibilityRole="button" accessibilityLabel={`Unlink ${t.payee || 'transaction'}`}>
+              <Pressable testID={`transaction-linked-unlink-${t.id}`} hitSlop={10} onPress={() => removeLink(t)} disabled={modalLocked || unlinkAction.isPending} style={({ pressed }) => pressed && { opacity: 0.5 }} accessibilityRole="button" accessibilityLabel={`Unlink ${t.payee || 'transaction'}`}>
                 <Text style={styles.unlink}>Unlink</Text>
               </Pressable>
             </View>
@@ -1216,9 +1226,9 @@ export default function TransactionDetail() {
         </Pressable>
       </Modal>
 
-      <Modal visible={!!viewerId} animationType="fade" transparent onRequestClose={() => setViewerId(null)}>
-        <Pressable style={styles.viewerBg} onPress={() => setViewerId(null)}>
-          <Pressable style={[styles.viewerClose, { top: insets.top + 12 }]} onPress={() => setViewerId(null)}>
+      <Modal visible={!!viewerId} animationType="fade" transparent onRequestClose={closeReceiptViewer}>
+        <Pressable style={styles.viewerBg} onPress={closeReceiptViewer}>
+          <Pressable style={[styles.viewerClose, { top: insets.top + 12 }]} onPress={closeReceiptViewer} disabled={receiptDeleting}>
             <Text style={styles.viewerCloseText}>Done</Text>
           </Pressable>
           {viewerId ? (
@@ -1234,8 +1244,8 @@ export default function TransactionDetail() {
                     {r.amount != null ? fmtPos(r.amount) : ''}{r.amount != null && r.date ? ' · ' : ''}{r.date || ''}
                   </Text>
                 ) : null}
-                <Pressable testID="transaction-receipt-delete-button" onPress={() => removeReceipt(r.id)} disabled={delReceipt.isPending} style={({ pressed }) => [styles.viewerDelete, pressed && { opacity: 0.7 }]}>
-                  <Text style={styles.viewerDeleteText}>{delReceipt.isPending ? 'Deleting…' : 'Delete receipt'}</Text>
+                <Pressable testID="transaction-receipt-delete-button" onPress={() => removeReceipt(r.id)} disabled={modalLocked || deleteReceiptAction.isPending} style={({ pressed }) => [styles.viewerDelete, pressed && { opacity: 0.7 }]}>
+                  <Text style={styles.viewerDeleteText}>{deleteReceiptAction.isPending ? 'Deleting…' : 'Delete receipt'}</Text>
                 </Pressable>
               </View>
             );

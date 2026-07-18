@@ -6,7 +6,6 @@ import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
 import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
-import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
 
 export interface UseMutationActionOptions<TVariables> {
   mutation: UseMutationResult<unknown, FinanceError, TVariables>;
@@ -140,6 +139,7 @@ export function useMutationAction<TVariables>({
     onActivate,
     onRefetch,
     onSuccess,
+    pendingLockRef,
     setDispatchPending,
   ]);
 
@@ -150,7 +150,7 @@ export function useMutationAction<TVariables>({
       rollback: lastRollback.current,
       onSettled: lastSettled.current,
     });
-  }, [run]);
+  }, [pendingLockRef, run]);
 
   return {
     outcome,

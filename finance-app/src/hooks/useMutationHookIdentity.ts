@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   bumpMutationHookEpoch,
   captureMutationDispatchToken,
+  invalidateMutationDispatch,
   isMutationDispatchTokenCurrent,
   resetMutationHookPendingLock,
 } from '@/lib/mutation-hook-identity';
@@ -21,24 +22,26 @@ export function useMutationHookIdentity(options: UseMutationHookIdentityOptions 
   const scopeDigest = demo ? 'demo' : scope;
   const profileGeneration = demo ? 0 : getProfileGeneration();
   const epochRef = useRef({ value: 0 });
+  const dispatchIdRef = useRef({ value: 0 });
   const pendingLockRef = useRef<boolean | number>(pendingLockKind === 'counter' ? 0 : false);
   const [dispatchPending, setDispatchPending] = useState(false);
   const identityKey = `${scopeDigest}:${profileGeneration}:${formId ?? ''}`;
 
   useEffect(() => {
     bumpMutationHookEpoch(epochRef);
+    invalidateMutationDispatch(dispatchIdRef);
     resetMutationHookPendingLock(pendingLockRef, pendingLockKind);
-    // Reset in-flight UI lock when profile/form identity changes.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional lock reset on identity change
     setDispatchPending(false);
   }, [identityKey, pendingLockKind]);
 
   useEffect(() => () => {
     bumpMutationHookEpoch(epochRef);
+    invalidateMutationDispatch(dispatchIdRef);
   }, []);
 
   const captureDispatchToken = useCallback(
-    () => captureMutationDispatchToken(epochRef, scopeDigest, profileGeneration, formId),
+    () => captureMutationDispatchToken(epochRef, dispatchIdRef, scopeDigest, profileGeneration, formId),
     [formId, profileGeneration, scopeDigest],
   );
 
@@ -46,6 +49,7 @@ export function useMutationHookIdentity(options: UseMutationHookIdentityOptions 
     (token: MutationDispatchToken) => isMutationDispatchTokenCurrent(
       token,
       epochRef,
+      dispatchIdRef,
       scopeDigest,
       profileGeneration,
       formId,
@@ -63,6 +67,7 @@ export function useMutationHookIdentity(options: UseMutationHookIdentityOptions 
     profileGeneration,
     identityKey,
     epochRef,
+    dispatchIdRef,
     pendingLockRef,
     dispatchPending,
     setDispatchPending,

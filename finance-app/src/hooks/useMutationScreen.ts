@@ -181,7 +181,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
         runOptions?.onSettled?.();
       },
     });
-  }, [bumpActivity, captureDispatchToken, handleError, isDispatchTokenCurrent, markPending, setDispatchPending]);
+  }, [bumpActivity, captureDispatchToken, handleError, isDispatchTokenCurrent, markPending, pendingLockCountRef, setDispatchPending]);
 
   const bind = useCallback(<TVariables,>(actionOptions: MutationScreenActionOptions<TVariables>): MutationScreenAction<TVariables> => {
     const existing = registryRef.current.get(actionOptions.key);
@@ -199,9 +199,9 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     registryRef.current.set(actionOptions.key, entry);
     return {
       run: (variables, runOptions) => dispatch(actionOptions.key, variables, runOptions),
-      isPending: actionOptions.mutation.isPending,
+      isPending: pendingKeys.has(actionOptions.key),
     };
-  }, [dispatch]);
+  }, [dispatch, pendingKeys]);
 
   const isLocked = pendingKeys.size > 0;
 

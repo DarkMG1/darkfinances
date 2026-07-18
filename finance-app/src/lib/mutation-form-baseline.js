@@ -23,8 +23,16 @@ function canStartMutationActionDispatch({ pendingLock, dispatchPending }) {
   return true;
 }
 
+function shouldRebaselineFormIdentity(prev, next) {
+  return prev.formId !== next.formId
+    || prev.scopeDigest !== next.scopeDigest
+    || prev.profileGeneration !== next.profileGeneration
+    || prev.persistDraft !== next.persistDraft;
+}
+
 module.exports = {
   canStartMutationActionDispatch,
   canStartMutationFormDispatch,
   resolveMutationFormBaseline,
+  shouldRebaselineFormIdentity,
 };

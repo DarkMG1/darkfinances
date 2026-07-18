@@ -44,6 +44,7 @@ export default function NetWorthScreen() {
   const [months, setMonths] = useState(12);
   const [showHidden, setShowHidden] = useState(false);
   const [edit, setEdit] = useState<EditState>(null);
+  const [manualSessionId, setManualSessionId] = useState(0);
 
   const accounts = useAccounts();
   const today = useToday();
@@ -74,7 +75,7 @@ export default function NetWorthScreen() {
   }, []);
 
   const form = useMutationForm({
-    formId: edit ? (edit.id ? `manual-${edit.id}` : `manual-new-${edit.kind}`) : 'manual-none',
+    formId: edit ? (edit.id ? `manual-${edit.id}` : `manual-new-${manualSessionId}`) : 'manual-none',
     fields,
     setFields: applyFields,
     persistDraft: false,
@@ -158,6 +159,7 @@ export default function NetWorthScreen() {
   const openNew = (kind: EditKind) => {
     haptics.tap();
     form.clearErrors();
+    setManualSessionId((n) => n + 1);
     setEdit({ name: '', value: '', kind });
   };
 

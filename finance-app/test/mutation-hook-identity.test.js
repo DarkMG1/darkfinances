@@ -5,37 +5,43 @@ const path = require('path');
 const {
   bumpMutationHookEpoch,
   captureMutationDispatchToken,
+  invalidateMutationDispatch,
   isMutationDispatchTokenCurrent,
   resetMutationHookPendingLock,
 } = require('../src/lib/mutation-hook-identity');
 
 test('dispatch token rejects stale epoch after profile identity bump', () => {
   const epochRef = { value: 0 };
-  const token = captureMutationDispatchToken(epochRef, 'scope-a', 1, 'form-1');
+  const dispatchIdRef = { value: 0 };
+  const token = captureMutationDispatchToken(epochRef, dispatchIdRef, 'scope-a', 1, 'form-1');
   bumpMutationHookEpoch(epochRef);
-  assert.equal(isMutationDispatchTokenCurrent(token, epochRef, 'scope-a', 1, 'form-1'), false);
+  invalidateMutationDispatch(dispatchIdRef);
+  assert.equal(isMutationDispatchTokenCurrent(token, epochRef, dispatchIdRef, 'scope-a', 1, 'form-1'), false);
 });
 
 test('dispatch token rejects scope or generation drift', () => {
   const epochRef = { value: 0 };
-  const token = captureMutationDispatchToken(epochRef, 'scope-a', 1, 'form-1');
-  assert.equal(isMutationDispatchTokenCurrent(token, epochRef, 'scope-b', 1, 'form-1'), false);
-  assert.equal(isMutationDispatchTokenCurrent(token, epochRef, 'scope-a', 2, 'form-1'), false);
-  assert.equal(isMutationDispatchTokenCurrent(token, epochRef, 'scope-a', 1, 'form-2'), false);
+  const dispatchIdRef = { value: 0 };
+  const token = captureMutationDispatchToken(epochRef, dispatchIdRef, 'scope-a', 1, 'form-1');
+  assert.equal(isMutationDispatchTokenCurrent(token, epochRef, dispatchIdRef, 'scope-b', 1, 'form-1'), false);
+  assert.equal(isMutationDispatchTokenCurrent(token, epochRef, dispatchIdRef, 'scope-a', 2, 'form-1'), false);
+  assert.equal(isMutationDispatchTokenCurrent(token, epochRef, dispatchIdRef, 'scope-a', 1, 'form-2'), false);
 });
 
 test('old settled callback cannot unlock a newer pending lock after epoch bump', () => {
   const epochRef = { value: 0 };
+  const dispatchIdRef = { value: 0 };
   const pendingLockRef = { value: true };
-  const firstToken = captureMutationDispatchToken(epochRef, 'demo', 0, 'add');
+  const firstToken = captureMutationDispatchToken(epochRef, dispatchIdRef, 'demo', 0, 'add');
   bumpMutationHookEpoch(epochRef);
+  invalidateMutationDispatch(dispatchIdRef);
   pendingLockRef.value = true;
-  const secondToken = captureMutationDispatchToken(epochRef, 'demo', 0, 'add');
-  if (isMutationDispatchTokenCurrent(firstToken, epochRef, 'demo', 0, 'add')) {
+  const secondToken = captureMutationDispatchToken(epochRef, dispatchIdRef, 'demo', 0, 'add');
+  if (isMutationDispatchTokenCurrent(firstToken, epochRef, dispatchIdRef, 'demo', 0, 'add')) {
     pendingLockRef.value = false;
   }
   assert.equal(pendingLockRef.value, true);
-  if (isMutationDispatchTokenCurrent(secondToken, epochRef, 'demo', 0, 'add')) {
+  if (isMutationDispatchTokenCurrent(secondToken, epochRef, dispatchIdRef, 'demo', 0, 'add')) {
     pendingLockRef.value = false;
   }
   assert.equal(pendingLockRef.value, false);
@@ -62,7 +68,8 @@ test('hook sources reset pending locks and guard callbacks on identity change', 
   const identityHook = require('fs').readFileSync(require('path').join(__dirname, '../src/hooks/useMutationHookIdentity.ts'), 'utf8');
   assert.match(identityHook, /bumpMutationHookEpoch/);
   assert.match(identityHook, /resetMutationHookPendingLock/);
-  assert.match(identityHook, /bumpMutationHookEpoch\(epochRef\)/);
+  assert.match(identityHook, /invalidateMutationDispatch/);
+  assert.match(identityHook, /dispatchIdRef/);
   assert.match(identityHook, /useEffect\(\(\) => \(\) => \{/);
 });
 

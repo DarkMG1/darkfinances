@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Stack } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -34,10 +34,17 @@ export default function Rules() {
 
   const fields = useMemo(() => ({ match, categoryId: catId }), [catId, match]);
 
+  const applyFields = useCallback((updater: React.SetStateAction<typeof fields>) => {
+    const prev = fields;
+    const next = typeof updater === 'function' ? updater(prev) : updater;
+    if (next.match !== undefined) setMatch(String(next.match));
+    if (next.categoryId !== undefined) setCatId(String(next.categoryId));
+  }, [fields]);
+
   const addForm = useMutationForm({
     formId: 'rules-add',
     fields,
-    setFields: () => {},
+    setFields: applyFields,
     persistDraft: false,
     mutation: saveRule,
     mutationLabel: 'Add rule',

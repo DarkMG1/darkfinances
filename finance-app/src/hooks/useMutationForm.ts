@@ -96,6 +96,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   const [activitySeq, setActivitySeq] = useState(0);
   const [baseline, setBaseline] = useState(fields);
   const fieldsRef = useRef(fields);
+  const setFieldsRef = useRef(setFields);
   const closedRef = useRef(false);
   const variablesRef = useRef<TVariables | null>(null);
 
@@ -110,19 +111,21 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   }, [fields]);
 
   useEffect(() => {
+    setFieldsRef.current = setFields;
+  }, [setFields]);
+
+  useEffect(() => {
     const draft = persistDraft ? getMutationFormDraft(scopeDigest, formId, profileGeneration) : null;
     const next = resolveMutationFormBaseline(fieldsRef.current, draft);
     setBaseline(next);
     if (draft) {
-      setFields(next);
+      setFieldsRef.current(next);
     }
-    // Form identity reset: rehydrate draft and clear stale mutation UI when formId/scope changes.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional reset on identity change
     setOutcome(null);
     setPhase('idle');
     setAnnounce('');
     variablesRef.current = null;
-  }, [formId, persistDraft, profileGeneration, scopeDigest, setFields]);
+  }, [formId, persistDraft, profileGeneration, scopeDigest]);
 
   useEffect(() => {
     if (!persistDraft) return;
@@ -217,6 +220,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     mutationLabel,
     onSuccessClose,
     setDispatchPending,
+    pendingLockRef,
   ]);
 
   const submit = useCallback(() => {
@@ -235,7 +239,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
       }
     }
     runMutation(buildVariables(fields));
-  }, [buildVariables, bumpActivity, fieldOrder, fields, focusFirstInvalid, phase, runMutation, validate]);
+  }, [buildVariables, bumpActivity, fieldOrder, fields, focusFirstInvalid, phase, pendingLockRef, runMutation, validate]);
 
   const retry = useCallback(() => {
     if (pendingLockRef.current || phase === 'submitting' || phase === 'reconciling') return;
@@ -244,7 +248,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
       return;
     }
     submit();
-  }, [phase, runMutation, submit]);
+  }, [phase, pendingLockRef, runMutation, submit]);
 
   const clearErrors = useCallback(() => {
     setOutcome(null);

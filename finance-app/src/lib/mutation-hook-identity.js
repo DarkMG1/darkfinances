@@ -1,18 +1,30 @@
 /**
- * Epoch + scope/generation/form identity guards for mutation hook async callbacks.
+ * Epoch + scope/generation/form identity + per-dispatch id guards for mutation hook async callbacks.
  */
 
-function captureMutationDispatchToken(epochRef, scope, generation, formId) {
+function nextMutationDispatchId(dispatchIdRef) {
+  dispatchIdRef.value += 1;
+  return dispatchIdRef.value;
+}
+
+function invalidateMutationDispatch(dispatchIdRef) {
+  return nextMutationDispatchId(dispatchIdRef);
+}
+
+function captureMutationDispatchToken(epochRef, dispatchIdRef, scope, generation, formId) {
+  const dispatchId = nextMutationDispatchId(dispatchIdRef);
   return {
     epoch: epochRef.value,
+    dispatchId,
     scope: String(scope || 'demo'),
     generation: Number(generation ?? 0),
     formId: formId == null ? undefined : String(formId),
   };
 }
 
-function isMutationDispatchTokenCurrent(token, epochRef, scope, generation, formId) {
+function isMutationDispatchTokenCurrent(token, epochRef, dispatchIdRef, scope, generation, formId) {
   if (!token || token.epoch !== epochRef.value) return false;
+  if (token.dispatchId !== dispatchIdRef.value) return false;
   if (token.scope !== String(scope || 'demo')) return false;
   if (token.generation !== Number(generation ?? 0)) return false;
   if (token.formId !== undefined && token.formId !== String(formId ?? '')) return false;
@@ -32,6 +44,8 @@ function resetMutationHookPendingLock(pendingLockRef, kind = 'boolean') {
 module.exports = {
   bumpMutationHookEpoch,
   captureMutationDispatchToken,
+  invalidateMutationDispatch,
   isMutationDispatchTokenCurrent,
+  nextMutationDispatchId,
   resetMutationHookPendingLock,
 };

@@ -6,6 +6,7 @@ const {
   canStartMutationActionDispatch,
   canStartMutationFormDispatch,
   resolveMutationFormBaseline,
+  shouldRebaselineFormIdentity,
 } = require('../src/lib/mutation-form-baseline');
 
 test('resolveMutationFormBaseline merges draft without caller setFields side effects', () => {
@@ -60,7 +61,38 @@ test('useMutationForm uses fieldsRef baseline init and budgets wires applyFields
   const formHook = fs.readFileSync(path.join(__dirname, '../src/hooks/useMutationForm.ts'), 'utf8');
   const budgets = fs.readFileSync(path.join(__dirname, '../src/app/budgets.tsx'), 'utf8');
   assert.match(formHook, /resolveMutationFormBaseline\(fieldsRef\.current, draft\)/);
+  assert.match(formHook, /setFieldsRef\.current/);
   assert.match(formHook, /fieldsRef\.current = fields/);
+  const identityEffect = formHook.match(/useEffect\(\(\) => \{[\s\S]*?variablesRef\.current = null;\s*\}, \[([^\]]+)\]\);/)?.[1] ?? '';
+  assert.doesNotMatch(identityEffect, /setFields/);
   assert.doesNotMatch(budgets, /setFields:\s*\(\)\s*=>\s*\{\}/);
   assert.match(budgets, /setFields:\s*applyFields/);
+});
+
+test('keystrokes do not rebaseline form identity; identity key change does', () => {
+  const deps = {
+    formId: 'goals-new',
+    scopeDigest: 'scope',
+    profileGeneration: 1,
+    persistDraft: true,
+  };
+  assert.equal(shouldRebaselineFormIdentity(deps, { ...deps, targetText: '123' }), false);
+  assert.equal(shouldRebaselineFormIdentity(deps, { ...deps, formId: 'goals-edit-1' }), true);
+});
+
+test('typing after open stays dirty until discard or successful save baseline', () => {
+  const baseline = resolveMutationFormBaseline({ name: 'Goal', target: '100' }, null);
+  const typed = { name: 'Goal edited', target: '100' };
+  assert.notEqual(JSON.stringify(typed), JSON.stringify(baseline));
+  const reopened = resolveMutationFormBaseline({ name: 'Goal', target: '100' }, null);
+  assert.equal(JSON.stringify(reopened), JSON.stringify(baseline));
+});
+
+test('draft hydration baseline opens clean without overwriting live fields when no draft', () => {
+  const live = { name: 'Live', target: '50', current: '0', deadline: '', accountId: null };
+  const baseline = resolveMutationFormBaseline(live, null);
+  assert.deepEqual(baseline, live);
+  const hydrated = resolveMutationFormBaseline(live, { name: 'Draft', target: '500' });
+  assert.equal(hydrated.name, 'Draft');
+  assert.equal(live.name, 'Live');
 });

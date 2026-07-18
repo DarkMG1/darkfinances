@@ -7,8 +7,8 @@ const {
 const {
   bumpMutationHookEpoch,
   captureMutationDispatchToken,
+  invalidateMutationDispatch,
   isMutationDispatchTokenCurrent,
-  resetMutationHookPendingLock,
 } = require('../src/lib/mutation-hook-identity');
 
 test('stale onSettled does not decrement lock, clear pending key, or invoke callback', () => {
@@ -51,11 +51,13 @@ test('current onSettled unlocks and invokes callback once', () => {
 
 test('old A settle after identity reset does not unlock new B dispatch', () => {
   const epochRef = { value: 0 };
-  const tokenA = captureMutationDispatchToken(epochRef, 'scope', 1, 'screen');
+  const dispatchIdRef = { value: 0 };
+  const tokenA = captureMutationDispatchToken(epochRef, dispatchIdRef, 'scope', 1, 'screen');
 
   bumpMutationHookEpoch(epochRef);
+  invalidateMutationDispatch(dispatchIdRef);
 
-  const tokenB = captureMutationDispatchToken(epochRef, 'scope', 1, 'screen');
+  const tokenB = captureMutationDispatchToken(epochRef, dispatchIdRef, 'scope', 1, 'screen');
   let pendingLockCount = 1;
   let pendingKeys = new Set(['action-b']);
 
@@ -65,7 +67,7 @@ test('old A settle after identity reset does not unlock new B dispatch', () => {
     dispatchPending: true,
   }, {
     key: 'action-a',
-    isTokenCurrent: isMutationDispatchTokenCurrent(tokenA, epochRef, 'scope', 1, 'screen'),
+    isTokenCurrent: isMutationDispatchTokenCurrent(tokenA, epochRef, dispatchIdRef, 'scope', 1, 'screen'),
   });
 
   assert.equal(staleSettle.settledApplied, false);
@@ -82,7 +84,7 @@ test('old A settle after identity reset does not unlock new B dispatch', () => {
     dispatchPending: true,
   }, {
     key: 'action-b',
-    isTokenCurrent: isMutationDispatchTokenCurrent(tokenB, epochRef, 'scope', 1, 'screen'),
+    isTokenCurrent: isMutationDispatchTokenCurrent(tokenB, epochRef, dispatchIdRef, 'scope', 1, 'screen'),
   });
   assert.equal(freshSettle.settledApplied, true);
   assert.equal(freshSettle.pendingLockCount, 0);

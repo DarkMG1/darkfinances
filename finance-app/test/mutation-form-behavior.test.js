@@ -51,6 +51,7 @@ test('mutation hooks unlock on settled and guard stale profile callbacks', () =>
   assert.match(settledBlock, /if \(!isDispatchTokenCurrent\(token\)\) return;/);
   assert.doesNotMatch(settledBlock, /markPending\(key, false\)[\s\S]*if \(!isDispatchTokenCurrent/);
   assert.match(screen, /setPendingKeys\(new Set\(\)\)/);
+  assert.match(screen, /isPending: pendingKeys\.has/);
 });
 
 test('goals sheet blocks dismiss while locked and uses one live region', () => {
@@ -123,6 +124,52 @@ test('mutation hooks expose synchronous pending guards for UI lock', () => {
   assert.match(action, /dispatchPending/);
   assert.match(form, /pendingLockRef/);
   assert.match(action, /pendingLockRef/);
+});
+
+test('transaction receipt viewer guards delete and close while locked or deleting', () => {
+  const source = fs.readFileSync(path.join(root, 'src/app/transaction/[id].tsx'), 'utf8');
+  assert.match(source, /removeReceipt/);
+  assert.match(source, /modalLocked \|\| deleteReceiptAction\.isPending/);
+  assert.match(source, /closeReceiptViewer/);
+  assert.match(source, /receiptDeleting/);
+  assert.match(source, /modalLocked \|\| unlinkAction\.isPending/);
+});
+
+test('networth manual sheet uses stable session formId and dirty kind changes', () => {
+  const source = fs.readFileSync(path.join(root, 'src/app/networth.tsx'), 'utf8');
+  assert.match(source, /manualSessionId/);
+  assert.match(source, /manual-new-\$\{manualSessionId\}/);
+  assert.doesNotMatch(source, /manual-new-\$\{edit\.kind\}/);
+  assert.match(source, /form\.requestDismiss/);
+});
+
+test('sheet mutation forms confirm dirty dismiss on close', () => {
+  for (const rel of ['goals.tsx', 'budgets.tsx', 'account/[id].tsx', 'networth.tsx']) {
+    const source = fs.readFileSync(path.join(root, 'src/app', rel), 'utf8');
+    assert.match(source, /useMutationForm/, `${rel} uses mutation form`);
+    assert.match(source, /requestDismiss/, `${rel} confirms dirty dismiss`);
+  }
+  const addTxn = fs.readFileSync(path.join(root, 'src/app/add-transaction.tsx'), 'utf8');
+  assert.match(addTxn, /useMutationForm/);
+  assert.match(addTxn, /requestDismiss/);
+});
+
+test('inline mutation forms use stable formId and wired setFields where drafts apply', () => {
+  for (const rel of ['rules.tsx', 'events.tsx']) {
+    const source = fs.readFileSync(path.join(root, 'src/app', rel), 'utf8');
+    assert.match(source, /useMutationForm/, `${rel} uses mutation form`);
+    assert.doesNotMatch(source, /setFields:\s*\(\)\s*=>\s*\{\}/, `${rel} must not noop setFields`);
+  }
+});
+
+test('mutation hooks capture per-dispatch ids in dispatch tokens', () => {
+  for (const rel of ['useMutationForm.ts', 'useMutationAction.ts', 'useMutationScreen.ts', 'useMutationHookIdentity.ts']) {
+    const source = fs.readFileSync(path.join(root, 'src/hooks', rel), 'utf8');
+    assert.match(source, /captureDispatchToken|captureMutationDispatchToken/, `${rel} captures dispatch token`);
+    assert.match(source, /isDispatchTokenCurrent|isMutationDispatchTokenCurrent/, `${rel} validates dispatch token`);
+  }
+  const identity = fs.readFileSync(path.join(root, 'src/lib/mutation-hook-identity.js'), 'utf8');
+  assert.match(identity, /dispatchId/);
 });
 
 test('multi-action screens pass activitySeq into banner coordinator', () => {
