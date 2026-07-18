@@ -35,6 +35,13 @@ const {
 } = require('./lib/mutation-route-registry');
 const { parse, schemas } = require('./lib/validation');
 const { readReleaseIdentity } = require('./lib/release-identity');
+const {
+  exportExitCode,
+  buildReimbursementExportV1Envelope,
+  formatReimbursementExportCsv,
+  formatReimbursementExportHuman,
+  stableStringify,
+} = require('./lib/reimbursement-export-ledger');
 const { boundedJsonMiddleware } = require('./lib/bounded-json');
 const {
   DEFAULT_MAX_JSON_BYTES,
@@ -459,6 +466,25 @@ function demoMiddleware(v1mode) {
     if (p === 'reconciliation/pending') return send(demo.reconcilePending());
     if (p === 'repayments/suggestions') return send(demo.repaymentSuggestions());
     if (p === 'reimbursement-ledger') return send(demo.reimbursementLedger ? demo.reimbursementLedger(req.query.month) : { month: new Date().toISOString().slice(0, 7), range: {}, totals: {}, people: [], months: [] });
+    if (p === 'reimbursement-export') {
+      const format = String(req.query.format || 'json').toLowerCase();
+      const payload = demo.reimbursementExport();
+      if (format === 'csv') {
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        return res.send(formatReimbursementExportCsv(payload));
+      }
+      if (format === 'human') {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        return res.send(formatReimbursementExportHuman(payload));
+      }
+      if (v1mode) {
+        return res.type('application/json').send(`${buildReimbursementExportV1Envelope(payload)}\n`);
+      }
+      res.setHeader('X-Reimbursement-Export-Status', payload.completeness.status);
+      res.setHeader('X-Reimbursement-Export-Exit-Code', String(exportExitCode(payload)));
+      res.setHeader('X-Reimbursement-Export-Authoritative', String(payload.totals.authoritative));
+      return res.type('application/json').send(stableStringify(payload));
+    }
     if (p === 'events') return send(demo.events());
     if (p === 'receipts') return send(demo.receipts(req.query.txnId ? String(req.query.txnId) : undefined));
     switch (p) {
@@ -1175,6 +1201,43 @@ const setReconEnabledH = (req, operation) => {
   );
 };
 
+async function reimbursementExport(req, res) {
+  try {
+    await withReadAdmission(req, actualCoordinator, async () => {
+      const { from, to } = req.query;
+      const strict = req.query.strict === '1' || req.query.strict === 'true';
+      const format = String(req.query.format || 'json').toLowerCase();
+      const payload = await data.buildReimbursementExport({
+        from,
+        to,
+        strict,
+        releaseManifestPath: RELEASE_MANIFEST_PATH,
+      });
+      const exitCode = exportExitCode(payload);
+      if (format === 'csv') {
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="reimbursement-export.csv"');
+        res.send(formatReimbursementExportCsv(payload));
+        return;
+      }
+      if (format === 'human') {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.send(formatReimbursementExportHuman(payload));
+        return;
+      }
+      const isV1 = req.baseUrl === '/api/v1';
+      if (isV1) {
+        res.type('application/json').send(`${buildReimbursementExportV1Envelope(payload)}\n`);
+        return;
+      }
+      res.setHeader('X-Reimbursement-Export-Status', payload.completeness.status);
+      res.setHeader('X-Reimbursement-Export-Exit-Code', String(exitCode));
+      res.setHeader('X-Reimbursement-Export-Authoritative', String(payload.totals.authoritative));
+      res.type('application/json').send(stableStringify(payload));
+    }, { admission: requestAdmission });
+  } catch (e) { sendApiError(req, res, e); }
+}
+
 // Monthly CSV export (raw text/csv, used by web download + app share sheet).
 function csvEscape(v) {
   let s = String(v == null ? '' : v);
@@ -1308,6 +1371,7 @@ app.get('/api/budgets', raw(resolvers.budgets));
 app.post('/api/budgets', raw(setBudget));
 app.get('/api/reimbursement', raw(resolvers.reimbursement));
 app.get('/api/reimbursement-ledger', raw(resolvers.reimbursementLedger));
+app.get('/api/reimbursement-export', reimbursementExport);
 app.get('/api/insights', raw(resolvers.insights));
 app.get('/api/merchant-history', raw(resolvers.merchantHistory));
 app.get('/api/categories', raw(resolvers.categories));
@@ -1453,6 +1517,7 @@ v1.get('/reimbursement', env(resolvers.reimbursement));
 v1.get('/review', env(resolvers.review));
 registerV1Mutation('POST', '/review/dispositions', setReviewDispositionH);
 v1.get('/reimbursement-ledger', env(resolvers.reimbursementLedger));
+v1.get('/reimbursement-export', reimbursementExport);
 v1.get('/insights', env(resolvers.insights));
 v1.get('/merchant-history', env(resolvers.merchantHistory));
 v1.get('/categories', env(resolvers.categories));

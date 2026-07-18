@@ -332,6 +332,20 @@ function createReimbursementLinkSaga({
     return { recovered: active.length, errors };
   }
 
+  function listNonterminalSagas() {
+    return Object.values(loadState().sagas || {})
+      .filter((saga) => !isTerminalSaga(saga))
+      .map((saga) => ({
+        id: saga.id,
+        phase: saga.phase,
+        action: saga.action,
+        inflowId: saga.inflowId || null,
+        expenseId: saga.expenseId || null,
+        terminal: false,
+      }))
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }
+
   function inspectState() {
     return loadState();
   }
@@ -345,6 +359,7 @@ function createReimbursementLinkSaga({
     assertAvailable,
     inspectState,
     link,
+    listNonterminalSagas,
     markSynced,
     recover,
     unlink,

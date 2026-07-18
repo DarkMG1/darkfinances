@@ -68,12 +68,30 @@ const {
 const {
   buildLegacyMigrationReport,
   classifyStoredLink,
+  endpointAdmissionFingerprint,
   enrichEndpointForRead,
+  liveEndpointIdentityFingerprint,
   summarizeEndpointCapacity,
   sumTrustedAllocationsForExpense,
   sumTrustedAllocationsForInflow,
   trustedLinkedCents,
 } = require('./lib/reimbursement-allocation');
+const {
+  ExportSourceChangedError,
+  MAX_SNAPSHOT_ATTEMPTS,
+  buildTrustedAllocationIndex,
+  digestStableJson,
+  prepareExportForPublish,
+  projectAllocationLedger,
+  sortLinks,
+} = require('./lib/reimbursement-export-ledger');
+const {
+  acquireExportSnapshotLock,
+  assertExportLockAvailable,
+  assertSnapshotUnchanged,
+  sidecarSnapshotDigest,
+} = require('./lib/reimbursement-export-snapshot');
+const { readReleaseIdentity } = require('./lib/release-identity');
 const {
   BulkOperationInProgressError,
   createBulkOperationSaga,
@@ -1613,12 +1631,16 @@ function setOwesConfig(next) {
 // Reimbursement links — connect a repayment inflow to the expense(s) it repays
 // ---------------------------------------------------------------------------
 function readReimbLinks() {
-  const store = readJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, links: [] });
-  if (!store || !Array.isArray(store.links)) return { schemaVersion: 2, links: [] };
+  const store = readJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, links: [], revision: 0 });
+  if (!store || !Array.isArray(store.links)) return { schemaVersion: 2, links: [], revision: 0 };
+  if (!Number.isSafeInteger(store.revision) || store.revision < 0) store.revision = 0;
   return store;
 }
 function writeReimbLinks(store) {
-  writeJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, ...store });
+  assertExportLockAvailable(REIMB_LINKS_PATH);
+  const revision = (Number.isSafeInteger(store.revision) ? store.revision : 0) + 1;
+  writeJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, ...store, revision });
+  getActualCoordinator().invalidateGeneration();
 }
 function txnRef(t) {
   if (!t || t.id == null) throw new Error('transaction id required');
@@ -1721,6 +1743,117 @@ async function deleteReimbLink({ inflowId, expenseId, expectedVersion, operation
 }
 function exportReimbursementLegacyReport() {
   return buildLegacyMigrationReport(readReimbLinks().links);
+}
+
+async function resolveReimbursementExportLive(api, links) {
+  const payees = await api.getPayees();
+  const pn = Object.fromEntries(payees.map((p) => [p.id, p.name || '']));
+  const ids = new Set();
+  for (const link of links) {
+    if (link?.inflow?.id != null) ids.add(String(link.inflow.id));
+    if (link?.expense?.id != null) ids.add(String(link.expense.id));
+  }
+  const liveById = {};
+  let scanIncomplete = false;
+  for (const id of [...ids].sort()) {
+    try {
+      const live = await locateTransactionLive(api, id, {}, pn);
+      if (live) liveById[id] = live;
+    } catch (_) {
+      scanIncomplete = true;
+    }
+  }
+  return { liveById, scanIncomplete };
+}
+
+async function buildReimbursementExport({
+  from,
+  to,
+  strict = false,
+  releaseManifestPath,
+  operationBinding = null,
+} = {}) {
+  const coordinator = getActualCoordinator();
+  const manifestPath = releaseManifestPath
+    || process.env.RELEASE_MANIFEST_PATH
+    || path.join(__dirname, 'release-manifest.json');
+  const release = readReleaseIdentity(manifestPath);
+
+  for (let attempt = 1; attempt <= MAX_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    const captureGeneration = coordinator.generation;
+    let lock;
+    try {
+      const initialStore = readReimbLinks();
+      const linksRevision = initialStore.revision;
+      lock = acquireExportSnapshotLock(REIMB_LINKS_PATH, linksRevision);
+      const preStore = readReimbLinks();
+      if (preStore.revision !== linksRevision) throw new ExportSourceChangedError();
+      const links = sortLinks(preStore.links);
+      const activeSagas = getReimbursementLinkSagaManager().listNonterminalSagas();
+      const preDigest = sidecarSnapshotDigest({
+        linksRevision: preStore.revision,
+        links,
+        activeSagas,
+      });
+
+      const payload = await coordinator.runRead(async () => {
+        if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+        return withApi(async (api) => {
+          if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+          const groups = await api.getCategoryGroups();
+          const reimbId = reimbCategoryId(groups);
+          const { liveById, scanIncomplete } = await resolveReimbursementExportLive(api, links);
+          const postStore = readReimbLinks();
+          const postSagas = getReimbursementLinkSagaManager().listNonterminalSagas();
+          const postDigest = sidecarSnapshotDigest({
+            linksRevision: postStore.revision,
+            links: sortLinks(postStore.links),
+            activeSagas: postSagas,
+          });
+          assertSnapshotUnchanged(preDigest, postDigest);
+          if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+          const linksSidecarDigest = digestStableJson({
+            schemaVersion: postStore.schemaVersion || 2,
+            revision: postStore.revision,
+            links: sortLinks(postStore.links),
+          });
+          return projectAllocationLedger({
+            links,
+            liveById,
+            activeSagas,
+            reimbCategoryId: reimbId,
+            window: { from: from || null, to: to || null },
+            generatedAt: new Date().toISOString(),
+            scanIncomplete,
+            provenance: {
+              actualGeneration: captureGeneration,
+              linksRevision: postStore.revision,
+              release,
+              linksSidecarDigest,
+              inputDigests: {
+                linksSidecar: linksSidecarDigest,
+                sidecarSnapshot: preDigest,
+                liveEndpoints: digestStableJson(Object.keys(liveById).sort().map((id) => ({
+                  id,
+                  identityFingerprint: liveEndpointIdentityFingerprint(liveById[id]),
+                }))),
+              },
+              operationBinding,
+            },
+          });
+        }, { skipRecover: true });
+      }, { label: 'reimbursement-export' });
+
+      if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+      return prepareExportForPublish(payload, { strict });
+    } catch (error) {
+      if (error instanceof ExportSourceChangedError && attempt < MAX_SNAPSHOT_ATTEMPTS) continue;
+      throw error;
+    } finally {
+      lock?.release();
+    }
+  }
+  throw new ExportSourceChangedError();
 }
 
 // ---------------------------------------------------------------------------
@@ -2343,22 +2476,18 @@ async function getReimbursementLedger({ month } = {}) {
 
     // Payback allocations from the links store (amount-allocated / partial aware).
     const { links } = readReimbLinks();
+    const { byExpense: allocByExpCents, paymentsByExpense } = buildTrustedAllocationIndex(links);
     const allocByExp = {};
     const paymentsByExp = {};
-    for (const l of links) {
-      if (!l.expense) continue;
-      const eid = l.expense.id;
-      const trusted = trustedLinkedCents(l);
-      if (trusted <= 0) continue;
-      const amt = fromCents(trusted);
-      allocByExp[eid] = round2((allocByExp[eid] || 0) + amt);
-      if (l.inflow) (paymentsByExp[eid] = paymentsByExp[eid] || []).push({
-        id: String(l.inflow.id),
-        date: l.inflow.date || null,
-        payee: l.inflow.payee || 'Payment',
-        amount: amt,
+    for (const [expenseId, cents] of Object.entries(allocByExpCents)) {
+      allocByExp[expenseId] = fromCents(cents);
+      paymentsByExp[expenseId] = (paymentsByExpense[expenseId] || []).map((payment) => ({
+        id: payment.id,
+        date: payment.date,
+        payee: payment.payee,
+        amount: fromCents(payment.amountCents),
         allocationTrusted: true,
-      });
+      }));
     }
 
     const chargeStatus = (fronted, allocated, remaining) =>
@@ -5587,6 +5716,7 @@ module.exports = {
   deleteReimbLink,
   prepareReimbLinkAdmission,
   exportReimbursementLegacyReport,
+  buildReimbursementExport,
   getReview,
   setReviewDisposition,
   suggestRepayments,

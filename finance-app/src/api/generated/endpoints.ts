@@ -64,6 +64,7 @@ export const API_ENDPOINTS = {
   confirmRepayment: def('/api/v1/repayments/:id/confirm', 'POST', 'confirmRepayment'),
   dismissRepayment: def('/api/v1/repayments/:id/dismiss', 'POST', 'dismissRepayment'),
   reimbursementLedger: def('/api/v1/reimbursement-ledger', 'GET', 'reimbursementLedger'),
+  reimbursementExport: def('/api/v1/reimbursement-export', 'GET', 'reimbursementExport'),
   reconciliation: def('/api/v1/reconciliation', 'GET', 'reconciliation'),
   reconcilePending: def('/api/v1/reconciliation/pending', 'GET', 'reconcilePending'),
   setReconcileItem: def('/api/v1/reconciliation/item', 'POST', 'setReconcileItem'),

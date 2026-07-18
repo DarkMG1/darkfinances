@@ -1,4 +1,5 @@
 const { AppError, classifyError, AdmissionOverloadedError, AdmissionUnavailableError } = require('./errors');
+const { ReimbursementExportIncompleteError } = require('./reimbursement-export-common');
 const { sanitizeIssues } = require('./request-issues');
 
 const API_ERROR_CODES = Object.freeze({
@@ -21,7 +22,12 @@ function apiErrorBody(error, req) {
   if (error && Array.isArray(error.issues) && error.issues.length) {
     body.issues = sanitizeIssues(error.issues);
   }
-  if (error instanceof AdmissionOverloadedError || error instanceof AdmissionUnavailableError) {
+  if (error instanceof ReimbursementExportIncompleteError) {
+    body.incompleteReasons = error.incompleteReasons || [];
+    if (Array.isArray(error.incompleteSections) && error.incompleteSections.length) {
+      body.incompleteSections = error.incompleteSections;
+    }
+  } else if (error instanceof AdmissionOverloadedError || error instanceof AdmissionUnavailableError) {
     body.admission = {
       retryAfterSeconds: error.retryAfterSeconds ?? undefined,
       lane: error.lane ?? undefined,

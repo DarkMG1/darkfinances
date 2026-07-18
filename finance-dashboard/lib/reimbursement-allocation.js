@@ -125,6 +125,58 @@ function endpointAdmissionFingerprint(live) {
   ].join('|');
 }
 
+function storedEndpointIdentityFingerprint(ref, role) {
+  if (!ref?.id) return '';
+  let amountCents = '';
+  if (ref.amount != null) {
+    try {
+      const cents = Math.abs(toCents(ref.amount));
+      amountCents = String(role === 'expense' ? -cents : cents);
+    } catch (_) {
+      amountCents = '';
+    }
+  } else if (ref.amountCents != null && Number.isSafeInteger(ref.amountCents)) {
+    amountCents = String(ref.amountCents);
+  }
+  return [
+    String(ref.id),
+    String(ref.accountId ?? ''),
+    String(ref.date ?? ''),
+    amountCents,
+  ].join('|');
+}
+
+function liveEndpointIdentityFingerprint(live) {
+  if (!live?.id) return '';
+  return [
+    String(live.id),
+    String(live.accountId ?? ''),
+    String(live.date ?? ''),
+    String(live.amountCents ?? ''),
+  ].join('|');
+}
+
+function assessLiveReimbursementEndpoint(live, { reimbCategoryId, role } = {}) {
+  if (!live?.id) return { eligible: false, reason: 'missing_live' };
+  if (role === 'inflow') {
+    if (!(live.amountCents > 0)) return { eligible: false, reason: 'inflow_sign' };
+    return { eligible: true, reason: null };
+  }
+  if (role === 'expense') {
+    if (!(live.amountCents < 0)) return { eligible: false, reason: 'expense_sign' };
+    if (reimbCategoryId != null) {
+      if (live.category == null) return { eligible: false, reason: 'missing_category' };
+      if (String(live.category) !== String(reimbCategoryId)) {
+        return { eligible: false, reason: 'category_mismatch' };
+      }
+    }
+    return { eligible: true, reason: null };
+  }
+  if (live.amountCents > 0) return assessLiveReimbursementEndpoint(live, { reimbCategoryId, role: 'inflow' });
+  if (live.amountCents < 0) return assessLiveReimbursementEndpoint(live, { reimbCategoryId, role: 'expense' });
+  return { eligible: false, reason: 'zero_amount' };
+}
+
 function classifyStoredLink(link) {
   if (link?.allocationCents != null) {
     const cents = requireSafeCents(link.allocationCents, 'stored allocationCents');
@@ -248,6 +300,8 @@ function txnRefFromLive({
   accountId,
   accountName,
   imported,
+  category,
+  categoryId,
 }) {
   return {
     id: String(id),
@@ -257,6 +311,7 @@ function txnRefFromLive({
     accountId: accountId || null,
     account: accountName || '',
     imported: Boolean(imported),
+    categoryId: categoryId ?? category ?? null,
   };
 }
 
@@ -416,6 +471,11 @@ function migrateLinkToSchemaV2(link) {
     next.amount = fromCents(classified.allocationCents);
   }
   if (next.version == null && classified.trusted) next.version = 1;
+  for (const role of ['inflow', 'expense']) {
+    const ref = next?.[role];
+    if (!ref || ref.categoryId != null) continue;
+    if (ref.category != null) ref.categoryId = ref.category;
+  }
   return next;
 }
 
@@ -431,11 +491,13 @@ module.exports = {
   assertAllocationFieldsAgree,
   assertExpectedVersion,
   assertLegacyAmbiguityAdmission,
+  assessLiveReimbursementEndpoint,
   buildExplicitLinkRecord,
   buildLegacyMigrationReport,
   classifyStoredLink,
   enrichEndpointForRead,
   endpointAdmissionFingerprint,
+  liveEndpointIdentityFingerprint,
   linkPairKey,
   linkRecordConverged,
   linkVersion,
@@ -443,6 +505,7 @@ module.exports = {
   parseRequestedAllocationCents,
   removeLinkRecord,
   sameTransactionId,
+  storedEndpointIdentityFingerprint,
   summarizeEndpointCapacity,
   sumTrustedAllocationsForExpense,
   sumTrustedAllocationsForInflow,
