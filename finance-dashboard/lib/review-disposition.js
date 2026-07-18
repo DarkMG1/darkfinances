@@ -4,14 +4,17 @@ const { KnownPreApplyError } = require('./errors');
 const {
   REVIEW_CONTENT_VERSION,
   enrichReviewTask,
+  expandTransactionTargetEvidence,
+  hashPayload,
   legacyRepaymentIdFromKey,
   legacyTxnIdFromKey,
   parseReviewTaskId,
-  reviewTaskStableKey,
+  stableKeyDigest,
+  txnImportedId,
 } = require('./review-task-fingerprint');
 
 const REVIEW_STATE_SCHEMA_VERSION = 2;
-const MAX_LEGACY_DISPOSITIONS = 5000;
+const MAX_NEW_DISPOSITION_ENTRIES = 10000;
 const HIDDEN_DISPOSITIONS = new Set(['acknowledge', 'dismiss', 'resolved']);
 
 class ReviewDispositionStaleError extends KnownPreApplyError {
@@ -23,7 +26,7 @@ class ReviewDispositionStaleError extends KnownPreApplyError {
 
 class ReviewDispositionUnknownError extends KnownPreApplyError {
   constructor(message = 'review task not found') {
-    super(message, { code: 'REVIEW_DISPOSITION_UNKNOWN', status: 409 });
+    super(message, { code: 'REVIEW_DISPOSITION_UNKNOWN', status: 404 });
     this.name = 'ReviewDispositionUnknownError';
   }
 }
@@ -32,6 +35,20 @@ class ReviewDispositionAmbiguousError extends KnownPreApplyError {
   constructor(message = 'legacy review disposition is ambiguous') {
     super(message, { code: 'REVIEW_DISPOSITION_AMBIGUOUS', status: 409 });
     this.name = 'ReviewDispositionAmbiguousError';
+  }
+}
+
+class ReviewDispositionLegacyRefetchError extends KnownPreApplyError {
+  constructor(message = 'review task id requires refresh with current content hash') {
+    super(message, { code: 'REVIEW_DISPOSITION_LEGACY_REFETCH', status: 409 });
+    this.name = 'ReviewDispositionLegacyRefetchError';
+  }
+}
+
+class ReviewDispositionCapacityError extends KnownPreApplyError {
+  constructor(message = 'review disposition store at capacity') {
+    super(message, { code: 'REVIEW_DISPOSITION_CAPACITY', status: 409 });
+    this.name = 'ReviewDispositionCapacityError';
   }
 }
 
@@ -45,8 +62,7 @@ function cloneJson(value) {
 
 function normalizeDispositionRecord(raw) {
   if (typeof raw === 'string') {
-    if (raw === 'hidden') return { disposition: 'acknowledge', at: new Date(0).toISOString() };
-    return { disposition: raw, at: new Date(0).toISOString() };
+    return { disposition: raw === 'hidden' ? 'acknowledge' : raw, at: new Date(0).toISOString() };
   }
   if (!isPlainObject(raw)) return null;
   return cloneJson(raw);
@@ -84,25 +100,30 @@ function normalizeReviewState(raw) {
     schemaVersion: REVIEW_STATE_SCHEMA_VERSION,
     contentVersion: REVIEW_CONTENT_VERSION,
     dispositions: {},
-    legacyDispositions: boundLegacyBucket(legacyDispositions),
+    legacyDispositions,
   };
 }
 
-function boundLegacyBucket(legacyDispositions) {
-  const entries = Object.entries(legacyDispositions || {});
-  if (entries.length <= MAX_LEGACY_DISPOSITIONS) return Object.fromEntries(entries);
-  entries.sort((left, right) => String(right[1]?.at || '').localeCompare(String(left[1]?.at || '')));
-  return Object.fromEntries(entries.slice(0, MAX_LEGACY_DISPOSITIONS));
+function reviewStateRevision(state) {
+  const normalized = normalizeReviewState(state);
+  return hashPayload({
+    contentVersion: normalized.contentVersion,
+    dispositionKeys: Object.keys(normalized.dispositions).sort(),
+    legacyKeys: Object.keys(normalized.legacyDispositions).sort(),
+  });
 }
 
 function buildReviewTaskIndex(tasks) {
   const byStableKey = new Map();
+  const byStableKeyDigest = new Map();
   const byLegacyKey = new Map();
   const byTxnId = new Map();
   const bySuggestionId = new Map();
 
   for (const task of tasks || []) {
     byStableKey.set(task.stableKey, task);
+    if (task.stableKeyHash) byStableKeyDigest.set(task.stableKeyHash, task);
+    byStableKeyDigest.set(stableKeyDigest(task.stableKey), task);
     byLegacyKey.set(task.stableKey, task);
     byLegacyKey.set(task.id, task);
 
@@ -126,14 +147,15 @@ function buildReviewTaskIndex(tasks) {
     if (task.kind === 'reconciliation' && task.month) byLegacyKey.set(`reconcile:${task.month}`, task);
   }
 
-  return { byStableKey, byLegacyKey, byTxnId, bySuggestionId };
+  return { byStableKey, byStableKeyDigest, byLegacyKey, byTxnId, bySuggestionId };
 }
 
 function resolveTaskForDispositionId(id, taskIndex) {
-  const parsed = parseReviewTaskId(id);
-  if (!parsed.legacy && parsed.stableKey) {
-    const exact = taskIndex.byStableKey.get(parsed.stableKey);
-    if (exact) return { task: exact, parsed };
+  const parsed = parseReviewTaskId(id, taskIndex);
+  if (!parsed.legacy) {
+    const stableKey = parsed.stableKey || parsed.task?.stableKey;
+    const task = parsed.task || (stableKey ? taskIndex.byStableKey.get(stableKey) : null);
+    if (task) return { task, parsed };
     throw new ReviewDispositionUnknownError();
   }
 
@@ -157,9 +179,15 @@ function resolveTaskForDispositionId(id, taskIndex) {
   throw new ReviewDispositionUnknownError();
 }
 
+function dispositionCanHide(record) {
+  if (!record || typeof record !== 'object') return false;
+  return typeof record.contentHash === 'string' && /^[a-f0-9]{64}$/.test(record.contentHash);
+}
+
 function dispositionRecordMatchesTask(record, task) {
-  if (!record) return false;
-  if (record.contentHash && record.contentHash !== task.contentHash) return false;
+  if (!record || !task?.contentHash) return false;
+  if (!dispositionCanHide(record)) return false;
+  if (record.contentHash !== task.contentHash) return false;
   if (record.kind && record.kind !== task.kind) return false;
   return true;
 }
@@ -185,6 +213,21 @@ function lookupDispositionForTask(state, task, taskIndex) {
   return null;
 }
 
+function countMigrationRequired(state, taskIndex = null) {
+  const normalized = normalizeReviewState(state);
+  let count = 0;
+  for (const record of Object.values(normalized.legacyDispositions)) {
+    if (!dispositionCanHide(record)) count += 1;
+    else if (taskIndex) {
+      // legacy with hash but not yet promoted counts as zero migration-required for API
+    }
+  }
+  for (const record of Object.values(normalized.dispositions)) {
+    if (!dispositionCanHide(record)) count += 1;
+  }
+  return count;
+}
+
 function isReviewTaskVisible(task, state, now = Date.now(), taskIndex = null) {
   const index = taskIndex || buildReviewTaskIndex([task]);
   const saved = lookupDispositionForTask(state, task, index);
@@ -197,7 +240,7 @@ function isReviewTaskVisible(task, state, now = Date.now(), taskIndex = null) {
   }
 
   if (!HIDDEN_DISPOSITIONS.has(saved.disposition)) return true;
-  return saved.contentHash !== task.contentHash;
+  return !dispositionRecordMatchesTask(saved, task);
 }
 
 function collectExpiredSnoozeKeys(state, now = Date.now()) {
@@ -207,7 +250,7 @@ function collectExpiredSnoozeKeys(state, now = Date.now()) {
     for (const [key, record] of Object.entries(normalized[bucketName] || {})) {
       if (record?.disposition !== 'snooze') continue;
       const until = Date.parse(record.until || '');
-      if (Number.isFinite(until) && until <= now) expired.push({ bucket: bucketName, key });
+      if (Number.isFinite(until) && until <= now) expired.push({ bucket: bucketName, key, disposition: record.disposition, until: record.until });
     }
   }
   return expired;
@@ -230,56 +273,85 @@ function pruneExpiredReviewSnoozes(state, now = Date.now()) {
   return { state: next, changed };
 }
 
-function migrateResolvedLegacyEntries(state, taskIndex) {
-  const next = normalizeReviewState(state);
-  let changed = false;
-  for (const [legacyKey, record] of Object.entries(next.legacyDispositions)) {
-    let task = next.legacyDispositions === state.legacyDispositions ? null : null;
-    try {
-      ({ task } = resolveTaskForDispositionId(legacyKey, taskIndex));
-    } catch {
-      continue;
-    }
-    if (!task || !dispositionRecordMatchesTask(record, task)) continue;
-    if (next.dispositions[task.stableKey]) continue;
-    next.dispositions[task.stableKey] = {
-      ...record,
-      kind: task.kind,
-      contentHash: task.contentHash,
-      contentVersion: task.contentVersion,
-    };
-    delete next.legacyDispositions[legacyKey];
-    changed = true;
+function assertNewDispositionCapacity(state, stableKey) {
+  const normalized = normalizeReviewState(state);
+  if (normalized.dispositions[stableKey]) return;
+  const total = Object.keys(normalized.dispositions).length + Object.keys(normalized.legacyDispositions).length;
+  if (total >= MAX_NEW_DISPOSITION_ENTRIES) {
+    throw new ReviewDispositionCapacityError();
   }
-  return { state: next, changed };
 }
 
-function applyReviewDisposition(state, payload, { taskIndex, now = Date.now() } = {}) {
-  const { id, disposition, until, note, contentHash } = payload || {};
+function preflightReviewDispositionAdmission(state, payload, { taskIndex, now = Date.now() } = {}) {
+  const { id, disposition, contentHash } = payload || {};
   if (!id) throw new Error('review task id required');
 
-  let next = normalizeReviewState(state);
-  ({ state: next } = pruneExpiredReviewSnoozes(next, now));
+  const normalized = normalizeReviewState(state);
 
   if (disposition === 'clear') {
-    const parsed = parseReviewTaskId(id);
-    if (!parsed.legacy && parsed.stableKey) {
-      delete next.dispositions[parsed.stableKey];
-    }
-    delete next.legacyDispositions[parsed.legacyKey || id];
-    return { state: next, id, disposition };
+    return { state: normalized, revision: reviewStateRevision(normalized), admitted: true };
   }
 
   const { task, parsed } = resolveTaskForDispositionId(id, taskIndex);
+
+  if (parsed.legacy || parsed.mappedFromLegacy) {
+    if (!contentHash) {
+      throw new ReviewDispositionLegacyRefetchError();
+    }
+    if (contentHash !== task.contentHash) {
+      throw new ReviewDispositionStaleError();
+    }
+  }
+
   if (contentHash && contentHash !== task.contentHash) {
     throw new ReviewDispositionStaleError();
   }
+
   if (!parsed.legacy && parsed.contentHash && parsed.contentHash !== task.contentHash) {
     throw new ReviewDispositionStaleError();
   }
-  if (parsed.legacy && parsed.contentHash && parsed.contentHash !== task.contentHash) {
-    throw new ReviewDispositionStaleError();
+
+  assertNewDispositionCapacity(normalized, task.stableKey);
+
+  const saved = lookupDispositionForTask(normalized, task, taskIndex);
+  if (saved?.disposition === 'snooze') {
+    const until = Date.parse(saved.until || '');
+    if (Number.isFinite(until) && until <= now) {
+      // expired snooze visible; admission proceeds and post-write prune clears it
+    }
   }
+
+  return {
+    state: normalized,
+    revision: reviewStateRevision(normalized),
+    task,
+    parsed,
+    admitted: true,
+  };
+}
+
+function applyReviewDisposition(state, payload, { taskIndex, now = Date.now(), preflight } = {}) {
+  const { id, disposition, until, note, contentHash } = payload || {};
+  if (!id) throw new Error('review task id required');
+
+  const admission = preflight || preflightReviewDispositionAdmission(state, payload, { taskIndex, now });
+  let next = normalizeReviewState(admission.state);
+
+  if (disposition === 'clear') {
+    const parsed = parseReviewTaskId(id, taskIndex);
+    if (!parsed.legacy && parsed.stableKey) delete next.dispositions[parsed.stableKey];
+    if (parsed.stableKeyDigest) {
+      const task = taskIndex.byStableKeyDigest.get(parsed.stableKeyDigest);
+      if (task) delete next.dispositions[task.stableKey];
+    }
+    delete next.legacyDispositions[parsed.legacyKey || id];
+    ({ state: next } = pruneExpiredReviewSnoozes(next, now));
+    return { state: next, id, disposition };
+  }
+
+  const { task, parsed } = admission.task
+    ? { task: admission.task, parsed: admission.parsed }
+    : resolveTaskForDispositionId(id, taskIndex);
 
   next.dispositions[task.stableKey] = {
     disposition,
@@ -287,19 +359,87 @@ function applyReviewDisposition(state, payload, { taskIndex, now = Date.now() } 
     kind: task.kind,
     contentHash: task.contentHash,
     contentVersion: task.contentVersion,
+    stableKey: task.stableKey,
+    stableKeyHash: task.stableKeyHash || stableKeyDigest(task.stableKey),
     ...(until ? { until } : {}),
     ...(note ? { note } : {}),
   };
   if (parsed.legacyKey) delete next.legacyDispositions[parsed.legacyKey];
+  ({ state: next } = pruneExpiredReviewSnoozes(next, now));
 
   return { state: next, id: task.id, disposition, stableKey: task.stableKey };
 }
 
-function rewriteStableKeyWithIdMap(stableKey, idMap) {
+function compareAndSwapReviewStateMaintenance(state, { expectedRevision, expiredSnoozeKeys = [], now = Date.now() } = {}) {
+  const normalized = normalizeReviewState(state);
+  if (expectedRevision && reviewStateRevision(normalized) !== expectedRevision) {
+    return { state: normalized, changed: false, conflict: true };
+  }
+
+  let next = cloneJson(normalized);
+  let changed = false;
+
+  for (const entry of expiredSnoozeKeys) {
+    const bucket = entry?.bucket;
+    const key = entry?.key;
+    const record = next[bucket]?.[key];
+    if (!record || record.disposition !== 'snooze') continue;
+    const until = Date.parse(record.until || '');
+    if (!Number.isFinite(until) || until > now) continue;
+    if (entry.until && entry.until !== record.until) continue;
+    delete next[bucket][key];
+    changed = true;
+  }
+
+  const pruned = pruneExpiredReviewSnoozes(next, now);
+  if (pruned.changed) {
+    next = pruned.state;
+    changed = true;
+  }
+
+  return { state: next, changed, conflict: false };
+}
+
+function invalidateReviewDispositionsForTargets(reviewState, { targetIds = [], importedIds = [], stableKeys = [] } = {}) {
+  const next = normalizeReviewState(reviewState);
+  const stats = { reviewState: 0 };
+  const targets = new Set((targetIds || []).map(String));
+  const imports = new Set((importedIds || []).map(String));
+  const keys = new Set((stableKeys || []).map(String));
+
+  const refers = (key, record) => {
+    const keyStr = String(key || '');
+    if (keys.has(keyStr)) return true;
+    if (record?.stableKey && keys.has(String(record.stableKey))) return true;
+    for (const id of targets) {
+      if (keyStr.includes(`:id:${id}`) || keyStr.includes(`:leg:${id}:`) || keyStr.includes(`:imported:${id}`)) return true;
+      if (keyStr.endsWith(`:${id}`)) return true;
+      if (keyStr === `uncategorized:${id}` || keyStr === `large_charge:${id}` || keyStr === `missing_receipt:${id}` || keyStr === `pending:${id}`) return true;
+    }
+    for (const imported of imports) {
+      if (keyStr.includes(`:imported:${imported}`) || keyStr.includes(`ambiguousImport:${imported}`)) return true;
+    }
+    return false;
+  };
+
+  for (const bucketName of ['dispositions', 'legacyDispositions']) {
+    for (const key of Object.keys(next[bucketName])) {
+      if (!refers(key, next[bucketName][key])) continue;
+      delete next[bucketName][key];
+      stats.reviewState += 1;
+    }
+  }
+
+  return { reviewState: next, stats };
+}
+
+function rewriteStableKeyWithIdMap(stableKey, idMap, { importedIdCounts = null } = {}) {
   let next = String(stableKey || '');
   for (const [oldId, newId] of Object.entries(idMap || {})) {
     next = next.split(`:id:${oldId}`).join(`:id:${newId}`);
     next = next.split(`:leg:${oldId}:`).join(`:leg:${newId}:`);
+    const legPattern = new RegExp(`:leg:([^:]+):${oldId}:`, 'g');
+    next = next.replace(legPattern, `:leg:$1:${newId}:`);
   }
   return next;
 }
@@ -310,6 +450,7 @@ function rewriteLegacyKeyWithIdMap(legacyKey, idMap) {
     for (const prefix of ['uncategorized', 'large_charge', 'missing_receipt', 'pending']) {
       const needle = `${prefix}:${oldId}`;
       if (next === needle) next = `${prefix}:${newId}`;
+      if (next === `${prefix}:id:${oldId}`) next = `${prefix}:id:${newId}`;
     }
     const repaymentNeedle = `repayment:sg_${oldId}`;
     if (next === repaymentNeedle) next = `repayment:sg_${newId}`;
@@ -335,43 +476,54 @@ function rewriteReviewDispositionsForReplacement(reviewState, idMap, { tasksBefo
   const rewriteBucket = (bucket, label) => {
     const rewritten = {};
     for (const [key, record] of Object.entries(bucket)) {
-      const nextKey = key.includes(':id:') || key.includes(':leg:')
+      const nextKey = key.includes(':id:') || key.includes(':leg:') || key.includes(':imported:')
         ? rewriteStableKeyWithIdMap(key, idMap)
         : rewriteLegacyKeyWithIdMap(key, idMap);
-      let nextRecord = cloneJson(record);
+      const nextRecord = cloneJson(record);
 
       const beforeTask = beforeIndex.byStableKey.get(key) || beforeIndex.byLegacyKey.get(key);
-      const afterTask = afterIndex.byStableKey.get(nextKey)
-        || afterIndex.byLegacyKey.get(nextKey)
-        || (beforeTask ? afterIndex.byStableKey.get(rewriteStableKeyWithIdMap(beforeTask.stableKey, idMap)) : null);
+      let afterTask = afterIndex.byStableKey.get(nextKey) || afterIndex.byLegacyKey.get(nextKey);
+      if (!afterTask && beforeTask) {
+        afterTask = afterIndex.byStableKey.get(rewriteStableKeyWithIdMap(beforeTask.stableKey, idMap));
+      }
 
       if (!afterTask) {
-        if (nextKey !== key) {
-          assignWithoutLoss(rewritten, nextKey, nextRecord, label);
-          if (nextKey !== key || JSON.stringify(nextRecord) !== JSON.stringify(record)) stats.reviewState += 1;
-          continue;
-        }
         stats.reviewState += 1;
         continue;
       }
-      if (record.contentHash && record.contentHash !== afterTask.contentHash) {
+
+      const explicitHashMatch = record.contentHash === afterTask.contentHash;
+
+      if (beforeTask && afterTask && beforeTask.contentHash === afterTask.contentHash) {
+        nextRecord.kind = afterTask.kind;
+        nextRecord.contentHash = afterTask.contentHash;
+        nextRecord.contentVersion = afterTask.contentVersion;
+        nextRecord.stableKey = afterTask.stableKey;
+        nextRecord.stableKeyHash = afterTask.stableKeyHash || stableKeyDigest(afterTask.stableKey);
+        assignWithoutLoss(rewritten, afterTask.stableKey, nextRecord, label);
+        if (nextKey !== key || afterTask.stableKey !== key) stats.reviewState += 1;
+        continue;
+      }
+
+      if (!explicitHashMatch && record.contentHash && record.contentHash !== afterTask.contentHash) {
         stats.reviewState += 1;
         continue;
       }
-      if (beforeTask && afterTask && beforeTask.contentHash !== afterTask.contentHash) {
+
+      if (!explicitHashMatch && beforeTask && beforeTask.contentHash !== afterTask.contentHash) {
         stats.reviewState += 1;
         continue;
       }
+
       if (afterTask) {
-        nextRecord = {
-          ...nextRecord,
-          kind: afterTask.kind,
-          contentHash: afterTask.contentHash,
-          contentVersion: afterTask.contentVersion,
-        };
+        nextRecord.kind = afterTask.kind;
+        nextRecord.contentHash = afterTask.contentHash;
+        nextRecord.contentVersion = afterTask.contentVersion;
+        nextRecord.stableKey = afterTask.stableKey;
+        nextRecord.stableKeyHash = afterTask.stableKeyHash || stableKeyDigest(afterTask.stableKey);
+        assignWithoutLoss(rewritten, afterTask.stableKey, nextRecord, label);
       }
-      if (nextKey !== key || JSON.stringify(nextRecord) !== JSON.stringify(record)) stats.reviewState += 1;
-      assignWithoutLoss(rewritten, nextKey, nextRecord, label);
+      if (nextKey !== key) stats.reviewState += 1;
     }
     return rewritten;
   };
@@ -381,40 +533,41 @@ function rewriteReviewDispositionsForReplacement(reviewState, idMap, { tasksBefo
   return { reviewState: next, stats };
 }
 
-function stableKeyRefersToTarget(stableKey, targets) {
-  const key = String(stableKey || '');
+function dispositionRefersToEvidence(key, record, { targets, importedIds }) {
+  const keyStr = String(key || '');
   for (const id of targets) {
-    if (key.includes(`:id:${id}`) || key.includes(`:leg:${id}:`) || key.includes(`:imported:${id}`)) return true;
-    if (key.endsWith(`:${id}`)) return true;
-  }
-  return false;
-}
-
-function legacyKeyRefersToTarget(legacyKey, targets) {
-  const key = String(legacyKey || '');
-  for (const id of targets) {
+    if (keyStr.includes(`:id:${id}`) || keyStr.includes(`:leg:${id}:`) || keyStr.includes(`:imported:${id}`)) return true;
+    if (keyStr.endsWith(`:${id}`)) return true;
     for (const prefix of ['uncategorized', 'large_charge', 'missing_receipt', 'pending']) {
-      if (key === `${prefix}:${id}`) return true;
+      if (keyStr === `${prefix}:${id}` || keyStr === `${prefix}:id:${id}`) return true;
     }
-    if (key === `repayment:sg_${id}` || key === `repayment:${id}`) return true;
+    if (keyStr === `repayment:sg_${id}` || keyStr === `repayment:${id}`) return true;
+  }
+  for (const imported of importedIds) {
+    if (keyStr.includes(`:imported:${imported}`) || keyStr.includes(`ambiguousImport:${imported}`)) return true;
+  }
+  if (record?.stableKey) {
+    return dispositionRefersToEvidence(record.stableKey, null, { targets, importedIds });
   }
   return false;
 }
 
-function rewriteReviewDispositionsForDeletion(reviewState, targetIds) {
+function rewriteReviewDispositionsForDeletion(reviewState, targetEvidence) {
   const stats = { reviewState: 0 };
   const next = normalizeReviewState(reviewState);
-  const targets = new Set((targetIds || []).map(String));
+  const expanded = Array.isArray(targetEvidence)
+    ? { targets: targetEvidence.map(String), importedIds: [] }
+    : expandTransactionTargetEvidence(targetEvidence?.transactions || []);
+  const targets = new Set(expanded.targets || []);
+  const importedIds = new Set(expanded.importedIds || []);
 
-  for (const key of Object.keys(next.dispositions)) {
-    if (!stableKeyRefersToTarget(key, targets)) continue;
-    delete next.dispositions[key];
-    stats.reviewState += 1;
-  }
-  for (const key of Object.keys(next.legacyDispositions)) {
-    if (!legacyKeyRefersToTarget(key, targets)) continue;
-    delete next.legacyDispositions[key];
-    stats.reviewState += 1;
+  for (const bucketName of ['dispositions', 'legacyDispositions']) {
+    for (const key of Object.keys(next[bucketName])) {
+      const record = next[bucketName][key];
+      if (!dispositionRefersToEvidence(key, record, { targets, importedIds })) continue;
+      delete next[bucketName][key];
+      stats.reviewState += 1;
+    }
   }
 
   return { reviewState: next, stats };
@@ -427,23 +580,28 @@ function filterVisibleReviewTasks(tasks, state, now = Date.now()) {
 }
 
 module.exports = {
-  MAX_LEGACY_DISPOSITIONS,
+  MAX_NEW_DISPOSITION_ENTRIES,
   REVIEW_STATE_SCHEMA_VERSION,
   ReviewDispositionAmbiguousError,
+  ReviewDispositionCapacityError,
+  ReviewDispositionLegacyRefetchError,
   ReviewDispositionStaleError,
   ReviewDispositionUnknownError,
   applyReviewDisposition,
-  boundLegacyBucket,
   buildReviewTaskIndex,
   collectExpiredSnoozeKeys,
+  compareAndSwapReviewStateMaintenance,
+  countMigrationRequired,
   emptyReviewState,
   filterVisibleReviewTasks,
+  invalidateReviewDispositionsForTargets,
   isReviewTaskVisible,
   lookupDispositionForTask,
-  migrateResolvedLegacyEntries,
   normalizeReviewState,
+  preflightReviewDispositionAdmission,
   pruneExpiredReviewSnoozes,
   resolveTaskForDispositionId,
+  reviewStateRevision,
   rewriteReviewDispositionsForDeletion,
   rewriteReviewDispositionsForReplacement,
 };

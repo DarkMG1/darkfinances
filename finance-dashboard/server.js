@@ -669,6 +669,7 @@ async function loadReviewInbox(req) {
   if (maintenance?.expiredSnoozeKeys?.length) {
     await actualCoordinator.runWrite(
       () => data.persistReviewStateMaintenance({
+        expectedRevision: maintenance.expectedRevision,
         expiredSnoozeKeys: maintenance.expiredSnoozeKeys,
       }),
       { label: 'review:maintenance' },

@@ -3,82 +3,109 @@ const assert = require('node:assert/strict');
 
 const {
   REVIEW_CONTENT_VERSION,
+  buildImportedIdCounts,
   canonicalReviewContent,
   enrichReviewTask,
+  entityAnchor,
+  hashPayload,
   parseReviewTaskId,
   reviewTaskContentHash,
   reviewTaskStableKey,
-  txnAnchor,
+  stableKeyDigest,
 } = require('../lib/review-task-fingerprint');
+const { buildReviewTaskIndex } = require('../lib/review-disposition');
 
-test('txnAnchor prefers imported identity over raw id', () => {
-  const anchor = txnAnchor({ id: 'txn-1', imported_id: 'bank-abc' }, 'uncategorized');
-  assert.equal(anchor, 'uncategorized:imported:bank-abc');
+const ctx = (txns) => ({ importedIdCounts: buildImportedIdCounts(txns), transactions: txns });
+
+test('entityAnchor uses imported only when unique', () => {
+  const txns = [
+    { id: 'a', imported_id: 'dup' },
+    { id: 'b', imported_id: 'dup' },
+  ];
+  const context = ctx(txns);
+  assert.equal(entityAnchor(txns[0], context), 'id:a:ambiguousImport:dup');
+  assert.equal(entityAnchor({ id: 'solo', imported_id: 'unique-1' }, ctx([{ id: 'solo', imported_id: 'unique-1' }])), 'imported:unique-1');
 });
 
-test('review task id binds stableKey and contentHash', () => {
+test('split legs stay distinct when parent and imported overlap', () => {
+  const parent = { id: 'p1', imported_id: 'bank-1' };
+  const legA = { id: 'leg-a', parentId: 'p1', isLeg: true, amount: -10, categoryId: 'c1', payee: 'A', imported_id: 'bank-1' };
+  const legB = { id: 'leg-b', parentId: 'p1', isLeg: true, amount: -20, categoryId: 'c2', payee: 'B', imported_id: 'bank-1' };
+  const context = ctx([parent, legA, legB]);
+  assert.notEqual(entityAnchor(legA, context), entityAnchor(legB, context));
+});
+
+test('stable key uses single kind prefix and public id uses full digests', () => {
+  const txns = [{ id: 'txn-1', imported_id: 'bank-abc', amount: -42.5, payee: 'Coffee #123', date: '2026-07-01', accountId: 'acct-1', categoryId: '', cleared: true }];
   const task = enrichReviewTask({
     kind: 'uncategorized',
-    transaction: { id: 'txn-1', imported_id: 'bank-abc', amount: -42.5, payee: 'Coffee #123', date: '2026-07-01', accountId: 'acct-1', categoryId: '', cleared: true },
+    transaction: txns[0],
     date: '2026-07-01',
     amount: 42.5,
-  });
-  assert.match(task.id, /^uncategorized:uncategorized:imported:bank-abc@[a-f0-9]{64}$/);
-  assert.equal(task.stableKey, 'uncategorized:uncategorized:imported:bank-abc');
+  }, ctx(txns));
+  assert.match(task.stableKey, /^uncategorized:imported:bank-abc$/);
   assert.equal(task.contentVersion, REVIEW_CONTENT_VERSION);
-  assert.equal(task.contentHash, reviewTaskContentHash(task));
+  assert.equal(task.contentHash, reviewTaskContentHash(task, ctx(txns)));
+  assert.equal(task.id, `${stableKeyDigest(task.stableKey)}@${task.contentHash}`);
+  assert.equal(task.id.length, 64 + 1 + 64);
 });
 
-test('amount change changes contentHash but not imported stableKey', () => {
-  const baseTxn = { id: 'txn-1', imported_id: 'bank-abc', amount: -42.5, payee: 'Coffee', date: '2026-07-01', accountId: 'acct-1', categoryId: '', cleared: true };
-  const first = enrichReviewTask({ kind: 'large_charge', transaction: baseTxn, date: '2026-07-01', amount: 42.5 }, { largeThreshold: 200 });
-  const second = enrichReviewTask({ kind: 'large_charge', transaction: { ...baseTxn, amount: -99 }, date: '2026-07-01', amount: 99 }, { largeThreshold: 200 });
-  assert.equal(first.stableKey, second.stableKey);
-  assert.notEqual(first.contentHash, second.contentHash);
-});
-
-test('price_change hash tracks pct/from/to only', () => {
-  const first = enrichReviewTask({
-    kind: 'price_change',
-    key: 'netflix',
-    priceChange: { from: 15.99, to: 17.99, pct: 12.5 },
-    amount: 17.99,
-  });
-  const second = enrichReviewTask({
-    kind: 'price_change',
-    key: 'netflix',
-    priceChange: { from: 15.99, to: 18.99, pct: 18.8 },
-    amount: 18.99,
-  });
-  assert.equal(first.stableKey, second.stableKey);
-  assert.notEqual(first.contentHash, second.contentHash);
-  assert.match(first.stableKey, /^price:netflix$/);
-});
-
-test('reconciliation hash tracks remaining and total', () => {
-  const first = enrichReviewTask({ kind: 'reconciliation', month: '2026-06', remaining: 3, total: 10, amount: 3 });
-  const second = enrichReviewTask({ kind: 'reconciliation', month: '2026-06', remaining: 2, total: 10, amount: 2 });
-  assert.equal(first.stableKey, second.stableKey);
-  assert.notEqual(first.contentHash, second.contentHash);
-});
-
-test('parseReviewTaskId distinguishes legacy and bound ids', () => {
-  const bound = parseReviewTaskId(`uncategorized:uncategorized:id:txn-1@${'a'.repeat(64)}`);
-  assert.equal(bound.legacy, false);
-  assert.equal(bound.stableKey, 'uncategorized:uncategorized:id:txn-1');
-  const legacy = parseReviewTaskId('uncategorized:txn-1');
-  assert.equal(legacy.legacy, true);
-  assert.equal(legacy.legacyKey, 'uncategorized:txn-1');
-});
-
-test('canonicalReviewContent excludes locale strings', () => {
-  const content = canonicalReviewContent({
+test('payee prefers payeeId and keeps hash tokens', () => {
+  const withId = canonicalReviewContent({
     kind: 'uncategorized',
     date: '2026-07-01',
     amount: 10,
-    transaction: { id: '1', amount: -10, payee: 'Café René', date: '2026-07-01', accountId: 'a1', categoryId: 'c1' },
+    transaction: { id: '1', payeeId: 'pid-1', payee: 'Store #123', amount: -10, date: '2026-07-01', accountId: 'a1', categoryId: '' },
+  }, ctx([{ id: '1', payeeId: 'pid-1' }]));
+  assert.deepEqual(withId.payee, { kind: 'payeeId', value: 'pid-1' });
+  const text = canonicalReviewContent({
+    kind: 'uncategorized',
+    date: '2026-07-01',
+    amount: 10,
+    transaction: { id: '2', payee: 'Café #123 René', amount: -10, date: '2026-07-01', accountId: 'a1', categoryId: '' },
+  }, ctx([{ id: '2' }]));
+  assert.equal(text.payee.value, 'cafe #123 rene');
+});
+
+test('missing_receipt hash tracks categoryId', () => {
+  const txn = { id: '1', amount: -80, date: '2026-07-01', accountId: 'a1', categoryId: 'c1' };
+  const first = enrichReviewTask({ kind: 'missing_receipt', date: '2026-07-01', amount: 80, transaction: txn }, ctx([txn]));
+  const second = enrichReviewTask({ kind: 'missing_receipt', date: '2026-07-01', amount: 80, transaction: { ...txn, categoryId: 'c2' } }, ctx([{ ...txn, categoryId: 'c2' }]));
+  assert.equal(first.stableKey, second.stableKey);
+  assert.notEqual(first.contentHash, second.contentHash);
+});
+
+test('reconciliation hash tracks unresolved identity set not counts alone', () => {
+  const base = {
+    kind: 'reconciliation',
+    month: '2026-06',
+    unresolvedItems: [{ id: 'a', amount: 10 }, { id: 'b', amount: 20 }],
+  };
+  const sameCount = enrichReviewTask({ ...base, remaining: 2, total: 10 });
+  const different = enrichReviewTask({ ...base, unresolvedItems: [{ id: 'a', amount: 10 }, { id: 'c', amount: 20 }], remaining: 2, total: 10 });
+  assert.equal(sameCount.stableKey, different.stableKey);
+  assert.notEqual(sameCount.contentHash, different.contentHash);
+});
+
+test('parseReviewTaskId resolves digest ids through task index', () => {
+  const txns = [{ id: 'txn-1', amount: -10, date: '2026-07-01', accountId: 'a1', categoryId: '' }];
+  const task = enrichReviewTask({ kind: 'pending', date: '2026-07-01', amount: 10, transaction: txns[0] }, ctx(txns));
+  const parsed = parseReviewTaskId(task.id, buildReviewTaskIndex([task]));
+  assert.equal(parsed.legacy, false);
+  assert.equal(parsed.stableKey, task.stableKey);
+  assert.equal(parsed.contentHash, task.contentHash);
+});
+
+test('hash permutations are order-independent for reconciliation unresolved set', () => {
+  const firstTask = enrichReviewTask({
+    kind: 'reconciliation',
+    month: '2026-06',
+    unresolvedItems: [{ id: 'b', amount: 20 }, { id: 'a', amount: 10 }],
   });
-  assert.equal(content.payeeKey, 'caf ren');
-  assert.equal(content.kind, 'uncategorized');
-  assert.ok(!Object.prototype.hasOwnProperty.call(content, 'title'));
+  const secondTask = enrichReviewTask({
+    kind: 'reconciliation',
+    month: '2026-06',
+    unresolvedItems: [{ id: 'a', amount: 10 }, { id: 'b', amount: 20 }],
+  });
+  assert.equal(firstTask.contentHash, secondTask.contentHash);
 });

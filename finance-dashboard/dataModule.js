@@ -108,12 +108,15 @@ const {
   applyReviewDisposition,
   buildReviewTaskIndex,
   collectExpiredSnoozeKeys,
+  compareAndSwapReviewStateMaintenance,
+  countMigrationRequired,
   filterVisibleReviewTasks,
-  migrateResolvedLegacyEntries,
+  invalidateReviewDispositionsForTargets,
   normalizeReviewState,
-  pruneExpiredReviewSnoozes,
+  preflightReviewDispositionAdmission,
+  reviewStateRevision,
 } = require('./lib/review-disposition');
-const { enrichReviewTask, reviewTaskStableKey } = require('./lib/review-task-fingerprint');
+const { buildImportedIdCounts, enrichReviewTask, reviewTaskStableKey } = require('./lib/review-task-fingerprint');
 const {
   SagaInterruption,
   addableTransaction,
@@ -3446,6 +3449,7 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
     if (!isLeg) {
       // Simple, safe path for non-split transactions.
       await api.updateTransaction(id, { category: categoryId || null });
+      invalidateReviewStateForTransactionEvidence({ targetIds: [id] });
       return { ok: true, mode: 'update' };
     }
     // Split leg: rebuild the parent, preserve every field, then migrate all IDs.
@@ -3467,6 +3471,7 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
       requestedLegs: retainedReplacementLegs(parent),
     });
     const { idMap, references } = replacementSagaResult(added);
+    invalidateReviewStateForTransactionEvidence({ targetIds: [id, parentId, added.id, idMap[String(id)]].filter(Boolean) });
     return {
       ok: true,
       mode: 'rebuild-split',
@@ -3489,41 +3494,34 @@ function writeReviewState(state) {
   writeJsonSafe(REVIEW_STATE_PATH, normalizeReviewState(state));
 }
 
-function persistReviewStateMaintenance({ expiredSnoozeKeys = [] } = {}) {
-  let state = readReviewState();
-  let changed = false;
-  for (const entry of expiredSnoozeKeys) {
-    const bucket = entry?.bucket;
-    const key = entry?.key;
-    if (!bucket || !key || !state[bucket]?.[key]) continue;
-    delete state[bucket][key];
-    changed = true;
-  }
-  const pruned = pruneExpiredReviewSnoozes(state);
-  if (pruned.changed) {
-    state = pruned.state;
-    changed = true;
-  }
-  if (changed) writeReviewState(state);
-  return { ok: true, changed };
+function invalidateReviewStateForTransactionEvidence(evidence) {
+  const state = readReviewState();
+  const { reviewState, stats } = invalidateReviewDispositionsForTargets(state, evidence);
+  if (stats.reviewState) writeReviewState(reviewState);
+  return stats;
 }
 
-async function setReviewDisposition({ id, disposition, until, note, contentHash, month } = {}) {
+function persistReviewStateMaintenance({ expectedRevision, expiredSnoozeKeys = [] } = {}) {
+  const state = readReviewState();
+  const result = compareAndSwapReviewStateMaintenance(state, { expectedRevision, expiredSnoozeKeys });
+  if (result.changed && !result.conflict) writeReviewState(result.state);
+  return { ok: true, changed: result.changed, conflict: result.conflict };
+}
+
+async function setReviewDisposition({ id, disposition, until, note, contentHash, month, expectedRevision } = {}) {
   if (!id) throw new Error('review task id required');
-  let state = readReviewState();
-  const pruned = pruneExpiredReviewSnoozes(state);
-  if (pruned.changed) {
-    state = pruned.state;
-    writeReviewState(state);
-  }
   const { allTasks } = await collectReviewTasks({ month });
-  const migrated = migrateResolvedLegacyEntries(state, buildReviewTaskIndex(allTasks));
-  if (migrated.changed) {
-    state = migrated.state;
-    writeReviewState(state);
+  const taskIndex = buildReviewTaskIndex(allTasks);
+  const state = readReviewState();
+  const revision = expectedRevision || reviewStateRevision(state);
+  if (expectedRevision && expectedRevision !== reviewStateRevision(state)) {
+    const { ReviewDispositionStaleError } = require('./lib/review-disposition');
+    throw new ReviewDispositionStaleError('review state changed — refresh and retry');
   }
+  const preflight = preflightReviewDispositionAdmission(state, { id, disposition, until, note, contentHash }, { taskIndex });
   const { state: next, id: canonicalId } = applyReviewDisposition(state, { id, disposition, until, note, contentHash }, {
-    taskIndex: buildReviewTaskIndex(allTasks),
+    taskIndex,
+    preflight,
   });
   writeReviewState(next);
   const task = allTasks.find((entry) => entry.id === canonicalId || entry.stableKey === canonicalId);
@@ -3564,7 +3562,6 @@ async function collectReviewTasks({ month, classifiedLeaves: preclassifiedLeaves
 
   const largeThreshold = Number(process.env.REVIEW_LARGE_CHARGE_THRESHOLD || 200);
   const receiptThreshold = Number(process.env.REVIEW_RECEIPT_THRESHOLD || 75);
-  const reviewContext = { largeThreshold, receiptThreshold };
 
   const tasks = [];
   const seen = new Set();
@@ -3575,6 +3572,7 @@ async function collectReviewTasks({ month, classifiedLeaves: preclassifiedLeaves
     accountId: txn.accountId || '',
     account: txn.account || '',
     payee: txn.payee || '',
+    payeeId: txn.payeeId || txn.payee_id || null,
     amount: round2(Number(txn.amount) || 0),
     date: txn.date || '',
     category: txn.category || null,
@@ -3683,6 +3681,15 @@ async function collectReviewTasks({ month, classifiedLeaves: preclassifiedLeaves
   }
 
   if (recon && recon.pending) {
+    const reconState = reconMonthState(readRecon(), recon.pending);
+    const reconItemRows = await withApi((api) => reconItemsFor(api, recon.pending));
+    const unresolvedItems = reconItemRows
+      .filter((item) => !reconState.items[item.id])
+      .map((item) => ({
+        id: item.id,
+        imported_id: item.imported_id || null,
+        amount: item.amount,
+      }));
     tasks.push({
       kind: 'reconciliation',
       priority: 85,
@@ -3694,9 +3701,12 @@ async function collectReviewTasks({ month, classifiedLeaves: preclassifiedLeaves
       month: recon.pending,
       remaining: recon.remaining || 0,
       total: recon.total || 0,
+      unresolvedItems,
     });
   }
 
+  const importedIdCounts = buildImportedIdCounts(txns);
+  const reviewContext = { largeThreshold, receiptThreshold, importedIdCounts, transactions: txns };
   const enrichedTasks = tasks.map((task) => enrichReviewTask(task, reviewContext));
   enrichedTasks.sort((a, b) => b.priority - a.priority || String(b.date || '').localeCompare(String(a.date || '')));
   const state = readReviewState();
@@ -3705,15 +3715,18 @@ async function collectReviewTasks({ month, classifiedLeaves: preclassifiedLeaves
   const counts = {};
   for (const t of visibleTasks) counts[t.kind] = (counts[t.kind] || 0) + 1;
   const expiredSnoozeKeys = collectExpiredSnoozeKeys(state, now);
+  const migrationRequired = countMigrationRequired(state, buildReviewTaskIndex(enrichedTasks));
   return {
     generatedAt: new Date().toISOString(),
     month: m,
     count: visibleTasks.length,
     hiddenCount: enrichedTasks.length - visibleTasks.length,
+    migrationRequired,
     counts,
     tasks: visibleTasks.slice(0, 50),
     allTasks: enrichedTasks,
     _maintenance: {
+      expectedRevision: reviewStateRevision(state),
       expiredSnoozeKeys,
     },
   };
@@ -3726,6 +3739,7 @@ async function getReview(options = {}) {
     month: inbox.month,
     count: inbox.count,
     hiddenCount: inbox.hiddenCount,
+    migrationRequired: inbox.migrationRequired,
     counts: inbox.counts,
     tasks: inbox.tasks,
     _allTasks: inbox.allTasks,
@@ -5483,6 +5497,7 @@ function addReceipt({
     try { fs.unlinkSync(finalPath); } catch (_) {}
     throw error;
   }
+  invalidateReviewStateForTransactionEvidence({ targetIds: [txnId] });
   return publicReceipt(rec);
 }
 // Strip server-only fields for API responses (the file name stays internal).
@@ -5544,6 +5559,7 @@ function deleteReceipt({ id } = {}) {
       try { if (fs.existsSync(trash)) fs.renameSync(trash, file); } catch (_) {}
       throw error;
     }
+    invalidateReviewStateForTransactionEvidence({ targetIds: [removed.txnId] });
   }
   return { ok: true, removed: !!removed };
 }

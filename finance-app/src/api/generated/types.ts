@@ -488,6 +488,7 @@ export interface ReviewInbox {
   month: string;
   count: number;
   hiddenCount?: number;
+  migrationRequired?: number;
   counts: Partial<Record<ReviewTaskKind, number>>;
   tasks: ReviewTask[];
 }

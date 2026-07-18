@@ -75,7 +75,7 @@ function stores() {
       schemaVersion: 2,
       contentVersion: 1,
       dispositions: {
-        'uncategorized:uncategorized:id:parent': {
+        'uncategorized:imported:parent': {
           disposition: 'acknowledge',
           at: '2026-07-01T00:00:00.000Z',
           contentHash: 'a'.repeat(64),

@@ -1,19 +1,27 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { enrichReviewTask } = require('../lib/review-task-fingerprint');
+const { enrichReviewTask, buildImportedIdCounts } = require('../lib/review-task-fingerprint');
 const {
   applyReviewDisposition,
   buildReviewTaskIndex,
+  countMigrationRequired,
   filterVisibleReviewTasks,
   isReviewTaskVisible,
   normalizeReviewState,
+  preflightReviewDispositionAdmission,
   pruneExpiredReviewSnoozes,
+  ReviewDispositionLegacyRefetchError,
   ReviewDispositionStaleError,
   ReviewDispositionUnknownError,
 } = require('../lib/review-disposition');
 
+function ctx(txns) {
+  return { importedIdCounts: buildImportedIdCounts(txns), transactions: txns };
+}
+
 function sampleTask(overrides = {}) {
+  const txns = [{ id: 'txn-1', imported_id: 'bank-abc', amount: -12, payee: 'Coffee', date: '2026-07-01', accountId: 'acct-1', categoryId: '', cleared: true }];
   return enrichReviewTask({
     kind: 'uncategorized',
     priority: 95,
@@ -22,63 +30,63 @@ function sampleTask(overrides = {}) {
     action: 'categorize',
     amount: 12,
     date: '2026-07-01',
-    transaction: {
-      id: 'txn-1',
-      imported_id: 'bank-abc',
-      amount: -12,
-      payee: 'Coffee',
-      date: '2026-07-01',
-      accountId: 'acct-1',
-      categoryId: '',
-      cleared: true,
-    },
+    transaction: txns[0],
     ...overrides,
-  });
+  }, ctx(txns));
+}
+
+function emptyState() {
+  return normalizeReviewState({ schemaVersion: 2, contentVersion: 1, dispositions: {}, legacyDispositions: {} });
 }
 
 test('ack hides equivalent content by stableKey', () => {
   const task = sampleTask();
   const index = buildReviewTaskIndex([task]);
-  const applied = applyReviewDisposition(emptyState(), {
-    id: task.id,
-    disposition: 'acknowledge',
-  }, { taskIndex: index });
-  const visible = filterVisibleReviewTasks([task], applied.state);
-  assert.equal(visible.length, 0);
+  const applied = applyReviewDisposition(emptyState(), { id: task.id, disposition: 'acknowledge', contentHash: task.contentHash }, { taskIndex: index });
+  assert.equal(filterVisibleReviewTasks([task], applied.state).length, 0);
 });
 
-test('amount change reopens large_charge', () => {
-  const hidden = sampleTask({ kind: 'large_charge', amount: 250, transaction: { id: 'txn-1', imported_id: 'bank-abc', amount: -250, payee: 'Hotel', date: '2026-07-01', accountId: 'a1', categoryId: 'c1', cleared: true } });
-  const changed = enrichReviewTask({ ...hidden, amount: 400, transaction: { ...hidden.transaction, amount: -400 } }, { largeThreshold: 200 });
-  const index = buildReviewTaskIndex([hidden]);
-  const state = applyReviewDisposition(emptyState(), { id: hidden.id, disposition: 'acknowledge' }, { taskIndex: index }).state;
-  assert.equal(isReviewTaskVisible(changed, state, Date.now(), buildReviewTaskIndex([changed])), true);
+test('legacy without proven contentHash never hides current task', () => {
+  const task = sampleTask();
+  const state = normalizeReviewState({
+    schemaVersion: 2,
+    contentVersion: 1,
+    dispositions: {},
+    legacyDispositions: {
+      'uncategorized:txn-1': { disposition: 'acknowledge', at: '2026-07-01T00:00:00.000Z' },
+    },
+  });
+  assert.equal(isReviewTaskVisible(task, state, Date.now(), buildReviewTaskIndex([task])), true);
+  assert.ok(countMigrationRequired(state) >= 1);
 });
 
-test('legacy id maps to current task without stale hash and stores stableKey', () => {
+test('legacy write requires current contentHash', () => {
   const task = sampleTask();
   const index = buildReviewTaskIndex([task]);
-  const applied = applyReviewDisposition(emptyState(), {
+  assert.throws(
+    () => preflightReviewDispositionAdmission(emptyState(), { id: 'uncategorized:txn-1', disposition: 'acknowledge' }, { taskIndex: index }),
+    ReviewDispositionLegacyRefetchError,
+  );
+  assert.doesNotThrow(() => preflightReviewDispositionAdmission(emptyState(), {
     id: 'uncategorized:txn-1',
     disposition: 'acknowledge',
-  }, { taskIndex: index });
-  assert.ok(applied.state.dispositions[task.stableKey]);
-  assert.equal(applied.state.dispositions[task.stableKey].contentHash, task.contentHash);
+    contentHash: task.contentHash,
+  }, { taskIndex: index }));
 });
 
 test('stale bound id rejects with 409', () => {
   const task = sampleTask();
-  const staleId = `${task.stableKey}@${'b'.repeat(64)}`;
+  const staleId = `${task.id.slice(0, 64)}@${'b'.repeat(64)}`;
   const index = buildReviewTaskIndex([task]);
   assert.throws(
-    () => applyReviewDisposition(emptyState(), { id: staleId, disposition: 'acknowledge' }, { taskIndex: index }),
+    () => preflightReviewDispositionAdmission(emptyState(), { id: staleId, disposition: 'acknowledge' }, { taskIndex: index }),
     ReviewDispositionStaleError,
   );
 });
 
-test('unknown disposition id rejects with 409', () => {
+test('unknown disposition id rejects with 404', () => {
   assert.throws(
-    () => applyReviewDisposition(emptyState(), { id: 'uncategorized:missing', disposition: 'acknowledge' }, {
+    () => preflightReviewDispositionAdmission(emptyState(), { id: 'uncategorized:missing', disposition: 'acknowledge', contentHash: 'a'.repeat(64) }, {
       taskIndex: buildReviewTaskIndex([]),
     }),
     ReviewDispositionUnknownError,
@@ -93,37 +101,34 @@ test('snooze hides until expiry then shows immediately without read-side write',
     id: task.id,
     disposition: 'snooze',
     until,
+    contentHash: task.contentHash,
   }, { taskIndex: index, now: Date.parse('2026-07-01T10:00:00.000Z') });
   assert.equal(isReviewTaskVisible(task, applied.state, Date.parse('2026-07-01T11:00:00.000Z'), index), false);
   assert.equal(isReviewTaskVisible(task, applied.state, Date.parse('2026-07-01T13:00:00.000Z'), index), true);
-  assert.ok(applied.state.dispositions[task.stableKey]);
 });
 
-test('snooze expiry is durably pruned on write path', () => {
+test('snooze expiry is durably pruned on mutation write path only', () => {
   const task = sampleTask();
   const index = buildReviewTaskIndex([task]);
   const until = new Date('2026-07-01T12:00:00.000Z').toISOString();
-  let state = applyReviewDisposition(emptyState(), { id: task.id, disposition: 'snooze', until }, {
+  const state = applyReviewDisposition(emptyState(), { id: task.id, disposition: 'snooze', until, contentHash: task.contentHash }, {
     taskIndex: index,
     now: Date.parse('2026-07-01T10:00:00.000Z'),
   }).state;
+  assert.ok(state.dispositions[task.stableKey]);
   const pruned = pruneExpiredReviewSnoozes(state, Date.parse('2026-07-01T13:00:00.000Z'));
   assert.equal(pruned.changed, true);
   assert.equal(pruned.state.dispositions[task.stableKey], undefined);
 });
 
-test('v1 legacy bucket preserved in bounded migration', () => {
-  const migrated = normalizeReviewState({
-    schemaVersion: 1,
-    dispositions: {
-      'uncategorized:txn-1': { disposition: 'acknowledge', at: '2026-07-01T00:00:00.000Z' },
-      'fp-1': 'hidden',
-    },
-  });
-  assert.equal(migrated.schemaVersion, 2);
+test('v1 legacy bucket preserved losslessly without truncation', () => {
+  const legacyDispositions = {};
+  for (let i = 0; i < 6000; i += 1) {
+    legacyDispositions[`uncategorized:txn-${i}`] = { disposition: 'acknowledge', at: '2026-07-01T00:00:00.000Z' };
+  }
+  const migrated = normalizeReviewState({ schemaVersion: 1, dispositions: legacyDispositions });
+  assert.equal(Object.keys(migrated.legacyDispositions).length, 6000);
   assert.deepEqual(migrated.dispositions, {});
-  assert.ok(migrated.legacyDispositions['uncategorized:txn-1']);
-  assert.equal(migrated.legacyDispositions['fp-1'].disposition, 'acknowledge');
 });
 
 test('uncertain legacy mapping fails open (shows task)', () => {
@@ -133,12 +138,8 @@ test('uncertain legacy mapping fails open (shows task)', () => {
     contentVersion: 1,
     dispositions: {},
     legacyDispositions: {
-      'uncategorized:orphan-txn': { disposition: 'acknowledge', at: '2026-07-01T00:00:00.000Z' },
+      'uncategorized:orphan-txn': { disposition: 'acknowledge', at: '2026-07-01T00:00:00.000Z', contentHash: 'a'.repeat(64) },
     },
   });
   assert.equal(isReviewTaskVisible(task, state, Date.now(), buildReviewTaskIndex([task])), true);
 });
-
-function emptyState() {
-  return normalizeReviewState({ schemaVersion: 2, contentVersion: 1, dispositions: {}, legacyDispositions: {} });
-}

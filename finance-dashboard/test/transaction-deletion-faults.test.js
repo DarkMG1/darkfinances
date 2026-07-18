@@ -176,7 +176,7 @@ function makeHarness({ applyThenThrowDelete = false } = {}) {
     schemaVersion: 2,
     contentVersion: 1,
     dispositions: {
-      [`uncategorized:uncategorized:id:${original.id}`]: {
+      [`uncategorized:id:${original.id}`]: {
         disposition: 'acknowledge',
         at: '2026-07-01T00:00:00.000Z',
         contentHash: 'a'.repeat(64),

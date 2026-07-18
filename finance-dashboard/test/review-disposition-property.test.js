@@ -3,128 +3,76 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+const { buildImportedIdCounts, enrichReviewTask } = require('../lib/review-task-fingerprint');
 const {
-  canonicalReviewContent,
-  enrichReviewTask,
-  reviewTaskContentHash,
-  reviewTaskStableKey,
-} = require('../lib/review-task-fingerprint');
-const {
-  MAX_LEGACY_DISPOSITIONS,
   applyReviewDisposition,
-  boundLegacyBucket,
   buildReviewTaskIndex,
-  collectExpiredSnoozeKeys,
+  compareAndSwapReviewStateMaintenance,
   filterVisibleReviewTasks,
-  isReviewTaskVisible,
+  invalidateReviewDispositionsForTargets,
   normalizeReviewState,
-  pruneExpiredReviewSnoozes,
+  preflightReviewDispositionAdmission,
+  reviewStateRevision,
+  rewriteReviewDispositionsForDeletion,
+  rewriteReviewDispositionsForReplacement,
 } = require('../lib/review-disposition');
 
-function txn(overrides = {}) {
-  return {
-    id: 'txn-1',
-    imported_id: 'bank-import-1',
-    amount: -10.5,
-    payee: '  Cafe   Latte ',
-    date: '2026-07-01',
-    accountId: 'acct-1',
-    categoryId: '',
-    cleared: true,
-    ...overrides,
-  };
+function ctx(txns) {
+  return { importedIdCounts: buildImportedIdCounts(txns), transactions: txns };
 }
 
-test('canonical hash is stable for payee normalization and exact cents', () => {
-  const first = canonicalReviewContent({
-    kind: 'uncategorized',
-    date: '2026-07-01',
-    amount: 10.5,
-    transaction: txn(),
-  });
-  const second = canonicalReviewContent({
-    kind: 'uncategorized',
-    date: '2026-07-01',
-    amount: 10.5,
-    transaction: txn({ payee: 'cafe latte' }),
-  });
-  assert.deepEqual(first, second);
-  assert.equal(reviewTaskContentHash({ kind: 'uncategorized', transaction: txn() }), reviewTaskContentHash({ kind: 'uncategorized', transaction: txn({ payee: 'cafe latte' }) }));
+test('duplicate imported ids use raw id anchors with distinct hashes', () => {
+  const txns = [
+    { id: 'raw-1', imported_id: 'dup', amount: -10, date: '2026-07-01', accountId: 'a1', categoryId: '' },
+    { id: 'raw-2', imported_id: 'dup', amount: -20, date: '2026-07-01', accountId: 'a1', categoryId: '' },
+  ];
+  const first = enrichReviewTask({ kind: 'pending', date: '2026-07-01', amount: 10, transaction: txns[0] }, ctx(txns));
+  const second = enrichReviewTask({ kind: 'pending', date: '2026-07-01', amount: 20, transaction: txns[1] }, ctx(txns));
+  assert.notEqual(first.stableKey, second.stableKey);
+  assert.notEqual(first.contentHash, second.contentHash);
 });
 
-test('duplicate-looking txns with imported vs raw id diverge stable keys', () => {
-  const imported = enrichReviewTask({ kind: 'pending', date: '2026-07-01', amount: 10, transaction: txn({ id: 'raw-1', imported_id: 'bank-1' }) });
-  const rawOnly = enrichReviewTask({ kind: 'pending', date: '2026-07-01', amount: 10, transaction: txn({ id: 'raw-1', imported_id: null }) });
-  assert.notEqual(imported.stableKey, rawOnly.stableKey);
-  assert.notEqual(imported.contentHash, rawOnly.contentHash);
-});
-
-test('resolved task that disappears and returns with same content stays hidden', () => {
-  const task = enrichReviewTask({ kind: 'missing_receipt', date: '2026-07-01', amount: 80, transaction: txn({ amount: -80 }) });
-  const index = buildReviewTaskIndex([task]);
-  const state = applyReviewDisposition(normalizeReviewState({ schemaVersion: 2, contentVersion: 1, dispositions: {}, legacyDispositions: {} }), {
-    id: task.id,
-    disposition: 'resolved',
-  }, { taskIndex: index }).state;
-  assert.equal(filterVisibleReviewTasks([task], state).length, 0);
-  assert.equal(isReviewTaskVisible(task, state, Date.now(), index), false);
-});
-
-test('resolved task that returns with changed amount reopens', () => {
-  const hidden = enrichReviewTask({ kind: 'missing_receipt', date: '2026-07-01', amount: 80, transaction: txn({ amount: -80 }) });
-  const changed = enrichReviewTask({ kind: 'missing_receipt', date: '2026-07-01', amount: 120, transaction: txn({ amount: -120 }) });
-  const index = buildReviewTaskIndex([hidden]);
-  const state = applyReviewDisposition(normalizeReviewState({ schemaVersion: 2, contentVersion: 1, dispositions: {}, legacyDispositions: {} }), {
-    id: hidden.id,
-    disposition: 'resolved',
-  }, { taskIndex: index }).state;
-  assert.equal(reviewTaskStableKey(hidden), reviewTaskStableKey(changed));
-  assert.equal(isReviewTaskVisible(changed, state, Date.now(), buildReviewTaskIndex([changed])), true);
-});
-
-test('snooze maintenance collects expired keys without mutating read snapshot', () => {
+test('compare-and-swap snooze cleanup refuses concurrent disposition overwrite', () => {
   const state = normalizeReviewState({
     schemaVersion: 2,
     contentVersion: 1,
     dispositions: {
-      'pending:pending:imported:bank-1': {
-        disposition: 'snooze',
-        until: '2020-01-01T00:00:00.000Z',
+      'pending:id:txn-1': {
+        disposition: 'acknowledge',
+        at: '2026-07-01T00:00:00.000Z',
+        contentHash: 'a'.repeat(64),
       },
     },
     legacyDispositions: {},
   });
-  const expired = collectExpiredSnoozeKeys(state, Date.parse('2026-07-01T00:00:00.000Z'));
-  assert.equal(expired.length, 1);
-  assert.ok(state.dispositions['pending:pending:imported:bank-1']);
-  const pruned = pruneExpiredReviewSnoozes(state, Date.parse('2026-07-01T00:00:00.000Z'));
-  assert.equal(pruned.changed, true);
-  assert.equal(pruned.state.dispositions['pending:pending:imported:bank-1'], undefined);
+  const revision = reviewStateRevision(state);
+  const result = compareAndSwapReviewStateMaintenance(state, {
+    expectedRevision: revision,
+    expiredSnoozeKeys: [{ bucket: 'dispositions', key: 'pending:id:txn-1', disposition: 'snooze', until: '2020-01-01T00:00:00.000Z' }],
+  });
+  assert.equal(result.changed, false);
+  assert.equal(result.state.dispositions['pending:id:txn-1'].disposition, 'acknowledge');
 });
 
-test('legacy bucket is bounded without dropping newest records', () => {
-  const legacyDispositions = {};
-  for (let i = 0; i < MAX_LEGACY_DISPOSITIONS + 10; i += 1) {
-    legacyDispositions[`uncategorized:txn-${i}`] = {
-      disposition: 'acknowledge',
-      at: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
-    };
-  }
-  const bounded = boundLegacyBucket(legacyDispositions);
-  assert.equal(Object.keys(bounded).length, MAX_LEGACY_DISPOSITIONS);
-  assert.ok(bounded[`uncategorized:txn-${MAX_LEGACY_DISPOSITIONS + 9}`]);
-  assert.equal(bounded['uncategorized:txn-0'], undefined);
-});
-
-test('optional body contentHash rejects stale race with 409 class', () => {
-  const task = enrichReviewTask({ kind: 'uncategorized', date: '2026-07-01', amount: 10, transaction: txn() });
+test('lifecycle invalidation clears disposition when task evidence disappears', () => {
+  const txns = [{ id: 'txn-1', amount: -12, payee: 'Coffee', date: '2026-07-01', accountId: 'acct-1', categoryId: '', cleared: true }];
+  const task = enrichReviewTask({ kind: 'missing_receipt', date: '2026-07-01', amount: 12, transaction: txns[0] }, ctx(txns));
   const index = buildReviewTaskIndex([task]);
-  assert.throws(
-    () => applyReviewDisposition(normalizeReviewState({ schemaVersion: 2, contentVersion: 1, dispositions: {}, legacyDispositions: {} }), {
-      id: task.id,
-      disposition: 'acknowledge',
-      contentHash: 'b'.repeat(64),
-    }, { taskIndex: index }),
-    (error) => error.name === 'ReviewDispositionStaleError' && error.status === 409,
-  );
+  let state = applyReviewDisposition(emptyState(), { id: task.id, disposition: 'acknowledge', contentHash: task.contentHash }, { taskIndex: index }).state;
+  ({ reviewState: state } = invalidateReviewDispositionsForTargets(state, { targetIds: ['txn-1'] }));
+  assert.equal(Object.keys(state.dispositions).length, 0);
 });
+
+test('preflight admission performs zero writes', () => {
+  const txns = [{ id: 'txn-1', amount: -12, date: '2026-07-01', accountId: 'a1', categoryId: '' }];
+  const task = enrichReviewTask({ kind: 'uncategorized', date: '2026-07-01', amount: 12, transaction: txns[0] }, ctx(txns));
+  const before = emptyState();
+  preflightReviewDispositionAdmission(before, { id: task.id, disposition: 'acknowledge', contentHash: task.contentHash }, {
+    taskIndex: buildReviewTaskIndex([task]),
+  });
+  assert.deepEqual(before, emptyState());
+});
+
+function emptyState() {
+  return normalizeReviewState({ schemaVersion: 2, contentVersion: 1, dispositions: {}, legacyDispositions: {} });
+}

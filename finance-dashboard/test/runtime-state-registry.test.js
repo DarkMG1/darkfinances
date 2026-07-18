@@ -227,7 +227,7 @@ const FIXTURES = {
       schemaVersion: 2,
       contentVersion: 1,
       dispositions: {
-        'uncategorized:uncategorized:imported:abc@v1': {
+        'uncategorized:imported:abc@v1': {
           disposition: 'acknowledge',
           at: '2026-07-13T00:00:00.000Z',
           contentHash: 'a'.repeat(64),
