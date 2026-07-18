@@ -272,6 +272,18 @@ npm run check:tools
 This syntax-checks every JavaScript tool and runs tests for retry handling, group resolution,
 multi-currency rejection, snapshots, CSV parsing/merging, and runner safety.
 
+## Finance Dashboard account projection parity
+
+The dashboard server (`finance-dashboard`) owns authoritative account projection for net worth,
+operating/liquid cash, spending attribution, and Splitwise mirror identity. `actual-tools` CLI
+reports read Actual directly and **do not** consume dashboard account overrides, role assignments,
+or the durable Splitwise mirror ID contract (`SPLITWISE_MIRROR_ACCOUNT_ID`, `owes-config.json`
+`mirrorAccountId`, bulk-saga `mirrorRuntime.accountId`).
+
+Until a deployment contract ships override/mirror metadata to tools, treat CLI balances and
+name-based Splitwise heuristics as **non-authoritative** relative to dashboard metrics. Do not
+invent account-name resolution in tools; configure durable mirror IDs in dashboard sidecars instead.
+
 ## License
 
 MIT. See [`LICENSE`](./LICENSE).

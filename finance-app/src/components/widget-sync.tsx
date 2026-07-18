@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Platform } from 'react-native';
 import { useAccounts, useBills, useManualAssets, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { getFinanceCapabilities } from '@/lib/capabilities';
+import { resolveMoneyMetric } from '@/lib/account-metrics';
 import { clearFinanceWidget, pushFinanceWidget } from '@/lib/widgets';
 import { useServerConfig } from '@/state/server';
 import { useFinanceToday } from '@/lib/date-only';
@@ -33,10 +34,15 @@ export function WidgetSync() {
     if (!accts) return;
     const visible = accts.filter((account) => !account.hidden);
     const syncedNetWorth = visible.reduce((sum, account) => sum + account.balance, 0);
-    const fallbackNetWorth = syncedNetWorth + (manual.data?.assets ?? 0) - (manual.data?.liabilities ?? 0);
-    const serverNetWorth = today.data?.metrics?.netWorth;
-    const netWorthAuthoritative = serverNetWorth?.complete === true && serverNetWorth.value != null;
-    const netWorth = netWorthAuthoritative ? serverNetWorth!.value! : fallbackNetWorth;
+    const manualComplete = manual.data?.complete !== false;
+    const fallbackNetWorth = syncedNetWorth
+      + (manualComplete ? (manual.data?.assets ?? 0) : 0)
+      - (manualComplete ? (manual.data?.liabilities ?? 0) : 0);
+    const resolvedNetWorth = resolveMoneyMetric(today.data?.metrics?.netWorth, fallbackNetWorth);
+    const netWorth = resolvedNetWorth.authoritative && resolvedNetWorth.value != null
+      ? resolvedNetWorth.value
+      : (resolvedNetWorth.unavailable ? null : (resolvedNetWorth.value ?? fallbackNetWorth));
+    if (netWorth == null) return;
 
     const months = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
     let change = '';

@@ -36,7 +36,8 @@ async function getAccounts() {
   return accounts.map(({ balance, role, ...account }) => ({ ...account }));
 }
 async function getAccountBalance(id) {
-  return accounts.find((account) => account.id === id)?.balance || 0;
+  const account = accounts.find((entry) => entry.id === id);
+  return account ? account.balance : null;
 }
 async function getCategoryGroups() {
   return structuredClone(categoryGroups);

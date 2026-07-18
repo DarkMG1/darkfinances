@@ -21,6 +21,7 @@ const {
   CLOSED_ID,
   SPLITWISE_ID,
 } = require('./fixtures/account-projection-matrix');
+const { validateManualAssetsStore } = require('../lib/manual-assets-projection');
 
 function balancesFromAccounts(accounts) {
   return Object.fromEntries(accounts.map((account) => [account.id, account.balance]));
@@ -61,7 +62,7 @@ test('unknown role fails closed for role-dependent metrics without silent inclus
     splitwiseMirrorAccountId,
   });
   assert.ok(projection.incompleteReasons.includes(ACCOUNT_PROJECTION_REASON.netWorthRoleUnknown));
-  const metric = buildNetWorthMetric({ projection, manualAssets: { assets: 0, liabilities: 0 }, asOf: new Date().toISOString(), financeDate: '2026-07-18' });
+  const metric = buildNetWorthMetric({ projection, manualAssets: validateManualAssetsStore({ items: [] }), asOf: new Date().toISOString(), financeDate: '2026-07-18' });
   assert.equal(metric.complete, false);
   assert.equal(metric.value, null);
   assert.equal(metric.valueCents, null);
@@ -115,7 +116,7 @@ test('authoritative net worth sums recognized roles exactly once with manual ass
   });
   const metric = buildNetWorthMetric({
     projection,
-    manualAssets: { assets: 100, liabilities: 25 },
+    manualAssets: { complete: true, assets: 100, liabilities: 25, assetCents: 10000, liabilityCents: 2500 },
     asOf: new Date().toISOString(),
     financeDate: '2026-07-18',
   });

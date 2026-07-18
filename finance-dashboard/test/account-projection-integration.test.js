@@ -37,6 +37,7 @@ const {
   getTrends,
   getSpending,
   getAccounts,
+  getForecast,
   resetApi,
 } = require('../dataModule');
 
@@ -89,4 +90,37 @@ test('renamed account display propagates to transactions', async () => {
   const today = await getToday();
   const txn = today.activity.recent.find((row) => row.accountId === 'acc-check');
   assert.equal(txn.account, 'Everyday');
+});
+
+test('trends spend/income/net withheld when spending projection is incomplete', async () => {
+  resetApi();
+  delete process.env.SPLITWISE_MIRROR_ACCOUNT_ID;
+  writeJson(process.env.ACCOUNT_OVERRIDES_PATH, {
+    schemaVersion: 2,
+    accounts: {
+      'acc-check': { role: 'operating_cash' },
+      'acc-save': { role: 'protected_savings' },
+      'acc-credit': { role: 'credit_card' },
+      'acc-splitwise': { role: 'operating_cash' },
+    },
+  });
+  const trends = await getTrends({ months: 6 });
+  assert.equal(trends.scope.spendingProjectionComplete, false);
+  assert.ok(trends.months.every((month) => month.spend == null && month.income == null && month.net == null));
+});
+
+test('getForecast withholds start balance when operating cash projection is incomplete', async () => {
+  resetApi();
+  process.env.SPLITWISE_MIRROR_ACCOUNT_ID = 'acc-splitwise';
+  writeJson(process.env.ACCOUNT_OVERRIDES_PATH, {
+    schemaVersion: 2,
+    accounts: {
+      'acc-save': { role: 'protected_savings' },
+      'acc-credit': { role: 'credit_card' },
+    },
+  });
+  const forecast = await getForecast({ days: 45 });
+  assert.equal(forecast.startBalance, null);
+  assert.ok(forecast.warnings.some((warning) => /operating cash projection incomplete/i.test(warning)));
+  assert.ok(forecast.assumptions.operatingCashComplete === false);
 });

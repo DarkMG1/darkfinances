@@ -11,6 +11,7 @@ import { Account } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { useFinanceToday } from '@/lib/date-only';
+import { accountsHaveInclusion, resolveMoneyMetric } from '@/lib/account-metrics';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -64,15 +65,19 @@ export default function Overview() {
   ]);
 
   const accts = (today.data?.accounts ?? []).filter((a) => !a.hidden);
-  const serverNetWorth = today.data?.metrics?.netWorth;
-  const netWorthAuthoritative = serverNetWorth?.complete === true && serverNetWorth.value != null;
-  const acctAssets = accts.filter((a) => a.balance > 0).reduce((s, a) => s + a.balance, 0);
-  const acctLiab = accts.filter((a) => a.balance < 0).reduce((s, a) => s + a.balance, 0);
-  const assets = acctAssets + (manual.data?.assets ?? 0);
-  const liabilities = acctLiab - (manual.data?.liabilities ?? 0);
+  const hasInclusion = accountsHaveInclusion(accts);
+  const manualComplete = manual.data?.complete !== false;
+  const acctAssets = accts.filter((a) => (hasInclusion ? !!a.inclusion?.netWorth && a.balance > 0 : a.balance > 0)).reduce((s, a) => s + a.balance, 0);
+  const acctLiab = accts.filter((a) => (hasInclusion ? !!a.inclusion?.netWorth && a.balance < 0 : a.balance < 0)).reduce((s, a) => s + a.balance, 0);
+  const assets = acctAssets + (manualComplete ? (manual.data?.assets ?? 0) : 0);
+  const liabilities = acctLiab - (manualComplete ? (manual.data?.liabilities ?? 0) : 0);
   const fallbackNetWorth = assets + liabilities;
-  const netWorth = netWorthAuthoritative ? serverNetWorth!.value! : fallbackNetWorth;
-  const netWorthIncompleteReasons = serverNetWorth?.complete === false ? (serverNetWorth.incompleteReasons ?? []) : [];
+  const resolvedNetWorth = resolveMoneyMetric(today.data?.metrics?.netWorth, fallbackNetWorth);
+  const netWorthAuthoritative = resolvedNetWorth.authoritative;
+  const netWorthIncompleteReasons = resolvedNetWorth.reasons;
+  const netWorth = netWorthAuthoritative && resolvedNetWorth.value != null
+    ? resolvedNetWorth.value
+    : (resolvedNetWorth.unavailable ? 0 : (resolvedNetWorth.value ?? fallbackNetWorth));
 
   const financeToday = useFinanceToday();
   const curMonth = financeToday.slice(0, 7);
@@ -94,9 +99,15 @@ export default function Overview() {
   const acctNetWorth = acctAssets + acctLiab;
   const nwDelta = prevNW != null ? acctNetWorth - prevNW : null;
 
-  const cash = accts.filter((a) => a.role === 'operating_cash' || a.role === 'protected_savings');
-  const credit = accts.filter((a) => a.role === 'credit_card' || a.role === 'loan');
-  const invest = accts.filter((a) => a.role === 'investment' || a.role === 'excluded' || a.role === 'unknown');
+  const cash = hasInclusion
+    ? accts.filter((a) => a.inclusion?.liquidCash)
+    : accts.filter((a) => a.role === 'operating_cash' || a.role === 'protected_savings');
+  const credit = hasInclusion
+    ? accts.filter((a) => a.inclusion?.netWorth && (a.role === 'credit_card' || a.role === 'loan'))
+    : accts.filter((a) => a.role === 'credit_card' || a.role === 'loan');
+  const invest = hasInclusion
+    ? accts.filter((a) => a.inclusion?.netWorth && (a.role === 'investment' || a.role === 'excluded' || a.role === 'unknown'))
+    : accts.filter((a) => a.role === 'investment' || a.role === 'excluded' || a.role === 'unknown');
   const groups: { title: string; items: Account[] }[] = [
     { title: 'Cash', items: cash },
     { title: 'Credit & Loans', items: credit },

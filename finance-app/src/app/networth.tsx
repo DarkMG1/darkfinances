@@ -8,6 +8,7 @@ import { Avatar, Card, ErrorState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { AreaChart } from '@/components/charts';
 import { haptics } from '@/lib/haptics';
+import { accountsHaveInclusion, resolveMoneyMetric } from '@/lib/account-metrics';
 import { colors, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -37,22 +38,28 @@ export default function NetWorthScreen() {
   const accts = accounts.data ?? [];
   const visible = accts.filter((a) => !a.hidden);
   const hiddenAccts = accts.filter((a) => a.hidden);
-  const assetsList = visible.filter((a) => a.balance >= 0).sort((a, b) => b.balance - a.balance);
-  const liabList = visible.filter((a) => a.balance < 0).sort((a, b) => a.balance - b.balance);
+  const hasInclusion = accountsHaveInclusion(accts);
+  const nwIncluded = (a: Account) => (hasInclusion ? !!a.inclusion?.netWorth : true);
+  const assetsList = visible.filter((a) => nwIncluded(a) && a.balance >= 0).sort((a, b) => b.balance - a.balance);
+  const liabList = visible.filter((a) => nwIncluded(a) && a.balance < 0).sort((a, b) => a.balance - b.balance);
 
   const manualItems = manual.data?.items ?? [];
-  const manualAssetTotal = manual.data?.assets ?? 0;
-  const manualLiabTotal = manual.data?.liabilities ?? 0;
+  const manualComplete = manual.data?.complete !== false;
+  const manualAssetTotal = manualComplete ? (manual.data?.assets ?? 0) : 0;
+  const manualLiabTotal = manualComplete ? (manual.data?.liabilities ?? 0) : 0;
 
   const acctAssets = assetsList.reduce((s, a) => s + a.balance, 0);
   const acctLiab = liabList.reduce((s, a) => s + a.balance, 0);
+  const fallbackNetWorth = acctAssets + manualAssetTotal + acctLiab - manualLiabTotal;
+  const resolvedNetWorth = resolveMoneyMetric(today.data?.metrics?.netWorth, fallbackNetWorth);
+  const netWorthAuthoritative = resolvedNetWorth.authoritative;
+  const netWorthIncompleteReasons = resolvedNetWorth.reasons;
+  const netWorth = netWorthAuthoritative && resolvedNetWorth.value != null
+    ? resolvedNetWorth.value
+    : (resolvedNetWorth.unavailable ? 0 : (resolvedNetWorth.value ?? fallbackNetWorth));
   const assets = acctAssets + manualAssetTotal;
   const liabilities = acctLiab - manualLiabTotal;
-  const fallbackNetWorth = assets + liabilities;
-  const serverNetWorth = today.data?.metrics?.netWorth;
-  const netWorthAuthoritative = serverNetWorth?.complete === true && serverNetWorth.value != null;
-  const netWorth = netWorthAuthoritative ? serverNetWorth!.value! : fallbackNetWorth;
-  const netWorthIncompleteReasons = serverNetWorth?.complete === false ? (serverNetWorth.incompleteReasons ?? []) : [];
+  const breakdownUnavailable = resolvedNetWorth.unavailable;
 
   const nwHist = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
@@ -158,13 +165,21 @@ export default function NetWorthScreen() {
 
           <Card style={{ marginBottom: 16 }}>
             <View style={styles.splitHead}>
-              <Text style={styles.splitText}>Assets <Text style={{ color: colors.green }}>{fmtPos(assets)}</Text></Text>
-              <Text style={styles.splitText}><Text style={{ color: colors.red }}>{fmtPos(Math.abs(liabilities))}</Text> Liabilities</Text>
+              <Text style={styles.splitText}>
+                Assets <Text style={{ color: colors.green }}>{breakdownUnavailable ? '—' : fmtPos(assets)}</Text>
+              </Text>
+              <Text style={styles.splitText}>
+                <Text style={{ color: colors.red }}>{breakdownUnavailable ? '—' : fmtPos(Math.abs(liabilities))}</Text> Liabilities
+              </Text>
             </View>
-            <View style={styles.splitBar}>
-              <View style={{ flex: Math.max(assetPct, 0.0001), backgroundColor: colors.green }} />
-              <View style={{ flex: Math.max(100 - assetPct, 0.0001), backgroundColor: colors.red }} />
-            </View>
+            {!breakdownUnavailable ? (
+              <View style={styles.splitBar}>
+                <View style={{ flex: Math.max(assetPct, 0.0001), backgroundColor: colors.green }} />
+                <View style={{ flex: Math.max(100 - assetPct, 0.0001), backgroundColor: colors.red }} />
+              </View>
+            ) : (
+              <Text style={styles.delta}>Asset/liability breakdown unavailable while projection is incomplete</Text>
+            )}
           </Card>
 
           <View style={styles.deepLinks}>

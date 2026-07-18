@@ -4,6 +4,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/account-overrides-schema.js',
   'lib/account-overrides.js',
   'lib/account-projection.js',
+  'lib/manual-assets-projection.js',
   'lib/splitwise-mirror-account.js',
   'lib/actual-coordinator.js',
   'lib/date-only.js',

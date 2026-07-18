@@ -120,16 +120,28 @@ test('generated contract includes account projection metric and inclusion types'
   assert.match(generatedTypes, /netWorthIncludedAccountIds\?: string\[\]/);
 });
 
-test('clients prefer authoritative server net worth with incomplete fallback', () => {
+test('clients prefer authoritative server net worth and withhold local fallback when server metric is incomplete', () => {
   const home = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'index.tsx'), 'utf8');
   const networth = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'networth.tsx'), 'utf8');
   const widget = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'components', 'widget-sync.tsx'), 'utf8');
-  assert.match(home, /metrics\?\.netWorth/);
-  assert.match(home, /netWorthAuthoritative/);
-  assert.match(networth, /metrics\?\.netWorth/);
-  assert.match(widget, /metrics\?\.netWorth/);
-  assert.match(browser, /metrics\?\.netWorth/);
+  assert.match(home, /resolveMoneyMetric/);
+  assert.match(home, /accountsHaveInclusion/);
+  assert.match(networth, /resolveMoneyMetric/);
+  assert.match(networth, /inclusion\?\.netWorth/);
+  assert.match(widget, /resolveMoneyMetric/);
+  assert.match(browser, /netWorthHasServerMetric/);
   assert.match(browser, /netWorthAuthoritative/);
+});
+
+test('generated contract includes splitwise mirror identity and manual asset completeness', () => {
+  assert.match(generatedTypes, /export interface SplitwiseMirrorIdentity/);
+  assert.match(generatedTypes, /splitwiseMirrorIdentity\?: SplitwiseMirrorIdentity/);
+  assert.match(generatedTypes, /complete\?: boolean;/);
+});
+
+test('server account override invalidation includes insights', () => {
+  const server = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /'accounts', 'today', 'forecast', 'trends', 'spending', 'goals', 'review', 'reports', 'insights'/);
 });
 
 test('generated contract includes goal feasibility and advisory types', () => {

@@ -2,8 +2,13 @@
 
 const crypto = require('crypto');
 const { metricValue } = require('./metric-provenance');
-const { fromCents, sumCents, toCents } = require('./domain/money');
-const { isSplitwiseMirrorAccount } = require('./splitwise-mirror-account');
+const { fromCents, sumCents } = require('./domain/money');
+const {
+  isSplitwiseMirrorAccount,
+  SPLITWISE_MIRROR_IDENTITY_INVALID,
+  SPLITWISE_MIRROR_MIGRATION_REQUIRED,
+} = require('./splitwise-mirror-account');
+const { MANUAL_ASSETS_UNAVAILABLE } = require('./manual-assets-projection');
 
 const ACCOUNT_METRIC = Object.freeze({
   displayList: 'display_list',
@@ -24,6 +29,11 @@ const ACCOUNT_PROJECTION_REASON = Object.freeze({
   operatingCashRoleUnknown: 'operating_cash_role_unknown',
   liquidCashRoleUnknown: 'liquid_cash_role_unknown',
   spendingRoleUnknown: 'spending_role_unknown',
+  accountBalanceUnavailable: 'account_balance_unavailable',
+  accountIdentityDuplicate: 'account_identity_duplicate',
+  manualAssetsUnavailable: MANUAL_ASSETS_UNAVAILABLE,
+  splitwiseMirrorIdentityInvalid: SPLITWISE_MIRROR_IDENTITY_INVALID,
+  splitwiseMirrorMigrationRequired: SPLITWISE_MIRROR_MIGRATION_REQUIRED,
 });
 
 const NET_WORTH_ROLES = new Set([
@@ -44,6 +54,67 @@ const ROLE_DEPENDENT_METRICS = new Set([
   ACCOUNT_METRIC.spendingAttribution,
   ACCOUNT_METRIC.notificationsCash,
 ]);
+const BALANCE_DEPENDENT_METRICS = new Set([
+  ACCOUNT_METRIC.netWorthLive,
+  ACCOUNT_METRIC.operatingCash,
+  ACCOUNT_METRIC.liquidCash,
+  ACCOUNT_METRIC.forecastCash,
+]);
+
+function normalizeBalanceCents(value) {
+  if (value === null || value === undefined) return { ok: false };
+  if (typeof value === 'bigint') return { ok: false };
+  if (!Number.isFinite(value)) return { ok: false };
+  const cents = typeof value === 'number' && Number.isInteger(value) ? value : Math.round(value);
+  if (!Number.isSafeInteger(cents)) return { ok: false };
+  return { ok: true, cents };
+}
+
+function topologySignature(account) {
+  return JSON.stringify({
+    id: String(account.id),
+    name: account.name ?? '',
+    closed: !!account.closed,
+    offbudget: !!account.offbudget,
+    role: account.role ?? 'unknown',
+  });
+}
+
+function detectDuplicateAccountTopology(accountsRaw) {
+  const byId = new Map();
+  for (const account of accountsRaw || []) {
+    const id = String(account.id);
+    if (!byId.has(id)) byId.set(id, []);
+    byId.get(id).push(account);
+  }
+  const duplicates = [];
+  for (const [id, rows] of byId) {
+    if (rows.length <= 1) continue;
+    const canonical = topologySignature(rows[0]);
+    duplicates.push({
+      id,
+      count: rows.length,
+      conflicting: rows.some((row) => topologySignature(row) !== canonical),
+    });
+  }
+  return duplicates;
+}
+
+function detectDuplicateAccountIds(accountsRaw) {
+  return detectDuplicateAccountTopology(accountsRaw).map((entry) => entry.id);
+}
+
+function firstOccurrenceAccounts(accountsRaw, duplicateAccountIds = []) {
+  const duplicateIds = new Set(duplicateAccountIds);
+  const seen = new Set();
+  return (accountsRaw || []).filter((account) => {
+    const id = String(account.id);
+    if (!duplicateIds.has(id)) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
 
 function effectiveRole(rawAccount, override) {
   if (override?.role) return override.role;
@@ -58,7 +129,8 @@ function displayNameForAccount(rawAccount, override) {
 
 function enrichAccountRow(rawAccount, {
   override = {},
-  balanceCents,
+  balanceCents = null,
+  balanceUnavailable = false,
   splitwiseMirrorAccountId = null,
 } = {}) {
   const role = effectiveRole(rawAccount, override);
@@ -70,8 +142,9 @@ function enrichAccountRow(rawAccount, {
     name: displayNameForAccount(rawAccount, override),
     offbudget: !!rawAccount.offbudget,
     closed: !!rawAccount.closed,
-    balance: fromCents(balanceCents),
-    balanceCents,
+    balance: Number.isSafeInteger(balanceCents) ? fromCents(balanceCents) : null,
+    balanceCents: Number.isSafeInteger(balanceCents) ? balanceCents : null,
+    balanceUnavailable,
     hidden,
     role,
     roleSource: override?.role ? 'explicit' : (rawAccount?.role && rawAccount.role !== 'unknown' ? 'explicit' : 'unknown'),
@@ -124,6 +197,17 @@ function unknownReasonForMetric(metric) {
     default:
       return ACCOUNT_PROJECTION_REASON.accountRolesUnassigned;
   }
+}
+
+function splitwiseReasonsForMetric(metric, splitwiseMirrorIdentity) {
+  if (!splitwiseMirrorIdentity || !metricNeedsRoleAssignment(metric)) return [];
+  if (Array.isArray(splitwiseMirrorIdentity.incompleteReasons) && splitwiseMirrorIdentity.incompleteReasons.length) {
+    return [...splitwiseMirrorIdentity.incompleteReasons];
+  }
+  if (splitwiseMirrorIdentity.migrationRequired && (splitwiseMirrorIdentity.legacyNameCandidates || []).length) {
+    return [ACCOUNT_PROJECTION_REASON.splitwiseMirrorMigrationRequired];
+  }
+  return [];
 }
 
 function includeForMetric(metric, row) {
@@ -192,6 +276,7 @@ function accountProjectionRevision({
   accountsRaw = [],
   balancesById = {},
   splitwiseMirrorAccountId = null,
+  splitwiseMirrorIdentity = null,
 } = {}) {
   const payload = {
     overrides,
@@ -202,6 +287,11 @@ function accountProjectionRevision({
       balanceCents: balancesById[account.id] ?? null,
     })).sort((a, b) => a.id.localeCompare(b.id)),
     splitwiseMirrorAccountId,
+    splitwiseMirrorIdentity: splitwiseMirrorIdentity ? {
+      status: splitwiseMirrorIdentity.status,
+      accountId: splitwiseMirrorIdentity.accountId,
+      configuredSources: splitwiseMirrorIdentity.configuredSources,
+    } : null,
   };
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16);
 }
@@ -209,26 +299,42 @@ function accountProjectionRevision({
 function projectAccounts({
   accountsRaw = [],
   balancesById = {},
+  balanceUnavailableIds = new Set(),
+  duplicateAccountIds = [],
   overrides = {},
   metric,
   splitwiseMirrorAccountId = null,
+  splitwiseMirrorIdentity = null,
   financeDate = null,
 } = {}) {
   if (!metric) throw new Error('metric required');
 
-  const accounts = (accountsRaw || []).map((rawAccount) => {
+  const duplicateIds = new Set(duplicateAccountIds || []);
+  const unavailableIds = balanceUnavailableIds instanceof Set
+    ? balanceUnavailableIds
+    : new Set(balanceUnavailableIds || []);
+  const sourceAccounts = firstOccurrenceAccounts(accountsRaw, [...duplicateIds]);
+
+  const accounts = sourceAccounts.map((rawAccount) => {
     const override = overrides[rawAccount.id] || {};
-    const balanceCents = Number.isSafeInteger(balancesById[rawAccount.id])
-      ? balancesById[rawAccount.id]
-      : Math.round(Number(rawAccount.balance || 0));
+    const balanceCents = balancesById[rawAccount.id];
+    const balanceUnavailable = unavailableIds.has(rawAccount.id)
+      || !Number.isSafeInteger(balanceCents);
     return enrichAccountRow(rawAccount, {
       override,
-      balanceCents,
+      balanceCents: Number.isSafeInteger(balanceCents) ? balanceCents : null,
+      balanceUnavailable,
       splitwiseMirrorAccountId,
     });
   });
 
   const incompleteReasons = [];
+  if (duplicateIds.size && metricNeedsRoleAssignment(metric)) {
+    incompleteReasons.push(ACCOUNT_PROJECTION_REASON.accountIdentityDuplicate);
+  }
+  for (const reason of splitwiseReasonsForMetric(metric, splitwiseMirrorIdentity)) {
+    if (!incompleteReasons.includes(reason)) incompleteReasons.push(reason);
+  }
   if (metricNeedsRoleAssignment(metric)) {
     for (const row of accounts) {
       if (unknownRoleBlocksMetric(metric, row)) {
@@ -253,6 +359,17 @@ function projectAccounts({
     }
   }
 
+  if (BALANCE_DEPENDENT_METRICS.has(metric)) {
+    for (const row of accounts) {
+      if (includedIds.has(row.id) && !Number.isSafeInteger(row.balanceCents)) {
+        if (!incompleteReasons.includes(ACCOUNT_PROJECTION_REASON.accountBalanceUnavailable)) {
+          incompleteReasons.push(ACCOUNT_PROJECTION_REASON.accountBalanceUnavailable);
+        }
+        break;
+      }
+    }
+  }
+
   const displayNameById = Object.fromEntries(
     accounts.map((row) => [row.id, row.name]),
   );
@@ -262,13 +379,21 @@ function projectAccounts({
     accountsRaw,
     balancesById,
     splitwiseMirrorAccountId,
+    splitwiseMirrorIdentity,
   });
 
   const scope = {
     metric,
     financeDate,
     splitwiseMirrorAccountId,
+    splitwiseMirrorIdentity: splitwiseMirrorIdentity ? {
+      status: splitwiseMirrorIdentity.status,
+      configuredSources: splitwiseMirrorIdentity.configuredSources,
+      legacyNameCandidates: splitwiseMirrorIdentity.legacyNameCandidates || [],
+      migrationRequired: !!splitwiseMirrorIdentity.migrationRequired,
+    } : null,
     splitwiseMirrorResolvedBy: splitwiseMirrorAccountId ? 'configured_identity' : 'none',
+    duplicateAccountIds: [...duplicateIds],
     includesClosedAccountHistory: metric === ACCOUNT_METRIC.netWorthHistory,
     excludedHiddenAccounts: true,
     excludedRoles: ['excluded'],
@@ -284,6 +409,8 @@ function projectAccounts({
     scope,
     displayNameById,
     splitwiseMirrorAccountId,
+    splitwiseMirrorIdentity,
+    duplicateAccountIds: [...duplicateIds],
     accountFilter: (rawAccount) => includedIds.has(rawAccount.id),
     ledgerAccountFilter: (rawAccount) => includedIds.has(rawAccount.id),
   };
@@ -293,18 +420,28 @@ function sumIncludedBalanceCents(projection) {
   return sumCents(
     projection.accounts
       .filter((row) => projection.includedIds.has(row.id))
-      .map((row) => row.balanceCents),
+      .map((row) => {
+        if (!Number.isSafeInteger(row.balanceCents)) {
+          throw new Error('sumIncludedBalanceCents requires complete balances');
+        }
+        return row.balanceCents;
+      }),
   );
 }
 
 function buildNetWorthMetric({
   projection,
-  manualAssets = { assets: 0, liabilities: 0 },
+  manualAssets = { complete: true, assets: 0, liabilities: 0, assetCents: 0, liabilityCents: 0 },
   asOf,
   financeDate,
   metric = 'net_worth',
 } = {}) {
   const incompleteReasons = [...(projection.incompleteReasons || [])];
+  if (manualAssets?.complete === false) {
+    for (const reason of manualAssets.incompleteReasons || [ACCOUNT_PROJECTION_REASON.manualAssetsUnavailable]) {
+      if (!incompleteReasons.includes(reason)) incompleteReasons.push(reason);
+    }
+  }
   if (incompleteReasons.length > 0) {
     return metricValue({
       metric,
@@ -321,8 +458,8 @@ function buildNetWorthMetric({
   }
 
   const ledgerCents = sumIncludedBalanceCents(projection);
-  const assetCents = toCents(Number(manualAssets.assets) || 0);
-  const liabilityCents = toCents(Number(manualAssets.liabilities) || 0);
+  const assetCents = manualAssets.assetCents ?? 0;
+  const liabilityCents = manualAssets.liabilityCents ?? 0;
   const totalCents = sumCents([ledgerCents, assetCents, -liabilityCents]);
   const sources = projection.accounts
     .filter((row) => projection.includedIds.has(row.id))
@@ -408,9 +545,12 @@ module.exports = {
   attachInclusionToAccountRow,
   buildBalanceMetric,
   buildNetWorthMetric,
+  detectDuplicateAccountIds,
+  detectDuplicateAccountTopology,
   displayNameForAccount,
   enrichAccountRow,
   includeForMetric,
+  normalizeBalanceCents,
   projectAccounts,
   sumIncludedBalanceCents,
 };

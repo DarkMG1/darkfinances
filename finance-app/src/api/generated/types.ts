@@ -3,6 +3,17 @@
 export type Nullish<T> = T | null | undefined;
 export type AccountRole = 'operating_cash' | 'protected_savings' | 'credit_card' | 'loan' | 'investment' | 'excluded' | 'unknown';
 
+export interface SplitwiseMirrorIdentity {
+  status: 'valid' | 'disagreement' | 'invalid' | 'migration_required' | 'not_configured';
+  configuredSources: {
+    env: string | null;
+    saga: string | null;
+    owesConfig: string | null;
+  };
+  legacyNameCandidates: string[];
+  migrationRequired: boolean;
+}
+
 export type CreditLiabilityCoverage = 'exclude' | 'current_balance' | 'statement';
 
 export interface AccountCreditStatementOverride {
@@ -70,9 +81,13 @@ export interface ManualAsset {
 }
 export interface ManualAssets {
   items: ManualAsset[];
-  assets: number;
-  liabilities: number;
-  net: number;
+  assets: number | null;
+  liabilities: number | null;
+  net: number | null;
+  complete?: boolean;
+  incompleteReasons?: string[];
+  assetCents?: number | null;
+  liabilityCents?: number | null;
 }
 
 export interface InvestmentHolding {
@@ -265,6 +280,9 @@ export interface Trends {
     accountProjectionRevision?: string;
     splitwiseMirrorAccountId?: string | null;
     splitwiseMirrorExcludedFromNetWorth?: boolean;
+    splitwiseMirrorIdentity?: SplitwiseMirrorIdentity | null;
+    spendingIncludedAccountIds?: string[];
+    spendingProjectionComplete?: boolean;
     demoSyntheticHistory?: boolean;
     months?: number;
   };
@@ -1164,6 +1182,7 @@ export interface Today {
     accountProjectionRevision?: string;
     netWorthIncludedAccountIds?: string[];
     splitwiseMirrorAccountId?: string | null;
+    splitwiseMirrorIdentity?: SplitwiseMirrorIdentity | null;
     netWorthIncludesManualAssets?: boolean;
     netWorthHistoryScope?: string;
   };
