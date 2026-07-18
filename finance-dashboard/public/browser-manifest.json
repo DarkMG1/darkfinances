@@ -1,0 +1,76 @@
+{
+  "version": "f942c0acf381aac8",
+  "entrypoints": [
+    "js/app.js",
+    "js/login.js"
+  ],
+  "stylesheets": [
+    "css/dashboard.css",
+    "css/login.css"
+  ],
+  "pages": [
+    "index.html",
+    "login.html"
+  ],
+  "vendor": [
+    "vendor/chart.umd.js",
+    "vendor/chart-js.manifest.json",
+    "vendor/THIRD-PARTY-NOTICES.txt"
+  ],
+  "modules": [
+    "js/api.js",
+    "js/app.js",
+    "js/chart-runtime.js",
+    "js/constants.js",
+    "js/demo.js",
+    "js/dom.js",
+    "js/filters.js",
+    "js/finance-date.js",
+    "js/format.js",
+    "js/login.js",
+    "js/metrics.js",
+    "js/render/accounts.js",
+    "js/render/budgets.js",
+    "js/render/charts-pages.js",
+    "js/render/goals.js",
+    "js/render/recurring.js",
+    "js/render/reimbursement.js",
+    "js/render/safe-to-spend.js",
+    "js/render/transactions.js",
+    "js/router.js",
+    "js/state.js"
+  ],
+  "meta": [
+    "browser-manifest.json"
+  ],
+  "digests": {
+    "css/dashboard.css": "7c6cd149a47e7ae79ea5b9fecc23a57a92adb68f9eecd1a9ed5b60624fe65a9b",
+    "css/login.css": "52bab62d8af74df4b2d36f9b6c5aabce14075c3e0c37ef53c356798ceb7c2d60",
+    "index.html": "8453a39258f648404d0143de971b33b986b2180fa94c1314d5f8f37ffbe2f6da",
+    "js/api.js": "7d7ea0b02093542e9ae5c67e349a4bcd4fe24c68e8ca5782272ceaff1b69cbb9",
+    "js/app.js": "ddf916cf606202e4bcec50031be38c0c27775e3b32b5ad0a553e0090aa45bc0f",
+    "js/chart-runtime.js": "87b7b4ffb0315c84efddbe6ad51e69ad9dfd5b14750658984b853e08445c1891",
+    "js/constants.js": "0cd3873f5b09f214d8e2ea3fcdb7c82f4e5048429eb8ca60134da09b6d396594",
+    "js/demo.js": "fa269ad13dcd926cbfc13fd987f46702ded0746f3b2c4a9d12284b5fb452ae2d",
+    "js/dom.js": "e7dfd5ccf0ffb51b72a43fb953b16117e504b8c6ecd613538e7091148389ff78",
+    "js/filters.js": "83d35ca9f98dfd44927cbaf1642bc2f05281b406ee759a8ac0d64fac029c3f18",
+    "js/finance-date.js": "e8cf9397fb2c7be0e81529811ba64a5131ea67ffe78c477d8e4ac1aee7e219ee",
+    "js/format.js": "b2db0a3eccb70d4fb70e05820b02af26a741e1abfa0ddb71a9fef708e5df82ad",
+    "js/login.js": "5d66001ad8ec7579115981fdd5db37dafdbb986cd28772a718a4038901fdfc8a",
+    "js/metrics.js": "da127425eb1e23d51fb36bbcc289efbd5a29144c52f88d278e8cf8b97b4ab3a7",
+    "js/render/accounts.js": "6c78434e9075fa06c63040fadd98fd1f231546b8f22ecec86b71d2185e35e26d",
+    "js/render/budgets.js": "0560c1ac62182e17812ad3ec48a81cefa3c82c68804121f8c2293a2209ead0f3",
+    "js/render/charts-pages.js": "0b9840385929f2c5afa41f92fd16194634fb443e9bef8b034f9122c3d52f8522",
+    "js/render/goals.js": "85ad516f2632d16be8b4098b4a1125b5ae0e44d8696a2a1eb77745d6ea92d0c6",
+    "js/render/recurring.js": "91a1ad2f0a212c61116263eaf1e31a44703f7b003a251cec215bfad507d44e00",
+    "js/render/reimbursement.js": "4641e69d4097850d1267ac54f4910342c1c1c20deda5ab709412e5a898e618b0",
+    "js/render/safe-to-spend.js": "327c330355c0d053399136d0008b6f4610cb108c94d4b8d1225325bfc71962a0",
+    "js/render/transactions.js": "c53c1c7a2a0e0fee9d21a010193927b3e91ec01d8f3887514a4f75d8bc3b21ee",
+    "js/router.js": "57fbec4bc640aade2ba68e5f9f74f1b6590fe6a3c4836cdfb15961b97d714572",
+    "js/state.js": "83c39433eb444f391014f9a3fc710fbc1d8c7698750b5811e55868dfb76ad8fb",
+    "login.html": "e072ac9cfd241df70508da16b2e7cba2d4f569aa79fbdcc7b8856ea751b56e2a",
+    "vendor/THIRD-PARTY-NOTICES.txt": "2486168e9024282e11c358edccda6767922e409f895af7839154445f9c6ab8e5",
+    "vendor/chart-js.manifest.json": "79551a69f28903e567da17ba974070679f7ffed5fb7bbd48eee09d786678c464",
+    "vendor/chart.umd.js": "4189ade3d07862981d2a92e0629d48a83ae840260122bc1fac01094e4b1c0aa2"
+  }
+}

@@ -2,7 +2,7 @@ Third-party browser runtime assets
 
 chart.js 4.4.0 (MIT)
 Source tarball: https://registry.npmjs.org/chart.js/-/chart.js-4.4.0.tgz
-Pinned SHA-256: 321e3a3fa98da4aaa957d10be57cbb514de0989eed8f9d726b5d05902cd01904
+Pinned SHA-256: 4189ade3d07862981d2a92e0629d48a83ae840260122bc1fac01094e4b1c0aa2
 
 Copyright (c) 2014-2022 Chart.js Contributors
 
@@ -15,3 +15,4 @@ furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
+

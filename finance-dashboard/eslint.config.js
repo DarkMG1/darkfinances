@@ -25,4 +25,15 @@ module.exports = [
       'no-useless-escape': 'off',
     },
   },
+  {
+    files: ['public/js/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: globals.browser,
+    },
+    rules: {
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+    },
+  },
 ];

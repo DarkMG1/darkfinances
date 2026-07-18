@@ -20,6 +20,18 @@ function withTempDir(fn) {
   }
 }
 
+function committedVendorSnapshot() {
+  return {
+    asset: fs.readFileSync(ASSET_PATH),
+    manifest: fs.readFileSync(MANIFEST_PATH),
+  };
+}
+
+function assertCommittedVendorUnchanged(before) {
+  assert.equal(fs.readFileSync(ASSET_PATH).compare(before.asset), 0, 'committed chart.umd.js changed');
+  assert.equal(fs.readFileSync(MANIFEST_PATH).compare(before.manifest), 0, 'committed chart-js.manifest.json changed');
+}
+
 function copyFixtureTree(tempRoot) {
   const dashboardRoot = path.join(tempRoot, 'finance-dashboard');
   const repoRoot = tempRoot;
@@ -138,18 +150,43 @@ test('verifyChartJsAsset rejects byte-size drift', () => {
 });
 
 test('verifyChartJsAsset fails on corrupted committed asset without repairing it', () => {
-  const original = fs.readFileSync(ASSET_PATH);
-  fs.appendFileSync(ASSET_PATH, '\n');
-  try {
+  const committed = committedVendorSnapshot();
+  withTempDir((tempRoot) => {
+    const { dashboardRoot, repoRoot } = copyFixtureTree(tempRoot);
+    const manifestPath = path.join(dashboardRoot, 'public', 'vendor', 'chart-js.manifest.json');
+    const assetPath = path.join(dashboardRoot, 'public', 'vendor', 'chart.umd.js');
+    fs.appendFileSync(assetPath, '\n');
     assert.throws(
-      () => verifyChartJsAsset(),
+      () => verifyChartJsAsset({
+        manifestPath,
+        assetPath,
+        lockfilePath: path.join(repoRoot, 'package-lock.json'),
+      }),
       /committed chart.js asset (digest|size)/,
     );
-    assert.notEqual(fs.readFileSync(ASSET_PATH).compare(original), 0);
-  } finally {
-    fs.writeFileSync(ASSET_PATH, original);
-    verifyChartJsAsset();
-  }
+  });
+  assertCommittedVendorUnchanged(committed);
+});
+
+test('verifyChartJsAsset rejects dangling source map references', () => {
+  const committed = committedVendorSnapshot();
+  withTempDir((tempRoot) => {
+    const { dashboardRoot, repoRoot } = copyFixtureTree(tempRoot);
+    const manifestPath = path.join(dashboardRoot, 'public', 'vendor', 'chart-js.manifest.json');
+    const assetPath = path.join(dashboardRoot, 'public', 'vendor', 'chart.umd.js');
+    const original = fs.readFileSync(assetPath, 'utf8');
+    assert.doesNotMatch(original, /sourceMappingURL/);
+    fs.writeFileSync(assetPath, `${original}\n//# sourceMappingURL=chart.umd.js.map\n`);
+    assert.throws(
+      () => verifyChartJsAsset({
+        manifestPath,
+        assetPath,
+        lockfilePath: path.join(repoRoot, 'package-lock.json'),
+      }),
+      /dangling source map/,
+    );
+  });
+  assertCommittedVendorUnchanged(committed);
 });
 
 test('pinChartJsAsset rewrites manifest, notice, and asset from the installed package', () => {
@@ -165,6 +202,9 @@ test('pinChartJsAsset rewrites manifest, notice, and asset from the installed pa
       assetPath,
       noticePath,
       lockfilePath: path.join(repoRoot, 'package-lock.json'),
+      sourcePath: path.join(repoRoot, 'node_modules', 'chart.js', 'dist', 'chart.umd.js'),
+      dashboardRoot,
+      repoRoot,
     });
     assert.equal(fs.existsSync(noticePath), true);
     assert.match(fs.readFileSync(noticePath, 'utf8'), /chart\.js 4\.4\.0 \(MIT\)/);
@@ -173,6 +213,9 @@ test('pinChartJsAsset rewrites manifest, notice, and asset from the installed pa
       assetPath,
       lockfilePath: path.join(repoRoot, 'package-lock.json'),
       requireInstalledPackage: true,
+      sourcePath: path.join(repoRoot, 'node_modules', 'chart.js', 'dist', 'chart.umd.js'),
+      dashboardRoot,
+      repoRoot,
     });
     assert.equal(manifest.npmIntegrity, readRootLockEntry(path.join(repoRoot, 'package-lock.json')).integrity);
   });

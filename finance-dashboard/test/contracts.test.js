@@ -5,7 +5,13 @@ const path = require('path');
 
 const server = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8');
 const generated = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'endpoints.ts'), 'utf8');
-const browser = fs.readFileSync(path.resolve(__dirname, '..', 'public', 'index.html'), 'utf8');
+const { listModuleFiles } = require('../lib/browser-static');
+const dashboardRoot = path.resolve(__dirname, '..');
+const browser = fs.readFileSync(path.join(dashboardRoot, 'public', 'index.html'), 'utf8');
+const browserSources = [
+  browser,
+  ...listModuleFiles().map((file) => fs.readFileSync(path.join(dashboardRoot, 'public', 'js', file), 'utf8')),
+].join('\n');
 const appHome = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'index.tsx'), 'utf8');
 const appReimbursement = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'reimbursement.tsx'), 'utf8');
 const generatedTypes = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
@@ -63,9 +69,9 @@ test('app and web gate spending and trends on projection completeness', () => {
   const types = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
   assert.match(types, /completeness: ProjectionCompleteness/);
 
-  assert.match(browser, /current\?\.completeness\?\.complete !== false/);
-  assert.match(browser, /monthTrendComplete/);
-  assert.doesNotMatch(browser, /m\.income \?\? 0/);
+  assert.match(browserSources, /current\?\.completeness\?\.complete !== false/);
+  assert.match(browserSources, /monthTrendComplete/);
+  assert.doesNotMatch(browserSources, /m\.income \?\? 0/);
 
   const spending = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'spending.tsx'), 'utf8');
   const home = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'index.tsx'), 'utf8');
@@ -94,11 +100,11 @@ test('app and web render reserved obligations from graph', () => {
 
 test('app and web render incomplete Safe-to-Spend as unavailable, never zero', () => {
   assert.match(browser, /Safe to Spend/);
-  assert.match(browser, /metric\?\.complete === true && Number\.isFinite\(metric\.value\)/);
-  assert.match(browser, /available \? fmt\(metric\.value\) : 'Unavailable'/);
-  assert.doesNotMatch(browser, /fmt\(metric\.value\s*\|\|\s*0\)/);
+  assert.match(browserSources, /metric\?\.complete === true && Number\.isFinite\(metric\.value\)/);
+  assert.match(browserSources, /available \? fmt\(metric\.value\) : 'Unavailable'/);
+  assert.doesNotMatch(browserSources, /fmt\(metric\.value\s*\|\|\s*0\)/);
   assert.match(browser, /safeToSpendReasons/);
-  assert.match(browser, /metric\?\.incompleteReasons/);
+  assert.match(browserSources, /metric\?\.incompleteReasons/);
   assert.match(browser, /role="status"/);
   assert.match(browser, /aria-live="polite"/);
 
@@ -109,11 +115,11 @@ test('app and web render incomplete Safe-to-Spend as unavailable, never zero', (
 });
 
 test('legacy web reimbursement renders MetricValue totals without NaN or fabricated zero', () => {
-  assert.match(browser, /function renderMetricPos\(/);
-  assert.match(browser, /metric\?\.complete === true && Number\.isFinite\(metric\.value\)/);
-  assert.match(browser, /renderMetricPos\(data\.totalOwed\)/);
-  assert.doesNotMatch(browser, /fmtPos\(data\.totalOwed\)/);
-  assert.match(browser, /return fallback;/);
+  assert.match(browserSources, /function renderMetricPos\(/);
+  assert.match(browserSources, /metric\?\.complete === true && Number\.isFinite\(metric\.value\)/);
+  assert.match(browserSources, /renderMetricPos\(data\.totalOwed\)/);
+  assert.doesNotMatch(browserSources, /fmtPos\(data\.totalOwed\)/);
+  assert.match(browserSources, /return fallback;/);
 
   assert.match(appReimbursement, /totalOwedMetric\?\.complete \? \(totalOwedMetric\.value \?\? 0\)/);
   assert.match(appReimbursement, /grandLowerBound != null \?/);
@@ -135,8 +141,8 @@ test('clients prefer authoritative server net worth and withhold local fallback 
   assert.match(networth, /resolveNetWorthAggregateDisplay/);
   assert.match(widget, /resolveWidgetNetWorthDecision/);
   assert.match(widget, /clearFinanceWidget/);
-  assert.match(browser, /aggregatesUnavailable/);
-  assert.match(browser, /inclusion\?\.netWorth/);
+  assert.match(browserSources, /aggregatesUnavailable/);
+  assert.match(browserSources, /inclusion\?\.netWorth/);
 });
 
 test('generated contract includes splitwise mirror identity and manual asset completeness', () => {
