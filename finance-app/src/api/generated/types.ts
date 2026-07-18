@@ -710,6 +710,69 @@ export interface ReimbursementLedger {
   months: { month: string; spend: number }[];
 }
 
+export interface ReimbursementExportEndpointScope {
+  absCapCents: number | null;
+  allocatedTrustedCents: number | null;
+  remainingTrustedCents: number | null;
+  ambiguousLinkCount: number | null;
+  completeness?: string;
+  completenessReason?: string | null;
+  linkCountLowerBound?: number;
+}
+
+export interface ReimbursementExportEndpoint {
+  id: string;
+  role: 'inflow' | 'expense' | null;
+  live: boolean;
+  date?: string | null;
+  payee?: string;
+  amountCents?: number | null;
+  global: ReimbursementExportEndpointScope;
+  window: {
+    allocatedTrustedCents: number | null;
+    linkCountLowerBound: number;
+  } | null;
+}
+
+export interface ReimbursementExportPerson {
+  person: string;
+  allocatedTrustedCents: number | null;
+}
+
+export interface ReimbursementExportProvenance {
+  actualGeneration: number | null;
+  linksRevision: number | null;
+  release: Record<string, unknown> | null;
+  linksSidecarDigest: string | null;
+  inputDigests: Record<string, unknown>;
+  operationBinding: Record<string, unknown> | null;
+}
+
+export interface ReimbursementExportIncompleteSection {
+  section: string;
+  [key: string]: unknown;
+}
+
+export interface ReimbursementExportScopeTotals {
+  trustedAllocationCents: number | null;
+  linkCount: number;
+  trustedLinkCountLowerBound: number;
+  ambiguousLinkCountLowerBound: number;
+  authoritative: boolean;
+}
+
+export interface ReimbursementExportLinkEndpointRef {
+  id: string;
+  date: string | null;
+  payee: string;
+  amountCents: number | null;
+  accountId: string | null;
+  account: string;
+  identityFingerprint?: string;
+  admissionFingerprint?: string | null;
+  categoryId?: string | null;
+}
+
 export interface ReimbursementExportLink {
   linkKey: string;
   inflowId: string | null;
@@ -720,8 +783,12 @@ export interface ReimbursementExportLink {
   allocationAmbiguous: boolean;
   allocationReason: string;
   linkVersion: number;
+  inflow: ReimbursementExportLinkEndpointRef | null;
+  expense: ReimbursementExportLinkEndpointRef | null;
   inflowOrphan: boolean;
   expenseOrphan: boolean;
+  identityMismatch?: boolean;
+  eligibilityMismatch?: boolean;
 }
 
 export interface ReimbursementExport {
@@ -730,6 +797,11 @@ export interface ReimbursementExport {
   generatedAt: string;
   financeTimeZone: string;
   window: { from: string | null; to: string | null };
+  scopes: {
+    window: { active: boolean; totals: ReimbursementExportScopeTotals; links: ReimbursementExportLink[] };
+    global: { totals: ReimbursementExportScopeTotals; links: ReimbursementExportLink[] };
+  };
+  provenance: ReimbursementExportProvenance;
   completeness: { status: 'complete' | 'incomplete'; reasons: Record<string, unknown>[] };
   totals: {
     trustedAllocationCents: number | null;
@@ -739,6 +811,9 @@ export interface ReimbursementExport {
     authoritative: boolean;
   };
   links: ReimbursementExportLink[];
+  endpoints: Record<string, ReimbursementExportEndpoint>;
+  people: ReimbursementExportPerson[];
+  incompleteSections: ReimbursementExportIncompleteSection[];
 }
 
 export interface Receipt {

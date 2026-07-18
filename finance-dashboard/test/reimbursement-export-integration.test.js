@@ -7,7 +7,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { ExportSourceChangedError, MAX_SNAPSHOT_ATTEMPTS } = require('../lib/reimbursement-export-ledger');
+const { ExportSourceChangedError, MAX_SNAPSHOT_ATTEMPTS } = require('../lib/reimbursement-export-common');
 const { getActualCoordinator, resetActualCoordinator } = require('../lib/actual-coordinator');
 
 async function unusedPort() {
@@ -94,8 +94,19 @@ test('demo API reimbursement-export returns complete allocation ledger', async (
   const body = await first.json();
   assert.equal(body.data.completeness.status, 'complete');
   assert.equal(body.meta.exitCode, 0);
+  assert.equal(body.meta.authoritative, true);
   assert.ok(Array.isArray(body.data.links));
+  assert.ok(body.data.scopes?.global?.totals);
 
   const csv = await fetch(`${base}/reimbursement-export?format=csv`, { headers });
   assert.match(await csv.text(), /linkKey,inflowId/);
+
+  const legacy = await fetch(`http://127.0.0.1:${port}/api/reimbursement-export?format=json`, { headers });
+  assert.equal(legacy.status, 200);
+  assert.equal(legacy.headers.get('x-reimbursement-export-status'), 'complete');
+  assert.equal(legacy.headers.get('x-reimbursement-export-exit-code'), '0');
+  const legacyText = await legacy.text();
+  const legacyBody = JSON.parse(legacyText);
+  assert.equal(legacyBody.completeness.status, 'complete');
+  assert.equal(legacyBody.data, undefined);
 });

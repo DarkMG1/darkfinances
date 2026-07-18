@@ -70,6 +70,7 @@ const {
   classifyStoredLink,
   endpointAdmissionFingerprint,
   enrichEndpointForRead,
+  liveEndpointIdentityFingerprint,
   summarizeEndpointCapacity,
   sumTrustedAllocationsForExpense,
   sumTrustedAllocationsForInflow,
@@ -78,13 +79,18 @@ const {
 const {
   ExportSourceChangedError,
   MAX_SNAPSHOT_ATTEMPTS,
-  ReimbursementExportIncompleteError,
   buildTrustedAllocationIndex,
   digestStableJson,
+  prepareExportForPublish,
   projectAllocationLedger,
-  redactExportPayload,
   sortLinks,
 } = require('./lib/reimbursement-export-ledger');
+const {
+  acquireExportSnapshotLock,
+  assertExportLockAvailable,
+  assertSnapshotUnchanged,
+  sidecarSnapshotDigest,
+} = require('./lib/reimbursement-export-snapshot');
 const { readReleaseIdentity } = require('./lib/release-identity');
 const {
   BulkOperationInProgressError,
@@ -1625,12 +1631,16 @@ function setOwesConfig(next) {
 // Reimbursement links — connect a repayment inflow to the expense(s) it repays
 // ---------------------------------------------------------------------------
 function readReimbLinks() {
-  const store = readJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, links: [] });
-  if (!store || !Array.isArray(store.links)) return { schemaVersion: 2, links: [] };
+  const store = readJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, links: [], revision: 0 });
+  if (!store || !Array.isArray(store.links)) return { schemaVersion: 2, links: [], revision: 0 };
+  if (!Number.isSafeInteger(store.revision) || store.revision < 0) store.revision = 0;
   return store;
 }
 function writeReimbLinks(store) {
-  writeJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, ...store });
+  assertExportLockAvailable(REIMB_LINKS_PATH);
+  const revision = (Number.isSafeInteger(store.revision) ? store.revision : 0) + 1;
+  writeJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, ...store, revision });
+  getActualCoordinator().invalidateGeneration();
 }
 function txnRef(t) {
   if (!t || t.id == null) throw new Error('transaction id required');
@@ -1771,48 +1781,77 @@ async function buildReimbursementExport({
 
   for (let attempt = 1; attempt <= MAX_SNAPSHOT_ATTEMPTS; attempt += 1) {
     const captureGeneration = coordinator.generation;
-    const store = readReimbLinks();
-    const links = sortLinks(store.links);
-    const linksSidecarDigest = digestStableJson({ schemaVersion: store.schemaVersion || 2, links });
-    const activeSagas = getReimbursementLinkSagaManager().listNonterminalSagas();
-
-    const payload = await withApi(async (api) => {
-      if (coordinator.generation !== captureGeneration) {
-        throw new ExportSourceChangedError();
-      }
-      const { liveById, scanIncomplete } = await resolveReimbursementExportLive(api, links);
-      if (coordinator.generation !== captureGeneration) {
-        throw new ExportSourceChangedError();
-      }
-      return projectAllocationLedger({
+    let lock;
+    try {
+      const initialStore = readReimbLinks();
+      const linksRevision = initialStore.revision;
+      lock = acquireExportSnapshotLock(REIMB_LINKS_PATH, linksRevision);
+      const preStore = readReimbLinks();
+      if (preStore.revision !== linksRevision) throw new ExportSourceChangedError();
+      const links = sortLinks(preStore.links);
+      const activeSagas = getReimbursementLinkSagaManager().listNonterminalSagas();
+      const preDigest = sidecarSnapshotDigest({
+        linksRevision: preStore.revision,
         links,
-        liveById,
         activeSagas,
-        window: { from: from || null, to: to || null },
-        generatedAt: new Date().toISOString(),
-        scanIncomplete,
-        provenance: {
-          actualGeneration: captureGeneration,
-          release,
-          linksSidecarDigest,
-          inputDigests: {
-            linksSidecar: linksSidecarDigest,
-            liveEndpoints: digestStableJson(Object.keys(liveById).sort().map((id) => ({
-              id,
-              fingerprint: endpointAdmissionFingerprint(liveById[id]),
-            }))),
-          },
-          operationBinding,
-        },
       });
-    }, { skipRecover: true });
 
-    if (coordinator.generation !== captureGeneration) continue;
-    const redacted = redactExportPayload(payload);
-    if (strict && redacted.completeness.status !== 'complete') {
-      throw new ReimbursementExportIncompleteError('strict export refused incomplete reimbursement allocation ledger', redacted);
+      const payload = await coordinator.runRead(async () => {
+        if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+        return withApi(async (api) => {
+          if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+          const groups = await api.getCategoryGroups();
+          const reimbId = reimbCategoryId(groups);
+          const { liveById, scanIncomplete } = await resolveReimbursementExportLive(api, links);
+          const postStore = readReimbLinks();
+          const postSagas = getReimbursementLinkSagaManager().listNonterminalSagas();
+          const postDigest = sidecarSnapshotDigest({
+            linksRevision: postStore.revision,
+            links: sortLinks(postStore.links),
+            activeSagas: postSagas,
+          });
+          assertSnapshotUnchanged(preDigest, postDigest);
+          if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+          const linksSidecarDigest = digestStableJson({
+            schemaVersion: postStore.schemaVersion || 2,
+            revision: postStore.revision,
+            links: sortLinks(postStore.links),
+          });
+          return projectAllocationLedger({
+            links,
+            liveById,
+            activeSagas,
+            reimbCategoryId: reimbId,
+            window: { from: from || null, to: to || null },
+            generatedAt: new Date().toISOString(),
+            scanIncomplete,
+            provenance: {
+              actualGeneration: captureGeneration,
+              linksRevision: postStore.revision,
+              release,
+              linksSidecarDigest,
+              inputDigests: {
+                linksSidecar: linksSidecarDigest,
+                sidecarSnapshot: preDigest,
+                liveEndpoints: digestStableJson(Object.keys(liveById).sort().map((id) => ({
+                  id,
+                  identityFingerprint: liveEndpointIdentityFingerprint(liveById[id]),
+                }))),
+              },
+              operationBinding,
+            },
+          });
+        }, { skipRecover: true });
+      }, { label: 'reimbursement-export' });
+
+      if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+      return prepareExportForPublish(payload, { strict });
+    } catch (error) {
+      if (error instanceof ExportSourceChangedError && attempt < MAX_SNAPSHOT_ATTEMPTS) continue;
+      throw error;
+    } finally {
+      lock?.release();
     }
-    return redacted;
   }
   throw new ExportSourceChangedError();
 }

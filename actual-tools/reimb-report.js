@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const data = require('../finance-dashboard/dataModule');
+const { writePrivateFileAtomic } = require('../finance-dashboard/lib/private-durable-io');
 const {
   exportExitCode,
   formatReimbursementExportCsv,
@@ -67,11 +68,7 @@ function renderPayload(payload, format) {
 }
 
 function writeAtomic(targetPath, contents) {
-  const dir = path.dirname(targetPath);
-  fs.mkdirSync(dir, { recursive: true });
-  const tmp = path.join(dir, `.${path.basename(targetPath)}.${process.pid}.${Date.now()}.tmp`);
-  fs.writeFileSync(tmp, contents, { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(tmp, targetPath);
+  writePrivateFileAtomic(path.resolve(targetPath), contents);
 }
 
 (async () => {

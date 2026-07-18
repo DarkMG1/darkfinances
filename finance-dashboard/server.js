@@ -39,6 +39,7 @@ const {
   exportExitCode,
   formatReimbursementExportCsv,
   formatReimbursementExportHuman,
+  stableStringify,
 } = require('./lib/reimbursement-export-ledger');
 const { boundedJsonMiddleware } = require('./lib/bounded-json');
 const {
@@ -476,9 +477,19 @@ function demoMiddleware(v1mode) {
         return res.send(formatReimbursementExportHuman(payload));
       }
       if (v1mode) {
-        return res.json({ data: payload, meta: { exitCode: exportExitCode(payload) } });
+        return res.json({
+          data: payload,
+          meta: {
+            exitCode: exportExitCode(payload),
+            completeness: payload.completeness.status,
+            authoritative: payload.totals.authoritative,
+          },
+        });
       }
-      return send(payload);
+      res.setHeader('X-Reimbursement-Export-Status', payload.completeness.status);
+      res.setHeader('X-Reimbursement-Export-Exit-Code', String(exportExitCode(payload)));
+      res.setHeader('X-Reimbursement-Export-Authoritative', String(payload.totals.authoritative));
+      return res.type('application/json').send(stableStringify(payload));
     }
     if (p === 'events') return send(demo.events());
     if (p === 'receipts') return send(demo.receipts(req.query.txnId ? String(req.query.txnId) : undefined));
@@ -692,16 +703,6 @@ const resolvers = {
   },
   review: (req) => cachedActual(`review-${monthOf(req) || 'current'}`, () => data.getReview({ month: monthOf(req) }), 120),
   reimbursementLedger: (req) => cachedActual(`reimb-ledger-${monthOf(req) || 'current'}`, () => data.getReimbursementLedger({ month: monthOf(req) }), 180),
-  reimbursementExport: (req) => {
-    const { from, to } = req.query;
-    const strict = req.query.strict === '1' || req.query.strict === 'true';
-    return cachedActual(`reimb-export-${from || 'd'}-${to || 'd'}-${strict}`, () => data.buildReimbursementExport({
-      from,
-      to,
-      strict,
-      releaseManifestPath: RELEASE_MANIFEST_PATH,
-    }), 60);
-  },
   repaymentSuggestions: (req) => {
     const { from, to } = req.query;
     return cachedActual(`reimb-suggest-${from || 'd'}-${to || 'd'}`, () => data.suggestRepayments({ from, to }), 120);
@@ -1218,6 +1219,7 @@ async function reimbursementExport(req, res) {
         strict,
         releaseManifestPath: RELEASE_MANIFEST_PATH,
       });
+      const exitCode = exportExitCode(payload);
       if (format === 'csv') {
         res.setHeader('Content-Type', 'text/csv; charset=utf-8');
         res.setHeader('Content-Disposition', 'attachment; filename="reimbursement-export.csv"');
@@ -1229,7 +1231,22 @@ async function reimbursementExport(req, res) {
         res.send(formatReimbursementExportHuman(payload));
         return;
       }
-      res.json({ data: payload, meta: { exitCode: exportExitCode(payload) } });
+      const isV1 = req.baseUrl === '/api/v1';
+      if (isV1) {
+        res.json({
+          data: payload,
+          meta: {
+            exitCode,
+            completeness: payload.completeness.status,
+            authoritative: payload.totals.authoritative,
+          },
+        });
+        return;
+      }
+      res.setHeader('X-Reimbursement-Export-Status', payload.completeness.status);
+      res.setHeader('X-Reimbursement-Export-Exit-Code', String(exitCode));
+      res.setHeader('X-Reimbursement-Export-Authoritative', String(payload.totals.authoritative));
+      res.type('application/json').send(stableStringify(payload));
     }, { admission: requestAdmission });
   } catch (e) { sendApiError(req, res, e); }
 }

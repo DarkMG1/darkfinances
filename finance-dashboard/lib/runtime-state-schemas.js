@@ -663,26 +663,30 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
           throw new SchemaMigrationError('reimbursementLinks links must be an array', 'RUNTIME_STATE_INVALID_SHAPE');
         }
         const links = (Array.isArray(source?.links) ? source.links : []).map(migrateLinkToSchemaV2);
+        const revision = Number.isSafeInteger(source.revision) && source.revision >= 0 ? source.revision : 0;
         const store = {
           schemaVersion: 2,
           links,
+          revision,
         };
-        return preserveUnknownTopLevel(source, new Set(['links', 'schemaVersion']), store);
+        return preserveUnknownTopLevel(source, new Set(['links', 'schemaVersion', 'revision']), store);
       }, [
         (source) => {
           if (schemaVersionOf(source) !== 1) return null;
           const store = {
             schemaVersion: 2,
             links: (Array.isArray(source.links) ? source.links : []).map(migrateLinkToSchemaV2),
+            revision: Number.isSafeInteger(source.revision) && source.revision >= 0 ? source.revision : 0,
           };
-          return preserveUnknownTopLevel(source, new Set(['links', 'schemaVersion']), store);
+          return preserveUnknownTopLevel(source, new Set(['links', 'schemaVersion', 'revision']), store);
         },
       ]);
     },
     validate(value) {
       return isPlainObject(value)
         && value.schemaVersion === 2
-        && Array.isArray(value.links);
+        && Array.isArray(value.links)
+        && (value.revision == null || (Number.isSafeInteger(value.revision) && value.revision >= 0));
     },
   }),
 
