@@ -215,6 +215,7 @@ const schemas = {
     disposition: z.enum(['acknowledge', 'snooze', 'dismiss', 'resolved', 'clear']),
     until: z.string().datetime().optional().nullable(),
     note: z.string().max(1000).optional().nullable(),
+    contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional().nullable(),
   }).strict().refine((value) => value.disposition !== 'snooze' || !!value.until, 'snooze requires an until timestamp'),
 
   manualAsset: z.object({

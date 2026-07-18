@@ -239,6 +239,7 @@ export function useSetReviewDisposition() {
     disposition: 'acknowledge' | 'snooze' | 'dismiss' | 'resolved' | 'clear';
     until?: string | null;
     note?: string | null;
+    contentHash?: string | null;
   }>({
     endpoint: API_ENDPOINTS.setReviewDisposition.endpoint,
     method: API_ENDPOINTS.setReviewDisposition.method,

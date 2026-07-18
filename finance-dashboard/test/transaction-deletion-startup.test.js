@@ -81,6 +81,7 @@ test('existing startup recovery completes deletion and terminal restart performs
             suggestions: 0,
             reconciliation: 0,
             phantomSeen: 0,
+            reviewState: 0,
           },
           receiptFiles: ['deleted.jpg'],
         },

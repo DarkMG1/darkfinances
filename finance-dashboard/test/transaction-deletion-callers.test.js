@@ -154,6 +154,7 @@ test('direct deletion uses a separate saga and keeps receipt bytes until sync', 
       suggestions: 0,
       reconciliation: 0,
       phantomSeen: 0,
+      reviewState: 0,
     },
   });
   assert.equal(fakeActual.inspect().counts.delete, 1);

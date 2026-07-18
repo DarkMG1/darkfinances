@@ -82,6 +82,7 @@ function makeHarness({ applyThenThrowDelete = false } = {}) {
     suggestions: path.join(dir, 'suggestions.json'),
     reconciliation: path.join(dir, 'reconciliation.json'),
     phantomSeen: path.join(dir, 'phantom-seen.json'),
+    reviewState: path.join(dir, 'review-state.json'),
   };
   fs.mkdirSync(paths.receiptDir);
   writeJson(paths.actual, {
@@ -171,6 +172,19 @@ function makeHarness({ applyThenThrowDelete = false } = {}) {
       [unrelated.id]: { firstSeen: 'keep', legacy: null },
     },
   });
+  writeJson(paths.reviewState, {
+    schemaVersion: 2,
+    contentVersion: 1,
+    dispositions: {
+      [`uncategorized:uncategorized:id:${original.id}`]: {
+        disposition: 'acknowledge',
+        at: '2026-07-01T00:00:00.000Z',
+        contentHash: 'a'.repeat(64),
+        kind: 'uncategorized',
+      },
+    },
+    legacyDispositions: {},
+  });
   return { dir, paths };
 }
 
@@ -182,6 +196,7 @@ function readStores(harness) {
     suggestions: readJson(paths.suggestions),
     reconciliation: readJson(paths.reconciliation),
     phantomSeen: readJson(paths.phantomSeen),
+    reviewState: readJson(paths.reviewState),
   };
 }
 
@@ -221,6 +236,7 @@ function makeManager(harness, options = {}) {
     suggestions: paths.suggestions,
     reconciliation: paths.reconciliation,
     phantomSeen: paths.phantomSeen,
+    reviewState: paths.reviewState,
   };
   const plan = (targetIds) => {
     const result = rewriteTransactionDeletionReferences(readStores(harness), targetIds);
@@ -612,6 +628,7 @@ test('post-sync terminalization continues past an independent invalid saga', asy
         suggestions: 0,
         reconciliation: 0,
         phantomSeen: 0,
+        reviewState: 0,
       },
       receiptFiles: [],
     },

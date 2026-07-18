@@ -1,6 +1,7 @@
 'use strict';
 
 const { linkPairKey } = require('./reimbursement-allocation');
+const { rewriteReviewDispositionsForReplacement } = require('./review-disposition');
 
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
@@ -65,8 +66,8 @@ function preserveRuntimeEnvelope(source, body, { defaults = {} } = {}) {
   return next;
 }
 
-function rewriteTransactionReplacementReferences(stores, idMap) {
-  const stats = { receipts: 0, links: 0, suggestions: 0, reconciliation: 0, phantomSeen: 0 };
+function rewriteTransactionReplacementReferences(stores, idMap, options = {}) {
+  const stats = { receipts: 0, links: 0, suggestions: 0, reconciliation: 0, phantomSeen: 0, reviewState: 0 };
   const receiptBody = { byTxn: {} };
   for (const [oldTxnId, list] of Object.entries(stores.receipts?.byTxn || {})) {
     const nextTxnId = mappedId(idMap, oldTxnId);
@@ -173,8 +174,17 @@ function rewriteTransactionReplacementReferences(stores, idMap) {
     assignWithoutLoss(phantomSeen.seen, next, value, 'phantom-seen');
   }
 
+  const reviewRewrite = rewriteReviewDispositionsForReplacement(stores.reviewState, idMap, {
+    tasksBefore: options.tasksBefore || [],
+    tasksAfter: options.tasksAfter || [],
+  });
+  if (reviewRewrite.stats.reviewState) stats.reviewState += reviewRewrite.stats.reviewState;
+  const reviewState = preserveRuntimeEnvelope(stores.reviewState, reviewRewrite.reviewState, {
+    defaults: { schemaVersion: 2, contentVersion: 1, dispositions: {}, legacyDispositions: {} },
+  });
+
   return {
-    stores: { receipts, links, suggestions, reconciliation, phantomSeen },
+    stores: { receipts, links, suggestions, reconciliation, phantomSeen, reviewState },
     stats,
   };
 }

@@ -81,6 +81,8 @@ test('DELETE journals local apply, sync uncertainty, and status-only recovery', 
             suggestions: 0,
             reconciliation: 0,
             phantomSeen: 0,
+      reviewState: 0,
+            reviewState: 0,
           },
         };
       },
@@ -150,6 +152,7 @@ test('DELETE journals local apply, sync uncertainty, and status-only recovery', 
       suggestions: 0,
       reconciliation: 0,
       phantomSeen: 0,
+      reviewState: 0,
     },
   });
   assert.deepEqual(result.body.operation, { key: successKey, replayed: false });

@@ -1,6 +1,8 @@
 'use strict';
 
 const { migrateAccountOverrides } = require('./account-overrides-schema');
+const { normalizeReviewState, REVIEW_STATE_SCHEMA_VERSION } = require('./review-disposition');
+const { REVIEW_CONTENT_VERSION } = require('./review-task-fingerprint');
 const { validatePasskeyCredentials } = require('./passkey-credentials-schema');
 const { migrateLinkToSchemaV2 } = require('./reimbursement-allocation');
 
@@ -142,7 +144,16 @@ function isFlatReviewStateLegacy(raw) {
 }
 
 function migrateReviewState(raw) {
-  return migrateEnvelope('reviewState', raw, 1, (source) => {
+  if (isPlainObject(raw) && schemaVersionOf(raw) === REVIEW_STATE_SCHEMA_VERSION) {
+    const value = normalizeReviewState(raw);
+    return {
+      value,
+      changed: JSON.stringify(value) !== JSON.stringify(raw),
+      version: REVIEW_STATE_SCHEMA_VERSION,
+    };
+  }
+
+  const v1 = migrateEnvelope('reviewState', raw, 1, (source) => {
     if (isFlatReviewStateLegacy(source)) {
       return {
         schemaVersion: 1,
@@ -162,6 +173,17 @@ function migrateReviewState(raw) {
       };
     },
   ]);
+
+  if (schemaVersionOf(v1.value) === REVIEW_STATE_SCHEMA_VERSION) {
+    return { value: normalizeReviewState(v1.value), changed: v1.changed, version: REVIEW_STATE_SCHEMA_VERSION };
+  }
+
+  const upgraded = normalizeReviewState(v1.value);
+  return {
+    value: upgraded,
+    changed: true,
+    version: REVIEW_STATE_SCHEMA_VERSION,
+  };
 }
 
 function migrateEnvelope(name, raw, currentVersion, buildCurrent, legacyMigrations = []) {
@@ -751,15 +773,21 @@ const RUNTIME_STATE_SCHEMAS = Object.freeze({
   }),
 
   reviewState: defineStore('reviewState', {
-    currentVersion: 1,
-    missingValue: () => ({ schemaVersion: 1, dispositions: {} }),
+    currentVersion: REVIEW_STATE_SCHEMA_VERSION,
+    missingValue: () => ({
+      schemaVersion: REVIEW_STATE_SCHEMA_VERSION,
+      contentVersion: REVIEW_CONTENT_VERSION,
+      dispositions: {},
+      legacyDispositions: {},
+    }),
     migrate(raw) {
       return migrateReviewState(raw);
     },
     validate(value) {
       return isPlainObject(value)
-        && value.schemaVersion === 1
-        && isPlainObject(value.dispositions);
+        && value.schemaVersion === REVIEW_STATE_SCHEMA_VERSION
+        && isPlainObject(value.dispositions)
+        && isPlainObject(value.legacyDispositions);
     },
   }),
 

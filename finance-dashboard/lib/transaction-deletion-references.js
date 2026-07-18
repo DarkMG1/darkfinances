@@ -1,11 +1,14 @@
 'use strict';
 
+const { rewriteReviewDispositionsForDeletion } = require('./review-disposition');
+
 const REFERENCE_STEPS = Object.freeze([
   'receipts',
   'links',
   'suggestions',
   'reconciliation',
   'phantomSeen',
+  'reviewState',
 ]);
 
 function isObject(value) {
@@ -43,6 +46,12 @@ function assertStores(stores) {
   }
   if (!isObject(stores.phantomSeen) || !isObject(stores.phantomSeen.seen)) {
     throw new Error('invalid phantom-seen reference store');
+  }
+  if (stores.reviewState != null
+    && (!isObject(stores.reviewState)
+      || !isObject(stores.reviewState.dispositions)
+      || !isObject(stores.reviewState.legacyDispositions))) {
+    throw new Error('invalid review-state reference store');
   }
 }
 
@@ -171,6 +180,12 @@ function rewritePhantomSeen(store, targets, stats) {
   return changed ? { ...store, seen } : store;
 }
 
+function rewriteReviewState(store, targets, stats) {
+  const { reviewState, stats: reviewStats } = rewriteReviewDispositionsForDeletion(store, [...targets]);
+  stats.reviewState += reviewStats.reviewState;
+  return reviewState;
+}
+
 function rewriteTransactionDeletionReferences(stores, targetIds) {
   assertStores(stores);
   const targets = targetSet(targetIds);
@@ -180,6 +195,7 @@ function rewriteTransactionDeletionReferences(stores, targetIds) {
     suggestions: 0,
     reconciliation: 0,
     phantomSeen: 0,
+    reviewState: 0,
   };
   const receipts = rewriteReceipts(stores.receipts, targets, stats);
   return {
@@ -189,6 +205,7 @@ function rewriteTransactionDeletionReferences(stores, targetIds) {
       suggestions: rewriteSuggestions(stores.suggestions, targets, stats),
       reconciliation: rewriteReconciliation(stores.reconciliation, targets, stats),
       phantomSeen: rewritePhantomSeen(stores.phantomSeen, targets, stats),
+      reviewState: rewriteReviewState(stores.reviewState, targets, stats),
     },
     receiptFilesToDelete: receipts.receiptFilesToDelete,
     stats,

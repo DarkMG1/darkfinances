@@ -42,6 +42,13 @@ test('generated contract keeps legacy genericBudgetTarget alias and nested gener
   assert.match(types, /genericBudget: \{/);
 });
 
+test('generated contract includes content-bound review task fields', () => {
+  const types = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
+  assert.match(types, /stableKey: string;/);
+  assert.match(types, /contentHash: string;/);
+  assert.match(types, /contentVersion: number;/);
+});
+
 test('generated contract includes transfer identity completeness types', () => {
   const types = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
   assert.match(types, /export interface ProjectionCompleteness/);
