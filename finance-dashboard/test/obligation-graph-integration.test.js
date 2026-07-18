@@ -85,7 +85,70 @@ function withCreditCardPaymentHistory(fixture) {
   return fixture;
 }
 
+function withLoanPaymentHistory(fixture, { ambiguous = false } = {}) {
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());
+  const paymentDates = [addDays(today, -65), addDays(today, -35), addDays(today, -5)];
+  const loanCategory = { id: 'loan-payment', name: 'Loan Payment' };
+  fixture.categoryGroups = fixture.categoryGroups.map((group) => {
+    if (group.name !== 'Everyday Spending') return group;
+    return {
+      ...group,
+      categories: [
+        ...group.categories,
+        { id: loanCategory.id, name: loanCategory.name },
+        ...(ambiguous ? [{ id: 'dining', name: 'Dining' }] : []),
+      ],
+    };
+  });
+  fixture.budgetMonth.categoryGroups = fixture.budgetMonth.categoryGroups.map((group) => {
+    if (group.name !== 'Everyday Spending') return group;
+    const extra = ambiguous
+      ? [{ id: 'dining', name: 'Dining', budgeted: 20000, spent: 0, balance: 20000 }]
+      : [];
+    return {
+      ...group,
+      categories: [
+        ...group.categories,
+        {
+          id: loanCategory.id,
+          name: loanCategory.name,
+          budgeted: 90000,
+          spent: 0,
+          balance: 90000,
+        },
+        ...extra,
+      ],
+    };
+  });
+  fixture.payees.push({ id: 'loan-payment-payee', name: 'Loan Payment' });
+  for (const [index, date] of paymentDates.entries()) {
+    const category = ambiguous && index % 2 === 1 ? 'dining' : loanCategory.id;
+    fixture.transactions.push({
+      id: `loan-payment-${index}`,
+      account: 'acc-check',
+      date,
+      amount: -90000,
+      category,
+      payee: 'loan-payment-payee',
+      cleared: true,
+    });
+  }
+  return fixture;
+}
+
 const CREDIT_CARD_PAYMENT_KEY = 'credit card payment';
+const LOAN_PAYMENT_KEY = 'loan payment';
+
+function creditLiabilityOverrides(paymentKey = CREDIT_CARD_PAYMENT_KEY) {
+  return {
+    'acc-credit': {
+      role: 'credit_card',
+      creditLiabilityCoverage: 'current_balance',
+      paymentRecurringKey: paymentKey,
+      fundingAccountId: 'acc-check',
+    },
+  };
+}
 
 async function bootstrap(fixture, overrides = {}, accountOverrides = {}) {
   fixtures.configure(fixture);
@@ -132,7 +195,7 @@ test('explicit current_balance policy produces parity between graph reservations
     },
   });
   writeJson(process.env.RECURRING_OVERRIDES_PATH, {
-    [CREDIT_CARD_PAYMENT_KEY]: { forced: true, isBill: true },
+    [CREDIT_CARD_PAYMENT_KEY]: { forced: true, isBill: true, categoryId: 'loan-payment' },
   });
   const today = await getToday();
   assert.equal(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.creditCardCoverageUnknown), false);
@@ -165,6 +228,38 @@ test('setAccountOverride credit policy round-trips through persisted overrides',
   const cleared = await getToday();
   const clearedCard = cleared.accounts.find((account) => account.id === 'acc-credit');
   assert.equal(clearedCard.creditLiability, null);
+});
+
+test('loan payment bill without resolvable categoryId quarantines STS and skips budget reserve', async () => {
+  const fixture = withLoanPaymentHistory(fixtures.buildFixture({ cardBalance: -900 }), { ambiguous: true });
+  await bootstrap(fixture, {
+    [LOAN_PAYMENT_KEY]: { forced: true, isBill: true },
+  }, creditLiabilityOverrides(LOAN_PAYMENT_KEY));
+  const today = await getToday();
+  assert.equal(today.liquidity.safeToSpend.value, null);
+  assert.equal(today.liquidity.safeToSpend.complete, false);
+  assert.ok(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.identityOverlapAmbiguous));
+  assert.equal(
+    (today.obligationGraph.reservations || []).filter((item) => item.source?.categoryId === 'loan-payment').length,
+    0,
+  );
+});
+
+test('explicit loan payment categoryId reserves card liability once without loan budget reserve', async () => {
+  const fixture = withLoanPaymentHistory(fixtures.buildFixture({ cardBalance: -900 }));
+  await bootstrap(fixture, {
+    [LOAN_PAYMENT_KEY]: { forced: true, isBill: true, categoryId: 'loan-payment' },
+  }, creditLiabilityOverrides(LOAN_PAYMENT_KEY));
+  const today = await getToday();
+  assert.equal(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.identityOverlapAmbiguous), false);
+  assert.equal(today.liquidity.safeToSpend.complete, true);
+  const budgetReserve = (today.obligationGraph.reservations || []).filter((item) =>
+    item.source?.kind === 'budget' && item.source?.categoryId === 'loan-payment');
+  assert.equal(budgetReserve.length, 0);
+  const forecast = await getForecast({ days: 45 });
+  const liabilityEvents = forecast.events.filter((event) =>
+    event.label === 'Credit Card' && Math.abs(Math.round(event.amount * 100)) === 90000);
+  assert.equal(liabilityEvents.length, 1);
 });
 
 test('default credit-card policy keeps credit_card_coverage_unknown for old clients', async () => {

@@ -253,6 +253,7 @@ const schemas = {
     hidden: z.boolean().optional(),
     forced: z.boolean().optional(),
     isBill: z.boolean().optional().nullable(),
+    categoryId: identifier.optional().nullable(),
     cancellation: cancellation.optional(),
   }).strict(),
 

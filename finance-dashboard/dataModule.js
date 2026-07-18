@@ -149,6 +149,7 @@ const {
   validateCreditOverrideCrossFields,
 } = require('./lib/account-overrides-schema');
 const { resolveAccountCreditPolicy, COVERAGE_MODE } = require('./lib/domain/credit-liability-policy');
+const { resolveRecurringCategoryIdentity } = require('./lib/domain/obligation-identities');
 const { metricValue } = require('./lib/metric-provenance');
 const {
   SAFE_TO_SPEND_INPUTS,
@@ -3356,8 +3357,12 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
           key,
           payee: payeeName,
           category: (catInfo[lf.catId] && catInfo[lf.catId].name) || 'Uncategorized',
+          categoryIdCounts: {},
           charges: [],
         });
+        if (lf.catId) {
+          rec.categoryIdCounts[lf.catId] = (rec.categoryIdCounts[lf.catId] || 0) + 1;
+        }
         rec.charges.push({ date: t.date, amt: -lf.amount / 100 });
       }
     }
@@ -3447,11 +3452,20 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
       let status = daysBetween(lastCharged, today) <= inactiveGapDays(effCadence) ? 'active' : 'inactive';
       if (ov && ov.status) status = ov.status; // user override (e.g. cancelled)
       const finalIsBill = ov && typeof ov.isBill === 'boolean' ? ov.isBill : isBill;
+      const categoryIdentity = resolveRecurringCategoryIdentity({
+        override: ov || {},
+        categoryIdCounts: rec.categoryIdCounts || {},
+      });
+      const resolvedCategoryName = categoryIdentity.categoryId && catInfo[categoryIdentity.categoryId]
+        ? catInfo[categoryIdentity.categoryId].name
+        : rec.category;
 
       items.push({
         key: rec.key,
         payee: rec.payee,
-        category: rec.category,
+        category: resolvedCategoryName,
+        categoryId: categoryIdentity.categoryId,
+        categoryIdentityStatus: categoryIdentity.status,
         cadence: effCadence,
         amount: round2(amount),
         monthlyEquivalent: round2(monthlyEquivalent),
@@ -3508,7 +3522,7 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
   });
 }
 
-function setRecurringOverride({ key, status, hidden, forced, isBill, cancellation } = {}) {
+function setRecurringOverride({ key, status, hidden, forced, isBill, categoryId, cancellation } = {}) {
   if (!key) throw new Error('key required');
   const overrides = readJsonSafe(OVERRIDES_PATH, {});
   const cur = overrides[key] || {};
@@ -3519,6 +3533,10 @@ function setRecurringOverride({ key, status, hidden, forced, isBill, cancellatio
   if (isBill !== undefined) {
     if (isBill === null) delete cur.isBill; // clear to fall back to auto-detected type
     else cur.isBill = !!isBill;
+  }
+  if (categoryId !== undefined) {
+    if (categoryId === null || categoryId === '') delete cur.categoryId;
+    else cur.categoryId = categoryId;
   }
   if (status !== undefined) {
     if (!status || status === 'active') delete cur.status;

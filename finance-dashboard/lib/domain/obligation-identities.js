@@ -20,13 +20,44 @@ function budgetDedupeGroup(categoryId) {
   return `budget:${categoryId}`;
 }
 
+function resolveRecurringCategoryIdentity({ override = {}, categoryIdCounts = {} } = {}) {
+  if (typeof override.categoryId === 'string' && override.categoryId.trim()) {
+    return { categoryId: override.categoryId.trim(), status: 'explicit' };
+  }
+  const ids = Object.entries(categoryIdCounts || {})
+    .filter(([id, count]) => id && Number(count) > 0)
+    .map(([id]) => id);
+  if (ids.length === 1) return { categoryId: ids[0], status: 'inferred' };
+  if (ids.length > 1) return { categoryId: null, status: 'ambiguous' };
+  return { categoryId: null, status: 'missing' };
+}
+
 function buildBillCategoryIndex(recurring = {}) {
   const byCategoryId = new Map();
   for (const item of [...(recurring.items || []), ...(recurring.hiddenItems || [])]) {
     if (!item.isBill || item.status !== 'active') continue;
-    if (item.categoryId) byCategoryId.set(item.categoryId, item.key);
+    if (!item.categoryId) continue;
+    if (item.categoryIdentityStatus === 'ambiguous' || item.categoryIdentityStatus === 'missing') continue;
+    byCategoryId.set(item.categoryId, item.key);
   }
   return { byCategoryId };
+}
+
+function collectBillCategoryIdentity(recurring = {}) {
+  const billIndex = buildBillCategoryIndex(recurring);
+  const issues = [];
+  for (const item of [...(recurring.items || []), ...(recurring.hiddenItems || [])]) {
+    if (item.status !== 'active' || !item.isBill) continue;
+    const status = item.categoryIdentityStatus
+      || (item.categoryId ? 'explicit' : 'missing');
+    if (!item.categoryId || status === 'ambiguous' || status === 'missing') {
+      issues.push({ key: item.key, status });
+    }
+  }
+  return {
+    billCategoryIds: [...billIndex.byCategoryId.keys()],
+    billCategoryIdentityIssues: issues,
+  };
 }
 
 function billRecurringKeyForCategory(category, billIndex) {
@@ -46,7 +77,9 @@ module.exports = {
   budgetDedupeGroup,
   buildBillCategoryIndex,
   billRecurringKeyForCategory,
+  collectBillCategoryIdentity,
   isBillBackedCategory,
   recurringDurableIdentity,
+  resolveRecurringCategoryIdentity,
   subscriptionSeriesDedupeGroup,
 };

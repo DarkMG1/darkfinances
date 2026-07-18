@@ -191,6 +191,30 @@ const MUTATION_PAYLOAD_FIXTURES = [
     body: { hidden: true },
   },
   {
+    source: 'mobile:useSetAccountOverrideCredit',
+    method: 'POST',
+    path: '/api/v1/accounts/acct-credit/override',
+    params: { id: 'acct-credit' },
+    body: {
+      creditLiabilityCoverage: 'current_balance',
+      paymentRecurringKey: 'card payment',
+      fundingAccountId: 'acct-check',
+      statement: {
+        balanceCents: -50000,
+        paymentDueDate: '2026-08-01',
+        observedAt: '2026-07-01T00:00:00.000Z',
+      },
+      clearCreditLiability: true,
+    },
+  },
+  {
+    source: 'mobile:useSetRecurringOverrideCategory',
+    method: 'POST',
+    path: '/api/v1/recurring/loan-payment/override',
+    params: { key: 'loan-payment' },
+    body: { forced: true, isBill: true, categoryId: 'loan-payment' },
+  },
+  {
     source: 'mobile:useSaveManualAsset',
     method: 'POST',
     path: '/api/v1/manual-assets',

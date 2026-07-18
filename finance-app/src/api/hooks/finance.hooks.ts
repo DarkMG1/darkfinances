@@ -50,6 +50,14 @@ import {
   Trends,
 } from '@/api/generated/types';
 
+const ACCOUNT_OVERRIDE_DERIVED_KEYS = [
+  API_ENDPOINTS.today.key,
+  API_ENDPOINTS.forecast.key,
+  API_ENDPOINTS.accounts.key,
+  API_ENDPOINTS.bills.key,
+  API_ENDPOINTS.recurring.key,
+] as const;
+
 const TRANSACTION_DERIVED_KEYS = [
   API_ENDPOINTS.today.key,
   API_ENDPOINTS.accounts.key,
@@ -463,6 +471,7 @@ export interface SetRecurringVars {
   hidden?: boolean;
   forced?: boolean;
   isBill?: boolean | null;
+  categoryId?: string | null;
   cancellation?: {
     status?: string | null;
     notes?: string | null;
@@ -999,10 +1008,7 @@ export function useSetAccountOverride() {
     endpoint: (v) => `/api/v1/accounts/${encodeURIComponent(v.id)}/override`,
     method: 'POST',
     onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.accounts.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactions.key] }),
-      ]);
+      await invalidateKeys(qc, ACCOUNT_OVERRIDE_DERIVED_KEYS);
     },
   });
 }

@@ -16,6 +16,7 @@ const {
 const {
   billDurableIdentity,
   buildBillCategoryIndex,
+  collectBillCategoryIdentity,
   isBillBackedCategory,
   recurringDurableIdentity,
 } = require('./domain/obligation-identities');
@@ -247,6 +248,13 @@ function buildGraphTransactionInputs(rows, catInfo, {
           ambiguous: false,
           provenance: 'actual',
           fundsLiabilityAccountId: toAccountId && creditAccountIds.has(toAccountId) ? toAccountId : null,
+          transactionId: String(leaf.id || txnId),
+          transferredId: leaf.transferIdentity?.transferredId || leaf.transferredId || null,
+          sourceFingerprint: [
+            String(leaf.transferIdentity?.transferredId || leaf.transferredId || ''),
+            String(leaf.transferIdentity?.counterpartAccountId || toAccountId || ''),
+            String(Math.abs(leaf.amount)),
+          ].join(':'),
         });
         continue;
       }
@@ -316,16 +324,7 @@ function buildReimbursementExpectations({ reimb, linksAmbiguous = false, allocat
 }
 
 function collectBillCategoryIds(recurring = {}, budgets = {}) {
-  const billIndex = buildBillCategoryIndex(recurring);
-  const ids = new Set([...billIndex.byCategoryId.keys()]);
-  for (const group of budgets?.groups || []) {
-    for (const category of group.categories || []) {
-      if (billIndex.byCategoryId.has(category.id)) {
-        ids.add(category.id);
-      }
-    }
-  }
-  return ids;
+  return new Set(collectBillCategoryIdentity(recurring, budgets).billCategoryIds);
 }
 
 function liabilityByPaymentKeyMap(liabilities = []) {
@@ -365,6 +364,7 @@ function assembleObligationGraphInputs({
       forced: !!item.forced,
       status: item.status,
       categoryId: item.categoryId || null,
+      categoryIdentityStatus: item.categoryIdentityStatus || null,
       projectionUncertain: !!item.projectionUncertain,
       scheduleUncertain: item.isBill ? !!item.projectionUncertain : projection.scheduleUncertain,
       projectedOccurrences: item.isBill ? [] : projection.projectedOccurrences,
@@ -386,6 +386,7 @@ function assembleObligationGraphInputs({
   });
 
   const billCategoryIds = collectBillCategoryIds(recurring, budgets);
+  const { billCategoryIdentityIssues } = collectBillCategoryIdentity(recurring, budgets);
   const { reservations: budgetReservations } = buildBudgetReservations({ budgets, billCategoryIds });
   const operatingIds = new Set(operatingAccountIds);
   const {
@@ -418,6 +419,7 @@ function assembleObligationGraphInputs({
     fundingAccountsByLiability,
     operatingAccountIds: [...operatingIds],
     billCategoryIds: [...billCategoryIds],
+    billCategoryIdentityIssues,
     budgetReservations,
     reimbursementExpectations: buildReimbursementExpectations({
       reimb,
@@ -435,6 +437,9 @@ function assembleObligationGraphInputs({
       ambiguous: !!transfer.ambiguous,
       provenance: transfer.provenance || 'actual',
       fundsLiabilityAccountId: transfer.fundsLiabilityAccountId || null,
+      transactionId: transfer.transactionId || null,
+      transferredId: transfer.transferredId || null,
+      sourceFingerprint: transfer.sourceFingerprint || null,
     })),
     economicTransactions: (economicTransactions || []).map((txn) => ({
       durableIdentity: `txn:${txn.transactionId}`,
@@ -460,6 +465,7 @@ module.exports = {
   buildRecurringProjections,
   buildReimbursementExpectations,
   collectBillCategoryIds,
+  collectBillCategoryIdentity,
   isBillBackedCategory,
   recurringDurableIdentity,
   OBLIGATION_REASON,

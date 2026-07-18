@@ -838,3 +838,164 @@ test('statement coverage rejects stale observedAt', () => {
   });
   assert.ok(policy.quarantineReasons.includes('obligation_source_stale'));
 });
+
+test('indistinguishable liability transfer evidence under different link IDs quarantines cycle', () => {
+  const sharedFingerprint = 'pair-abc:card:500000';
+  const graph = buildObligationGraph({
+    financeDate: TODAY,
+    windowStart: TODAY,
+    windowEnd: WINDOW_END,
+    operatingAccountIds: ['checking'],
+    fundingAccountsByLiability: { card: 'checking' },
+    billCategoryIds: [],
+    creditLiabilities: [{
+      durableIdentity: 'liability:credit:card',
+      accountId: 'card',
+      name: 'Card',
+      eligible: true,
+      obligationCents: 500000,
+      currentBalanceCents: -500000,
+      coverageKind: 'current_balance',
+      paymentDueDate: '2026-08-01',
+      paymentRecurringKey: 'card-pay',
+      fundingAccountId: 'checking',
+      cycleKey: 'liability-cycle:card:2026-08-01',
+      quarantineReasons: [],
+    }],
+    transfers: [{
+      durableIdentity: 'transfer:dup-a',
+      linkId: 'dup-a',
+      date: '2026-07-20',
+      amountCents: -500000,
+      fromAccountId: 'checking',
+      toAccountId: 'card',
+      ambiguous: false,
+      fundsLiabilityAccountId: 'card',
+      sourceFingerprint: sharedFingerprint,
+    }, {
+      durableIdentity: 'transfer:dup-b',
+      linkId: 'dup-b',
+      date: '2026-07-20',
+      amountCents: -500000,
+      fromAccountId: 'checking',
+      toAccountId: 'card',
+      ambiguous: false,
+      fundsLiabilityAccountId: 'card',
+      sourceFingerprint: sharedFingerprint,
+    }],
+    recurringItems: [],
+    billOccurrences: [],
+    incomeStreams: [],
+    manualDebts: [],
+    budgetReservations: [],
+    reimbursementExpectations: [],
+    economicTransactions: [],
+  });
+  assert.equal(graph.cyclePartitions[0].quarantined, true);
+  assert.ok(graph.cyclePartitions[0].issues.includes('duplicate_evidence_collision'));
+  assert.equal(graph.occurrences.filter((occ) => occ.reserved && occ.partition).length, 0);
+});
+
+test('legitimate partial liability payments on different dates remain reserved', () => {
+  const graph = buildObligationGraph({
+    financeDate: TODAY,
+    windowStart: TODAY,
+    windowEnd: WINDOW_END,
+    operatingAccountIds: ['checking'],
+    fundingAccountsByLiability: { card: 'checking' },
+    billCategoryIds: [],
+    creditLiabilities: [{
+      durableIdentity: 'liability:credit:card',
+      accountId: 'card',
+      name: 'Card',
+      eligible: true,
+      obligationCents: 10000,
+      currentBalanceCents: -10000,
+      coverageKind: 'current_balance',
+      paymentDueDate: '2026-08-01',
+      paymentRecurringKey: 'card-pay',
+      fundingAccountId: 'checking',
+      cycleKey: 'liability-cycle:card:2026-08-01',
+      quarantineReasons: [],
+    }],
+    transfers: [{
+      durableIdentity: 'transfer:partial-a',
+      linkId: 'partial-a',
+      date: '2026-07-20',
+      amountCents: -3000,
+      fromAccountId: 'checking',
+      toAccountId: 'card',
+      ambiguous: false,
+      fundsLiabilityAccountId: 'card',
+      sourceFingerprint: 'partial-a:card:3000',
+    }, {
+      durableIdentity: 'transfer:partial-b',
+      linkId: 'partial-b',
+      date: '2026-07-25',
+      amountCents: -2000,
+      fromAccountId: 'checking',
+      toAccountId: 'card',
+      ambiguous: false,
+      fundsLiabilityAccountId: 'card',
+      sourceFingerprint: 'partial-b:card:2000',
+    }],
+    recurringItems: [],
+    billOccurrences: [],
+    incomeStreams: [],
+    manualDebts: [],
+    budgetReservations: [],
+    reimbursementExpectations: [],
+    economicTransactions: [],
+  });
+  assert.equal(graph.cyclePartitions[0].quarantined, false);
+  assert.equal(graph.cyclePartitions[0].futureTransferCents, 5000);
+  assert.equal(
+    sumCents(graph.occurrences.filter((occ) => occ.reserved && occ.partition).map((occ) => -occ.amountCents)),
+    10000,
+  );
+});
+
+test('liability-linked transfer after due date quarantines instead of ignoring', () => {
+  const graph = buildObligationGraph({
+    financeDate: TODAY,
+    windowStart: TODAY,
+    windowEnd: WINDOW_END,
+    operatingAccountIds: ['checking'],
+    fundingAccountsByLiability: { card: 'checking' },
+    billCategoryIds: [],
+    creditLiabilities: [{
+      durableIdentity: 'liability:credit:card',
+      accountId: 'card',
+      name: 'Card',
+      eligible: true,
+      obligationCents: 10000,
+      currentBalanceCents: -10000,
+      coverageKind: 'current_balance',
+      paymentDueDate: '2026-08-01',
+      paymentRecurringKey: 'card-pay',
+      fundingAccountId: 'checking',
+      cycleKey: 'liability-cycle:card:2026-08-01',
+      quarantineReasons: [],
+    }],
+    transfers: [{
+      durableIdentity: 'transfer:late-pay',
+      linkId: 'late-pay',
+      date: '2026-08-05',
+      amountCents: -1000,
+      fromAccountId: 'checking',
+      toAccountId: 'card',
+      ambiguous: false,
+      fundsLiabilityAccountId: 'card',
+      sourceFingerprint: 'late:card:1000',
+    }],
+    recurringItems: [],
+    billOccurrences: [],
+    incomeStreams: [],
+    manualDebts: [],
+    budgetReservations: [],
+    reimbursementExpectations: [],
+    economicTransactions: [],
+  });
+  assert.equal(graph.cyclePartitions[0].quarantined, true);
+  assert.ok(graph.cyclePartitions[0].issues.includes('future_transfer_after_due'));
+});

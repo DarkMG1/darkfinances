@@ -60,6 +60,7 @@ function validateCycleEvidence({
   futureTransferDates = [],
   duplicateTransferLinks = false,
   duplicateBillLinks = false,
+  duplicateEvidenceCollision = false,
 }) {
   const issues = [];
   const obligation = absCents(adjustedObligationCents);
@@ -67,6 +68,7 @@ function validateCycleEvidence({
   const future = absCents(futureTransferCents);
 
   if (duplicateTransferLinks || duplicateBillLinks) issues.push('duplicate_link');
+  if (duplicateEvidenceCollision) issues.push('duplicate_evidence_collision');
   if (billDueDate && liabilityDueDate && billDueDate !== liabilityDueDate) issues.push('due_date_mismatch');
   if (bill > obligation) issues.push('bill_exceeds_obligation');
   if (future > obligation) issues.push('future_transfer_exceeds_obligation');

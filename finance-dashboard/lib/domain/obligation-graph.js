@@ -172,7 +172,19 @@ function registerOccurrence(state, occurrence) {
 function buildObligationGraph(rawInput = {}) {
   const input = normalizeBuildInput(rawInput);
   const registry = { nodes: [], byIdentity: new Map(), duplicates: [] };
-  const state = { occurrences: [], edges: [], capExceeded: false, incompleteReasons: [], pendingCycles: [], cyclePartitions: [] };
+  const state = {
+    occurrences: [],
+    edges: [],
+    capExceeded: false,
+    incompleteReasons: [],
+    pendingCycles: [],
+    cyclePartitions: [],
+    blockBudgetReservations: (input.billCategoryIdentityIssues || []).length > 0,
+  };
+
+  if (state.blockBudgetReservations) {
+    state.incompleteReasons = mergeReasons([state.incompleteReasons, [OBLIGATION_REASON.identityOverlapAmbiguous]]);
+  }
 
   for (const recurring of input.recurringItems) ingestRecurring(registry, state, recurring, input);
   for (const bill of input.billOccurrences) ingestBillOccurrence(registry, state, bill, input);
@@ -259,6 +271,7 @@ function normalizeBuildInput(raw) {
     economicTransactions: sortByKeys(raw.economicTransactions || [], ['durableIdentity', 'transactionId']),
     operatingAccountIds: new Set(raw.operatingAccountIds || []),
     fundingAccountsByLiability: raw.fundingAccountsByLiability || {},
+    billCategoryIdentityIssues: sortByKeys(raw.billCategoryIdentityIssues || [], ['key', 'status']),
   };
 }
 
@@ -501,6 +514,10 @@ function ingestTransfer(registry, state, transfer, input) {
     role: OCCURRENCE_ROLE.INTERNAL_TRANSFER,
     reserved: false,
     paid: false,
+    fromAccountId: transfer.fromAccountId || null,
+    sourceFingerprint: transfer.sourceFingerprint || null,
+    transactionId: transfer.transactionId || null,
+    transferredId: transfer.transferredId || null,
     source: { kind: SOURCE_KIND.TRANSFER, linkId: transfer.linkId, provenance: transfer.provenance || 'actual' },
     explanation: [
       'Internal cash movement; excluded from economic spend double-count',
@@ -514,6 +531,7 @@ function ingestTransfer(registry, state, transfer, input) {
 }
 
 function ingestBudgetReservation(registry, state, budget, input) {
+  if (state.blockBudgetReservations) return;
   const durableIdentity = budget.durableIdentity || `budget:${budget.categoryId}`;
   const node = registerNode(registry, {
     id: stableNodeId(durableIdentity),
@@ -616,6 +634,31 @@ function reconcileBillBudgetOverlap(registry, state, input) {
   }
 }
 
+function liabilityTransferEvidenceFingerprint(transfer, liabilityAccountId) {
+  const fromAccountId = transfer.fromAccountId || '';
+  const amount = absCents(transfer.amountCents);
+  const sourceKey = transfer.sourceFingerprint
+    || transfer.durableIdentity
+    || `${transfer.transferredId || ''}|${transfer.transactionId || ''}|${fromAccountId}|${amount}`;
+  return `${liabilityAccountId}|${fromAccountId}|${transfer.date}|${amount}|${sourceKey}`;
+}
+
+function detectTransferEvidenceCollisions(transfers, liabilityAccountId) {
+  const byFingerprint = new Map();
+  for (const transfer of transfers || []) {
+    const linkId = transfer.source?.linkId || transfer.linkId;
+    if (!linkId) continue;
+    const fingerprint = liabilityTransferEvidenceFingerprint(transfer, liabilityAccountId);
+    const bucket = byFingerprint.get(fingerprint) || new Set();
+    bucket.add(linkId);
+    byFingerprint.set(fingerprint, bucket);
+  }
+  for (const linkIds of byFingerprint.values()) {
+    if (linkIds.size > 1) return true;
+  }
+  return false;
+}
+
 function collectLiabilityFundingTransfers(state, input, accountId) {
   const byLinkId = new Map();
   for (const transfer of state.occurrences) {
@@ -625,10 +668,16 @@ function collectLiabilityFundingTransfers(state, input, accountId) {
     const linkId = transfer.source?.linkId;
     if (!linkId) continue;
     byLinkId.set(linkId, {
+      linkId,
       date: transfer.date,
       amountCents: absCents(link.amountCents || transfer.amountCents),
+      fromAccountId: transfer.fromAccountId || null,
       source: transfer.source,
       fundingLinks: transfer.fundingLinks,
+      durableIdentity: transfer.durableIdentity,
+      sourceFingerprint: transfer.sourceFingerprint || null,
+      transactionId: transfer.transactionId || null,
+      transferredId: transfer.transferredId || null,
     });
   }
   for (const transfer of input.transfers || []) {
@@ -636,10 +685,16 @@ function collectLiabilityFundingTransfers(state, input, accountId) {
     if (!transfer.date || !transfer.linkId || byLinkId.has(transfer.linkId)) continue;
     const amountCents = absCents(transfer.amountCents);
     byLinkId.set(transfer.linkId, {
+      linkId: transfer.linkId,
       date: transfer.date,
       amountCents,
+      fromAccountId: transfer.fromAccountId || null,
       source: { linkId: transfer.linkId },
       fundingLinks: [{ kind: 'liability_funding', accountId, amountCents }],
+      durableIdentity: transfer.durableIdentity || null,
+      sourceFingerprint: transfer.sourceFingerprint || null,
+      transactionId: transfer.transactionId || null,
+      transferredId: transfer.transferredId || null,
     });
   }
   return [...byLinkId.values()];
@@ -663,9 +718,10 @@ function reconcileLiabilityFundingLedger(registry, state, input) {
     const linkedTransfers = collectLiabilityFundingTransfers(state, input, cycle.accountId);
     const futureTransfers = linkedTransfers.filter((transfer) =>
       transfer.date > financeDate && transfer.date <= cycle.paymentDueDate);
-    const futureLinkIds = futureTransfers.map((transfer) => transfer.source?.linkId).filter(Boolean);
-    const duplicateTransferLinks = futureLinkIds.length > 0
-      && futureLinkIds.length !== new Set(futureLinkIds).size;
+    const allLinkIds = linkedTransfers.map((transfer) => transfer.linkId || transfer.source?.linkId).filter(Boolean);
+    const duplicateTransferLinks = allLinkIds.length > 0
+      && allLinkIds.length !== new Set(allLinkIds).size;
+    const duplicateEvidenceCollision = detectTransferEvidenceCollisions(linkedTransfers, cycle.accountId);
 
     let postedPaymentCents = 0;
     let futureTransferCents = 0;
@@ -703,6 +759,9 @@ function reconcileLiabilityFundingLedger(registry, state, input) {
 
     const evidenceIssues = [];
     if (billDueMismatch) evidenceIssues.push('due_date_mismatch');
+    if (linkedTransfers.some((transfer) => transfer.date > cycle.paymentDueDate)) {
+      evidenceIssues.push('future_transfer_after_due');
+    }
     if (cycle.coverageKind === 'statement' && postedPaymentCents > absCents(cycle.obligationCents)) {
       evidenceIssues.push('overpayment');
     }
@@ -716,6 +775,7 @@ function reconcileLiabilityFundingLedger(registry, state, input) {
       futureTransferDates,
       duplicateTransferLinks,
       duplicateBillLinks,
+      duplicateEvidenceCollision,
     });
     const quarantined = evidenceIssues.length > 0 || !validation.ok;
     const partition = validation.partition;

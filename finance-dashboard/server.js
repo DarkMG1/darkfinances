@@ -774,10 +774,10 @@ async function finalizeBulkMutation(operation, mutate, { kind } = {}) {
 }
 
 async function setRecurring(req, operation) {
-  const { key, status, hidden, forced, isBill, cancellation } = parseRecurringOverrideRequest(req);
+  const { key, status, hidden, forced, isBill, categoryId, cancellation } = parseRecurringOverrideRequest(req);
   return runActualProjectionMutation(
     () => applyLocal(operation, () =>
-      data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation })),
+      data.setRecurringOverride({ key, status, hidden, forced, isBill, categoryId, cancellation })),
   );
 }
 async function markRecurring(req, operation) {

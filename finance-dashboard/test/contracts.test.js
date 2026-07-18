@@ -89,5 +89,6 @@ test('app and web render incomplete Safe-to-Spend as unavailable, never zero', (
 
   assert.match(appHome, /safeToSpend\?\.complete && safeToSpend\.value != null/);
   assert.match(appHome, /Safe to Spend unavailable/);
+  assert.match(appHome, /liquidity\.safeToSpend\.incompleteReasons/);
   assert.doesNotMatch(appHome, /fmtMoney\(safeToSpend\.value\s*\|\|\s*0\)/);
 });

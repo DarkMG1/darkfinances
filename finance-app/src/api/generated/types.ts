@@ -19,6 +19,7 @@ export interface AccountOverrideEntry {
   paymentRecurringKey?: string;
   fundingAccountId?: string;
   statement?: AccountCreditStatementOverride;
+  clearCreditLiability?: boolean;
 }
 
 export interface AccountCreditLiabilityOverride {
@@ -455,6 +456,8 @@ export interface RecurringItem {
   key: string;
   payee: string;
   category: string;
+  categoryId?: string | null;
+  categoryIdentityStatus?: 'explicit' | 'inferred' | 'ambiguous' | 'missing';
   cadence: Cadence;
   amount: number;
   monthlyEquivalent: number;

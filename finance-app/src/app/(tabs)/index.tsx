@@ -102,6 +102,7 @@ export default function Overview() {
   const reserved = today.data?.obligations.reserved ?? today.data?.obligationGraph?.reservations ?? [];
   const nextIncome = today.data?.obligations.nextIncome;
   const safeToSpend = today.data?.liquidity.safeToSpend;
+  const incompleteReasons = today.data?.liquidity.safeToSpend.incompleteReasons ?? [];
 
   return (
     <Screen title="dark" accent="finances" onRefresh={onRefresh} testID="home-screen">
@@ -153,8 +154,8 @@ export default function Overview() {
             <Card testID="today-safe-to-spend-unavailable" style={styles.incompleteCard}>
               <Text style={styles.incompleteTitle}>Safe to Spend unavailable</Text>
               <Text style={styles.incompleteText}>Required inputs are missing or unresolved. No estimate is shown until they are complete.</Text>
-              {today.data?.obligationGraph?.completeness?.incompleteReasons?.length ? (
-                <Text style={styles.incompleteText}>{today.data.obligationGraph.completeness.incompleteReasons.join(' · ')}</Text>
+              {incompleteReasons.length ? (
+                <Text style={styles.incompleteText}>{incompleteReasons.join(' · ')}</Text>
               ) : null}
             </Card>
           ) : null}

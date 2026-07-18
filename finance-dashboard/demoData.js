@@ -102,7 +102,7 @@ function buildSub(payee, category, amount, daysSinceLast, occ, priceFrom) {
   const priceChange = priceFrom && priceFrom !== amount
     ? { from: round2(priceFrom), to: round2(amount), pct: Math.round(((amount - priceFrom) / priceFrom) * 100) } : null;
   return {
-    key: recurKey(payee), payee, category, cadence: 'monthly', amount: round2(amount), monthlyEquivalent: round2(amount),
+    key: recurKey(payee), payee, category, categoryId: catId(category), cadence: 'monthly', amount: round2(amount), monthlyEquivalent: round2(amount),
     isBill: /rent|mortgage|phone|internet|cable|utilit|electric|water|\bgas\b|sewer|trash|insuranc|\bloan/i.test(category),
     occurrences: occ, firstCharged: history[0].date, lastCharged: last, nextRenewal,
     renewalWindow: renewalWindow(nextRenewal),
@@ -650,6 +650,7 @@ function investments() {
   return { generatedAt: new Date().toISOString(), holdings, totals, allocation: { byAssetClass, byAccount }, debts, debtTotals };
 }
 function forecast(days = 90) {
+  const todaySnapshot = today();
   const start = financeAnchor();
   const horizonDays = Math.min(180, Math.max(30, Number(days) || 90));
   const end = addDays(start, horizonDays);
@@ -690,7 +691,10 @@ function forecast(days = 90) {
     economicTransactions: graphTxnInputs.economicTransactions,
   });
   const graph = buildObligationGraph(graphInputs);
-  const graphEvents = graph.completeness?.complete
+  const obligationBlocked = !todaySnapshot.obligationGraph?.completeness?.complete
+    || (todaySnapshot.incompleteReasons || []).some((reason) => String(reason).startsWith('obligation_'));
+  const withholdGraphEvents = obligationBlocked;
+  const graphEvents = !withholdGraphEvents
     ? forecastCashEventsFromGraph(graph, { windowStart: start, windowEnd: end })
     : [];
   const events = graphEvents.map((event) => ({
@@ -725,8 +729,14 @@ function forecast(days = 90) {
   }
   const lowest = points.reduce((a, p) => (p.balance < a.balance ? p : a), points[0]);
   const warnings = [];
-  if (!graph.completeness?.complete) {
+  if (withholdGraphEvents) {
     warnings.push('Obligation graph incomplete; scheduled cash events withheld.');
+    for (const reason of [
+      ...(todaySnapshot.obligationGraph?.completeness?.incompleteReasons || []),
+      ...(todaySnapshot.incompleteReasons || []).filter((reason) => String(reason).startsWith('obligation_')),
+    ]) {
+      warnings.push(`Obligation graph: ${reason}`);
+    }
   }
   if (lowest.balance < 1000) warnings.push('Projected cash gets low this period.');
   return {
@@ -743,7 +753,11 @@ function forecast(days = 90) {
     events,
     assumptions: {
       liquidAccounts: cash.map((account) => ({ id: account.id, name: account.name })),
-      obligationGraph: graphSummary(graph),
+      obligationGraph: {
+        ...graphSummary(graph),
+        complete: graph.completeness?.complete,
+        incompleteReasons: graph.completeness?.incompleteReasons || [],
+      },
       graphDriven: true,
       genericBudgetTarget: 0,
       genericBudget: {
