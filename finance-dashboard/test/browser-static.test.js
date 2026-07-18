@@ -144,3 +144,10 @@ test('browser dashboard has a forced synthetic-data route', () => {
   assert.match(script, /location\.pathname === '\/demo'/);
   assert.match(script, /demoOnlyPage \|\|/);
 });
+
+test('browser trends chart does not coerce incomplete months to zero spend/income', () => {
+  assert.match(script, /monthTrendComplete/);
+  assert.match(script, /m\.income != null \? m\.income : null/);
+  assert.doesNotMatch(script, /m\.income \?\? 0/);
+  assert.doesNotMatch(script, /m\.spend \?\? 0/);
+});

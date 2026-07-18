@@ -24,6 +24,12 @@ test('report totals and field mappings obey their financial invariants', () => {
         totalIncome: 1000,
         totalSpend: 400,
         spending: { Shopping: 250, Groceries: 150 },
+        completeness: {
+          complete: true,
+          incompleteReasons: [],
+          transferIdentityUnresolvedCount: 0,
+          transferIdentityReasons: [],
+        },
       },
     },
     trends: { months: [{ month: '2026-07', income: 1000, spend: 400, net: 600, netWorth: 5000 }] },
@@ -38,4 +44,34 @@ test('report totals and field mappings obey their financial invariants', () => {
   ]);
   assert.equal(report.merchantTrends[0].payee, 'Merchant');
   assert.equal(report.cashFlow[0].month, '2026-07');
+});
+
+test('report monthlyReview nulls authoritative totals when transfer identity is incomplete', () => {
+  const report = buildReportsPayload({
+    month: '2026-07',
+    generatedAt: '2026-07-10T00:00:00.000Z',
+    monthly: {
+      transactions: [{ payee: 'Merchant', amount: -250 }],
+      summary: {
+        totalSpend: null,
+        totalIncome: null,
+        knownSpendSubtotal: 250,
+        knownIncomeSubtotal: 0,
+        spending: { Shopping: 250 },
+        completeness: {
+          complete: false,
+          incompleteReasons: ['transfer_identity_unresolved'],
+          transferIdentityUnresolvedCount: 1,
+          transferIdentityReasons: ['transfer_pair_amount_mismatch'],
+        },
+      },
+    },
+    trends: { months: [], completeness: { complete: true, incompleteReasons: [], transferIdentityUnresolvedCount: 0, transferIdentityReasons: [] } },
+    insights: { largestCharges: [], uncategorized: [], completeness: { complete: true, incompleteReasons: [], transferIdentityUnresolvedCount: 0, transferIdentityReasons: [] } },
+    tags: { tags: [] },
+  });
+  assert.equal(report.monthlyReview.spend, null);
+  assert.equal(report.monthlyReview.income, null);
+  assert.equal(report.monthlyReview.knownSpendSubtotal, 250);
+  assert.equal(report.completeness.complete, false);
 });

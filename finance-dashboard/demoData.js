@@ -5,6 +5,15 @@
 
 const { metricValue } = require('./lib/metric-provenance');
 const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
+const {
+  buildCategoryInfo,
+  buildTransferIndex,
+  classifyTransactionLeaves,
+  hasActualTransferIdentity,
+  leafCountsAsRealSpend,
+  transactionLeaves,
+} = require('./lib/domain/classification');
+const { spendSummaryFromClassifiedLeaves, mergeProjectionCompleteness } = require('./lib/domain/projection-completeness');
 const { addDays, addMonths, daysBetween, daysInMonth, monthEnd, shiftMonth, todayYMD } = require('./lib/date-only');
 const {
   inferRecurrenceSchedule,
@@ -51,7 +60,23 @@ const CATS = [
   ['Shopping', 'Shopping'], ['Electronics', 'Shopping'],
   ['Gym', 'Health'], ['Pharmacy', 'Health'],
   ['Entertainment', 'Entertainment'], ['Travel', 'Travel'],
+  ['Transfer', 'Money Movement'],
 ];
+const DEMO_CLASSIFIER_PATTERNS = {
+  incomeGroup: /^income$/i,
+  moneyMovementGroup: /money movement/i,
+  moneyMovementCategory: /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i,
+  reimbursementCategory: /^reimbursement$/i,
+};
+const demoCategoryInfo = () => buildCategoryInfo(
+  [{ name: 'Income', is_income: true, categories: [{ id: catId('Salary'), name: 'Salary' }, { id: catId('Interest'), name: 'Interest' }] },
+    { name: 'Money Movement', categories: [{ id: catId('Transfer'), name: 'Transfer' }] },
+    ...Array.from(new Set(CATS.map(([, group]) => group))).filter((g) => g !== 'Income' && g !== 'Money Movement').map((group) => ({
+      name: group,
+      categories: CATS.filter(([, g]) => g === group).map(([name]) => ({ id: catId(name), name })),
+    }))],
+  DEMO_CLASSIFIER_PATTERNS,
+);
 const catId = (name) => 'cat-' + name.toLowerCase().replace(/[^a-z]+/g, '-');
 const categories = () => CATS.map(([name, group]) => ({ id: catId(name), name, group }));
 
@@ -136,6 +161,7 @@ function today() {
     budgets: { supported: false },
     recurring: recurring(),
     goals: goals(),
+    spendingCompleteness: currentSpending.current?.completeness,
   });
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',
@@ -153,8 +179,11 @@ function today() {
     asOf,
     financeDate: financeAnchor(),
     revision: `demo-${currentMonth()}`,
-    complete: safeToSpend.complete,
-    incompleteReasons: safeToSpend.incompleteReasons,
+    complete: safeToSpend.complete && currentSpending.current?.completeness?.complete !== false,
+    incompleteReasons: [...new Set([
+      ...safeToSpend.incompleteReasons,
+      ...(currentSpending.current?.completeness?.complete === false ? currentSpending.current.completeness.incompleteReasons : []),
+    ])],
     health: { ready: true, initializedAt: asOf, lastSyncAt: asOf, lastErrorAt: null, lastError: null },
     accounts: allAccounts,
     spending: currentSpending,
@@ -217,16 +246,42 @@ function goals() {
 
 // ---- Spending (this month + prev) -----------------------------------------
 function summarizeTxns(start, end) {
-  const out = {};
-  let totalIncome = 0;
-  for (const t of transactions()) {
-    if (start && t.date < start) continue;
-    if (end && t.date > end) continue;
-    if (t.amount > 0) totalIncome += t.amount;
-    else if (t.category) out[t.category] = round2((out[t.category] || 0) + Math.abs(t.amount));
-  }
-  return { spending: out, totalSpend: round2(Object.values(out).reduce((s, x) => s + x, 0)), totalIncome: round2(totalIncome) };
+  const catInfo = demoCategoryInfo();
+  const allRows = transactions().map((t) => actualRowFromDemoTransaction(t));
+  const transferIndex = buildTransferIndex(allRows);
+  const classified = transactions()
+    .filter((t) => (!start || t.date >= start) && (!end || t.date <= end))
+    .flatMap((t) => {
+      const row = actualRowFromDemoTransaction(t);
+      return classifyTransactionLeaves(row.transaction, catInfo, { accountId: row.accountId, transferIndex });
+    });
+  return spendSummaryFromClassifiedLeaves(classified);
 }
+
+function actualRowFromDemoTransaction(t) {
+  const subtransactions = Array.isArray(t.subtransactions) ? t.subtransactions : null;
+  return {
+    transaction: {
+      id: t.id,
+      is_parent: !!subtransactions?.length,
+      amount: Math.round((t.amount || 0) * 100),
+      category: t.categoryId,
+      notes: t.notes,
+      transfer_id: t.transferId || null,
+      transferred_id: t.transferredId || null,
+      subtransactions: subtransactions?.map((leg) => ({
+        id: leg.id,
+        amount: Math.round((leg.amount || 0) * 100),
+        category: leg.categoryId,
+        notes: leg.notes,
+        transfer_id: leg.transferId || null,
+        transferred_id: leg.transferredId || null,
+      })),
+    },
+    accountId: t.accountId,
+  };
+}
+
 function spending(opts = {}) {
   const anchor = financeAnchor();
   let start = opts.start;
@@ -240,10 +295,13 @@ function spending(opts = {}) {
   const span = Math.max(1, daysBetween(start, end) + 1);
   const prevEnd = addDays(start, -1);
   const prevStart = addDays(prevEnd, -(span - 1));
+  const current = summarizeTxns(start, end);
+  const previous = summarizeTxns(prevStart, prevEnd);
   return {
-    current: summarizeTxns(start, end),
-    prev: summarizeTxns(prevStart, prevEnd),
+    current,
+    prev: previous,
     month: key || start.slice(0, 7),
+    completeness: mergeProjectionCompleteness([current.completeness, previous.completeness]),
   };
 }
 
@@ -337,19 +395,26 @@ function reimbursement() {
 // ---- Insights -------------------------------------------------------------
 function insights() {
   const month = currentMonth();
-  const curTxns = transactions().filter((t) => t.date.slice(0, 7) === month);
-  const expenses = curTxns.filter((t) => t.amount < 0);
+  const catInfo = demoCategoryInfo();
+  const leaves = transactions()
+    .filter((t) => t.date.slice(0, 7) === month)
+    .flatMap((t) => classifyTransactionLeaves(actualRowFromDemoTransaction(t).transaction, catInfo, { accountId: t.accountId, transactionId: t.id })
+      .map((lf) => ({ ...lf, payee: t.payee, date: t.date })));
+  const expenses = leaves.filter((lf) => leafCountsAsRealSpend(lf));
   const byPayee = {};
-  for (const t of expenses) {
-    if (!byPayee[t.payee]) byPayee[t.payee] = { payee: t.payee, total: 0, count: 0, category: t.category };
-    byPayee[t.payee].total = round2(byPayee[t.payee].total + Math.abs(t.amount));
-    byPayee[t.payee].count += 1;
+  for (const lf of expenses) {
+    const payee = lf.payee || '(no payee)';
+    if (!byPayee[payee]) byPayee[payee] = { payee, total: 0, count: 0, category: lf.reason?.startsWith('category:') ? lf.reason.slice('category:'.length) : 'Uncategorized' };
+    byPayee[payee].total = round2(byPayee[payee].total + Math.abs(lf.amount / 100));
+    byPayee[payee].count += 1;
   }
   return {
     month,
-    largestCharges: expenses.slice().sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount)).slice(0, 5),
+    largestCharges: expenses.slice().sort((a, b) => a.amount - b.amount).slice(0, 5).map((lf) => ({
+      id: lf.id, date: lf.date, payee: lf.payee, amount: lf.amount / 100, category: lf.reason?.startsWith('category:') ? lf.reason.slice('category:'.length) : 'Uncategorized',
+    })),
     topMerchants: Object.values(byPayee).sort((a, b) => b.total - a.total).slice(0, 5),
-    uncategorized: curTxns.filter((t) => !t.category).map((t) => ({ date: t.date, payee: t.payee, amount: t.amount })),
+    uncategorized: leaves.filter((lf) => lf.kind === 'uncat' && lf.amount < 0).map((lf) => ({ date: lf.date, payee: lf.payee, amount: lf.amount / 100 })),
     recurring: [
       { payee: 'Netflix', category: 'Streaming', monthsSeen: 8, estimated: 15.49 },
       { payee: 'Spotify', category: 'Streaming', monthsSeen: 10, estimated: 11.99 },
@@ -382,8 +447,34 @@ function transactions() {
   const rnd = mulberry32(42);
   const tx = [];
   const acctName = (accId) => (ACCOUNTS.find((a) => a.id === accId) || ACCOUNTS[0]).name;
-  const push = (daysBack, payee, amount, cat, accId, notes = '') => {
-    tx.push({ id: 'tx-' + _nextTxn++, parentId: null, isLeg: false, date: ymd(daysAgo(daysBack)), payee, account: acctName(accId), accountId: accId, cleared: true, amount: round2(amount), category: cat, categoryId: cat ? catId(cat) : null, notes, imported: true });
+  const push = (daysBack, payee, amount, cat, accId, notes = '', identity = {}) => {
+    const id = identity.id || ('tx-' + _nextTxn++);
+    if (!identity.id) _nextTxn += 1;
+    const row = {
+      id,
+      parentId: null,
+      isLeg: false,
+      date: ymd(daysAgo(daysBack)),
+      payee,
+      account: acctName(accId),
+      accountId: accId,
+      cleared: true,
+      amount: round2(amount),
+      category: cat,
+      categoryId: cat ? catId(cat) : null,
+      notes,
+      imported: true,
+      transferId: identity.transferId || null,
+      transferredId: identity.transferredId || null,
+    };
+    if (identity.subtransactions) {
+      row.isSplit = true;
+      row.splitCount = identity.subtransactions.length;
+      row.category = 'Split';
+      row.categoryId = null;
+      row.subtransactions = identity.subtransactions;
+    }
+    tx.push(row);
   };
   for (const db of [1, 15, 31, 46]) push(db, 'Acme Corp Payroll', 3250, 'Salary', 'acc-check');
   push(2, 'Ally Bank Interest', 38.2, 'Interest', 'acc-save');
@@ -412,7 +503,27 @@ function transactions() {
   push(13, 'CVS Pharmacy', -18.5, 'Pharmacy', 'acc-credit');
   push(5, 'Square *Vendor', -22.4, null, 'acc-credit', '#work');
   push(18, 'Venmo', -30, null, 'acc-check', '#alex');
+  const savingsXferOut = 'tx-demo-xfer-out';
+  const savingsXferIn = 'tx-demo-xfer-in';
+  push(4, 'Transfer : to High-Yield Savings', -500, 'Transfer', 'acc-check', '', { transferId: savingsXferIn, transferredId: 'acc-save' });
+  tx[tx.length - 1].id = savingsXferOut;
+  push(4, 'Transfer : from Everyday Checking', 500, 'Transfer', 'acc-save', '', { transferId: savingsXferOut, transferredId: 'acc-check' });
+  tx[tx.length - 1].id = savingsXferIn;
+  push(9, 'Transfer from Mom', -120, null, 'acc-check', 'renamed payee without Actual identity');
+  push(10, 'Wire Fee', -35, 'Shopping', 'acc-check', 'category Transfer name does not prove movement', { categoryOverride: true });
+  tx[tx.length - 1].category = 'Transfer';
+  tx[tx.length - 1].categoryId = catId('Transfer');
+  push(6, 'Split purchase', -150, null, 'acc-credit', 'mixed split', {
+    id: 'tx-demo-split-parent',
+    subtransactions: [
+      { id: 'tx-demo-split-exp', amount: -100, categoryId: catId('Shopping'), notes: 'merchandise' },
+      { id: 'tx-demo-split-xfer', amount: -50, categoryId: catId('Transfer'), transferId: 'tx-demo-split-remote', notes: 'savings leg' },
+    ],
+  });
   tx.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  for (const row of tx) {
+    row.transfer = hasActualTransferIdentity(actualRowFromDemoTransaction(row).transaction);
+  }
   _txns = tx;
   return tx;
 }
@@ -532,8 +643,8 @@ function reports() {
 }
 function review() {
   const tx = transactions();
-  const uncategorized = tx.find((t) => !t.category);
-  const large = tx.find((t) => Math.abs(t.amount) > 1000 && t.amount < 0);
+  const uncategorized = tx.find((t) => !t.category && !t.transfer);
+  const large = tx.find((t) => !t.transfer && Math.abs(t.amount) > 1000 && t.amount < 0);
   const tasks = [
     uncategorized ? { id: 'review-uncat', kind: 'uncategorized', priority: 95, title: 'Categorize transaction', subtitle: 'Needs a category', action: 'categorize', amount: Math.abs(uncategorized.amount), date: uncategorized.date, transaction: uncategorized } : null,
     large ? { id: 'review-large', kind: 'large_charge', priority: 85, title: 'Large charge', subtitle: 'Review unusually large spending', action: 'open_transaction', amount: Math.abs(large.amount), date: large.date, transaction: large } : null,
@@ -545,11 +656,16 @@ function events() { return { events: demoState.events.map((e) => ({ ...e, member
 function rules() { return { rules: demoState.rules.map((r) => ({ ...r })), catalog: [{ label: 'Streaming services', type: 'subscription' }, { label: 'Coffee shops', type: 'merchant' }] }; }
 function merchantHistory({ payee = '', months = 12 } = {}) {
   const m = Math.min(36, Math.max(1, Number(months) || 12));
+  const catInfo = demoCategoryInfo();
   const out = [];
   const anchorMonth = currentMonth();
   for (let i = m - 1; i >= 0; i--) {
     const key = shiftMonth(anchorMonth, -i);
-    const items = transactions().filter((t) => t.payee.toLowerCase() === String(payee).toLowerCase() && t.date.slice(0, 7) === key);
+    const items = transactions()
+      .filter((t) => t.payee.toLowerCase() === String(payee).toLowerCase() && t.date.slice(0, 7) === key)
+      .flatMap((t) => classifyTransactionLeaves(actualRowFromDemoTransaction(t).transaction, catInfo, { accountId: t.accountId })
+        .filter((lf) => leafCountsAsRealSpend(lf))
+        .map((lf) => ({ id: lf.id, date: t.date, payee: t.payee, amount: lf.amount / 100, category: lf.reason?.startsWith('category:') ? lf.reason.slice('category:'.length) : 'Uncategorized' })));
     out.push({ month: key, total: round2(items.reduce((s, t) => s + Math.abs(t.amount), 0)), count: items.length, items });
   }
   const all = out.flatMap((x) => x.items);

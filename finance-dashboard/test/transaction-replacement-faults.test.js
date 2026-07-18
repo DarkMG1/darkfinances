@@ -1485,13 +1485,23 @@ test('record-v2 rollback compatibility shields active sagas from the legacy reco
 
 test('parent and child transfer identity reject reconstruction before any state mutation', async (t) => {
   for (const [name, transaction] of [
-    ['parent', { ...original, transfer_id: 'paired-transfer' }],
-    ['child', {
+    ['parent transfer_id', { ...original, transfer_id: 'paired-transfer' }],
+    ['parent transferred_id', { ...original, transferred_id: 'acct-other' }],
+    ['child transfer_id', {
       ...original,
       is_parent: true,
       category: null,
       subtransactions: [
         { id: 'old-leg-1', amount: -400, category: 'cat-1', transfer_id: 'paired-transfer' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2' },
+      ],
+    }],
+    ['child transferred_id', {
+      ...original,
+      is_parent: true,
+      category: null,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', transferred_id: 'acct-other' },
         { id: 'old-leg-2', amount: -600, category: 'cat-2' },
       ],
     }],

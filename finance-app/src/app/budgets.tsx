@@ -6,7 +6,7 @@ import { BudgetCategory } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
 import { Card, CardTitle, EmptyState, ErrorState } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
-import { GroupedBars, MonthNavigator, ProgressBar } from '@/components/charts';
+import { GroupedBars, MonthNavigator, ProgressBar, trendPeriodComplete } from '@/components/charts';
 import { haptics } from '@/lib/haptics';
 import { useCurrentMonthKey, useSelectedMonth } from '@/lib/selectedMonth';
 import { colors, fmtPos } from '@/theme/colors';
@@ -39,19 +39,24 @@ export default function Budgets() {
   const onRefresh = () => Promise.all([trends.refetch(), budgets.refetch()]);
 
   const allMonths = useMemo(() => trends.data?.months ?? [], [trends.data?.months]);
+  const monthComplete = trendPeriodComplete;
   // Bars/navigation span exactly as far back as there's data.
   const availMonths = useMemo(() => {
     let i = 0;
-    while (i < allMonths.length && allMonths[i].spend === 0 && allMonths[i].income === 0) i++;
-    const trimmed = allMonths.slice(i).map((m) => ({ month: m.month, spend: m.spend }));
+    while (i < allMonths.length && (allMonths[i].spend == null || allMonths[i].spend === 0) && (allMonths[i].income == null || allMonths[i].income === 0)) i++;
+    const trimmed = allMonths.slice(i).map((m) => ({
+      month: m.month,
+      spend: monthComplete(m) ? m.spend! : null,
+    }));
     return trimmed.length ? trimmed : [{ month: curKey, spend: 0 }];
   }, [allMonths, curKey]);
 
   // Income vs spending chart keeps the most recent 12 months.
   const chart = allMonths.slice(-12);
   const labels = chart.map((m) => m.month.slice(5));
-  const income = chart.map((m) => m.income);
-  const spend = chart.map((m) => m.spend);
+  const income = chart.map((m) => (monthComplete(m) ? m.income! : null));
+  const spend = chart.map((m) => (monthComplete(m) ? m.spend! : null));
+  const chartHasIncomplete = chart.some((m) => !monthComplete(m));
 
   const b = budgets.data;
   const hasTargets = (b?.totalTarget ?? b?.totalBudgeted ?? 0) > 0;
@@ -80,6 +85,7 @@ export default function Budgets() {
       {chart.length > 1 ? (
         <Card style={{ marginBottom: 20 }}>
           <CardTitle>Income vs Spending · 12 mo</CardTitle>
+          {chartHasIncomplete ? <Text style={styles.incompleteNote} accessibilityRole="text">Some months unavailable — transfer identity unresolved</Text> : null}
           <GroupedBars width={width - 64} labels={labels} seriesA={income} seriesB={spend} />
           <View style={styles.legend}>
             <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.green }]} /><Text style={styles.legendText}>Income</Text></View>
@@ -200,6 +206,7 @@ const styles = StyleSheet.create({
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   legendDot: { width: 8, height: 8, borderRadius: 4 },
   legendText: { color: colors.muted, fontSize: 11 },
+  incompleteNote: { color: colors.muted, fontSize: 11, marginBottom: 8 },
   note: { color: colors.muted, fontSize: 12, marginBottom: 12 },
   summaryCard: { flexDirection: 'row', gap: 10, marginBottom: 12 },
   summaryItem: { flex: 1 },

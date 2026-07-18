@@ -21,6 +21,7 @@ const spendingSource = fs.readFileSync(
   path.resolve(__dirname, '..', 'src', 'app', '(tabs)', 'spending.tsx'),
   'utf8',
 );
+const appRoot = path.resolve(__dirname, '..');
 
 function luminance(hex) {
   const rgb = [0, 2, 4].map((i) => parseInt(hex.slice(i + 1, i + 3), 16) / 255)
@@ -200,10 +201,38 @@ test('spending screen preserves PR-19 finance-date hooks for period windows', ()
   assert.doesNotMatch(spendingSource, /new Date\(\)\.toISOString\(\)/);
 });
 
+test('spending screen gates authoritative totals on projection completeness', () => {
+  assert.match(spendingSource, /spendingComplete = cur\?\.completeness\?\.complete !== false/);
+  assert.match(spendingSource, /totalSpend = spendingComplete && cur\?\.totalSpend != null \? cur\.totalSpend : null/);
+  assert.match(spendingSource, /'Unavailable'/);
+  assert.doesNotMatch(spendingSource, /cur\?\.totalSpend \?\? 0/);
+  assert.doesNotMatch(spendingSource, /cur\?\.totalIncome \?\? 0/);
+});
+
+test('chart geometry preserves null incomplete trend values instead of coercing to zero', () => {
+  const chartsSource = fs.readFileSync(path.join(appRoot, 'src/components/charts.tsx'), 'utf8');
+  const cashflowSource = fs.readFileSync(path.join(appRoot, 'src/app/cashflow.tsx'), 'utf8');
+  const budgetsSource = fs.readFileSync(path.join(appRoot, 'src/app/budgets.tsx'), 'utf8');
+  assert.match(chartsSource, /ChartSeriesValue = number \| null/);
+  assert.match(chartsSource, /income == null \|\| spend == null/);
+  assert.match(chartsSource, /unavailable/);
+  assert.doesNotMatch(cashflowSource, /m\.income : 0\)/);
+  assert.doesNotMatch(cashflowSource, /m\.spend : 0\)/);
+  assert.match(cashflowSource, /monthComplete\(m\) \? m\.income! : null/);
+  assert.doesNotMatch(budgetsSource, /m\.income \?\? 0/);
+  assert.doesNotMatch(budgetsSource, /m\.spend \?\? 0/);
+  assert.doesNotMatch(spendingSource, /m\.income \?\? 0/);
+  assert.doesNotMatch(spendingSource, /m\.spend \?\? 0/);
+  assert.match(spendingSource, /incomeUnavailable/);
+  assert.match(spendingSource, /unavailableBar/);
+  assert.match(cashflowSource, /chartHasIncomplete/);
+  assert.match(budgetsSource, /chartHasIncomplete/);
+});
+
 /**
  * Residual Spending fallbacks audit (post-remediation):
- * - Income/Total Spend/Net: cur?.total* ?? 0 — gated behind spendingLoading/spendingIsError; zero only when cur exists.
- * - Chart net/netWorth: hard-coded 0 in synthetic month bucket when trends empty (no $ labels).
+ * - Income/Total Spend/Net: null + Unavailable when projection completeness is incomplete.
+ * - Chart net/netWorth: null buckets when trends month incomplete.
  * - Breakdown %: totalSpend > 0 guard — genuine computed.
  * - Refunds: refundEntries sum after spending gate — genuine computed; NaN guarded via computedMoneyMetric.
  * - Reimbursements: /api/v1/reimbursement summary.fronted for selectedWindow — independent query states.

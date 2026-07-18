@@ -11,6 +11,7 @@ import { haptics } from '@/lib/haptics';
 import { addDateOnlyDays, monthEnd, useFinanceToday } from '@/lib/date-only';
 import { buildBudgetMetrics, buildNonSpendingMetrics } from '@/lib/spending-metrics.js';
 import { useSelectedMonth } from '@/lib/selectedMonth';
+import { trendPeriodComplete } from '@/components/charts';
 import { categoryColors, colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
 
 type Period = 'week' | 'month' | 'quarter' | 'year';
@@ -89,17 +90,24 @@ export default function Spending() {
   const spendingLoading = useCurrentToday ? today.isLoading : spending.isLoading;
   const spendingError = useCurrentToday ? today.error : spending.error;
   const spendingIsError = useCurrentToday ? today.isError : spending.isError;
+  const spendingComplete = cur?.completeness?.complete !== false;
+  const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
+  const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
+  const netIncome = totalSpend != null && totalIncome != null ? totalIncome - totalSpend : null;
 
   // Bars/navigation span exactly as far back as there's data: trim leading
   // buckets with no spend and no income from the (ascending) trends series.
   const availMonths = useMemo(() => {
     const ms = trends.data?.months ?? [];
     let i = 0;
-    while (i < ms.length && ms[i].spend === 0 && ms[i].income === 0) i++;
+    while (i < ms.length && (ms[i].spend == null || ms[i].spend === 0) && (ms[i].income == null || ms[i].income === 0)) i++;
     const trimmed = ms.slice(i);
-    return trimmed.length ? trimmed : [{ month: curKey, spend: cur?.totalSpend ?? 0, income: cur?.totalIncome ?? 0, net: 0, netWorth: 0 }];
-  }, [trends.data, curKey, cur]);
+    const fallbackSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
+    const fallbackIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
+    return trimmed.length ? trimmed : [{ month: curKey, spend: fallbackSpend, income: fallbackIncome, net: fallbackSpend != null && fallbackIncome != null ? fallbackIncome - fallbackSpend : null, netWorth: 0 }];
+  }, [trends.data, curKey, cur, spendingComplete]);
   const chartMonths = useMemo(() => availMonths.slice(-6), [availMonths]);
+  const chartHasIncomplete = chartMonths.some((m) => m.spend == null || m.income == null);
 
   const entries = useMemo(
     () => (cur ? Object.entries(cur.spending).sort((a, b) => b[1] - a[1]) : []),
@@ -136,9 +144,7 @@ export default function Spending() {
       { key: 'subscriptions', label: 'Subscriptions', amount: subscriptions, target: 'Subscriptions' },
     ].filter((row) => row.amount > 0.005);
   }, [groupByCategory, spendEntries]);
-  const totalSpend = cur?.totalSpend ?? 0;
-  const totalIncome = cur?.totalIncome ?? 0;
-  const netIncome = totalIncome - totalSpend;
+
   const refundTotal = refundEntries.reduce((sum, [, amt]) => sum + Math.abs(amt), 0);
   const nonSpending = useMemo(
     () => buildNonSpendingMetrics({
@@ -192,6 +198,7 @@ export default function Spending() {
     <Screen title="Spending" right={headerRight} onRefresh={refresh} testID="spending-screen">
       <View style={styles.controlsCard}>
         <PeriodChips value={period} onChange={setPeriod} />
+        {chartHasIncomplete ? <Text style={styles.incompleteNote} accessibilityRole="text">Some months unavailable — transfer identity unresolved</Text> : null}
         <DualMonthBars months={chartMonths} selected={month} onSelect={setMonth} />
       </View>
 
@@ -204,8 +211,8 @@ export default function Spending() {
       ) : (
         <>
           <SummaryCard>
-            <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={fmtPos(totalIncome)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Income') })} />
-            <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={fmtPos(totalSpend)} expanded={totalExpanded} onPress={() => { haptics.tap(); setTotalExpanded((v) => !v); }} />
+            <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={totalIncome != null ? fmtPos(totalIncome) : 'Unavailable'} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Income') })} />
+            <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={totalSpend != null ? fmtPos(totalSpend) : 'Unavailable'} expanded={totalExpanded} onPress={() => { haptics.tap(); setTotalExpanded((v) => !v); }} />
             {totalExpanded ? totalSpendRows.map((row, i) => (
               <SummaryRow
                 key={row.key}
@@ -218,7 +225,7 @@ export default function Spending() {
                 onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(row.target, row.key) })}
               />
             )) : null}
-            <SummaryRow icon="minus.circle" label="Net Income" value={`${netIncome < 0 ? '-' : ''}${fmtPos(Math.abs(netIncome))}`} muted last />
+            <SummaryRow icon="minus.circle" label="Net Income" value={netIncome != null ? `${netIncome < 0 ? '-' : ''}${fmtPos(Math.abs(netIncome))}` : 'Unavailable'} muted last />
           </SummaryCard>
 
           <SectionTitle>Your Budget</SectionTitle>
@@ -290,7 +297,7 @@ export default function Spending() {
                     key={cat}
                     category={cat}
                     amount={amt}
-                    pct={totalSpend > 0 ? amt / totalSpend : 0}
+                    pct={totalSpend != null && totalSpend > 0 ? amt / totalSpend : 0}
                     color={categoryColors[i % categoryColors.length]}
                     onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(cat) })}
                   />
@@ -429,19 +436,39 @@ function PeriodChips({ value, onChange }: { value: Period; onChange: (p: Period)
   );
 }
 
-function DualMonthBars({ months, selected, onSelect }: { months: { month: string; spend: number; income: number }[]; selected: string; onSelect: (m: string) => void }) {
-  const max = Math.max(1, ...months.map((m) => Math.max(m.spend, m.income)));
+function DualMonthBars({ months, selected, onSelect }: { months: { month: string; spend: number | null; income: number | null }[]; selected: string; onSelect: (m: string) => void }) {
+  const values = months.flatMap((m) => [m.spend, m.income].filter((v): v is number => v != null));
+  const max = Math.max(1, ...values);
   const barMax = 48;
   return (
-    <View style={styles.monthWrap}>
+    <View style={styles.monthWrap} accessibilityRole="adjustable" accessibilityLabel={`Monthly income and spending chart${months.some((m) => m.spend == null || m.income == null) ? ', some months unavailable' : ''}`}>
       <View style={styles.monthBars}>
         {months.map((m) => {
           const on = m.month === selected;
+          const incomeVal = m.income;
+          const spendVal = m.spend;
+          const incomeUnavailable = incomeVal == null;
+          const spendUnavailable = spendVal == null;
           return (
-            <Pressable key={m.month} onPress={() => { haptics.tap(); onSelect(m.month); }} style={[styles.monthCell, on && styles.monthCellOn]}>
+            <Pressable
+              key={m.month}
+              accessibilityRole="button"
+              accessibilityState={{ selected: on }}
+              accessibilityLabel={`${monthLabel(m.month)}${incomeUnavailable || spendUnavailable ? ', unavailable' : `, income ${fmtPos(incomeVal ?? 0)}, spend ${fmtPos(spendVal ?? 0)}`}`}
+              onPress={() => { haptics.tap(); onSelect(m.month); }}
+              style={[styles.monthCell, on && styles.monthCellOn]}
+            >
               <View style={styles.barStage}>
-                <View style={[styles.incomeBar, { height: Math.max(2, (m.income / max) * barMax) }]} />
-                <View style={[styles.spendBar, { height: Math.max(2, (m.spend / max) * barMax) }]} />
+                {incomeUnavailable ? (
+                  <View style={[styles.unavailableBar, { height: 10 }]} />
+                ) : (
+                  <View style={[styles.incomeBar, { height: Math.max(incomeVal === 0 ? 0 : 2, (incomeVal / max) * barMax) }]} />
+                )}
+                {spendUnavailable ? (
+                  <View style={[styles.unavailableBar, { height: 10 }]} />
+                ) : (
+                  <View style={[styles.spendBar, { height: Math.max(spendVal === 0 ? 0 : 2, (spendVal / max) * barMax) }]} />
+                )}
               </View>
               <Text style={[styles.monthText, on && styles.monthTextOn]}>{monthLabel(m.month).split(' ')[0]}</Text>
             </Pressable>
@@ -483,12 +510,12 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <CardTitle style={styles.section}>{children}</CardTitle>;
 }
 
-function BreakdownCircle({ entries, total }: { entries: [string, number][]; total: number }) {
+function BreakdownCircle({ entries, total }: { entries: [string, number][]; total: number | null }) {
   const size = 118;
   const stroke = 14;
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
-  const pcts = entries.map(([, amount]) => (total > 0 ? Math.max(0.025, amount / total) : 0));
+  const pcts = entries.map(([, amount]) => (total != null && total > 0 ? Math.max(0.025, amount / total) : 0));
   const segments = entries.map(([cat], i) => ({
     cat,
     pct: pcts[i],
@@ -523,7 +550,7 @@ function BreakdownCircle({ entries, total }: { entries: [string, number][]; tota
         </Svg>
         <View style={styles.breakdownRingCenter}>
           <Text style={styles.breakdownCenterLabel}>Spend</Text>
-          <Text style={styles.breakdownCenterValue}>{fmtPos(total).replace('.00', '')}</Text>
+          <Text style={styles.breakdownCenterValue}>{total != null ? fmtPos(total).replace('.00', '') : 'Unavailable'}</Text>
         </View>
       </View>
       <View style={styles.breakdownLegend}>
@@ -646,6 +673,7 @@ const styles = StyleSheet.create({
   periodChipOn: { backgroundColor: 'rgba(124,110,247,0.18)', borderColor: 'rgba(168,152,255,0.55)' },
   periodText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
   periodTextOn: { color: colors.accentLight },
+  incompleteNote: { color: colors.muted, fontSize: 11, marginBottom: 8 },
   monthWrap: { marginBottom: 0 },
   monthBars: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
   monthCell: { flex: 1, minHeight: 82, borderRadius: 12, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 7, borderWidth: 1, borderColor: 'transparent' },
@@ -653,6 +681,7 @@ const styles = StyleSheet.create({
   barStage: { height: 56, flexDirection: 'row', alignItems: 'flex-end', gap: 5 },
   incomeBar: { width: 7, borderRadius: 4, backgroundColor: colors.green },
   spendBar: { width: 7, borderRadius: 4, backgroundColor: colors.accentLight },
+  unavailableBar: { width: 7, borderRadius: 4, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.muted },
   monthText: { color: colors.muted, fontSize: 11, marginTop: 5, fontWeight: '600' },
   monthTextOn: { color: colors.text, fontWeight: '800' },
   legendRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10 },

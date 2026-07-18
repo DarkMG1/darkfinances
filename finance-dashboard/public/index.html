@@ -712,22 +712,23 @@
     async function loadSpending() {
       const data = await (await fetch('/api/spending' + monthQS())).json();
       const { current, prev } = data;
-      document.getElementById('statSpent').textContent = fmtPos(current.totalSpend);
-      document.getElementById('statIncome').textContent = fmtPos(current.totalIncome);
-      const net = current.totalIncome - current.totalSpend;
+      const complete = current?.completeness?.complete !== false;
+      document.getElementById('statSpent').textContent = complete && current.totalSpend != null ? fmtPos(current.totalSpend) : 'Unavailable';
+      document.getElementById('statIncome').textContent = complete && current.totalIncome != null ? fmtPos(current.totalIncome) : 'Unavailable';
+      const net = complete && current.totalIncome != null && current.totalSpend != null ? current.totalIncome - current.totalSpend : null;
       const netEl = document.getElementById('statNet');
-      netEl.textContent = fmt(net);
-      netEl.style.color = net >= 0 ? 'var(--green)' : 'var(--red)';
+      netEl.textContent = net != null ? fmt(net) : 'Unavailable';
+      netEl.style.color = net != null && net >= 0 ? 'var(--green)' : net != null ? 'var(--red)' : 'var(--muted)';
 
       const dEl = document.getElementById('statSpentDelta');
-      if (prev.totalSpend > 0) {
+      if (complete && prev.totalSpend > 0 && current.totalSpend != null) {
         const delta = current.totalSpend - prev.totalSpend;
         const pct = Math.abs((delta / prev.totalSpend) * 100).toFixed(0);
         dEl.textContent = (delta > 0 ? '▲' : '▼') + ' ' + pct + '% vs prev month';
         dEl.className = 'stat-delta ' + (delta > 0 ? 'delta-down' : 'delta-up');
       } else dEl.textContent = '';
 
-      document.getElementById('chartCenterAmt').textContent = fmtPos(current.totalSpend);
+      document.getElementById('chartCenterAmt').textContent = complete && current.totalSpend != null ? fmtPos(current.totalSpend) : 'Unavailable';
       const entries = Object.entries(current.spending).sort((a, b) => b[1] - a[1]);
       const top = entries.slice(0, 10);
       const labels = top.map(e => e[0]), values = top.map(e => e[1]);
@@ -766,9 +767,10 @@
       const data = await (await fetch('/api/trends?months=' + months)).json();
       const labels = data.months.map(m => monthLabel(m.month));
       const nw = data.months.map(m => m.netWorth);
-      const inc = data.months.map(m => m.income);
-      const spd = data.months.map(m => m.spend);
-      const net = inc.map((v, i) => v - spd[i]);
+      const monthTrendComplete = (m) => m.completeness?.complete !== false && m.complete !== false;
+      const inc = data.months.map(m => monthTrendComplete(m) && m.income != null ? m.income : null);
+      const spd = data.months.map(m => monthTrendComplete(m) && m.spend != null ? m.spend : null);
+      const net = data.months.map(m => monthTrendComplete(m) && m.net != null ? m.net : null);
 
       state.trendFirstNW = nw.length ? nw[0] : null;
       state.trendMonths = months;

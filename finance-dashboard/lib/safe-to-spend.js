@@ -3,6 +3,7 @@
 const SAFE_TO_SPEND_INPUTS = Symbol('safe-to-spend-inputs');
 
 const SAFE_TO_SPEND_REASON = Object.freeze({
+  transferIdentityUnresolved: 'transfer_identity_unresolved',
   accountRolesUnassigned: 'account_roles_unassigned',
   operatingCashAccountMissing: 'operating_cash_account_missing',
   budgetDataUnavailable: 'budget_data_unavailable',
@@ -17,6 +18,7 @@ const SAFE_TO_SPEND_REASON = Object.freeze({
 });
 
 const SAFE_TO_SPEND_REASON_ORDER = Object.freeze([
+  SAFE_TO_SPEND_REASON.transferIdentityUnresolved,
   SAFE_TO_SPEND_REASON.accountRolesUnassigned,
   SAFE_TO_SPEND_REASON.operatingCashAccountMissing,
   SAFE_TO_SPEND_REASON.budgetDataUnavailable,
@@ -37,12 +39,17 @@ function safeToSpendIncompleteReasons({
   budgets = {},
   recurring = {},
   goals = [],
+  spendingCompleteness = null,
 } = {}) {
   const found = new Set();
   const add = (reason, condition) => {
     if (condition) found.add(reason);
   };
 
+  add(
+    SAFE_TO_SPEND_REASON.transferIdentityUnresolved,
+    spendingCompleteness != null && spendingCompleteness.complete === false,
+  );
   add(
     SAFE_TO_SPEND_REASON.accountRolesUnassigned,
     visibleAccounts.some((account) => account.roleSource !== 'explicit' || account.role === 'unknown'),

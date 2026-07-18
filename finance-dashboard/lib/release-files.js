@@ -7,6 +7,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/date-only.js',
   'lib/domain/cent-allocation.js',
   'lib/domain/classification.js',
+  'lib/domain/projection-completeness.js',
   'lib/domain/forecast-money.js',
   'lib/domain/money.js',
   'lib/errors.js',

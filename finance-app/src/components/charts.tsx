@@ -4,6 +4,32 @@ import { haptics } from '@/lib/haptics';
 import Svg, { Circle, G, Line, Polygon, Polyline, Rect, Text as SvgText } from 'react-native-svg';
 import { colors, fmtK, fmtMoney, monthLabel } from '@/theme/colors';
 
+export type ChartSeriesValue = number | null;
+
+export function trendPeriodComplete(m: {
+  complete?: boolean;
+  spend?: number | null;
+  income?: number | null;
+  net?: number | null;
+}): boolean {
+  return m.complete !== false && m.spend != null && m.income != null;
+}
+
+function seriesMax(...series: ChartSeriesValue[][]): number {
+  let max = 0;
+  for (const values of series) {
+    for (const value of values) {
+      if (value != null && value > max) max = value;
+    }
+  }
+  return Math.max(max, 1);
+}
+
+function chartAccessibilityPart(label: string, income: ChartSeriesValue, spend: ChartSeriesValue): string {
+  if (income == null || spend == null) return `${label} unavailable`;
+  return `${label} income ${fmtMoney(income)} spending ${fmtMoney(spend)}`;
+}
+
 const shortMonth = (key: string): string => {
   const [y, m] = key.split('-').map(Number);
   if (!y || !m) return key;
@@ -187,25 +213,38 @@ export function AreaChart({
 }
 
 export function GroupedBars({ width, height = 180, labels, seriesA, seriesB, colorA = colors.green, colorB = colors.red }: {
-  width: number; height?: number; labels: string[]; seriesA: number[]; seriesB: number[]; colorA?: string; colorB?: string;
+  width: number; height?: number; labels: string[]; seriesA: ChartSeriesValue[]; seriesB: ChartSeriesValue[]; colorA?: string; colorB?: string;
 }) {
   if (width <= 0 || !labels.length) return <View style={{ height }} />;
-  const max = Math.max(...seriesA, ...seriesB, 1);
+  const max = seriesMax(seriesA, seriesB);
   const pad = 8;
   const baseY = height - 18;
   const groupW = (width - pad * 2) / labels.length;
   const barW = Math.max(3, Math.min(11, groupW / 3));
+  const accessibilityLabel = `Grouped comparison: ${labels.map((lab, i) => chartAccessibilityPart(lab, seriesA[i], seriesB[i])).join('; ')}`;
   return (
-    <View accessible accessibilityRole="image" accessibilityLabel={`Grouped comparison across ${labels.length} periods`} style={{ width, height }}>
+    <View accessible accessibilityRole="image" accessibilityLabel={accessibilityLabel} style={{ width, height }}>
     <Svg width={width} height={height}>
       {labels.map((lab, i) => {
         const gx = pad + i * groupW + groupW / 2;
-        const aH = (seriesA[i] / max) * (baseY - 8);
-        const bH = (seriesB[i] / max) * (baseY - 8);
+        const income = seriesA[i];
+        const spend = seriesB[i];
+        const unavailable = income == null || spend == null;
+        if (unavailable) {
+          return (
+            <G key={i}>
+              <Rect x={gx - barW - 2} y={baseY - 10} width={barW * 2 + 4} height={10} rx={2} fill={colors.surface2} stroke={colors.muted} strokeWidth={1} strokeDasharray="2 2" />
+              <SvgText x={gx} y={baseY - 2} fill={colors.muted} fontSize={7} textAnchor="middle">—</SvgText>
+              <SvgText x={gx} y={height - 4} fill={colors.muted} fontSize={8} textAnchor="middle">{lab}</SvgText>
+            </G>
+          );
+        }
+        const aH = (income / max) * (baseY - 8);
+        const bH = (spend / max) * (baseY - 8);
         return (
           <G key={i}>
-            <Rect x={gx - barW - 1} y={baseY - aH} width={barW} height={aH} rx={2} fill={colorA} />
-            <Rect x={gx + 1} y={baseY - bH} width={barW} height={bH} rx={2} fill={colorB} />
+            <Rect x={gx - barW - 1} y={baseY - aH} width={barW} height={aH || (income === 0 ? 0 : 2)} rx={2} fill={colorA} />
+            <Rect x={gx + 1} y={baseY - bH} width={barW} height={bH || (spend === 0 ? 0 : 2)} rx={2} fill={colorB} />
             <SvgText x={gx} y={height - 4} fill={colors.muted} fontSize={8} textAnchor="middle">{lab}</SvgText>
           </G>
         );
@@ -219,7 +258,7 @@ export function GroupedBars({ width, height = 180, labels, seriesA, seriesB, col
 // Spending tab to that month; the selected column is highlighted and shows its
 // total. Auto-centers on the selected month (i.e. the most recent) on mount.
 export function MonthBars({ data, selected, onSelect, height = 120 }: {
-  data: { month: string; spend: number }[];
+  data: { month: string; spend: number | null }[];
   selected: string;
   onSelect: (m: string) => void;
   height?: number;
@@ -234,7 +273,8 @@ export function MonthBars({ data, selected, onSelect, height = 120 }: {
   const LABEL_H = 16;
   const VALUE_H = 14;
   const barMax = Math.max(20, height - LABEL_H - VALUE_H);
-  const max = data.length ? Math.max(1, ...data.map((d) => d.spend)) : 1;
+  const knownSpends = data.map((d) => d.spend).filter((v): v is number => v != null);
+  const max = knownSpends.length ? Math.max(1, ...knownSpends) : 1;
   const selIdx = data.findIndex((d) => d.month === selected);
 
   useEffect(() => {
@@ -256,21 +296,33 @@ export function MonthBars({ data, selected, onSelect, height = 120 }: {
       >
         {data.map((d) => {
           const on = d.month === selected;
-          const h = d.spend > 0 ? Math.max(3, (d.spend / max) * barMax) : 2;
+          const unavailable = d.spend == null;
+          const spend = d.spend ?? 0;
+          const h = unavailable ? 10 : spend > 0 ? Math.max(3, (spend / max) * barMax) : 2;
+          const valueLabel = unavailable ? 'Unavailable' : fmtMoney(spend);
           return (
             <Pressable
               key={d.month}
               accessibilityRole="button"
               accessibilityState={{ selected: on }}
-              accessibilityLabel={`${monthLabel(d.month)}, ${fmtMoney(d.spend)} spent`}
+              accessibilityLabel={`${monthLabel(d.month)}, ${valueLabel} spent`}
               onPress={() => { haptics.tap(); onSelect(d.month); }}
               style={[styles.barCol, { width: COL_W, height }]}
               hitSlop={4}
             >
               <View style={styles.barPlot}>
-                {on ? <Text style={styles.barValue} numberOfLines={1}>{fmtK(d.spend)}</Text> : null}
+                {on && !unavailable ? <Text style={styles.barValue} numberOfLines={1}>{fmtK(spend)}</Text> : null}
+                {on && unavailable ? <Text style={styles.barValueUnavailable} numberOfLines={1}>—</Text> : null}
                 <View
-                  style={{
+                  style={unavailable ? {
+                    width: BAR_W,
+                    height: h,
+                    borderRadius: 4,
+                    borderWidth: 1,
+                    borderColor: colors.muted,
+                    borderStyle: 'dashed',
+                    backgroundColor: colors.surface2,
+                  } : {
                     width: BAR_W,
                     height: h,
                     borderRadius: 4,
@@ -293,7 +345,7 @@ export function MonthBars({ data, selected, onSelect, height = 120 }: {
 // through `months` (disabled at the earliest data month / at the current month);
 // tapping the title jumps back to the current month.
 export function MonthNavigator({ months, selected, onSelect, currentKey }: {
-  months: { month: string; spend: number }[];
+  months: { month: string; spend: number | null }[];
   selected: string;
   onSelect: (m: string) => void;
   currentKey: string;
@@ -354,6 +406,7 @@ const styles = StyleSheet.create({
   barCol: { alignItems: 'center', justifyContent: 'flex-end' },
   barPlot: { flex: 1, width: '100%', alignItems: 'center', justifyContent: 'flex-end' },
   barValue: { color: colors.text, fontSize: 10, fontWeight: '700', marginBottom: 3 },
+  barValueUnavailable: { color: colors.muted, fontSize: 10, fontWeight: '700', marginBottom: 3 },
   barLabel: { color: colors.muted, fontSize: 10, marginTop: 5 },
   barLabelOn: { color: colors.text, fontWeight: '700' },
   navWrap: { marginBottom: 20 },

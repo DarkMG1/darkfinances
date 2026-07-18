@@ -157,9 +157,19 @@ function transactionReplacementMap(
   return idMap;
 }
 
+function normalizedTransferId(value) {
+  if (value == null || value === false) return null;
+  const normalized = String(value).trim();
+  return normalized || null;
+}
+
+function legHasTransferIdentity(leg) {
+  return !!(normalizedTransferId(leg?.transfer_id) || normalizedTransferId(leg?.transferred_id));
+}
+
 function assertReconstructableTransaction(transaction) {
-  const hasTransfer = transaction?.transfer_id
-    || (transaction?.subtransactions || []).some((leg) => leg?.transfer_id);
+  const hasTransfer = legHasTransferIdentity(transaction)
+    || (transaction?.subtransactions || []).some(legHasTransferIdentity);
   if (hasTransfer) {
     const error = new Error('transfer transactions cannot be rebuilt');
     error.code = 'TRANSFER_RECONSTRUCTION_UNSUPPORTED';

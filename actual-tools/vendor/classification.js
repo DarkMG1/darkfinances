@@ -1,4 +1,5 @@
 'use strict';
+/* Vendored from finance-dashboard/lib/domain/classification.js — do not edit by hand. */
 
 const PROVENANCE = Object.freeze({
   TRANSFER_IDENTITY: 'classification:transfer_identity',
