@@ -37,6 +37,7 @@ const { parse, schemas } = require('./lib/validation');
 const { readReleaseIdentity } = require('./lib/release-identity');
 const {
   exportExitCode,
+  buildReimbursementExportV1Envelope,
   formatReimbursementExportCsv,
   formatReimbursementExportHuman,
   stableStringify,
@@ -477,14 +478,7 @@ function demoMiddleware(v1mode) {
         return res.send(formatReimbursementExportHuman(payload));
       }
       if (v1mode) {
-        return res.json({
-          data: payload,
-          meta: {
-            exitCode: exportExitCode(payload),
-            completeness: payload.completeness.status,
-            authoritative: payload.totals.authoritative,
-          },
-        });
+        return res.type('application/json').send(`${buildReimbursementExportV1Envelope(payload)}\n`);
       }
       res.setHeader('X-Reimbursement-Export-Status', payload.completeness.status);
       res.setHeader('X-Reimbursement-Export-Exit-Code', String(exportExitCode(payload)));
@@ -1233,14 +1227,7 @@ async function reimbursementExport(req, res) {
       }
       const isV1 = req.baseUrl === '/api/v1';
       if (isV1) {
-        res.json({
-          data: payload,
-          meta: {
-            exitCode,
-            completeness: payload.completeness.status,
-            authoritative: payload.totals.authoritative,
-          },
-        });
+        res.type('application/json').send(`${buildReimbursementExportV1Envelope(payload)}\n`);
         return;
       }
       res.setHeader('X-Reimbursement-Export-Status', payload.completeness.status);

@@ -12,8 +12,13 @@ const {
   MAX_SNAPSHOT_ATTEMPTS,
   ReimbursementExportBoundsError,
   ReimbursementExportIncompleteError,
+  buildReimbursementExportV1Envelope,
+  collectLeakedAuthoritativeCents,
   digestStableJson,
+  exportExitCodeFromPayload,
   stableStringify,
+  summarizeExportIncompleteForError,
+  withholdAuthoritativeExportPayload,
 } = require('./reimbursement-export-common');
 const {
   buildLegacyMigrationReport,
@@ -165,50 +170,8 @@ function sumTrustedForLinks(linkRows) {
   return total;
 }
 
-function nullEndpointScopeNumbers(scope) {
-  return {
-    ...scope,
-    absCapCents: null,
-    allocatedTrustedCents: null,
-    remainingTrustedCents: null,
-    remainingWindowTrustedCents: null,
-    ambiguousLinkCount: null,
-  };
-}
-
 function withholdAuthoritativeNumbers(payload) {
-  const clone = JSON.parse(JSON.stringify(payload));
-  clone.totals = {
-    ...clone.totals,
-    trustedAllocationCents: null,
-    authoritative: false,
-  };
-  if (clone.scopes?.window?.totals) {
-    clone.scopes.window.totals.trustedAllocationCents = null;
-    clone.scopes.window.totals.authoritative = false;
-  }
-  if (clone.scopes?.global?.totals) {
-    clone.scopes.global.totals.trustedAllocationCents = null;
-    clone.scopes.global.totals.authoritative = false;
-  }
-  clone.people = (clone.people || []).map((row) => ({
-    person: row.person,
-    allocatedTrustedCents: null,
-  }));
-  clone.links = (clone.links || []).map((row) => ({
-    ...row,
-    allocationCents: null,
-    inflow: row.inflow ? { ...row.inflow, amountCents: null } : row.inflow,
-    expense: row.expense ? { ...row.expense, amountCents: null } : row.expense,
-  }));
-  clone.endpoints = Object.fromEntries(Object.entries(clone.endpoints || {}).map(([id, endpoint]) => {
-    const next = { ...endpoint };
-    if (next.global) next.global = nullEndpointScopeNumbers(next.global);
-    if (next.window) next.window = nullEndpointScopeNumbers(next.window);
-    next.amountCents = null;
-    return [id, next];
-  }));
-  return clone;
+  return withholdAuthoritativeExportPayload(payload);
 }
 
 function assertScopeConservation(payload) {
@@ -313,7 +276,7 @@ function prepareExportForPublish(payload, { strict = false } = {}) {
   if (strict && finalized.completeness.status !== 'complete') {
     throw new ReimbursementExportIncompleteError(
       'strict export refused incomplete reimbursement allocation ledger',
-      redactExportPayload(finalized),
+      summarizeExportIncompleteForError(finalized),
     );
   }
   return redactExportPayload(finalized);
@@ -626,8 +589,7 @@ function projectAllocationLedger({
 }
 
 function exportExitCode(payload) {
-  if (!payload) return 1;
-  return payload.completeness?.status === 'complete' ? 0 : 2;
+  return exportExitCodeFromPayload(payload);
 }
 
 function formatReimbursementExportCsv(payload) {
@@ -748,7 +710,9 @@ module.exports = {
   assertExportInputBounds,
   assertExportSerializedBounds,
   assertExportWindowBounds,
+  buildReimbursementExportV1Envelope,
   buildTrustedAllocationIndex,
+  collectLeakedAuthoritativeCents,
   csvEscape,
   digestStableJson,
   exportExitCode,

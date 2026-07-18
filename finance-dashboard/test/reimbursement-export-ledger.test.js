@@ -8,7 +8,9 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const {
   assertExportConservation,
+  buildReimbursementExportV1Envelope,
   buildTrustedAllocationIndex,
+  collectLeakedAuthoritativeCents,
   csvEscape,
   digestStableJson,
   exportExitCode,
@@ -24,7 +26,12 @@ const {
   stableStringify,
   withholdAuthoritativeNumbers,
 } = require('../lib/reimbursement-export-ledger');
-const { ExportSourceChangedError } = require('../lib/reimbursement-export-common');
+const {
+  ExportSourceChangedError,
+  ReimbursementExportIncompleteError,
+  summarizeExportIncompleteForError,
+} = require('../lib/reimbursement-export-common');
+const { apiErrorBody } = require('../lib/request-envelope');
 const {
   acquireExportSnapshotLock,
   assertExportLockAvailable,
@@ -33,6 +40,76 @@ const {
 const { writePrivateFileAtomic, assertSafeOutputTarget } = require('../lib/private-durable-io');
 
 const REIMB_CATEGORY = 'cat-reimb';
+
+function assertNoLeakedAuthoritativeCents(payload, label = 'payload') {
+  const leaks = collectLeakedAuthoritativeCents(payload);
+  assert.equal(leaks.length, 0, `${label} leaked authoritative cents: ${JSON.stringify(leaks)}`);
+}
+
+function assertCsvWithholdsCents(csv) {
+  const dataLines = csv.split('\n').filter((line) => line && !line.startsWith('#'));
+  const header = dataLines[0].split(',');
+  const centColumns = new Set([
+    'allocationCents',
+    'inflowAmountCents',
+    'expenseAmountCents',
+    'inflowGlobalRemainingTrustedCents',
+    'expenseGlobalRemainingTrustedCents',
+    'inflowWindowAllocatedTrustedCents',
+    'expenseWindowAllocatedTrustedCents',
+  ].map((name) => header.indexOf(name)).filter((index) => index >= 0));
+  for (const line of dataLines.slice(1)) {
+    if (!line.trim()) continue;
+    const cells = line.split(',');
+    for (const index of centColumns) {
+      assert.equal(cells[index] ?? '', '', `CSV leaked cents in column ${header[index]}: ${line}`);
+    }
+  }
+}
+
+function assertHumanWithholdsCents(human) {
+  assert.doesNotMatch(human, /\$\d+\.\d{2}/, 'human output leaked dollar amounts');
+}
+
+function assertPublishedFormatsWithholdCents(payload, label) {
+  assertNoLeakedAuthoritativeCents(payload, `${label} json`);
+  assertNoLeakedAuthoritativeCents(JSON.parse(stableStringify(payload)), `${label} stable json`);
+  assertCsvWithholdsCents(formatReimbursementExportCsv(payload));
+  assertHumanWithholdsCents(formatReimbursementExportHuman(payload));
+}
+
+function incompleteFixture(kind) {
+  const baseLinks = [explicitLink({ inflowId: 'in1', expenseId: 'ex1', cents: 4321, inflowCapCents: 5000, expenseCapCents: 5000 })];
+  const liveById = {
+    in1: live('in1', 5000),
+    ex1: live('ex1', -5000, '2026-07-02', REIMB_CATEGORY),
+  };
+  if (kind === 'legacy') {
+    return projectAllocationLedger({
+      links: [{ inflow: { id: 'in1' }, expense: { id: 'ex1' }, amount: null }],
+      liveById,
+      activeSagas: [],
+      reimbCategoryId: REIMB_CATEGORY,
+    });
+  }
+  if (kind === 'orphan') {
+    return projectAllocationLedger({
+      links: baseLinks,
+      liveById: { in1: live('in1', 5000) },
+      activeSagas: [],
+      reimbCategoryId: REIMB_CATEGORY,
+    });
+  }
+  if (kind === 'saga') {
+    return projectAllocationLedger({
+      links: baseLinks,
+      liveById,
+      activeSagas: [{ id: 's1', phase: 'prepared', action: 'link', inflowId: 'in1', expenseId: 'ex2', terminal: false }],
+      reimbCategoryId: REIMB_CATEGORY,
+    });
+  }
+  throw new Error(`unknown incomplete fixture: ${kind}`);
+}
 
 function live(id, amountCents, date = '2026-07-01', category = null) {
   return {
@@ -167,7 +244,10 @@ test('orphaned endpoints mark incomplete and withhold subsidiary numbers', () =>
   assert.equal(payload.links[0].expenseOrphan, true);
   assert.equal(payload.completeness.status, 'incomplete');
   assert.equal(payload.endpoints.in1.global.remainingTrustedCents, null);
+  assert.equal(payload.scopes.global.links[0].allocationCents, null);
+  assert.equal(payload.scopes.global.links[0].expense?.amountCents, null);
   assert.equal(payload.totals.authoritative, false);
+  assertPublishedFormatsWithholdCents(payload, 'orphan');
 });
 
 test('active reimbursement saga marks export incomplete', () => {
@@ -403,5 +483,95 @@ test('two-process export lock prevents concurrent snapshot writer takeover', () 
   const child = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
   assert.equal(child.status, 0);
   lock.release();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('deep withhold clears authoritative cents in all link copies and scopes', () => {
+  const raw = projectAllocationLedger({
+    links: [
+      explicitLink({ inflowId: 'in1', expenseId: 'ex1', cents: 1000 }),
+      explicitLink({
+        inflowId: 'in2',
+        expenseId: 'ex2',
+        cents: 2000,
+        inflowCapCents: 5000,
+        expenseCapCents: 5000,
+        inflowDate: '2026-08-01',
+        expenseDate: '2026-08-02',
+      }),
+    ],
+    liveById: {
+      in1: live('in1', 5000, '2026-07-01'),
+      ex1: live('ex1', -5000, '2026-07-02', REIMB_CATEGORY),
+      in2: live('in2', 5000, '2026-08-01'),
+      ex2: live('ex2', -5000, '2026-08-02', REIMB_CATEGORY),
+    },
+    activeSagas: [{ id: 's1', phase: 'prepared', action: 'link', terminal: false }],
+    window: { from: '2026-07-01', to: '2026-07-31' },
+    reimbCategoryId: REIMB_CATEGORY,
+  });
+  assert.ok(raw.scopes.global.links.some((row) => row.allocationCents != null));
+  assert.ok(raw.scopes.window.links.some((row) => row.allocationCents != null));
+  const payload = finalizeExportPayload(raw);
+  assertPublishedFormatsWithholdCents(payload, 'deep-withhold');
+  assert.equal(payload.scopes.global.links[0].allocationCents, null);
+  assert.equal(payload.scopes.window.links[0].allocationCents, null);
+});
+
+test('legacy incomplete export leaks no authoritative cents across json csv human', () => {
+  const payload = prepareExportForPublish(incompleteFixture('legacy'));
+  assertPublishedFormatsWithholdCents(payload, 'legacy');
+});
+
+test('orphan incomplete export leaks no authoritative cents across json csv human', () => {
+  const payload = prepareExportForPublish(incompleteFixture('orphan'));
+  assertPublishedFormatsWithholdCents(payload, 'orphan');
+});
+
+test('active saga incomplete export leaks no authoritative cents across json csv human', () => {
+  const payload = prepareExportForPublish(incompleteFixture('saga'));
+  assertPublishedFormatsWithholdCents(payload, 'saga');
+});
+
+test('strict incomplete error exposes actionable reason codes without cent values', () => {
+  const payload = finalizeExportPayload(incompleteFixture('saga'));
+  const summary = summarizeExportIncompleteForError(payload);
+  assert.ok(summary.incompleteReasons.includes('active_reimbursement_link_saga'));
+  assert.equal(
+    collectLeakedAuthoritativeCents({ incompleteReasons: summary.incompleteReasons }).length,
+    0,
+  );
+  assert.equal(collectLeakedAuthoritativeCents({ incompleteSections: summary.incompleteSections }).length, 0);
+  const error = new ReimbursementExportIncompleteError('strict export refused', summary);
+  const body = apiErrorBody(error, { requestId: 'req-test' }).body;
+  assert.deepEqual(body.incompleteReasons, summary.incompleteReasons);
+  assert.ok(Array.isArray(body.incompleteSections));
+  assert.throws(
+    () => prepareExportForPublish(incompleteFixture('saga'), { strict: true }),
+    ReimbursementExportIncompleteError,
+  );
+});
+
+test('v1 export envelope serializes canonically and stably', () => {
+  const payload = prepareExportForPublish(incompleteFixture('legacy'));
+  const a = buildReimbursementExportV1Envelope(payload);
+  const b = buildReimbursementExportV1Envelope(JSON.parse(a).data);
+  assert.equal(a, b);
+  assert.match(a, /"data":/);
+  assert.match(a, /"meta":/);
+});
+
+test('export lock release rejects foreign hostname or nonce ownership', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reimb-export-owner-'));
+  const linksPath = path.join(dir, 'reimb-links.json');
+  fs.writeFileSync(linksPath, JSON.stringify({ schemaVersion: 2, revision: 4, links: [] }));
+  const lock = acquireExportSnapshotLock(linksPath, 4);
+  const lockPath = path.join(dir, 'reimb-export.lock');
+  const foreign = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+  foreign.hostname = 'foreign-host';
+  fs.writeFileSync(lockPath, `${JSON.stringify(foreign, null, 2)}\n`);
+  lock.release();
+  assert.equal(fs.existsSync(lockPath), true);
+  fs.unlinkSync(lockPath);
   fs.rmSync(dir, { recursive: true, force: true });
 });

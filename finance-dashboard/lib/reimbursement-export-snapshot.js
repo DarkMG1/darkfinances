@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -7,7 +8,7 @@ const { ExportSourceChangedError, digestStableJson } = require('./reimbursement-
 const { assertNotSymlink } = require('./private-durable-io');
 
 const LOCK_KIND = 'darkfinances-reimb-export-lock';
-const LOCK_SCHEMA_VERSION = 1;
+const LOCK_SCHEMA_VERSION = 2;
 const DEFAULT_LOCK_WAIT_MS = 250;
 const DEFAULT_LOCK_TIMEOUT_MS = 5000;
 
@@ -42,6 +43,12 @@ function parseLockPayload(text) {
   if (!Number.isSafeInteger(parsed.pid) || parsed.pid <= 0) {
     throw new Error('reimb-export lock requires a positive integer pid');
   }
+  if (typeof parsed.hostname !== 'string' || !parsed.hostname) {
+    throw new Error('reimb-export lock requires hostname');
+  }
+  if (typeof parsed.nonce !== 'string' || !/^[0-9a-f]{32}$/.test(parsed.nonce)) {
+    throw new Error('reimb-export lock requires nonce');
+  }
   if (typeof parsed.linksRevision !== 'number' || !Number.isSafeInteger(parsed.linksRevision) || parsed.linksRevision < 0) {
     throw new Error('reimb-export lock requires linksRevision');
   }
@@ -51,7 +58,15 @@ function parseLockPayload(text) {
   return parsed;
 }
 
-function validateLockOwnership(lockPath, expectedRevision) {
+function lockOwnershipFromPayload(payload) {
+  return {
+    pid: payload.pid,
+    hostname: payload.hostname,
+    nonce: payload.nonce,
+  };
+}
+
+function validateLockOwnership(lockPath, expectedRevision, expectedOwnership = null) {
   assertNotSymlink(lockPath, 'reimb-export lock');
   const stat = fs.lstatSync(lockPath);
   if (!stat.isFile()) throw new Error('reimb-export lock must be a regular file');
@@ -63,14 +78,26 @@ function validateLockOwnership(lockPath, expectedRevision) {
   if (payload.linksRevision !== expectedRevision) {
     throw new ExportSourceChangedError('reimb-export lock revision binding mismatch');
   }
+  if (expectedOwnership) {
+    if (payload.pid !== expectedOwnership.pid
+      || payload.hostname !== expectedOwnership.hostname
+      || payload.nonce !== expectedOwnership.nonce) {
+      throw new ExportSourceChangedError('reimb-export lock ownership mismatch');
+    }
+  }
   return payload;
+}
+
+function isActiveForeignLock(payload) {
+  return isProcessAlive(payload.pid) && payload.hostname === os.hostname();
 }
 
 function removeStaleLockIfDead(lockPath) {
   if (!fs.existsSync(lockPath)) return false;
   try {
     const payload = parseLockPayload(fs.readFileSync(lockPath, 'utf8'));
-    if (isProcessAlive(payload.pid)) return false;
+    if (isActiveForeignLock(payload)) return false;
+    if (isProcessAlive(payload.pid) && payload.hostname !== os.hostname()) return false;
   } catch {
     fs.unlinkSync(lockPath);
     return true;
@@ -84,6 +111,8 @@ function createLockFile(lockPath, linksRevision) {
     kind: LOCK_KIND,
     schemaVersion: LOCK_SCHEMA_VERSION,
     pid: process.pid,
+    hostname: os.hostname(),
+    nonce: crypto.randomBytes(16).toString('hex'),
     linksRevision,
     createdAt: new Date().toISOString(),
   };
@@ -110,20 +139,20 @@ function createLockFile(lockPath, linksRevision) {
   return payload;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function assertExportLockAvailable(linksPath) {
   const lockPath = lockPathForLinksFile(linksPath);
   if (!fs.existsSync(lockPath)) return;
   let payload;
   try {
-    payload = validateLockOwnership(lockPath, parseLockPayload(fs.readFileSync(lockPath, 'utf8')).linksRevision);
+    payload = parseLockPayload(fs.readFileSync(lockPath, 'utf8'));
+    validateLockOwnership(lockPath, payload.linksRevision);
   } catch {
     throw new ExportSourceChangedError('reimbursement links sidecar is locked for export');
   }
-  if (isProcessAlive(payload.pid)) {
+  if (isActiveForeignLock(payload)) {
+    throw new ExportSourceChangedError('reimbursement links sidecar is locked for export');
+  }
+  if (isProcessAlive(payload.pid) && payload.hostname !== os.hostname()) {
     throw new ExportSourceChangedError('reimbursement links sidecar is locked for export');
   }
   fs.unlinkSync(lockPath);
@@ -135,13 +164,15 @@ function acquireExportSnapshotLock(linksPath, linksRevision, { timeoutMs = DEFAU
   while (Date.now() < deadline) {
     removeStaleLockIfDead(lockPath);
     try {
-      createLockFile(lockPath, linksRevision);
+      const payload = createLockFile(lockPath, linksRevision);
+      const ownership = lockOwnershipFromPayload(payload);
       return {
         lockPath,
+        ownership,
         release() {
           try {
             if (fs.existsSync(lockPath)) {
-              validateLockOwnership(lockPath, linksRevision);
+              validateLockOwnership(lockPath, linksRevision, ownership);
               fs.unlinkSync(lockPath);
             }
           } catch (_) {
@@ -152,7 +183,6 @@ function acquireExportSnapshotLock(linksPath, linksRevision, { timeoutMs = DEFAU
     } catch (cause) {
       if (cause?.code !== 'EEXIST') throw cause;
     }
-    // spin-wait briefly; bounded by timeoutMs
     const deadlineSlice = Date.now() + DEFAULT_LOCK_WAIT_MS;
     while (Date.now() < deadlineSlice) {
       // bounded spin-wait
