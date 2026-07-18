@@ -85,11 +85,12 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
   }, []);
 
   useEffect(() => {
-    // Profile identity reset clears stale screen mutation UI.
+    // Profile identity reset clears stale screen mutation UI and pending key locks.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional reset on identity change
     setOutcome(null);
     setAnnounce('');
     setActiveKey(null);
+    setPendingKeys(new Set());
     for (const entry of registryRef.current.values()) {
       entry.lastVars = null;
       entry.lastSuccess = undefined;
@@ -173,12 +174,11 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
         void handleError(key, error, entry, token);
       },
       onSettled: () => {
+        if (!isDispatchTokenCurrent(token)) return;
         pendingLockCountRef.current = Math.max(0, pendingLockCountRef.current - 1);
         markPending(key, false);
         if (pendingLockCountRef.current === 0) setDispatchPending(false);
-        if (isDispatchTokenCurrent(token)) {
-          runOptions?.onSettled?.();
-        }
+        runOptions?.onSettled?.();
       },
     });
   }, [bumpActivity, captureDispatchToken, handleError, isDispatchTokenCurrent, markPending, setDispatchPending]);

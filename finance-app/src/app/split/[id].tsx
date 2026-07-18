@@ -8,25 +8,11 @@ import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/co
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { haptics } from '@/lib/haptics';
+import { isSplitEditorDirty, seedSplitEditorBaseline } from '@/lib/split-editor-dirty';
 import { colors, fmtPos } from '@/theme/colors';
 
 type Mode = 'equal' | 'specific' | 'percent';
 type Leg = { key: string; id?: string; catId: string | null; catName: string; name: string; notes: string; showNote: boolean; amt: string; pct: string };
-
-function snapshotSplitEditor(mode: Mode, legs: Leg[]) {
-  return JSON.stringify({
-    mode,
-    legs: legs.map((l) => ({
-      id: l.id ?? null,
-      catId: l.catId,
-      catName: l.catName,
-      name: l.name,
-      notes: l.notes,
-      amt: l.amt,
-      pct: l.pct,
-    })),
-  });
-}
 
 const MODE_LABEL: Record<Mode, string> = {
   equal: 'by equal amounts',
@@ -108,12 +94,12 @@ export default function SplitEditor() {
   const total = d ? Math.abs(d.amount) : 0;
   const sign = d && d.amount < 0 ? -1 : 1;
 
-  // Seed the editor once the transaction loads.
+  // Seed the editor once the transaction loads — baseline is set atomically with mode/legs.
   useEffect(() => {
     if (!d || inited.current) return;
     inited.current = true;
-    const nextMode = d.isSplit && d.legs.length ? 'specific' : mode;
-    const nextLegs = d.isSplit && d.legs.length
+    const nextMode: Mode = d.isSplit && d.legs.length ? 'specific' : 'equal';
+    const nextLegs: Leg[] = d.isSplit && d.legs.length
       ? d.legs.map((l) => ({
           key: nk(),
           id: l.id,
@@ -126,15 +112,12 @@ export default function SplitEditor() {
           pct: total ? String(r2((Math.abs(l.amount) / total) * 100)) : '',
         }))
       : [
-          // First split: master carries the whole amount + inherits the category.
           { key: nk(), catId: d.categoryId, catName: d.category || '', name: '', notes: '', showNote: false, amt: total.toFixed(2), pct: '100' },
         ];
-    const timer = setTimeout(() => {
-      setMode(nextMode);
-      setLegs(nextLegs);
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [d, mode, total]);
+    setMode(nextMode);
+    setLegs(nextLegs);
+    setBaselineSnapshot(seedSplitEditorBaseline(nextMode, nextLegs));
+  }, [d, total]);
 
   useEffect(() => {
     const first = splitAction.outcome?.firstField;
@@ -146,13 +129,7 @@ export default function SplitEditor() {
     return () => cancelAnimationFrame(frame);
   }, [legs, splitAction.outcome]);
 
-  useEffect(() => {
-    if (!inited.current || baselineSnapshot != null) return;
-    setBaselineSnapshot(snapshotSplitEditor(mode, legs));
-  }, [baselineSnapshot, legs, mode]);
-
-  const isDirty = baselineSnapshot != null
-    && snapshotSplitEditor(mode, legs) !== baselineSnapshot;
+  const isDirty = isSplitEditorDirty(mode, legs, baselineSnapshot);
 
   const requestSplitExit = (exit: () => void) => {
     if (mutationLocked) return;

@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 const {
   bumpMutationHookEpoch,
   captureMutationDispatchToken,
@@ -64,9 +66,18 @@ test('hook sources reset pending locks and guard callbacks on identity change', 
   assert.match(identityHook, /useEffect\(\(\) => \(\) => \{/);
 });
 
+test('form and action hooks ignore stale react-query isPending for lock and dispatch', () => {
+  const form = fs.readFileSync(path.join(__dirname, '../src/hooks/useMutationForm.ts'), 'utf8');
+  const action = fs.readFileSync(path.join(__dirname, '../src/hooks/useMutationAction.ts'), 'utf8');
+  assert.doesNotMatch(form, /isLocked = mutation\.isPending/);
+  assert.doesNotMatch(action, /isLocked = mutation\.isPending/);
+  assert.doesNotMatch(form, /mutation\.isPending \|\| phase/);
+  assert.doesNotMatch(action, /pendingLockRef\.current \|\| mutation\.isPending/);
+});
+
 test('mutation hooks use shared activation sequence module', () => {
   for (const rel of ['useMutationForm.ts', 'useMutationAction.ts', 'useMutationScreen.ts']) {
-    const source = require('fs').readFileSync(require('path').join(__dirname, '../src/hooks', rel), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../src/hooks', rel), 'utf8');
     assert.match(source, /nextMutationActivationSeq/, `${rel} must use shared activation sequence`);
     assert.doesNotMatch(source, /activitySeqRef/, `${rel} must not keep per-hook activation counters`);
   }

@@ -40,6 +40,24 @@ test('audited screens do not surface mutation failures with Alert.alert', () => 
   }
 });
 
+test('account edit and networth manual sheets use mutation form with dismiss guards and inline errors', () => {
+  for (const rel of ['account/[id].tsx', 'networth.tsx']) {
+    const source = fs.readFileSync(path.join(appRoot, rel), 'utf8');
+    assert.match(source, /useMutationForm/, `${rel} must use mutation form`);
+    assert.match(source, /MutationSheet/, `${rel} must use mutation sheet`);
+    assert.match(source, /requestDismiss|form\.requestDismiss/, `${rel} must confirm dirty dismiss`);
+    assert.match(source, /MutationFieldError/, `${rel} must show inline field errors`);
+    assert.match(source, /MutationLiveRegion/, `${rel} must expose one live region`);
+    assert.equal((source.match(/<MutationLiveRegion/g) || []).length, 1, `${rel} must have one live region`);
+  }
+  const networth = fs.readFileSync(path.join(appRoot, 'networth.tsx'), 'utf8');
+  assert.match(networth, /validateMoneyField/);
+  assert.doesNotMatch(networth, /parseFloat\(edit\.value\)/);
+  const account = fs.readFileSync(path.join(appRoot, 'account/[id].tsx'), 'utf8');
+  assert.match(account, /form\.canDismiss/);
+  assert.match(account, /form\.submit\(\)/);
+});
+
 test('transaction detail uses unified mutation screen coordinator', () => {
   const source = fs.readFileSync(path.join(appRoot, 'transaction/[id].tsx'), 'utf8');
   assert.match(source, /useMutationScreen/);
@@ -63,6 +81,7 @@ const multiActionScreens = [
   'split/[id].tsx',
   'reimbursement.tsx',
   'reconcile.tsx',
+  'networth.tsx',
 ];
 
 test('multi-action screens coordinate banner retry through useMutationBannerCoordinator', () => {

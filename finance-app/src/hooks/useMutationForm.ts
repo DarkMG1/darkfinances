@@ -12,6 +12,7 @@ import {
 import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
 import { hapticClientValidationRejected } from '@/lib/haptics';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
+import { resolveMutationFormBaseline } from '@/lib/mutation-form-baseline';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
 
@@ -94,6 +95,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   const [announce, setAnnounce] = useState('');
   const [activitySeq, setActivitySeq] = useState(0);
   const [baseline, setBaseline] = useState(fields);
+  const fieldsRef = useRef(fields);
   const closedRef = useRef(false);
   const variablesRef = useRef<TVariables | null>(null);
 
@@ -104,12 +106,16 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   }, []);
 
   useEffect(() => {
+    fieldsRef.current = fields;
+  }, [fields]);
+
+  useEffect(() => {
     const draft = persistDraft ? getMutationFormDraft(scopeDigest, formId, profileGeneration) : null;
-    setFields((prev) => {
-      const next = draft ? { ...prev, ...draft } : prev;
-      setBaseline(next);
-      return next;
-    });
+    const next = resolveMutationFormBaseline(fieldsRef.current, draft);
+    setBaseline(next);
+    if (draft) {
+      setFields(next);
+    }
     // Form identity reset: rehydrate draft and clear stale mutation UI when formId/scope changes.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional reset on identity change
     setOutcome(null);
@@ -123,7 +129,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     setMutationFormDraft(scopeDigest, formId, fields, profileGeneration);
   }, [fields, formId, persistDraft, profileGeneration, scopeDigest]);
 
-  const isLocked = mutation.isPending || dispatchPending || phase === 'submitting' || phase === 'reconciling';
+  const isLocked = dispatchPending || phase === 'submitting' || phase === 'reconciling';
   const isDirty = useMemo(() => !fieldsEqual(fields, baseline), [baseline, fields]);
 
   const fieldErrors = useMemo(() => {
@@ -178,7 +184,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     pendingLockRef.current = true;
     bumpActivity();
     setDispatchPending(true);
-    setPhase(mutation.isPending ? 'submitting' : 'reconciling');
+    setPhase('submitting');
     setOutcome(null);
     mutation.mutate(variables, {
       onSuccess: () => {
@@ -214,7 +220,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   ]);
 
   const submit = useCallback(() => {
-    if (pendingLockRef.current || mutation.isPending || phase === 'submitting' || phase === 'reconciling') return;
+    if (pendingLockRef.current || phase === 'submitting' || phase === 'reconciling') return;
     if (validate) {
       const clientErrors = validate(fields);
       if (Object.keys(clientErrors).length) {
@@ -229,16 +235,16 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
       }
     }
     runMutation(buildVariables(fields));
-  }, [buildVariables, bumpActivity, fieldOrder, fields, focusFirstInvalid, mutation.isPending, phase, runMutation, validate]);
+  }, [buildVariables, bumpActivity, fieldOrder, fields, focusFirstInvalid, phase, runMutation, validate]);
 
   const retry = useCallback(() => {
-    if (pendingLockRef.current || mutation.isPending || phase === 'submitting' || phase === 'reconciling') return;
+    if (pendingLockRef.current || phase === 'submitting' || phase === 'reconciling') return;
     if (variablesRef.current != null) {
       runMutation(variablesRef.current);
       return;
     }
     submit();
-  }, [mutation.isPending, phase, runMutation, submit]);
+  }, [phase, runMutation, submit]);
 
   const clearErrors = useCallback(() => {
     setOutcome(null);

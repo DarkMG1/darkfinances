@@ -1,16 +1,30 @@
-import React, { useState } from 'react';
-import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import React, { useCallback, useMemo, useState } from 'react';
+import { Alert, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { useAccounts, useDeleteManualAsset, useManualAssets, useSaveManualAsset, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { Account, ManualAsset } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
 import { Avatar, Card, ErrorState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
-import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
-import { useMutationScreen } from '@/hooks/useMutationScreen';
+import {
+  MutationFieldError,
+  MutationFormBanner,
+  MutationLiveRegion,
+  MutationSheet,
+  MutationSubmitButton,
+} from '@/components/mutation-form';
+import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
+import { useMutationForm } from '@/hooks/useMutationForm';
 import { AreaChart } from '@/components/charts';
 import { haptics } from '@/lib/haptics';
 import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
+import {
+  collectFieldErrors,
+  parseStrictMoneyDollars,
+  validateMoneyField,
+  validateRequiredText,
+} from '@/lib/mutation-form-validation';
 import { colors, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -21,7 +35,8 @@ const RANGES: { label: string; v: number }[] = [
   { label: 'ALL', v: 36 },
 ];
 
-type EditState = { id?: string; name: string; value: string; kind: 'asset' | 'liability' } | null;
+type EditKind = 'asset' | 'liability';
+type EditState = { id?: string; name: string; value: string; kind: EditKind } | null;
 
 export default function NetWorthScreen() {
   const { width } = useWindowDimensions();
@@ -36,9 +51,68 @@ export default function NetWorthScreen() {
   const manual = useManualAssets();
   const saveManual = useSaveManualAsset();
   const delManual = useDeleteManualAsset();
-  const screen = useMutationScreen({ onRefetchStale: () => manual.refetch() });
-  const saveAction = screen.bind({ key: 'saveManual', mutation: saveManual, mutationLabel: 'Save asset', fieldOrder: ['name', 'value', 'kind'] });
-  const deleteAction = screen.bind({ key: 'deleteManual', mutation: delManual, mutationLabel: 'Delete asset' });
+
+  const fields = useMemo(() => ({
+    id: edit?.id,
+    name: edit?.name ?? '',
+    value: edit?.value ?? '',
+    kind: edit?.kind ?? 'asset' as EditKind,
+  }), [edit]);
+
+  const applyFields = useCallback((updater: React.SetStateAction<typeof fields>) => {
+    setEdit((prev) => {
+      if (!prev) return prev;
+      const prevFields = { id: prev.id, name: prev.name, value: prev.value, kind: prev.kind };
+      const next = typeof updater === 'function' ? updater(prevFields) : updater;
+      return {
+        ...prev,
+        name: next.name !== undefined ? String(next.name) : prev.name,
+        value: next.value !== undefined ? String(next.value) : prev.value,
+        kind: (next.kind ?? prev.kind) as EditKind,
+      };
+    });
+  }, []);
+
+  const form = useMutationForm({
+    formId: edit ? (edit.id ? `manual-${edit.id}` : `manual-new-${edit.kind}`) : 'manual-none',
+    fields,
+    setFields: applyFields,
+    persistDraft: false,
+    mutation: saveManual,
+    mutationLabel: 'Save asset',
+    fieldOrder: ['name', 'value', 'kind'],
+    onSuccessClose: () => setEdit(null),
+    onRefetch: () => manual.refetch(),
+    validate: (f) => collectFieldErrors({
+      name: validateRequiredText(f.name, 'Name'),
+      value: validateMoneyField(f.value, { label: 'Value' }),
+    }),
+    buildVariables: (f) => ({
+      id: f.id as string | undefined,
+      name: String(f.name).trim(),
+      value: parseStrictMoneyDollars(String(f.value))!,
+      kind: f.kind as EditKind,
+    }),
+  });
+
+  const deleteAction = useMutationAction({
+    mutation: delManual,
+    mutationLabel: 'Delete asset',
+    onActivate: () => form.clearErrors(),
+    onSuccess: () => {
+      form.clearErrors();
+      setEdit(null);
+    },
+    onRefetch: () => manual.refetch(),
+  });
+
+  const banner = useMutationBannerCoordinator(useMemo(() => [
+    { key: 'form', outcome: form.outcome, retry: form.retry, announce: form.announce, isLocked: form.isLocked, activitySeq: form.activitySeq },
+    { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked, activitySeq: deleteAction.activitySeq },
+  ], [
+    deleteAction.activitySeq, deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry,
+    form.activitySeq, form.announce, form.isLocked, form.outcome, form.retry,
+  ]));
 
   const accts = accounts.data ?? [];
   const visible = accts.filter((a) => !a.hidden);
@@ -73,7 +147,6 @@ export default function NetWorthScreen() {
 
   const nwHist = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
-  // Manual assets have no history, so base "this month" on synced accounts only.
   const acctNetWorth = acctAssets + acctLiab;
   const nwDelta = breakdownUnavailable || prevNW == null ? null : acctNetWorth - prevNW;
   const nwPoints = nwHist.map((m) => ({ value: m.netWorth as number, label: m.month }));
@@ -82,21 +155,31 @@ export default function NetWorthScreen() {
 
   const onRefresh = () => Promise.all([accounts.refetch(), today.refetch(), trends.refetch(), manual.refetch()]);
 
-  const openNew = (kind: 'asset' | 'liability') => { haptics.tap(); setEdit({ name: '', value: '', kind }); };
-  const openEdit = (m: ManualAsset) => { haptics.tap(); setEdit({ id: m.id, name: m.name, value: String(m.value), kind: m.kind }); };
-  const canSave = !!edit && edit.name.trim().length > 0 && (parseFloat(edit.value) || 0) > 0 && !screen.isLocked;
-  const doSave = () => {
-    if (!edit || !canSave) return;
-    saveAction.run(
-      { id: edit.id, name: edit.name.trim(), value: parseFloat(edit.value) || 0, kind: edit.kind },
-      { onSuccess: () => setEdit(null) },
-    );
+  const openNew = (kind: EditKind) => {
+    haptics.tap();
+    form.clearErrors();
+    setEdit({ name: '', value: '', kind });
   };
-  const doDelete = () => {
-    if (!edit?.id || screen.isLocked) return;
+
+  const openEdit = (m: ManualAsset) => {
+    haptics.tap();
+    form.clearErrors();
+    setEdit({ id: m.id, name: m.name, value: String(m.value), kind: m.kind });
+  };
+
+  const closeSheet = () => {
+    form.requestDismiss(() => setEdit(null));
+  };
+
+  const remove = () => {
+    if (!edit?.id || banner.isLocked) return;
     Alert.alert('Delete?', `Remove "${edit.name}" from net worth?`, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => deleteAction.run({ id: edit.id! }, { onSuccess: () => setEdit(null) }) },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => deleteAction.run({ id: edit.id! }),
+      },
     ]);
   };
 
@@ -134,8 +217,8 @@ export default function NetWorthScreen() {
   return (
     <PushScreen testID="networth-screen" onRefresh={onRefresh}>
       <Stack.Screen options={{ title: 'Net Worth' }} />
-      <MutationLiveRegion message={screen.announce} />
-      <MutationFormBanner outcome={screen.outcome} onRetry={screen.retry} onRefetch={() => { void screen.refetchStale(); manual.refetch(); }} />
+      <MutationLiveRegion message={banner.announce} />
+      <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => { void manual.refetch(); }} />
       {accounts.isLoading && !accounts.data ? (
         <SkeletonList hero rows={6} />
       ) : accounts.isError && !accounts.data ? (
@@ -245,54 +328,63 @@ export default function NetWorthScreen() {
         </>
       )}
 
-      <Modal visible={edit !== null} animationType="slide" transparent onRequestClose={() => { if (!screen.isLocked) setEdit(null); }}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-          <Pressable style={styles.modalBg} onPress={() => { if (!screen.isLocked) setEdit(null); }} disabled={screen.isLocked}>
-            <Pressable testID="networth-manual-sheet" style={styles.sheet} onPress={() => {}}>
-              <Text style={styles.sheetTitle}>{edit?.id ? 'Edit' : 'Add'} {edit?.kind === 'liability' ? 'liability' : 'asset'}</Text>
-              <Text style={styles.label}>Name</Text>
-              <TextInput
-                testID="networth-manual-name-input"
-                style={styles.input}
-                value={edit?.name ?? ''}
-                onChangeText={(v) => setEdit((e) => (e ? { ...e, name: v } : e))}
-                placeholder={edit?.kind === 'liability' ? 'e.g. Car loan' : 'e.g. Tesla Model 3'}
-                placeholderTextColor={colors.muted}
-                autoFocus
-              />
-              <Text style={[styles.label, { marginTop: 12 }]}>Value</Text>
-              <View style={styles.amtWrap}>
-                <Text style={styles.amtDollar}>$</Text>
-                <TextInput
-                  testID="networth-manual-value-input"
-                  style={styles.amtInput}
-                  value={edit?.value ?? ''}
-                  onChangeText={(v) => setEdit((e) => (e ? { ...e, value: v.replace(/[^0-9.]/g, '') } : e))}
-                  keyboardType="decimal-pad"
-                  placeholder="0.00"
-                  placeholderTextColor={colors.muted}
-                />
-              </View>
-              <View style={styles.segment}>
-                <Pressable testID={`networth-manual-kind-asset${edit?.kind === 'asset' ? '-selected' : ''}`} style={[styles.segBtn, edit?.kind === 'asset' && styles.segActive]} onPress={() => setEdit((e) => (e ? { ...e, kind: 'asset' } : e))}>
-                  <Text style={[styles.segText, edit?.kind === 'asset' && styles.segTextActive]}>Asset</Text>
-                </Pressable>
-                <Pressable testID={`networth-manual-kind-liability${edit?.kind === 'liability' ? '-selected' : ''}`} style={[styles.segBtn, edit?.kind === 'liability' && styles.segActive]} onPress={() => setEdit((e) => (e ? { ...e, kind: 'liability' } : e))}>
-                  <Text style={[styles.segText, edit?.kind === 'liability' && styles.segTextActive]}>Liability</Text>
-                </Pressable>
-              </View>
-              <Pressable testID="networth-manual-save-button" style={({ pressed }) => [styles.saveBtn, !canSave && { opacity: 0.4 }, pressed && { opacity: 0.85 }]} onPress={doSave} disabled={!canSave}>
-                <Text style={styles.saveText}>{screen.isLocked ? 'Saving…' : 'Save'}</Text>
-              </Pressable>
-              {edit?.id ? (
-                <Pressable testID="networth-manual-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={doDelete} disabled={screen.isLocked}>
-                  <Text style={styles.deleteText}>Delete</Text>
-                </Pressable>
-              ) : null}
-            </Pressable>
+      <MutationSheet
+        visible={edit !== null}
+        title={`${edit?.id ? 'Edit' : 'Add'} ${edit?.kind === 'liability' ? 'liability' : 'asset'}`}
+        testID="networth-manual-sheet"
+        canDismiss={form.canDismiss && !deleteAction.isLocked}
+        onRequestClose={closeSheet}
+      >
+        <Text style={styles.label}>Name</Text>
+        <TextInput
+          testID="networth-manual-name-input"
+          style={[styles.input, form.getFieldError('name') && { borderColor: '#ff6b6b' }]}
+          value={edit?.name ?? ''}
+          onChangeText={(v) => setEdit((e) => (e ? { ...e, name: v } : e))}
+          placeholder={edit?.kind === 'liability' ? 'e.g. Car loan' : 'e.g. Tesla Model 3'}
+          placeholderTextColor={colors.muted}
+          autoFocus
+          accessibilityLabel="Name"
+        />
+        <MutationFieldError error={form.getFieldError('name')} testID="networth-manual-name-error" />
+        <Text style={[styles.label, { marginTop: 12 }]}>Value</Text>
+        <View style={[styles.amtWrap, form.getFieldError('value') && { borderColor: '#ff6b6b' }]}>
+          <Text style={styles.amtDollar}>$</Text>
+          <TextInput
+            testID="networth-manual-value-input"
+            style={styles.amtInput}
+            value={edit?.value ?? ''}
+            onChangeText={(v) => setEdit((e) => (e ? { ...e, value: v.replace(/[^0-9.]/g, '') } : e))}
+            keyboardType="decimal-pad"
+            placeholder="0.00"
+            placeholderTextColor={colors.muted}
+            accessibilityLabel="Value"
+          />
+        </View>
+        <MutationFieldError error={form.getFieldError('value')} testID="networth-manual-value-error" />
+        <View style={styles.segment}>
+          <Pressable testID={`networth-manual-kind-asset${edit?.kind === 'asset' ? '-selected' : ''}`} style={[styles.segBtn, edit?.kind === 'asset' && styles.segActive]} onPress={() => setEdit((e) => (e ? { ...e, kind: 'asset' } : e))}>
+            <Text style={[styles.segText, edit?.kind === 'asset' && styles.segTextActive]}>Asset</Text>
           </Pressable>
-        </KeyboardAvoidingView>
-      </Modal>
+          <Pressable testID={`networth-manual-kind-liability${edit?.kind === 'liability' ? '-selected' : ''}`} style={[styles.segBtn, edit?.kind === 'liability' && styles.segActive]} onPress={() => setEdit((e) => (e ? { ...e, kind: 'liability' } : e))}>
+            <Text style={[styles.segText, edit?.kind === 'liability' && styles.segTextActive]}>Liability</Text>
+          </Pressable>
+        </View>
+        <MutationFieldError error={form.getFieldError('kind')} testID="networth-manual-kind-error" />
+        <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => manual.refetch()} />
+        <MutationSubmitButton
+          testID="networth-manual-save-button"
+          label="Save"
+          pendingLabel="Saving…"
+          onPress={() => form.submit()}
+          disabled={form.isLocked || deleteAction.isLocked}
+        />
+        {edit?.id ? (
+          <Pressable testID="networth-manual-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={remove} disabled={banner.isLocked}>
+            <Text style={styles.deleteText}>Delete</Text>
+          </Pressable>
+        ) : null}
+      </MutationSheet>
     </PushScreen>
   );
 }
@@ -326,9 +418,6 @@ const styles = StyleSheet.create({
   manualHint: { color: colors.muted, fontSize: 11, marginTop: 10, lineHeight: 16 },
   hiddenToggle: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 6 },
   hiddenToggleText: { color: colors.accentLight, fontSize: 13, fontWeight: '700' },
-  modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
-  sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16, paddingBottom: 32 },
-  sheetTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 12 },
   label: { color: colors.muted, fontSize: 12, fontWeight: '600', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
   input: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15 },
   amtWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, paddingHorizontal: 12 },
@@ -339,8 +428,6 @@ const styles = StyleSheet.create({
   segActive: { borderColor: colors.accent, backgroundColor: 'rgba(124,110,247,0.12)' },
   segText: { color: colors.muted, fontSize: 14, fontWeight: '600' },
   segTextActive: { color: colors.accentLight },
-  saveBtn: { backgroundColor: colors.accent, borderRadius: 10, paddingVertical: 13, alignItems: 'center', marginTop: 16 },
-  saveText: { color: '#fff', fontSize: 15, fontWeight: '700' },
   deleteBtn: { paddingVertical: 12, alignItems: 'center', marginTop: 6 },
   deleteText: { color: colors.red, fontSize: 14, fontWeight: '600' },
 });

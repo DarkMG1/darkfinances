@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useBudgets, useSetBudget, useTrends } from '@/api/hooks/finance.hooks';
@@ -85,10 +85,16 @@ export default function Budgets() {
     month: b?.month,
   }), [b?.month, editing?.id, targetText]);
 
+  const applyFields = useCallback((updater: React.SetStateAction<typeof fields>) => {
+    const prev = { targetText, categoryId: editing?.id ?? '', month: b?.month };
+    const next = typeof updater === 'function' ? updater(prev) : updater;
+    if (next.targetText !== undefined) setTargetText(String(next.targetText));
+  }, [b?.month, editing?.id, targetText]);
+
   const form = useMutationForm({
     formId: editing ? `budget-${editing.id}-${month}` : 'budget-none',
     fields,
-    setFields: () => {},
+    setFields: applyFields,
     persistDraft: false,
     mutation: setBudget,
     mutationLabel: 'Save budget',

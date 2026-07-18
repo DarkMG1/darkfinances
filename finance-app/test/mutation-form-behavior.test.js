@@ -46,6 +46,11 @@ test('mutation hooks unlock on settled and guard stale profile callbacks', () =>
     assert.match(source, /useMutationHookIdentity/, `${rel} must use shared identity hook`);
     assert.match(source, /isDispatchTokenCurrent\(token\)/, `${rel} must guard callbacks with dispatch token`);
   }
+  const screen = fs.readFileSync(path.join(root, 'src/hooks/useMutationScreen.ts'), 'utf8');
+  const settledBlock = screen.match(/onSettled:\s*\(\)\s*=>\s*\{([\s\S]*?)\n      \},/)?.[1] ?? '';
+  assert.match(settledBlock, /if \(!isDispatchTokenCurrent\(token\)\) return;/);
+  assert.doesNotMatch(settledBlock, /markPending\(key, false\)[\s\S]*if \(!isDispatchTokenCurrent/);
+  assert.match(screen, /setPendingKeys\(new Set\(\)\)/);
 });
 
 test('goals sheet blocks dismiss while locked and uses one live region', () => {
@@ -83,7 +88,8 @@ test('split editor confirms dirty discard on cancel and hardware back', () => {
   assert.match(source, /requestSplitExit/);
   assert.match(source, /beforeRemove/);
   assert.match(source, /allowExitRef/);
-  assert.match(source, /snapshotSplitEditor/);
+  assert.match(source, /isSplitEditorDirty/);
+  assert.match(source, /seedSplitEditorBaseline/);
 });
 
 test('client validation haptic is owned by mutation outcome gate', () => {

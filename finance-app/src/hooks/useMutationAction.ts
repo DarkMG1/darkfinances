@@ -73,7 +73,7 @@ export function useMutationAction<TVariables>({
     lastSettled.current = undefined;
   }, [identityKey]);
 
-  const isLocked = mutation.isPending || dispatchPending;
+  const isLocked = dispatchPending;
 
   const clear = useCallback(() => {
     setOutcome(null);
@@ -85,7 +85,7 @@ export function useMutationAction<TVariables>({
   }, []);
 
   const run = useCallback((variables: TVariables, options?: { onSuccess?: (data: unknown) => void; onSettled?: () => void; rollback?: () => void }) => {
-    if (pendingLockRef.current || mutation.isPending) return;
+    if (pendingLockRef.current) return;
     const token = captureDispatchToken();
     pendingLockRef.current = true;
     setDispatchPending(true);
@@ -144,13 +144,13 @@ export function useMutationAction<TVariables>({
   ]);
 
   const retry = useCallback(() => {
-    if (pendingLockRef.current || mutation.isPending || lastVars.current == null) return;
+    if (pendingLockRef.current || lastVars.current == null) return;
     run(lastVars.current, {
       onSuccess: lastSuccess.current,
       rollback: lastRollback.current,
       onSettled: lastSettled.current,
     });
-  }, [mutation.isPending, run]);
+  }, [run]);
 
   return {
     outcome,
