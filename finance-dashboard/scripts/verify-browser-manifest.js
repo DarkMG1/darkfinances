@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
-const { buildBrowserManifest } = require('../lib/browser-static');
+const { buildBrowserManifest, expectedManifestAssetPaths } = require('../lib/browser-static');
 
 const manifestPath = path.resolve(__dirname, '..', 'public', 'browser-manifest.json');
 
@@ -15,7 +15,13 @@ function verifyBrowserManifest({ write = false } = {}) {
   const committed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   const same = committed.version === built.version
     && JSON.stringify(committed.modules) === JSON.stringify(built.modules)
-    && JSON.stringify(committed.digests) === JSON.stringify(built.digests);
+    && JSON.stringify(committed.pages) === JSON.stringify(built.pages)
+    && JSON.stringify(committed.vendor) === JSON.stringify(built.vendor)
+    && JSON.stringify(committed.stylesheets) === JSON.stringify(built.stylesheets)
+    && JSON.stringify(committed.meta) === JSON.stringify(built.meta)
+    && JSON.stringify(committed.digests) === JSON.stringify(built.digests)
+    && JSON.stringify(Object.keys(committed.digests).sort())
+      === JSON.stringify(expectedManifestAssetPaths(committed));
   if (!same) {
     if (write) {
       fs.writeFileSync(manifestPath, `${JSON.stringify(built, null, 2)}\n`);

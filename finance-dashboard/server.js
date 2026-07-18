@@ -15,7 +15,12 @@ const {
 const { FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { SerialQueue } = require('./lib/serial-queue');
 const { bindGracefulShutdownSignals } = require('./lib/graceful-shutdown');
-const { createBrowserStaticMiddleware, isPublicBrowserAsset } = require('./lib/browser-static');
+const {
+  createBrowserStaticMiddleware,
+  isPublicBrowserAsset,
+  loadBrowserAssetInventory,
+  sendBrowserAsset,
+} = require('./lib/browser-static');
 const { getActualCoordinator } = require('./lib/actual-coordinator');
 const { loadAdmissionLimitsConfig } = require('./lib/admission-limits-config');
 const {
@@ -81,6 +86,14 @@ const {
 } = require('@simplewebauthn/server');
 
 const app = express();
+const PUBLIC_DIR = path.join(__dirname, 'public');
+let browserAssetInventory;
+try {
+  browserAssetInventory = loadBrowserAssetInventory({ publicRoot: PUBLIC_DIR });
+} catch (error) {
+  console.error('browser asset inventory failed:', error.message);
+  process.exit(1);
+}
 const cache = new NodeCache({ stdTTL: 300 }); // 5 min cache
 const actualCoordinator = getActualCoordinator();
 actualCoordinator.bindCache(cache);
@@ -283,9 +296,7 @@ function requireAuth(req, res, next) {
 }
 
 // Auth routes
-app.get('/login', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'login.html'));
-});
+app.get('/login', (req, res) => sendBrowserAsset(req, res, browserAssetInventory, 'login.html'));
 
 app.get('/auth/status', (req, res) => {
   const creds = loadCreds();
@@ -713,14 +724,14 @@ app.use((req, res, next) => {
     || req.path.startsWith('/login')
     || req.path.startsWith('/auth/')
     || isVersionedApiPath(req.path)
-    || isPublicBrowserAsset(req.path)
+    || isPublicBrowserAsset(req.path, browserAssetInventory)
   ) return next();
   requireAuth(req, res, next);
 });
 
-app.get('/demo', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-app.use(createBrowserStaticMiddleware({ publicRoot: path.join(__dirname, 'public') }));
+app.get('/demo', (req, res) => sendBrowserAsset(req, res, browserAssetInventory, 'index.html'));
+app.get('/', (req, res) => sendBrowserAsset(req, res, browserAssetInventory, 'index.html'));
+app.use(createBrowserStaticMiddleware({ inventory: browserAssetInventory }));
 
 // Demo mode for the legacy web API (runs after the passkey gate above).
 app.use((req, res, next) => isVersionedApiPath(req.path)

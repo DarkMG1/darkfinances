@@ -265,6 +265,34 @@ test('browser renderers emit semantic progress, palette classes, and hidden cont
   assert.match(categoryList.innerHTML, /<progress class="cat-progress cat-color-0" value="\d+" max="100"/);
   assert.equal(elements.get('statNet').classList.contains('text-tone-green'), true);
 
+  const reservedHost = createContainer('div', 'safeToSpendReserved');
+  const reasonsHost = createContainer('div', 'safeToSpendReasons');
+  elements.set('safeToSpendReserved', reservedHost);
+  elements.set('safeToSpendReasons', reasonsHost);
+  for (const id of ['safeToSpendValue', 'safeToSpendDetail', 'goalAdvisoryNote']) {
+    elements.set(id, createElement('div', id));
+  }
+  const adversarial = '<img src=x onerror=alert(1)>&amp; "quoted"';
+  const { renderSafeToSpend } = await import(pathToFileURL(path.join(publicRoot, 'js/render/safe-to-spend.js')).href);
+  renderSafeToSpend(
+    { complete: false, incompleteReasons: [adversarial] },
+    {
+      data: {
+        obligations: {
+          reserved: [{
+            label: adversarial,
+            amountCents: 12345,
+            date: adversarial,
+          }],
+        },
+      },
+    },
+  );
+  assert.ok(!reservedHost.innerHTML.includes('<img'));
+  assert.ok(!reasonsHost.innerHTML.includes('<img'));
+  assert.match(reservedHost.innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;&amp;amp; &quot;quoted&quot;/);
+  assert.match(reasonsHost.innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;&amp;amp; &quot;quoted&quot;/);
+
   const loadMoreBtn = createElement('button', 'loadMoreBtn');
   loadMoreBtn.hidden = true;
   elements.set('loadMoreBtn', loadMoreBtn);

@@ -10,9 +10,12 @@ const {
   cacheControlFor,
   contentTypeFor,
   createBrowserStaticMiddleware,
+  expectedManifestAssetPaths,
   listModuleFiles,
+  loadBrowserAssetInventory,
   normalizePublicPath,
   resolvePublicFile,
+  servedAssetPaths,
 } = require('../lib/browser-static');
 const { DASHBOARD_RUNTIME_FILES } = require('../lib/release-files');
 const { verifyNoInlineBrowserStyles } = require('../lib/browser-style-policy');
@@ -95,8 +98,8 @@ function parseModuleGraph(entrySource, entryPath) {
   return graph;
 }
 
-function startStaticServer() {
-  const middleware = createBrowserStaticMiddleware({ publicRoot });
+function startStaticServer(inventory) {
+  const middleware = createBrowserStaticMiddleware({ inventory });
   const server = http.createServer((req, res) => {
     middleware(req, res, () => {
       res.statusCode = 404;
@@ -206,16 +209,101 @@ test('browser dependency boundaries keep render modules from importing app.js', 
   }
 });
 
-test('browser manifest matches committed module digests', () => {
+test('browser manifest matches committed module digests and authoritative inventory', () => {
   const built = buildBrowserManifest();
   const committed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const chartManifest = JSON.parse(fs.readFileSync(path.join(publicRoot, 'vendor', 'chart-js.manifest.json'), 'utf8'));
   assert.deepEqual(committed.modules.sort(), built.modules.sort());
+  assert.deepEqual(committed.pages, built.pages);
+  assert.deepEqual(committed.vendor, built.vendor);
+  assert.deepEqual(committed.meta, built.meta);
   assert.equal(committed.version, built.version);
   assert.deepEqual(committed.digests, built.digests);
-  for (const relative of built.modules) {
+  assert.deepEqual(Object.keys(committed.digests).sort(), expectedManifestAssetPaths(committed));
+  assert.equal(committed.digests['vendor/chart.umd.js'], chartManifest.sha256);
+  for (const relative of expectedManifestAssetPaths(committed)) {
     assert.equal(DASHBOARD_RUNTIME_FILES.includes(`public/${relative}`), true, relative);
   }
   assert.equal(DASHBOARD_RUNTIME_FILES.includes('public/browser-manifest.json'), true);
+});
+
+test('browser asset inventory loads immutable verified bytes at startup', () => {
+  const inventory = loadBrowserAssetInventory({ publicRoot });
+  assert.equal(inventory.assets.size, servedAssetPaths(JSON.parse(fs.readFileSync(manifestPath, 'utf8'))).length);
+  const app = inventory.assets.get('js/app.js');
+  assert.ok(Buffer.isBuffer(app.body));
+  assert.equal(app.body.toString('utf8'), fs.readFileSync(path.join(publicRoot, 'js/app.js'), 'utf8'));
+});
+
+test('browser asset inventory rejects tampered, missing, and symlinked assets at startup', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(require('os').tmpdir(), 'df-browser-'));
+  try {
+    fs.cpSync(publicRoot, tmpRoot, { recursive: true });
+    assert.doesNotThrow(() => loadBrowserAssetInventory({ publicRoot: tmpRoot }));
+
+    fs.writeFileSync(path.join(tmpRoot, 'js/app.js'), 'console.log("tampered");\n');
+    assert.throws(
+      () => loadBrowserAssetInventory({ publicRoot: tmpRoot }),
+      /digest mismatch for js\/app\.js|does not match built/,
+    );
+
+    fs.cpSync(publicRoot, tmpRoot, { recursive: true, force: true });
+    fs.unlinkSync(path.join(tmpRoot, 'css/dashboard.css'));
+    assert.throws(
+      () => loadBrowserAssetInventory({ publicRoot: tmpRoot }),
+      /browser asset is missing: css\/dashboard\.css/,
+    );
+
+    fs.cpSync(publicRoot, tmpRoot, { recursive: true, force: true });
+    fs.writeFileSync(path.join(tmpRoot, 'js/extra-module.js'), 'export {};\n');
+    const manifest = JSON.parse(fs.readFileSync(path.join(tmpRoot, 'browser-manifest.json'), 'utf8'));
+    manifest.modules = [...manifest.modules, 'js/extra-module.js'].sort();
+    manifest.digests['js/extra-module.js'] = require('crypto')
+      .createHash('sha256')
+      .update(fs.readFileSync(path.join(tmpRoot, 'js/extra-module.js')))
+      .digest('hex');
+    fs.writeFileSync(path.join(tmpRoot, 'browser-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+    assert.throws(
+      () => loadBrowserAssetInventory({ publicRoot: tmpRoot }),
+      /digests do not match committed asset bytes|does not match built/,
+    );
+
+    fs.cpSync(publicRoot, tmpRoot, { recursive: true, force: true });
+    fs.rmSync(path.join(tmpRoot, 'js/extra-module.js'), { force: true });
+    fs.unlinkSync(path.join(tmpRoot, 'js/app.js'));
+    fs.symlinkSync(path.join(publicRoot, 'js/app.js'), path.join(tmpRoot, 'js/app.js'));
+    assert.throws(
+      () => loadBrowserAssetInventory({ publicRoot: tmpRoot }),
+      /symlinked browser asset path: js\/app\.js/,
+    );
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('browser static middleware serves verified immutable bytes after on-disk tampering', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(require('os').tmpdir(), 'df-browser-serve-'));
+  try {
+    fs.cpSync(publicRoot, tmpRoot, { recursive: true });
+    const inventory = loadBrowserAssetInventory({ publicRoot: tmpRoot });
+    const verified = inventory.assets.get('js/app.js').body.toString('utf8');
+    const server = await startStaticServer(inventory);
+    try {
+      const before = await request(server, '/js/app.js');
+      assert.equal(before.status, 200);
+      assert.equal(before.body, verified);
+
+      fs.writeFileSync(path.join(tmpRoot, 'js/app.js'), 'console.log("post-start tamper");\n');
+      const after = await request(server, '/js/app.js');
+      assert.equal(after.status, 200);
+      assert.equal(after.body, verified);
+      assert.notEqual(after.body, fs.readFileSync(path.join(tmpRoot, 'js/app.js'), 'utf8'));
+    } finally {
+      await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+    }
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
 });
 
 test('browser static middleware blocks traversal and serves typed assets with cache policy', async () => {
@@ -224,25 +312,38 @@ test('browser static middleware blocks traversal and serves typed assets with ca
   assert.equal(contentTypeFor('js/app.js'), 'text/javascript; charset=utf-8');
   assert.equal(contentTypeFor('css/dashboard.css'), 'text/css; charset=utf-8');
   assert.equal(cacheControlFor('index.html'), 'no-store');
+  assert.equal(cacheControlFor('login.html'), 'no-store');
   assert.equal(cacheControlFor('js/app.js'), 'no-store');
   assert.match(cacheControlFor('vendor/chart.umd.js'), /immutable/);
+  assert.equal(cacheControlFor('vendor/chart-js.manifest.json'), 'no-store');
 
-  const server = await startStaticServer();
+  const inventory = loadBrowserAssetInventory({ publicRoot });
+  const server = await startStaticServer(inventory);
   try {
     const ok = await request(server, '/js/app.js');
     assert.equal(ok.status, 200);
     assert.match(ok.headers['content-type'], /javascript/);
     assert.equal(ok.headers['cache-control'], 'no-store');
+    assert.equal(ok.headers['x-content-type-options'], 'nosniff');
 
     const css = await request(server, '/css/dashboard.css');
     assert.equal(css.status, 200);
     assert.match(css.headers['content-type'], /text\/css/);
+    assert.equal(css.headers['cache-control'], 'no-store');
+
+    const page = await request(server, '/index.html');
+    assert.equal(page.status, 200);
+    assert.equal(page.headers['cache-control'], 'no-store');
+    assert.equal(page.headers['x-content-type-options'], 'nosniff');
 
     const missing = await request(server, '/js/not-a-module.js');
     assert.equal(missing.status, 404);
 
     const traversal = await request(server, '/js/%2e%2e/server.js');
     assert.equal(traversal.status, 404);
+
+    const encoded = await request(server, '/js/%2e%2e%2f%2e%2e/public/index.html');
+    assert.equal(encoded.status, 404);
   } finally {
     await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
   }

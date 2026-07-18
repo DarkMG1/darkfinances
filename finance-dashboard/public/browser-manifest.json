@@ -1,5 +1,5 @@
 {
-  "version": "84b94cf621436bb5",
+  "version": "f942c0acf381aac8",
   "entrypoints": [
     "js/app.js",
     "js/login.js"
@@ -7,6 +7,15 @@
   "stylesheets": [
     "css/dashboard.css",
     "css/login.css"
+  ],
+  "pages": [
+    "index.html",
+    "login.html"
+  ],
+  "vendor": [
+    "vendor/chart.umd.js",
+    "vendor/chart-js.manifest.json",
+    "vendor/THIRD-PARTY-NOTICES.txt"
   ],
   "modules": [
     "js/api.js",
@@ -31,9 +40,13 @@
     "js/router.js",
     "js/state.js"
   ],
+  "meta": [
+    "browser-manifest.json"
+  ],
   "digests": {
     "css/dashboard.css": "7c6cd149a47e7ae79ea5b9fecc23a57a92adb68f9eecd1a9ed5b60624fe65a9b",
     "css/login.css": "52bab62d8af74df4b2d36f9b6c5aabce14075c3e0c37ef53c356798ceb7c2d60",
+    "index.html": "8453a39258f648404d0143de971b33b986b2180fa94c1314d5f8f37ffbe2f6da",
     "js/api.js": "7d7ea0b02093542e9ae5c67e349a4bcd4fe24c68e8ca5782272ceaff1b69cbb9",
     "js/app.js": "ddf916cf606202e4bcec50031be38c0c27775e3b32b5ad0a553e0090aa45bc0f",
     "js/chart-runtime.js": "87b7b4ffb0315c84efddbe6ad51e69ad9dfd5b14750658984b853e08445c1891",
@@ -50,10 +63,14 @@
     "js/render/charts-pages.js": "0b9840385929f2c5afa41f92fd16194634fb443e9bef8b034f9122c3d52f8522",
     "js/render/goals.js": "85ad516f2632d16be8b4098b4a1125b5ae0e44d8696a2a1eb77745d6ea92d0c6",
     "js/render/recurring.js": "91a1ad2f0a212c61116263eaf1e31a44703f7b003a251cec215bfad507d44e00",
-    "js/render/reimbursement.js": "6558fe3ffc3e0c86b81bf23f6cd40f64e4e29001907d9f5e23de0ee88db31e00",
-    "js/render/safe-to-spend.js": "f8d9299bff66fc4a084d18788a2328431c9262df2cff90e3f30a33d6ff085fdf",
+    "js/render/reimbursement.js": "4641e69d4097850d1267ac54f4910342c1c1c20deda5ab709412e5a898e618b0",
+    "js/render/safe-to-spend.js": "327c330355c0d053399136d0008b6f4610cb108c94d4b8d1225325bfc71962a0",
     "js/render/transactions.js": "c53c1c7a2a0e0fee9d21a010193927b3e91ec01d8f3887514a4f75d8bc3b21ee",
     "js/router.js": "57fbec4bc640aade2ba68e5f9f74f1b6590fe6a3c4836cdfb15961b97d714572",
-    "js/state.js": "83c39433eb444f391014f9a3fc710fbc1d8c7698750b5811e55868dfb76ad8fb"
+    "js/state.js": "83c39433eb444f391014f9a3fc710fbc1d8c7698750b5811e55868dfb76ad8fb",
+    "login.html": "e072ac9cfd241df70508da16b2e7cba2d4f569aa79fbdcc7b8856ea751b56e2a",
+    "vendor/THIRD-PARTY-NOTICES.txt": "2486168e9024282e11c358edccda6767922e409f895af7839154445f9c6ab8e5",
+    "vendor/chart-js.manifest.json": "79551a69f28903e567da17ba974070679f7ffed5fb7bbd48eee09d786678c464",
+    "vendor/chart.umd.js": "4189ade3d07862981d2a92e0629d48a83ae840260122bc1fac01094e4b1c0aa2"
   }
 }

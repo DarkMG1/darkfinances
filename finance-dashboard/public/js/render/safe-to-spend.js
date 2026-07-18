@@ -35,7 +35,7 @@ export function renderSafeToSpend(metric, payload = null) {
   if (reservedHost) {
     const reserved = payload?.data?.obligations?.reserved || payload?.data?.obligationGraph?.reservations || [];
     reservedHost.innerHTML = reserved.length
-      ? reserved.slice(0, 4).map((item) => `<div class="stat-sub">${item.label}: ${fmt(Math.abs(item.amountCents) / 100)} on ${item.date}</div>`).join('')
+      ? reserved.slice(0, 4).map((item) => `<div class="stat-sub">${html(item.label)}: ${fmt(Math.abs(item.amountCents) / 100)} on ${html(item.date)}</div>`).join('')
       : '';
   }
 }

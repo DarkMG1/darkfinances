@@ -107,7 +107,14 @@ test('server security boundaries fail closed', async (t) => {
   assert.equal(result.body.code, 'INVALID_REQUEST');
   result = await request(base, '/demo', { redirect: 'manual' });
   assert.equal(result.response.status, 200);
+  assert.equal(result.response.headers.get('cache-control'), 'no-store');
+  assert.equal(result.response.headers.get('x-content-type-options'), 'nosniff');
   assert.doesNotMatch(String(result.body), /demoOnlyPage/);
+  result = await request(base, '/login', { redirect: 'manual' });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.response.headers.get('cache-control'), 'no-store');
+  assert.equal(result.response.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(String(result.body), /login\.css/);
   result = await request(base, '/js/demo.js');
   assert.equal(result.response.status, 200);
   assert.match(String(result.body), /demoOnlyPage/);

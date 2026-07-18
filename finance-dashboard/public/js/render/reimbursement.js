@@ -12,11 +12,11 @@ export async function loadReimbursement() {
     oweList.innerHTML = owers.map((p) => {
       const parts = [];
       if (p.misc > 0) parts.push(`${fmtPos(p.misc)} misc`);
-      (p.trips || []).forEach((t) => parts.push(`${fmtPos(t.remaining)} ${t.event}`));
+      (p.trips || []).forEach((t) => parts.push(`${fmtPos(t.remaining)} ${html(t.event)}`));
       const sub = parts.join(' · ') || `${(p.legs || []).length} item${(p.legs || []).length === 1 ? '' : 's'}`;
       return `
         <div class="owe-row">
-          <div><div class="owe-name">${html(p.slug)}</div><div class="owe-sub">${html(sub)}</div></div>
+          <div><div class="owe-name">${html(p.slug)}</div><div class="owe-sub">${sub}</div></div>
           <div class="owe-amt owed">${fmtPos(p.owed)}</div>
         </div>`;
     }).join('');
