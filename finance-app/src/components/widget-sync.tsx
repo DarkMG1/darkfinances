@@ -56,7 +56,13 @@ export function WidgetSync() {
       widgetScope: widgetScopeRef.current,
       serverMetric: today.data?.metrics?.netWorth,
       accounts: accounts.data ?? null,
+      accountsLoading: accounts.isLoading,
+      accountsSettled: !accounts.isLoading && (accounts.isSuccess || accounts.isError),
+      accountsError: accounts.isError,
       manual: manual.data,
+      manualLoading: manual.isLoading,
+      manualSettled: !manual.isLoading && (manual.isSuccess || manual.isError),
+      manualError: manual.isError,
       prevTrendNetWorth,
     });
 
@@ -86,11 +92,17 @@ export function WidgetSync() {
     widgetGenerationRef.current = profileGeneration;
   }, [
     accounts.data,
+    accounts.isError,
+    accounts.isLoading,
+    accounts.isSuccess,
     bills.data,
     capabilities.widgets,
     demo,
     financeToday,
     manual.data,
+    manual.isError,
+    manual.isLoading,
+    manual.isSuccess,
     profileGeneration,
     scope,
     today.data,

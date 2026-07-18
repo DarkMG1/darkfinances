@@ -117,7 +117,13 @@ function resolveNetWorthAggregateDisplay({ resolved, assets, liabilities }) {
  *   widgetScope: string | null;
  *   serverMetric?: MetricValue;
  *   accounts?: Array<{ hidden?: boolean; balance: number; inclusion?: { netWorth?: boolean } }> | null;
+ *   accountsLoading?: boolean;
+ *   accountsSettled?: boolean;
+ *   accountsError?: boolean;
  *   manual?: { complete?: boolean; assets?: number | null; liabilities?: number | null };
+ *   manualLoading?: boolean;
+ *   manualSettled?: boolean;
+ *   manualError?: boolean;
  *   prevTrendNetWorth?: number | null;
  * }} input
  * @returns {WidgetNetWorthDecision}
@@ -132,8 +138,14 @@ function resolveWidgetNetWorthDecision(input) {
     scope,
     widgetScope,
     serverMetric,
-    accounts,
+    accounts = null,
+    accountsLoading = false,
+    accountsSettled = false,
+    accountsError = false,
     manual,
+    manualLoading = false,
+    manualSettled = true,
+    manualError = false,
     prevTrendNetWorth = null,
   } = input;
 
@@ -149,13 +161,18 @@ function resolveWidgetNetWorthDecision(input) {
   if (todayError) {
     return { action: 'clear', reason: 'today_error' };
   }
-  if (!accounts || accounts.length === 0) {
-    return { action: 'wait', reason: 'accounts_pending' };
-  }
 
-  const fallbackNetWorth = computeFallbackNetWorth(accounts, manual);
-  const resolved = resolveMoneyMetric(serverMetric, fallbackNetWorth);
-  if (resolved.unavailable) {
+  const resolved = resolveMoneyMetric(serverMetric, null);
+  if (resolved.authoritative && resolved.value != null) {
+    const changeDiff = prevTrendNetWorth != null ? resolved.value - prevTrendNetWorth : null;
+    return {
+      action: 'push',
+      netWorth: resolved.value,
+      changeDiff,
+      authoritative: true,
+    };
+  }
+  if (hasServerMetric(serverMetric) && resolved.unavailable) {
     return {
       action: 'clear',
       reason: 'metric_incomplete',
@@ -163,11 +180,21 @@ function resolveWidgetNetWorthDecision(input) {
     };
   }
 
-  const netWorth = resolved.authoritative && resolved.value != null
-    ? resolved.value
-    : (resolved.value ?? fallbackNetWorth);
+  if (!accountsSettled || !manualSettled || accountsLoading || manualLoading) {
+    return { action: 'wait', reason: 'fallback_inputs_pending' };
+  }
+  if (accountsError) {
+    return { action: 'clear', reason: 'accounts_error' };
+  }
+  if (manualError || manual?.complete === false) {
+    return { action: 'clear', reason: 'manual_unavailable' };
+  }
+
+  const fallbackNetWorth = computeFallbackNetWorth(accounts ?? [], manual);
+  const fallbackResolved = resolveMoneyMetric(serverMetric, fallbackNetWorth);
+  const netWorth = fallbackResolved.value ?? fallbackNetWorth;
   if (netWorth == null || !Number.isFinite(netWorth)) {
-    return { action: 'wait', reason: 'net_worth_unresolved' };
+    return { action: 'clear', reason: 'fallback_unavailable' };
   }
 
   const changeDiff = prevTrendNetWorth != null ? netWorth - prevTrendNetWorth : null;
@@ -175,7 +202,7 @@ function resolveWidgetNetWorthDecision(input) {
     action: 'push',
     netWorth,
     changeDiff,
-    authoritative: resolved.authoritative,
+    authoritative: false,
   };
 }
 
