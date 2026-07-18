@@ -34,6 +34,8 @@ const {
   routeKey,
 } = require('./lib/mutation-route-registry');
 const { parse, schemas } = require('./lib/validation');
+const { createReconnectFreshnessProbeService } = require('./lib/reconnect-freshness-probe');
+const { deriveRequestPrincipal } = require('./lib/request-principal');
 const { readReleaseIdentity } = require('./lib/release-identity');
 const {
   exportExitCode,
@@ -88,6 +90,13 @@ const runtimeHealth = {
 function releaseIdentity() {
   return readReleaseIdentity(RELEASE_MANIFEST_PATH, __dirname);
 }
+
+const reconnectFreshnessProbe = createReconnectFreshnessProbeService({
+  coordinator: actualCoordinator,
+  readAccountsProbe: () => data.getAccounts(),
+  financeTimeZone: FINANCE_TIME_ZONE,
+  deployIdentity: releaseIdentity,
+});
 
 // Defense-in-depth: the Actual API occasionally rejects a batch write out-of-band
 // (a promise that escapes the awaited call). Continuing after an unknown write
@@ -489,6 +498,12 @@ function demoMiddleware(v1mode) {
     if (p === 'receipts') return send(demo.receipts(req.query.txnId ? String(req.query.txnId) : undefined));
     switch (p) {
       case 'ping': return send({ ok: true, ts: Date.now() });
+      case 'reconnect-freshness':
+        return sendApiError(req, res, new AppError('Reconnect freshness probe is not supported in demo mode', {
+          code: 'RECONNECT_FRESHNESS_DEMO_UNSUPPORTED',
+          status: 404,
+          expose: true,
+        }));
       case 'accounts': return send(demo.accounts());
       case 'today': return send(demo.today());
       case 'transactions': {
@@ -1504,6 +1519,21 @@ v1.get('/ping', env(async () => {
     queuedMutations: mutationQueue.size,
     release: releaseIdentity(),
   };
+}));
+v1.get('/reconnect-freshness', env(async (req) => {
+  const actual = data.getHealth();
+  if (runtimeHealth.fatalErrorAt || !actual.ready) {
+    throw new AppError('Finance data is not ready', {
+      code: 'NOT_READY',
+      status: 503,
+      expose: true,
+    });
+  }
+  const principal = deriveRequestPrincipal(req, {
+    apiToken: process.env.FINANCE_API_TOKEN || '',
+    selftest: SELFTEST,
+  });
+  return reconnectFreshnessProbe.runProbe(principal);
 }));
 v1.get('/accounts', env(resolvers.accounts));
 v1.get('/today', env(resolvers.today));

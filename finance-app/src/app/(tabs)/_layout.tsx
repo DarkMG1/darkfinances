@@ -5,6 +5,7 @@ import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { WidgetSync } from '@/components/widget-sync';
 import { FinanceStatusBanner } from '@/components/finance-status-banner';
+import { ReconnectStaleBanner } from '@/components/reconnect-stale-banner';
 import { haptics } from '@/lib/haptics';
 import { colors } from '@/theme/colors';
 
@@ -36,6 +37,7 @@ export default function TabsLayout() {
       <Tabs.Screen name="settings" options={{ title: 'Settings', tabBarButtonTestID: 'settings-tab', tabBarIcon: ({ color }) => <TabIcon name="gearshape.fill" color={color} /> }} />
     </Tabs>
     <FinanceStatusBanner />
+    <ReconnectStaleBanner />
     </View>
   );
 }

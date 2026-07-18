@@ -913,12 +913,27 @@ export interface CategorizeResult {
   previousId?: string;
   parentId?: string;
 }
+export interface ReconnectFreshnessEvidence {
+  ok: boolean;
+  probeKind: string;
+  cacheGenerationBefore: number;
+  cacheGenerationAfter: number;
+  sourceObservedAt: number;
+  sourceObservedRevision: string | null;
+  financeTimeZone: string;
+  deployIdentity: string | null;
+  coalesced?: boolean;
+}
 export interface Ping {
   ok: boolean;
   ts: number;
   startedAt?: string;
   financeTimeZone?: string;
   queuedMutations?: number;
+  actualCoordinator?: {
+    generation: number;
+    queued?: number;
+  };
   release?: {
     commit: string | null;
     dirty: boolean;

@@ -366,6 +366,7 @@ function validateLegacyMutationRequest(req) {
 const VERSIONED_READ_ROUTE_PATTERNS = [
   /^\/operations\/[^/]+$/i,
   /^\/ping$/i,
+  /^\/reconnect-freshness$/i,
   /^\/accounts$/i,
   /^\/today$/i,
   /^\/transactions(?:\/[^/]+)?$/i,
