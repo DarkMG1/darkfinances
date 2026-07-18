@@ -64,11 +64,15 @@ export default function Overview() {
   ]);
 
   const accts = (today.data?.accounts ?? []).filter((a) => !a.hidden);
+  const serverNetWorth = today.data?.metrics?.netWorth;
+  const netWorthAuthoritative = serverNetWorth?.complete === true && serverNetWorth.value != null;
   const acctAssets = accts.filter((a) => a.balance > 0).reduce((s, a) => s + a.balance, 0);
   const acctLiab = accts.filter((a) => a.balance < 0).reduce((s, a) => s + a.balance, 0);
   const assets = acctAssets + (manual.data?.assets ?? 0);
   const liabilities = acctLiab - (manual.data?.liabilities ?? 0);
-  const netWorth = assets + liabilities;
+  const fallbackNetWorth = assets + liabilities;
+  const netWorth = netWorthAuthoritative ? serverNetWorth!.value! : fallbackNetWorth;
+  const netWorthIncompleteReasons = serverNetWorth?.complete === false ? (serverNetWorth.incompleteReasons ?? []) : [];
 
   const financeToday = useFinanceToday();
   const curMonth = financeToday.slice(0, 7);
@@ -87,7 +91,8 @@ export default function Overview() {
   // "This month" net-worth change ≈ now vs the previous monthly snapshot. Based on
   // synced accounts only, since manual assets have no monthly history.
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
-  const nwDelta = prevNW != null ? acctAssets + acctLiab - prevNW : null;
+  const acctNetWorth = acctAssets + acctLiab;
+  const nwDelta = prevNW != null ? acctNetWorth - prevNW : null;
 
   const cash = accts.filter((a) => a.role === 'operating_cash' || a.role === 'protected_savings');
   const credit = accts.filter((a) => a.role === 'credit_card' || a.role === 'loan');
@@ -191,7 +196,12 @@ export default function Overview() {
           {widgets.netWorth ? (
             <Pressable testID="home-networth-hero" onPress={() => { haptics.tap(); router.push('/networth' as never); }} style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}>
               <Text style={styles.heroLabel}>NET WORTH</Text>
-              <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>{fmtMoney(netWorth)}</Text>
+              <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>
+                {netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth))}
+              </Text>
+              {!netWorthAuthoritative && netWorthIncompleteReasons.length ? (
+                <Text style={styles.heroSub}>Local estimate hidden — server projection incomplete</Text>
+              ) : null}
               <View style={styles.heroMetaRow}>
                 {nwDelta != null ? (
                   <Text style={[styles.heroDelta, { color: nwDelta >= 0 ? colors.green : colors.red }]}>

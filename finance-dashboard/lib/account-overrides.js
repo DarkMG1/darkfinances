@@ -1,5 +1,11 @@
 'use strict';
 
+const {
+  ACCOUNT_METRIC,
+  LIQUID_CASH_ROLES,
+  NET_WORTH_ROLES,
+  OPERATING_CASH_ROLES,
+} = require('./account-projection');
 const { ACCOUNT_ROLES, migrateAccountOverrides } = require('./account-overrides-schema');
 
 function runtimeStore() {
@@ -22,12 +28,27 @@ function writeAccountOverrides(file, store) {
   writeRuntimeState(resolveAccountOverridesName(file), migrated, { file });
 }
 
+function roleSetForMetric(metric) {
+  switch (metric) {
+    case 'operating_cash':
+    case ACCOUNT_METRIC.operatingCash:
+    case ACCOUNT_METRIC.forecastCash:
+      return OPERATING_CASH_ROLES;
+    case 'liquid_cash':
+    case ACCOUNT_METRIC.liquidCash:
+      return LIQUID_CASH_ROLES;
+    case 'net_worth':
+    case ACCOUNT_METRIC.netWorthLive:
+    case ACCOUNT_METRIC.netWorthHistory:
+      return NET_WORTH_ROLES;
+    default:
+      return new Set();
+  }
+}
+
 function accountsForMetric(accounts, metric) {
-  const allowed = metric === 'operating_cash'
-    ? new Set(['operating_cash'])
-    : metric === 'net_worth'
-      ? new Set(['operating_cash', 'protected_savings', 'credit_card', 'loan', 'investment'])
-      : new Set();
+  const allowed = roleSetForMetric(metric);
+  if (!allowed.size) return [];
   return (accounts || []).filter((account) => allowed.has(account.role));
 }
 
@@ -36,5 +57,6 @@ module.exports = {
   accountsForMetric,
   migrateAccountOverrides,
   readAccountOverrides,
+  roleSetForMetric,
   writeAccountOverrides,
 };

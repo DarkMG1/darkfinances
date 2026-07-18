@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { Platform } from 'react-native';
-import { useAccounts, useBills, useManualAssets, useTrends } from '@/api/hooks/finance.hooks';
+import { useAccounts, useBills, useManualAssets, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { getFinanceCapabilities } from '@/lib/capabilities';
 import { clearFinanceWidget, pushFinanceWidget } from '@/lib/widgets';
 import { useServerConfig } from '@/state/server';
@@ -14,6 +14,7 @@ export function WidgetSync() {
   const capabilities = getFinanceCapabilities();
   const { demo } = useServerConfig();
   const accounts = useAccounts({ enabled: capabilities.widgets && !demo });
+  const today = useToday();
   const bills = useBills(undefined, { enabled: capabilities.widgets && !demo });
   const trends = useTrends(12, { enabled: capabilities.widgets && !demo });
   const manual = useManualAssets({ enabled: capabilities.widgets && !demo });
@@ -32,7 +33,10 @@ export function WidgetSync() {
     if (!accts) return;
     const visible = accts.filter((account) => !account.hidden);
     const syncedNetWorth = visible.reduce((sum, account) => sum + account.balance, 0);
-    const netWorth = syncedNetWorth + (manual.data?.assets ?? 0) - (manual.data?.liabilities ?? 0);
+    const fallbackNetWorth = syncedNetWorth + (manual.data?.assets ?? 0) - (manual.data?.liabilities ?? 0);
+    const serverNetWorth = today.data?.metrics?.netWorth;
+    const netWorthAuthoritative = serverNetWorth?.complete === true && serverNetWorth.value != null;
+    const netWorth = netWorthAuthoritative ? serverNetWorth!.value! : fallbackNetWorth;
 
     const months = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
     let change = '';
@@ -53,7 +57,7 @@ export function WidgetSync() {
       billAmount: nextBill ? fmtPos(nextBill.amount) : '',
       billDue: nextBill ? dueLabel(nextBill.dueDate, financeToday) : 'No bills due',
     });
-  }, [accounts.data, bills.data, capabilities.widgets, demo, financeToday, manual.data, trends.data]);
+  }, [accounts.data, bills.data, capabilities.widgets, demo, financeToday, manual.data, today.data, trends.data]);
 
   return null;
 }

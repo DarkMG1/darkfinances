@@ -56,6 +56,12 @@ const ACCOUNT_OVERRIDE_DERIVED_KEYS = [
   API_ENDPOINTS.accounts.key,
   API_ENDPOINTS.bills.key,
   API_ENDPOINTS.recurring.key,
+  API_ENDPOINTS.trends.key,
+  API_ENDPOINTS.spending.key,
+  API_ENDPOINTS.goals.key,
+  API_ENDPOINTS.review.key,
+  API_ENDPOINTS.reports.key,
+  API_ENDPOINTS.insights.key,
 ] as const;
 
 const RECURRING_OVERRIDE_DERIVED_KEYS = [

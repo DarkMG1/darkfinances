@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
-import { useAccounts, useDeleteManualAsset, useManualAssets, useSaveManualAsset, useTrends } from '@/api/hooks/finance.hooks';
+import { useAccounts, useDeleteManualAsset, useManualAssets, useSaveManualAsset, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { Account, ManualAsset } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
 import { Avatar, Card, ErrorState, SectionLabel } from '@/components/ui';
@@ -28,6 +28,7 @@ export default function NetWorthScreen() {
   const [edit, setEdit] = useState<EditState>(null);
 
   const accounts = useAccounts();
+  const today = useToday();
   const trends = useTrends(months);
   const manual = useManualAssets();
   const saveManual = useSaveManualAsset();
@@ -44,10 +45,14 @@ export default function NetWorthScreen() {
   const manualLiabTotal = manual.data?.liabilities ?? 0;
 
   const acctAssets = assetsList.reduce((s, a) => s + a.balance, 0);
-  const acctLiab = liabList.reduce((s, a) => s + a.balance, 0); // negative
+  const acctLiab = liabList.reduce((s, a) => s + a.balance, 0);
   const assets = acctAssets + manualAssetTotal;
-  const liabilities = acctLiab - manualLiabTotal; // negative
-  const netWorth = assets + liabilities;
+  const liabilities = acctLiab - manualLiabTotal;
+  const fallbackNetWorth = assets + liabilities;
+  const serverNetWorth = today.data?.metrics?.netWorth;
+  const netWorthAuthoritative = serverNetWorth?.complete === true && serverNetWorth.value != null;
+  const netWorth = netWorthAuthoritative ? serverNetWorth!.value! : fallbackNetWorth;
+  const netWorthIncompleteReasons = serverNetWorth?.complete === false ? (serverNetWorth.incompleteReasons ?? []) : [];
 
   const nwHist = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
@@ -58,7 +63,7 @@ export default function NetWorthScreen() {
   const totalAbs = assets + Math.abs(liabilities);
   const assetPct = totalAbs > 0 ? (assets / totalAbs) * 100 : 100;
 
-  const onRefresh = () => Promise.all([accounts.refetch(), trends.refetch(), manual.refetch()]);
+  const onRefresh = () => Promise.all([accounts.refetch(), today.refetch(), trends.refetch(), manual.refetch()]);
 
   const openNew = (kind: 'asset' | 'liability') => { haptics.tap(); setEdit({ name: '', value: '', kind }); };
   const openEdit = (m: ManualAsset) => { haptics.tap(); setEdit({ id: m.id, name: m.name, value: String(m.value), kind: m.kind }); };
@@ -120,7 +125,12 @@ export default function NetWorthScreen() {
         <>
           <View style={styles.hero}>
             <Text style={styles.heroLabel}>NET WORTH</Text>
-            <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>{fmtMoney(netWorth)}</Text>
+            <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>
+              {netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth))}
+            </Text>
+            {!netWorthAuthoritative && netWorthIncompleteReasons.length ? (
+              <Text style={styles.delta}>Server projection incomplete — local sum not shown as authoritative</Text>
+            ) : null}
             {nwDelta != null ? (
               <Text style={[styles.delta, { color: nwDelta >= 0 ? colors.green : colors.red }]}>
                 {nwDelta >= 0 ? '▲' : '▼'} {fmtPos(Math.abs(nwDelta))} this month

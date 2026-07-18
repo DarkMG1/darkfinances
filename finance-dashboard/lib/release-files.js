@@ -3,6 +3,8 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'demoData.js',
   'lib/account-overrides-schema.js',
   'lib/account-overrides.js',
+  'lib/account-projection.js',
+  'lib/splitwise-mirror-account.js',
   'lib/actual-coordinator.js',
   'lib/date-only.js',
   'lib/domain/budget-envelope.js',

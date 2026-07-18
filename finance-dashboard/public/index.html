@@ -584,7 +584,9 @@
       categoryFilter: null,   // category name
       txnFilter: 'all',
       txnPage: 50,
-      netWorth: null,         // live net worth from account balances (source of truth)
+      netWorth: null,         // live net worth from server projection (source of truth)
+      netWorthAuthoritative: false,
+      netWorthIncompleteReasons: [],
       trendFirstNW: null,     // first net-worth point of the loaded trend window
       trendMonths: null,
     };
@@ -657,6 +659,15 @@
 
     // ---- Accounts + Net Worth -------------------------------------------------
     async function loadAccounts() {
+      if (!state.netWorthAuthoritative) {
+        try {
+          const todayPayload = await (await fetch('/api/v1/today')).json();
+          const metric = todayPayload?.data?.metrics?.netWorth;
+          state.netWorthAuthoritative = metric?.complete === true && metric?.value != null;
+          state.netWorthIncompleteReasons = metric?.complete === false ? (metric.incompleteReasons || []) : [];
+          if (state.netWorthAuthoritative) state.netWorth = metric.value;
+        } catch (_) { /* keep local fallback */ }
+      }
       accounts = (await (await fetch('/api/accounts')).json()).filter((account) => !account.hidden);
       let totalAssets = 0, totalLiabilities = 0;
       const grid = document.getElementById('accountsGrid');
@@ -673,13 +684,24 @@
         div.onclick = () => toggleAccountFilter(a);
         grid.appendChild(div);
       });
-      const netWorth = totalAssets + totalLiabilities;
+      const netWorthMetric = state.netWorthAuthoritative ? { value: state.netWorth, complete: true } : null;
+      const netWorth = netWorthMetric?.complete ? netWorthMetric.value : (totalAssets + totalLiabilities);
       state.netWorth = netWorth;
       const nwEl = document.getElementById('netWorth');
-      nwEl.textContent = fmt(netWorth);
+      if (state.netWorthAuthoritative) {
+        nwEl.textContent = fmt(netWorth);
+      } else if ((state.netWorthIncompleteReasons || []).length) {
+        nwEl.textContent = 'Unavailable';
+      } else {
+        nwEl.textContent = fmt(netWorth);
+      }
       nwEl.style.color = netWorth >= 0 ? 'var(--text)' : 'var(--red)';
       document.getElementById('netWorthBreakdown').textContent =
-        `${fmtPos(totalAssets)} assets  ·  ${fmtPos(Math.abs(totalLiabilities))} liabilities`;
+        state.netWorthAuthoritative
+          ? `${fmtPos(totalAssets)} assets · ${fmtPos(Math.abs(totalLiabilities))} liabilities · server projection`
+          : ((state.netWorthIncompleteReasons || []).length
+            ? 'Net worth incomplete — assign account roles or resolve overrides'
+            : `${fmtPos(totalAssets)} assets · ${fmtPos(Math.abs(totalLiabilities))} liabilities · local estimate`);
       renderNetWorthChange();
     }
 
@@ -749,6 +771,10 @@
         const response = await fetch('/api/v1/today');
         if (!response.ok) throw new Error('Today unavailable');
         const payload = await response.json();
+        const metric = payload?.data?.metrics?.netWorth;
+        state.netWorthAuthoritative = metric?.complete === true && metric?.value != null;
+        state.netWorth = state.netWorthAuthoritative ? metric.value : state.netWorth;
+        state.netWorthIncompleteReasons = metric?.complete === false ? (metric.incompleteReasons || []) : [];
         renderSafeToSpend(payload?.data?.liquidity?.safeToSpend, payload);
         renderGoalAdvisory(payload?.data?.liquidity?.goalAdvisory);
       } catch (error) {

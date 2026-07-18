@@ -37,6 +37,7 @@ function reset({
       closed: false,
       offbudget: false,
       hidden: false,
+      role: 'operating_cash',
     });
     const rows = [];
     for (let i = 0; i < rowsPerAccount; i++) {

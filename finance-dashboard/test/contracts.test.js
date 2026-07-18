@@ -112,6 +112,26 @@ test('legacy web reimbursement renders MetricValue totals without NaN or fabrica
   assert.match(appReimbursement, /grandLowerBound != null \?/);
 });
 
+test('generated contract includes account projection metric and inclusion types', () => {
+  assert.match(generatedTypes, /inclusion\?: \{/);
+  assert.match(generatedTypes, /metrics\?: \{/);
+  assert.match(generatedTypes, /netWorth: MetricValue/);
+  assert.match(generatedTypes, /accountProjectionRevision\?: string/);
+  assert.match(generatedTypes, /netWorthIncludedAccountIds\?: string\[\]/);
+});
+
+test('clients prefer authoritative server net worth with incomplete fallback', () => {
+  const home = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'index.tsx'), 'utf8');
+  const networth = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'networth.tsx'), 'utf8');
+  const widget = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'components', 'widget-sync.tsx'), 'utf8');
+  assert.match(home, /metrics\?\.netWorth/);
+  assert.match(home, /netWorthAuthoritative/);
+  assert.match(networth, /metrics\?\.netWorth/);
+  assert.match(widget, /metrics\?\.netWorth/);
+  assert.match(browser, /metrics\?\.netWorth/);
+  assert.match(browser, /netWorthAuthoritative/);
+});
+
 test('generated contract includes goal feasibility and advisory types', () => {
   assert.match(generatedTypes, /export interface GoalFeasibility/);
   assert.match(generatedTypes, /export interface GoalAdvisory/);

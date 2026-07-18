@@ -49,6 +49,14 @@ export interface Account {
   hidden?: boolean;
   role: AccountRole;
   roleSource: 'explicit' | 'unknown';
+  inclusion?: {
+    netWorth: boolean;
+    operatingCash: boolean;
+    liquidCash: boolean;
+    spending: boolean;
+    obligations: boolean;
+    forecast: boolean;
+  };
   creditLiability?: AccountCreditLiabilityOverride | null;
   creditLiabilityPolicy?: AccountCreditLiabilityPolicy | null;
 }
@@ -224,6 +232,10 @@ export interface Spending {
   prev: SpendSummary;
   month: string;
   completeness?: ProjectionCompleteness;
+  scope?: {
+    accountProjectionRevision?: string;
+    spendingIncludedAccountIds?: string[];
+  };
 }
 
 export interface TrendMonth {
@@ -244,9 +256,16 @@ export interface Trends {
     includesClosedAccountHistory: boolean;
     includesManualAssets: boolean;
     excludedHiddenAccounts: boolean;
+    excludedRoles?: string[];
     queriedFrom?: string;
     queriedTo?: string;
     netWorthHistoryComplete?: boolean;
+    netWorthIncludedRoles?: AccountRole[];
+    netWorthIncludedAccountIds?: string[];
+    accountProjectionRevision?: string;
+    splitwiseMirrorAccountId?: string | null;
+    splitwiseMirrorExcludedFromNetWorth?: boolean;
+    demoSyntheticHistory?: boolean;
     months?: number;
   };
 }
@@ -1136,6 +1155,18 @@ export interface Today {
   incompleteReasons: string[];
   health: NonNullable<Ping['actual']>;
   accounts: Account[];
+  metrics?: {
+    netWorth: MetricValue;
+    liquidCash: MetricValue;
+    operatingCash: MetricValue;
+  };
+  scope?: {
+    accountProjectionRevision?: string;
+    netWorthIncludedAccountIds?: string[];
+    splitwiseMirrorAccountId?: string | null;
+    netWorthIncludesManualAssets?: boolean;
+    netWorthHistoryScope?: string;
+  };
   spending: Spending;
   liquidity: { safeToSpend: MetricValue; goalAdvisory?: GoalAdvisory | null };
   obligationGraph?: ObligationGraphView;
