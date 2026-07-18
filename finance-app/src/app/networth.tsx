@@ -119,6 +119,8 @@ export default function NetWorthScreen() {
     form.activitySeq, form.announce, form.isLocked, form.outcome, form.retry,
   ]));
 
+  const inputLocked = banner.isLocked;
+
   const accts = accounts.data ?? [];
   const visible = accts.filter((a) => !a.hidden);
   const hiddenAccts = accts.filter((a) => a.hidden);
@@ -161,6 +163,7 @@ export default function NetWorthScreen() {
   const onRefresh = () => Promise.all([accounts.refetch(), today.refetch(), trends.refetch(), manual.refetch()]);
 
   const openNew = (kind: EditKind) => {
+    if (inputLocked) return;
     haptics.tap();
     form.clearErrors();
     setManualSessionId((n) => n + 1);
@@ -168,6 +171,7 @@ export default function NetWorthScreen() {
   };
 
   const openEdit = (m: ManualAsset) => {
+    if (inputLocked) return;
     haptics.tap();
     form.clearErrors();
     setEdit({ id: m.id, name: m.name, value: String(m.value), kind: m.kind });
@@ -312,10 +316,10 @@ export default function NetWorthScreen() {
             <SectionLabel>Manual assets</SectionLabel>
             {manualItems.length ? <Card style={styles.list}>{manualItems.map(manualRow)}</Card> : null}
             <View style={styles.addRow}>
-              <Pressable testID="networth-add-asset-button" style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.7 }]} onPress={() => openNew('asset')}>
+              <Pressable testID="networth-add-asset-button" style={({ pressed }) => [styles.addBtn, pressed && !inputLocked && { opacity: 0.7 }, inputLocked && { opacity: 0.5 }]} onPress={() => openNew('asset')} disabled={inputLocked}>
                 <Text style={styles.addBtnText}>+ Add asset</Text>
               </Pressable>
-              <Pressable testID="networth-add-liability-button" style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.7 }]} onPress={() => openNew('liability')}>
+              <Pressable testID="networth-add-liability-button" style={({ pressed }) => [styles.addBtn, pressed && !inputLocked && { opacity: 0.7 }, inputLocked && { opacity: 0.5 }]} onPress={() => openNew('liability')} disabled={inputLocked}>
                 <Text style={styles.addBtnText}>+ Add liability</Text>
               </Pressable>
             </View>
@@ -347,6 +351,7 @@ export default function NetWorthScreen() {
           style={[styles.input, form.getFieldError('name') && { borderColor: '#ff6b6b' }]}
           value={edit?.name ?? ''}
           onChangeText={(v) => setEdit((e) => (e ? { ...e, name: v } : e))}
+          editable={!inputLocked}
           placeholder={edit?.kind === 'liability' ? 'e.g. Car loan' : 'e.g. Tesla Model 3'}
           placeholderTextColor={colors.muted}
           autoFocus
@@ -361,6 +366,7 @@ export default function NetWorthScreen() {
             style={styles.amtInput}
             value={edit?.value ?? ''}
             onChangeText={(v) => setEdit((e) => (e ? { ...e, value: v.replace(/[^0-9.]/g, '') } : e))}
+            editable={!inputLocked}
             keyboardType="decimal-pad"
             placeholder="0.00"
             placeholderTextColor={colors.muted}
@@ -369,10 +375,10 @@ export default function NetWorthScreen() {
         </View>
         <MutationFieldError error={form.getFieldError('value')} testID="networth-manual-value-error" />
         <View style={styles.segment}>
-          <Pressable testID={`networth-manual-kind-asset${edit?.kind === 'asset' ? '-selected' : ''}`} style={[styles.segBtn, edit?.kind === 'asset' && styles.segActive]} onPress={() => setEdit((e) => (e ? { ...e, kind: 'asset' } : e))}>
+          <Pressable testID={`networth-manual-kind-asset${edit?.kind === 'asset' ? '-selected' : ''}`} style={[styles.segBtn, edit?.kind === 'asset' && styles.segActive, inputLocked && { opacity: 0.5 }]} onPress={() => { if (inputLocked) return; setEdit((e) => (e ? { ...e, kind: 'asset' } : e)); }} disabled={inputLocked}>
             <Text style={[styles.segText, edit?.kind === 'asset' && styles.segTextActive]}>Asset</Text>
           </Pressable>
-          <Pressable testID={`networth-manual-kind-liability${edit?.kind === 'liability' ? '-selected' : ''}`} style={[styles.segBtn, edit?.kind === 'liability' && styles.segActive]} onPress={() => setEdit((e) => (e ? { ...e, kind: 'liability' } : e))}>
+          <Pressable testID={`networth-manual-kind-liability${edit?.kind === 'liability' ? '-selected' : ''}`} style={[styles.segBtn, edit?.kind === 'liability' && styles.segActive, inputLocked && { opacity: 0.5 }]} onPress={() => { if (inputLocked) return; setEdit((e) => (e ? { ...e, kind: 'liability' } : e)); }} disabled={inputLocked}>
             <Text style={[styles.segText, edit?.kind === 'liability' && styles.segTextActive]}>Liability</Text>
           </Pressable>
         </View>
@@ -383,10 +389,10 @@ export default function NetWorthScreen() {
           label="Save"
           pendingLabel="Saving…"
           onPress={() => form.submit()}
-          disabled={banner.isLocked}
+          disabled={inputLocked}
         />
         {edit?.id ? (
-          <Pressable testID="networth-manual-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={remove} disabled={banner.isLocked}>
+          <Pressable testID="networth-manual-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={remove} disabled={inputLocked}>
             <Text style={styles.deleteText}>Delete</Text>
           </Pressable>
         ) : null}

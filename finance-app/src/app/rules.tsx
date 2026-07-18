@@ -34,13 +34,14 @@ export default function Rules() {
   const matchRef = useRef<TextInput>(null);
   const admissionRef = useMutationScreenAdmission();
 
-  const fields = useMemo(() => ({ match, categoryId: catId }), [catId, match]);
+  const fields = useMemo(() => ({ match, categoryId: catId, categoryName: catName }), [catId, catName, match]);
 
   const applyFields = useCallback((updater: React.SetStateAction<typeof fields>) => {
     const prev = fields;
     const next = typeof updater === 'function' ? updater(prev) : updater;
     if (next.match !== undefined) setMatch(String(next.match));
     if (next.categoryId !== undefined) setCatId(String(next.categoryId));
+    if (next.categoryName !== undefined) setCatName(String(next.categoryName));
   }, [fields]);
 
   const addForm = useMutationForm({
@@ -61,7 +62,7 @@ export default function Rules() {
     buildVariables: (f) => ({
       match: String(f.match).trim(),
       categoryId: String(f.categoryId),
-      categoryName: catName,
+      categoryName: String(f.categoryName ?? ''),
     }),
     onSuccessClose: () => {
       setMatch('');
@@ -82,6 +83,8 @@ export default function Rules() {
     applyAction.activitySeq, applyAction.announce, applyAction.isLocked, applyAction.outcome, applyAction.retry,
     deleteAction.activitySeq, deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry,
   ]));
+
+  const inputLocked = banner.isLocked;
 
   const remove = (id: string) => {
     if (banner.isLocked) return;
@@ -112,6 +115,7 @@ export default function Rules() {
           style={[styles.input, addForm.getFieldError('match') && styles.inputError]}
           value={match}
           onChangeText={setMatch}
+          editable={!inputLocked}
           placeholder="e.g. Spotify"
           placeholderTextColor={colors.muted}
           autoCapitalize="none"
@@ -120,7 +124,7 @@ export default function Rules() {
         />
         <MutationFieldError error={addForm.getFieldError('match')} testID="rules-match-error" />
         <Text style={[styles.label, { marginTop: 12 }]}>Set category to</Text>
-        <Pressable testID="rules-category-picker" style={({ pressed }) => [styles.pickRow, pressed && { opacity: 0.7 }]} onPress={() => { haptics.tap(); setPicking(true); }}>
+        <Pressable testID="rules-category-picker" style={({ pressed }) => [styles.pickRow, pressed && !inputLocked && { opacity: 0.7 }, inputLocked && { opacity: 0.5 }]} onPress={() => { if (inputLocked) return; haptics.tap(); setPicking(true); }} disabled={inputLocked} accessibilityState={{ disabled: inputLocked }}>
           <Text style={[styles.pickValue, !catName && { color: colors.muted }]}>{catName || 'Choose a category'}</Text>
           <Text style={styles.pickArrow}>›</Text>
         </Pressable>
@@ -130,14 +134,14 @@ export default function Rules() {
           label="Add rule"
           pendingLabel="Saving…"
           onPress={addForm.submit}
-          disabled={banner.isLocked}
+          disabled={inputLocked}
         />
       </Card>
 
       <View style={styles.listHeader}>
         <CardTitle style={{ marginTop: 0 }}>Your rules{list.length ? ` (${list.length})` : ''}</CardTitle>
         {list.length ? (
-          <Pressable testID="rules-apply-button" onPress={() => { if (banner.isLocked) return; haptics.tap(); applyAction.run(undefined); }} disabled={banner.isLocked} hitSlop={8} style={({ pressed }) => [pressed && !banner.isLocked && { opacity: 0.6 }, banner.isLocked && { opacity: 0.5 }]}>
+          <Pressable testID="rules-apply-button" onPress={() => { if (inputLocked) return; haptics.tap(); applyAction.run(undefined); }} disabled={inputLocked} hitSlop={8} style={({ pressed }) => [pressed && !inputLocked && { opacity: 0.6 }, inputLocked && { opacity: 0.5 }]}>
             <Text style={styles.applyLink}>{applyAction.isLocked ? 'Applying…' : 'Apply now'}</Text>
           </Pressable>
         ) : null}
@@ -153,7 +157,7 @@ export default function Rules() {
                 <Text style={styles.ruleMatch} numberOfLines={1}>“{r.match}”</Text>
                 <Text style={styles.ruleCat} numberOfLines={1}>→ {r.categoryName || 'category'}</Text>
               </View>
-              <Pressable testID={`rules-delete-${r.id}`} hitSlop={8} onPress={() => remove(r.id)} disabled={banner.isLocked} style={({ pressed }) => [pressed && !banner.isLocked && { opacity: 0.5 }, banner.isLocked && { opacity: 0.4 }]}>
+              <Pressable testID={`rules-delete-${r.id}`} hitSlop={8} onPress={() => remove(r.id)} disabled={inputLocked} style={({ pressed }) => [pressed && !inputLocked && { opacity: 0.5 }, inputLocked && { opacity: 0.4 }]}>
                 <Text style={styles.del}>Delete</Text>
               </Pressable>
             </View>
@@ -196,7 +200,8 @@ export default function Rules() {
                   <Pressable
                     testID={`rules-category-option-${item.id}`}
                     style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]}
-                    onPress={() => { setCatId(item.id); setCatName(item.name); setPicking(false); }}
+                    onPress={() => { if (inputLocked) return; setCatId(item.id); setCatName(item.name); setPicking(false); }}
+                    disabled={inputLocked}
                   >
                     <Text style={styles.catOptionText}>{item.name}</Text>
                     <Text style={styles.catOptionGroup}>{item.group}</Text>

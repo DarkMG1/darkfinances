@@ -6,6 +6,10 @@ import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
 import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
 import { hapticClientValidationRejected } from '@/lib/haptics';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
+import {
+  awaitMutationErrorReconciliation,
+  startMutationErrorReconciliation,
+} from '@/lib/mutation-error-reconciliation';
 import { useMutationAdmissionLifecycle } from '@/hooks/useMutationAdmissionLifecycle';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
@@ -121,7 +125,11 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     token: MutationDispatchToken,
   ) => {
     if (!isDispatchTokenCurrent(token)) return;
-    entry.lastError?.(error);
+    try {
+      entry.lastError?.(error);
+    } catch {
+      // Optional UI callbacks must not break reconciliation.
+    }
     entry.rollback?.();
     const mapped = mapMutationApiError(error, {
       mutationLabel: entry.label,
@@ -165,6 +173,7 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
     markPending(key, true);
 
     try {
+      let errorReconciliation: Promise<void> | null = null;
       entry.mutation.mutate(variables, {
         onSuccess: (data) => {
           if (!isDispatchTokenCurrent(token)) return;
@@ -179,9 +188,10 @@ export function useMutationScreen(options: UseMutationScreenOptions = {}): UseMu
           runOptions?.onSuccess?.(data);
         },
         onError: (error) => {
-          void handleError(key, error, entry, token);
+          errorReconciliation = startMutationErrorReconciliation(() => handleError(key, error, entry, token));
         },
-        onSettled: () => {
+        onSettled: async () => {
+          await awaitMutationErrorReconciliation(errorReconciliation);
           releaseAdmissionForLease(lease);
           if (!isDispatchTokenCurrent(token)) return;
           pendingLockCountRef.current = Math.max(0, pendingLockCountRef.current - 1);

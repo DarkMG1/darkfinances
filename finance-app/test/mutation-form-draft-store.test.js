@@ -66,3 +66,33 @@ test('purge all clears every scope when scope omitted', () => {
   assert.equal(getMutationFormDraft('y', 'form', 1), null);
   clearMutationFormDraft('demo', 'form', 0);
 });
+
+test('scope digests containing colons or URL-like strings use consistent bucket keys', () => {
+  const urlScope = 'https://host.example:8443/profile';
+  purgeMutationFormDrafts(urlScope);
+  setMutationFormDraft(urlScope, 'add-transaction', { amount: '12.50' }, 1);
+  assert.deepEqual(getMutationFormDraft(urlScope, 'add-transaction', 1), { amount: '12.50' });
+  clearMutationFormDraft(urlScope, 'add-transaction', 1);
+  assert.equal(getMutationFormDraft(urlScope, 'add-transaction', 1), null);
+
+  const colonScope = 'tenant:region:abc';
+  purgeMutationFormDrafts(colonScope);
+  setMutationFormDraft(colonScope, 'events-create', { name: 'Trip' }, 2);
+  assert.deepEqual(getMutationFormDraft(colonScope, 'events-create', 2), { name: 'Trip' });
+  clearMutationFormDraft(colonScope, null, 2);
+  assert.equal(getMutationFormDraft(colonScope, 'events-create', 2), null);
+});
+
+test('LRU eviction uses full scope digest bucket not split prefix', () => {
+  const scopeA = 'https://a.example:1/x';
+  const scopeB = 'https://a.example:2/y';
+  purgeMutationFormDrafts();
+  setMutationFormDraft(scopeA, 'form-a', { n: 1 }, 1);
+  setMutationFormDraft(scopeB, 'form-b', { n: 2 }, 1);
+  assert.deepEqual(getMutationFormDraft(scopeA, 'form-a', 1), { n: 1 });
+  assert.deepEqual(getMutationFormDraft(scopeB, 'form-b', 1), { n: 2 });
+  purgeMutationFormDrafts(scopeA);
+  assert.equal(getMutationFormDraft(scopeA, 'form-a', 1), null);
+  assert.deepEqual(getMutationFormDraft(scopeB, 'form-b', 1), { n: 2 });
+  purgeMutationFormDrafts(scopeB);
+});

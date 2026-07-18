@@ -14,8 +14,12 @@ const DATA_URI = /^data:[^;]+;base64,/i;
 const MAX_DRAFTS_PER_SCOPE = 32;
 const MAX_DRAFTS_GLOBAL = 256;
 
+function bucketKey(scopeDigest) {
+  return String(scopeDigest ?? 'demo');
+}
+
 function scopeKey(scopeDigest, profileGeneration, formId) {
-  return `${String(scopeDigest || 'demo')}:${String(profileGeneration ?? getProfileGeneration())}:${String(formId || 'default')}`;
+  return `${bucketKey(scopeDigest)}:${String(profileGeneration ?? getProfileGeneration())}:${String(formId || 'default')}`;
 }
 
 function isSensitiveValue(value) {
@@ -81,7 +85,7 @@ function evictDrafts(scope) {
 
 function getMutationFormDraft(scopeDigest, formId, profileGeneration) {
   const key = scopeKey(scopeDigest, profileGeneration, formId);
-  const scope = key.split(':')[0];
+  const scope = bucketKey(scopeDigest);
   const bucket = draftsByScope.get(scope);
   if (!bucket) return null;
   const entry = bucket.get(key);
@@ -92,7 +96,7 @@ function getMutationFormDraft(scopeDigest, formId, profileGeneration) {
 
 function setMutationFormDraft(scopeDigest, formId, values, profileGeneration) {
   const key = scopeKey(scopeDigest, profileGeneration, formId);
-  const scope = key.split(':')[0];
+  const scope = bucketKey(scopeDigest);
   if (!draftsByScope.has(scope)) draftsByScope.set(scope, new Map());
   draftsByScope.get(scope).set(key, sanitizeDraftValues(values));
   touchLru(scope, key);
@@ -100,7 +104,7 @@ function setMutationFormDraft(scopeDigest, formId, values, profileGeneration) {
 }
 
 function clearMutationFormDraft(scopeDigest, formId, profileGeneration) {
-  const scope = String(scopeDigest || 'demo');
+  const scope = bucketKey(scopeDigest);
   const bucket = draftsByScope.get(scope);
   if (!bucket) return;
   if (formId == null) {
@@ -120,8 +124,9 @@ function clearMutationFormDraft(scopeDigest, formId, profileGeneration) {
 
 function purgeMutationFormDrafts(scopeDigest) {
   if (scopeDigest) {
-    draftsByScope.delete(String(scopeDigest));
-    lruByScope.delete(String(scopeDigest));
+    const scope = bucketKey(scopeDigest);
+    draftsByScope.delete(scope);
+    lruByScope.delete(scope);
     return;
   }
   draftsByScope.clear();
@@ -131,6 +136,7 @@ function purgeMutationFormDrafts(scopeDigest) {
 module.exports = {
   MAX_DRAFTS_GLOBAL,
   MAX_DRAFTS_PER_SCOPE,
+  bucketKey,
   clearMutationFormDraft,
   getMutationFormDraft,
   purgeMutationFormDrafts,

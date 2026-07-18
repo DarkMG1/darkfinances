@@ -134,6 +134,28 @@ export default function SplitEditor() {
   }, [legs, splitAction.outcome]);
 
   const isDirty = isSplitEditorDirty(mode, legs, baselineSnapshot);
+  const splitErrorBaselineRef = useRef<ReturnType<typeof seedSplitEditorBaseline> | null>(null);
+
+  useEffect(() => {
+    if (!splitAction.outcome) {
+      splitErrorBaselineRef.current = null;
+      return;
+    }
+    splitErrorBaselineRef.current = seedSplitEditorBaseline(mode, legs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- snapshot at error time only
+  }, [splitAction.outcome]);
+
+  useEffect(() => {
+    const snap = splitErrorBaselineRef.current;
+    if (!snap || !splitAction.outcome) return;
+    if (isSplitEditorDirty(mode, legs, snap)) {
+      splitAction.clear();
+      unsplitAction.clear();
+      splitErrorBaselineRef.current = null;
+    }
+  // splitAction/unsplitAction clear helpers are stable for this invalidation pass
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [legs, mode, splitAction.outcome]);
 
   const requestSplitExit = (exit: () => void) => {
     if (mutationLocked) return;
@@ -195,21 +217,27 @@ export default function SplitEditor() {
   const allPositive = amounts.every((v) => v > 0.0049);
   const canSave = legs.length >= 2 && balanced && allPositive && master > 0.0049;
 
-  const setLeg = (i: number, patch: Partial<Leg>) => setLegs((ls) => ls.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
+  const setLeg = (i: number, patch: Partial<Leg>) => {
+    if (mutationLocked) return;
+    setLegs((ls) => ls.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
+  };
 
   const addLeg = () => {
+    if (mutationLocked) return;
     haptics.tap();
     const key = nk();
     setLegs((ls) => [...ls, { key, catId: null, catName: '', name: '', notes: '', showNote: false, amt: '', pct: '' }]);
     if (mode === 'specific' || mode === 'percent') setFocusKey(key);
   };
   const removeLeg = (i: number) => {
+    if (mutationLocked) return;
     if (i === 0) return; // master is not removable
     haptics.tap();
     setLegs((ls) => ls.filter((_, idx) => idx !== i));
   };
 
   const changeMode = (m: Mode) => {
+    if (mutationLocked) return;
     setModePick(false);
     setLegs((ls) => {
       const amts = computeAmounts(ls, ls.length ? mode : m, total);
@@ -315,7 +343,7 @@ export default function SplitEditor() {
               </View>
             ) : null}
 
-            <Pressable testID="split-mode-picker" style={styles.modeRow} onPress={() => setModePick(true)}>
+            <Pressable testID="split-mode-picker" style={[styles.modeRow, mutationLocked && { opacity: 0.5 }]} onPress={() => { if (mutationLocked) return; setModePick(true); }} disabled={mutationLocked}>
               <Text style={styles.modeLead}>Split this transaction</Text>
               <View style={styles.modePill}>
                 <Text style={styles.modePillText}>{MODE_LABEL[mode]}</Text>
@@ -334,7 +362,7 @@ export default function SplitEditor() {
                           style={styles.amtInput}
                           value={i === 0 ? String(r2(total ? (master / total) * 100 : 0)) : l.pct}
                           onChangeText={(v) => setLeg(i, { pct: v.replace(/[^0-9.]/g, '') })}
-                          editable={i !== 0}
+                          editable={!mutationLocked && i !== 0}
                           keyboardType="decimal-pad"
                           placeholder="0"
                           placeholderTextColor={colors.muted}
@@ -350,7 +378,7 @@ export default function SplitEditor() {
                           style={styles.amtInput}
                           value={i === 0 || mode === 'equal' ? (amounts[i] ?? 0).toFixed(2) : l.amt}
                           onChangeText={(v) => setLeg(i, { amt: v.replace(/[^0-9.]/g, '') })}
-                          editable={i !== 0 && mode === 'specific'}
+                          editable={!mutationLocked && i !== 0 && mode === 'specific'}
                           keyboardType="decimal-pad"
                           placeholder="0.00"
                           placeholderTextColor={colors.muted}
@@ -362,14 +390,14 @@ export default function SplitEditor() {
                   {i === 0 ? (
                     <View style={styles.masterBadge}><Text style={styles.masterBadgeText}>REMAINDER</Text></View>
                   ) : (
-                    <Pressable testID={`split-leg-${i}-remove-button`} hitSlop={10} onPress={() => removeLeg(i)} style={({ pressed }) => pressed && { opacity: 0.5 }}>
+                    <Pressable testID={`split-leg-${i}-remove-button`} hitSlop={10} onPress={() => removeLeg(i)} disabled={mutationLocked} style={({ pressed }) => [pressed && !mutationLocked && { opacity: 0.5 }, mutationLocked && { opacity: 0.35 }]}>
                       <Text style={styles.legRemove}>✕</Text>
                     </Pressable>
                   )}
                 </View>
                 <MutationFieldError error={legFieldError(i)} testID={`split-leg-${i}-error`} />
 
-                <Pressable testID={`split-leg-${i}-category-picker`} style={[styles.legField, legFieldError(i) && styles.legFieldError]} onPress={() => setCatPick(i)}>
+                <Pressable testID={`split-leg-${i}-category-picker`} style={[styles.legField, legFieldError(i) && styles.legFieldError, mutationLocked && { opacity: 0.5 }]} onPress={() => { if (mutationLocked) return; setCatPick(i); }} disabled={mutationLocked}>
                   <Text style={styles.legFieldLabel}>Category</Text>
                   <Text style={[styles.legFieldValue, !l.catName && { color: colors.muted }]} numberOfLines={1}>{l.catName || 'Choose'}</Text>
                 </Pressable>
@@ -381,6 +409,7 @@ export default function SplitEditor() {
                     style={styles.legFieldInput}
                     value={l.name}
                     onChangeText={(v) => setLeg(i, { name: v })}
+                    editable={!mutationLocked}
                     placeholder={d.payee || 'Optional'}
                     placeholderTextColor={colors.muted}
                   />
@@ -394,19 +423,20 @@ export default function SplitEditor() {
                       style={styles.legFieldInput}
                       value={l.notes}
                       onChangeText={(v) => setLeg(i, { notes: v })}
+                      editable={!mutationLocked}
                       placeholder="Add a note"
                       placeholderTextColor={colors.muted}
                     />
                   </View>
                 ) : (
-                  <Pressable testID={`split-leg-${i}-add-note-button`} onPress={() => setLeg(i, { showNote: true })} style={({ pressed }) => [styles.addNote, pressed && { opacity: 0.6 }]}>
+                  <Pressable testID={`split-leg-${i}-add-note-button`} onPress={() => setLeg(i, { showNote: true })} disabled={mutationLocked} style={({ pressed }) => [styles.addNote, pressed && !mutationLocked && { opacity: 0.6 }, mutationLocked && { opacity: 0.4 }]}>
                     <Text style={styles.addNoteText}>+ add note</Text>
                   </Pressable>
                 )}
               </View>
             ))}
 
-            <Pressable testID="split-add-leg-button" onPress={addLeg} style={({ pressed }) => [styles.addSplit, pressed && { opacity: 0.85 }]}>
+            <Pressable testID="split-add-leg-button" onPress={addLeg} disabled={mutationLocked} style={({ pressed }) => [styles.addSplit, pressed && !mutationLocked && { opacity: 0.85 }, mutationLocked && { opacity: 0.4 }]}>
               <Text style={styles.addSplitText}>Add Split</Text>
             </Pressable>
 

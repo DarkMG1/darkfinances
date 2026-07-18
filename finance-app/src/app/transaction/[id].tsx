@@ -520,6 +520,25 @@ export default function TransactionDetail() {
     ? (screen.outcome?.fieldErrors?.allocationCents as string | undefined)
     : undefined;
 
+  const notesErrorSnapshotRef = useRef<{ text: string; raws: string[] } | null>(null);
+  useEffect(() => {
+    if (!screen.outcome || screen.activeKey !== 'notes') {
+      notesErrorSnapshotRef.current = null;
+      return;
+    }
+    notesErrorSnapshotRef.current = { text: noteText.trim(), raws: rawsOf(tags) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- snapshot at error time only
+  }, [screen.outcome, screen.activeKey]);
+
+  useEffect(() => {
+    const snap = notesErrorSnapshotRef.current;
+    if (!snap || !screen.outcome || screen.activeKey !== 'notes') return;
+    if (noteText.trim() !== snap.text || !sameRaws(rawsOf(tags), snap.raws)) {
+      screen.clear();
+      notesErrorSnapshotRef.current = null;
+    }
+  }, [noteText, screen, screen.activeKey, screen.outcome, tags]);
+
   const requestLeave = (leave: () => void) => {
     if (modalLocked) return;
     if (!dirty) {
@@ -929,6 +948,7 @@ export default function TransactionDetail() {
           style={[styles.notes, notesFieldError && { borderWidth: 1, borderColor: '#ff6b6b' }]}
           value={noteText}
           onChangeText={setNoteText}
+          editable={!modalLocked}
           placeholder="Add a note…"
           placeholderTextColor={colors.muted}
           multiline
@@ -1043,6 +1063,7 @@ export default function TransactionDetail() {
                     style={[styles.searchInput, allocationFieldError && { borderWidth: 1, borderColor: '#ff6b6b' }]}
                     value={allocationText}
                     onChangeText={setAllocationText}
+                    editable={!modalLocked}
                     placeholder={suggestedAllocationCents != null && suggestedAllocationCents > 0
                       ? formatAllocationDollars(suggestedAllocationCents)
                       : 'Amount in dollars'}

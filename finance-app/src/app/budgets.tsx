@@ -72,13 +72,6 @@ export default function Budgets() {
   const b = budgets.data;
   const hasTargets = (b?.totalTarget ?? b?.totalBudgeted ?? 0) > 0;
 
-  const openEdit = (c: BudgetCategory, groupName: string) => {
-    haptics.tap();
-    form.clearErrors();
-    setEditing({ ...c, groupName });
-    setTargetText(c.budgeted > 0 ? String(c.budgeted) : '');
-  };
-
   const fields = useMemo(() => ({
     targetText,
     categoryId: editing?.id ?? '',
@@ -115,6 +108,15 @@ export default function Budgets() {
   const save = () => form.submit();
   const closeSheet = () => {
     form.requestDismiss(() => setEditing(null));
+  };
+  const inputLocked = form.isLocked;
+
+  const openEdit = (c: BudgetCategory, groupName: string) => {
+    if (inputLocked) return;
+    haptics.tap();
+    form.clearErrors();
+    setEditing({ ...c, groupName });
+    setTargetText(c.budgeted > 0 ? String(c.budgeted) : '');
   };
 
   return (
@@ -183,8 +185,9 @@ export default function Budgets() {
                     <Pressable
                       testID={`budgets-category-${c.id}`}
                       key={c.id}
-                      style={({ pressed }) => [styles.catRow, pressed && { opacity: 0.6 }]}
+                      style={({ pressed }) => [styles.catRow, pressed && !inputLocked && { opacity: 0.6 }, inputLocked && { opacity: 0.5 }]}
                       onPress={() => openEdit(c, g.name)}
+                      disabled={inputLocked}
                     >
                       <View style={styles.catTop}>
                         <Text style={styles.catName}>{c.name}</Text>
@@ -242,6 +245,7 @@ export default function Budgets() {
             style={[styles.input, form.getFieldError('targetText') && { borderColor: '#ff6b6b' }]}
             value={targetText}
             onChangeText={setTargetText}
+            editable={!inputLocked}
             placeholder="0"
             placeholderTextColor={colors.muted}
             keyboardType="decimal-pad"
@@ -256,12 +260,13 @@ export default function Budgets() {
           label="Save target"
           pendingLabel="Saving…"
           onPress={save}
-          disabled={form.isLocked}
+          disabled={inputLocked}
         />
         <Pressable
           testID="budgets-clear-target-button"
-          style={({ pressed }) => [styles.clearBtn, pressed && { opacity: 0.7 }]}
-          onPress={() => { setTargetText('0'); }}
+          style={({ pressed }) => [styles.clearBtn, pressed && !inputLocked && { opacity: 0.7 }, inputLocked && { opacity: 0.5 }]}
+          onPress={() => { if (inputLocked) return; setTargetText('0'); }}
+          disabled={inputLocked}
         >
           <Text style={styles.clearText}>Clear target</Text>
         </Pressable>

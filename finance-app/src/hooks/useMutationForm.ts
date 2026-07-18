@@ -17,6 +17,11 @@ import {
 import { hapticClientValidationRejected } from '@/lib/haptics';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
 import { resolveMutationFormBaseline } from '@/lib/mutation-form-baseline';
+import { mutationFieldsEqual } from '@/lib/mutation-fields-equal';
+import {
+  awaitMutationErrorReconciliation,
+  startMutationErrorReconciliation,
+} from '@/lib/mutation-error-reconciliation';
 import { useMutationAdmissionLifecycle } from '@/hooks/useMutationAdmissionLifecycle';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
@@ -67,10 +72,6 @@ function focusRef(ref?: React.RefObject<{ focus?: () => void } | null>) {
   ref?.current?.focus?.();
 }
 
-function fieldsEqual(a: Record<string, unknown>, b: Record<string, unknown>) {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-
 export function useMutationForm<TFields extends Record<string, unknown>, TVariables>({
   formId,
   fields,
@@ -115,6 +116,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   const setFieldsRef = useRef(setFields);
   const closedRef = useRef(false);
   const variablesRef = useRef<TVariables | null>(null);
+  const submittedFieldsRef = useRef<TFields | null>(null);
   const rebaselineAfterSuccessRef = useRef(false);
   const suppressPersistRef = useRef(false);
   const hydrationTargetRef = useRef<{ identity: string; target: TFields } | null>(null);
@@ -146,6 +148,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     setPhase('idle');
     setAnnounce('');
     variablesRef.current = null;
+    submittedFieldsRef.current = null;
     suppressPersistRef.current = false;
     rebaselineAfterSuccessRef.current = false;
   }, [formId, formIdentityKey, persistDraft, profileGeneration, scopeDigest]);
@@ -153,7 +156,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   useLayoutEffect(() => {
     const pending = hydrationTargetRef.current;
     if (!pending || pending.identity !== formIdentityKey) return;
-    if (fieldsEqual(fields, pending.target)) {
+    if (mutationFieldsEqual(fields, pending.target)) {
       setHydrationReadyIdentity(formIdentityKey);
     }
   }, [fields, formIdentityKey]);
@@ -172,14 +175,25 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
       formIdentityKey,
       fields,
       baseline,
-      fieldsEqual,
+      mutationFieldsEqual,
       suppressPersistRef.current || rebaselineAfterSuccessRef.current,
     )) return;
     setMutationFormDraft(scopeDigest, formId, fields, profileGeneration);
   }, [baseline, fields, formId, formIdentityKey, hydrationReadyIdentity, persistDraft, profileGeneration, scopeDigest]);
 
   const isLocked = dispatchPending || phase === 'submitting' || phase === 'reconciling';
-  const isDirty = useMemo(() => !fieldsEqual(fields, baseline), [baseline, fields]);
+  const isDirty = useMemo(() => !mutationFieldsEqual(fields, baseline), [baseline, fields]);
+
+  useEffect(() => {
+    if (phase !== 'error' || !outcome || !submittedFieldsRef.current) return;
+    if (!mutationFieldsEqual(fields, submittedFieldsRef.current)) {
+      setOutcome(null);
+      setPhase('idle');
+      setAnnounce('');
+      variablesRef.current = null;
+      submittedFieldsRef.current = null;
+    }
+  }, [fields, outcome, phase]);
 
   const fieldErrors = useMemo(() => {
     if (!outcome?.fieldErrors) return {} as Partial<Record<keyof TFields, string>>;
@@ -207,11 +221,13 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     setPhase('error');
     setAnnounce(mapped.announce);
     if (mapped.requiresRefetch) {
+      setPhase('reconciling');
       const ok = await runStaleRefetch(onRefetch);
       if (!isDispatchTokenCurrent(token)) return;
       if (ok && (mapped.kind === 'conflict_stale' || mapped.kind === 'conflict_saga' || mapped.kind === 'conflict_ownership')) {
         setOutcome({ ...mapped, summary: staleConflictNotice(mapped.summary) });
       }
+      setPhase('error');
     }
     requestAnimationFrame(() => focusFirstInvalid());
   }, [fieldOrder, fieldPathOverrides, focusFirstInvalid, isDispatchTokenCurrent, mutationLabel, onRefetch]);
@@ -222,9 +238,10 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     setPhase('idle');
     setAnnounce('');
     variablesRef.current = null;
-    setBaseline(fields);
+    setBaseline({ ...fieldsRef.current });
+    submittedFieldsRef.current = null;
     onConfirmed?.();
-  }, [fields, formId, profileGeneration, scopeDigest]);
+  }, [formId, profileGeneration, scopeDigest]);
 
   const runMutation = useCallback((variables: TVariables) => {
     if (pendingLockRef.current) return;
@@ -232,12 +249,14 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     if (lease == null) return;
     const token = captureDispatchToken();
     variablesRef.current = variables;
+    submittedFieldsRef.current = { ...fieldsRef.current };
     closedRef.current = false;
     pendingLockRef.current = true;
     bumpActivity();
     setDispatchPending(true);
     setPhase('submitting');
     setOutcome(null);
+    let errorReconciliation: Promise<void> | null = null;
     try {
       mutation.mutate(variables, {
         onSuccess: () => {
@@ -247,16 +266,22 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
           setAnnounce(`${mutationLabel} succeeded.`);
           suppressPersistRef.current = true;
           clearMutationFormDraft(token.scope, formId, token.generation);
+          rebaselineAfterSuccessRef.current = true;
+          submittedFieldsRef.current = null;
           if (!closedRef.current) {
             closedRef.current = true;
-            onSuccessClose?.();
-            rebaselineAfterSuccessRef.current = true;
+            try {
+              onSuccessClose?.();
+            } catch {
+              // User close hook must not leak lock/draft state.
+            }
           }
         },
         onError: (error) => {
-          void handleError(error, token);
+          errorReconciliation = startMutationErrorReconciliation(() => handleError(error, token));
         },
-        onSettled: () => {
+        onSettled: async () => {
+          await awaitMutationErrorReconciliation(errorReconciliation);
           releaseAdmissionForLease(lease);
           if (!isDispatchTokenCurrent(token)) return;
           pendingLockRef.current = false;
@@ -304,6 +329,11 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
 
   const retry = useCallback(() => {
     if (pendingLockRef.current || phase === 'submitting' || phase === 'reconciling') return;
+    const submitted = submittedFieldsRef.current;
+    if (submitted && !mutationFieldsEqual(fieldsRef.current, submitted)) {
+      submit();
+      return;
+    }
     if (variablesRef.current != null) {
       runMutation(variablesRef.current);
       return;
@@ -316,6 +346,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     setPhase('idle');
     setAnnounce('');
     variablesRef.current = null;
+    submittedFieldsRef.current = null;
   }, []);
 
   const requestDismiss = useCallback((onConfirmed?: () => void) => {

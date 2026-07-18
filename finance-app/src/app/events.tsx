@@ -93,14 +93,16 @@ export default function Events() {
     { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked, activitySeq: deleteAction.activitySeq },
   ], [deleteAction.activitySeq, deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry, form.activitySeq, form.announce, form.isLocked, form.outcome, form.retry]));
 
+  const inputLocked = banner.isLocked;
+
   const remove = (slug: string, label: string) => {
-    if (banner.isLocked) return;
+    if (inputLocked) return;
     Alert.alert('Delete trip?', `Remove “${label}”? Tagged transactions keep their #ev-${slug} tag but the trip disappears from this list.`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
-        onPress: () => { if (banner.isLocked) return; haptics.tap(); deleteAction.run({ slug }); },
+        onPress: () => { if (inputLocked) return; haptics.tap(); deleteAction.run({ slug }); },
       },
     ]);
   };
@@ -127,6 +129,7 @@ export default function Events() {
           style={[styles.input, form.getFieldError('name') && styles.inputError]}
           value={name}
           onChangeText={setName}
+          editable={!inputLocked}
           placeholder="e.g. Summer trip 2026"
           placeholderTextColor={colors.muted}
           autoCorrect={false}
@@ -141,6 +144,7 @@ export default function Events() {
           style={[styles.input, form.getFieldError('start') && styles.inputError]}
           value={start}
           onChangeText={setStart}
+          editable={!inputLocked}
           placeholder="YYYY-MM-DD"
           placeholderTextColor={colors.muted}
           autoCapitalize="none"
@@ -156,6 +160,7 @@ export default function Events() {
           style={[styles.input, form.getFieldError('members') && styles.inputError]}
           value={members}
           onChangeText={setMembers}
+          editable={!inputLocked}
           placeholder="e.g. alex, sam, jordan"
           placeholderTextColor={colors.muted}
           autoCapitalize="none"
@@ -172,6 +177,7 @@ export default function Events() {
           style={[styles.input, form.getFieldError('group') && styles.inputError]}
           value={group}
           onChangeText={setGroup}
+          editable={!inputLocked}
           placeholder="Exact Splitwise group name"
           placeholderTextColor={colors.muted}
           autoCorrect={false}
@@ -185,7 +191,7 @@ export default function Events() {
           label="Create trip"
           pendingLabel="Saving…"
           onPress={form.submit}
-          disabled={banner.isLocked}
+          disabled={inputLocked}
         />
       </Card>
 

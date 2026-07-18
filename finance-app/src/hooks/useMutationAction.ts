@@ -5,6 +5,10 @@ import { mapMutationApiError } from '@/lib/mutation-form-errors';
 import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
 import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
+import {
+  awaitMutationErrorReconciliation,
+  startMutationErrorReconciliation,
+} from '@/lib/mutation-error-reconciliation';
 import { useMutationAdmissionLifecycle } from '@/hooks/useMutationAdmissionLifecycle';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationAdmissionRef } from '@/hooks/useMutationScreenAdmission';
@@ -102,6 +106,7 @@ export function useMutationAction<TVariables>({
     lastRollback.current = options?.rollback;
     lastSettled.current = options?.onSettled;
     setOutcome(null);
+    let errorReconciliation: Promise<void> | null = null;
     try {
       mutation.mutate(variables, {
         onSuccess: (data) => {
@@ -115,21 +120,24 @@ export function useMutationAction<TVariables>({
           options?.onSuccess?.(data);
           onSuccess?.();
         },
-        onError: async (error) => {
-          if (!isDispatchTokenCurrent(token)) return;
-          lastRollback.current?.();
-          const mapped = mapMutationApiError(error, { fieldPathOverrides, fieldOrder, mutationLabel });
-          setOutcome(mapped);
-          setAnnounce(mapped.announce);
-          if (mapped.requiresRefetch) {
-            const ok = await runStaleRefetch(onRefetch);
+        onError: (error) => {
+          errorReconciliation = startMutationErrorReconciliation(async () => {
             if (!isDispatchTokenCurrent(token)) return;
-            if (ok && (mapped.kind === 'conflict_stale' || mapped.kind === 'conflict_saga' || mapped.kind === 'conflict_ownership')) {
-              setOutcome({ ...mapped, summary: staleConflictNotice(mapped.summary) });
+            lastRollback.current?.();
+            const mapped = mapMutationApiError(error, { fieldPathOverrides, fieldOrder, mutationLabel });
+            setOutcome(mapped);
+            setAnnounce(mapped.announce);
+            if (mapped.requiresRefetch) {
+              const ok = await runStaleRefetch(onRefetch);
+              if (!isDispatchTokenCurrent(token)) return;
+              if (ok && (mapped.kind === 'conflict_stale' || mapped.kind === 'conflict_saga' || mapped.kind === 'conflict_ownership')) {
+                setOutcome({ ...mapped, summary: staleConflictNotice(mapped.summary) });
+              }
             }
-          }
+          });
         },
-        onSettled: () => {
+        onSettled: async () => {
+          await awaitMutationErrorReconciliation(errorReconciliation);
           releaseAdmissionForLease(lease);
           if (!isDispatchTokenCurrent(token)) return;
           pendingLockRef.current = false;

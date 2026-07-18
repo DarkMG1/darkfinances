@@ -47,8 +47,8 @@ test('mutation hooks unlock on settled and guard stale profile callbacks', () =>
     assert.match(source, /isDispatchTokenCurrent\(token\)/, `${rel} must guard callbacks with dispatch token`);
   }
   const screen = fs.readFileSync(path.join(root, 'src/hooks/useMutationScreen.ts'), 'utf8');
-  assert.match(screen, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*releaseAdmissionForLease\(lease\)/);
-  assert.match(screen, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*releaseAdmissionForLease\(lease\);[\s\S]*if \(!isDispatchTokenCurrent\(token\)\) return;[\s\S]*markPending\(key, false\)/);
+  assert.match(screen, /onSettled:\s*async \(\) => \{[\s\S]*awaitMutationErrorReconciliation[\s\S]*releaseAdmissionForLease\(lease\)/);
+  assert.match(screen, /onSettled:\s*async \(\) => \{[\s\S]*releaseAdmissionForLease\(lease\);[\s\S]*if \(!isDispatchTokenCurrent\(token\)\) return;[\s\S]*markPending\(key, false\)/);
   assert.match(screen, /setPendingKeys\(new Set\(\)\)/);
   assert.match(screen, /isPending: pendingKeys\.has/);
 });
@@ -172,6 +172,44 @@ test('mutation hooks capture per-dispatch ids in dispatch tokens', () => {
   }
   const identity = fs.readFileSync(path.join(root, 'src/lib/mutation-hook-identity.js'), 'utf8');
   assert.match(identity, /dispatchId/);
+});
+
+test('mutation hooks store submitted field snapshot and invalidate stale retry on edit', () => {
+  const form = fs.readFileSync(path.join(root, 'src/hooks/useMutationForm.ts'), 'utf8');
+  assert.match(form, /submittedFieldsRef/);
+  assert.match(form, /mutationFieldsEqual/);
+  assert.match(form, /phase !== 'error'/);
+});
+
+test('mutation form uses canonical field equality not JSON.stringify', () => {
+  const form = fs.readFileSync(path.join(root, 'src/hooks/useMutationForm.ts'), 'utf8');
+  assert.doesNotMatch(form, /JSON\.stringify\(a\) === JSON\.stringify\(b\)/);
+  assert.match(form, /mutationFieldsEqual/);
+});
+
+test('rules form binds categoryName in fields not closure', () => {
+  const source = fs.readFileSync(path.join(root, 'src/app/rules.tsx'), 'utf8');
+  assert.match(source, /categoryName: catName/);
+  assert.match(source, /categoryName: String\(f\.categoryName/);
+  assert.doesNotMatch(source, /buildVariables:[\s\S]*categoryName: catName/s);
+});
+
+test('audited mutation forms lock inputs during in-flight mutation', () => {
+  for (const rel of [
+    'add-transaction.tsx',
+    'goals.tsx',
+    'events.tsx',
+    'rules.tsx',
+    'budgets.tsx',
+    'account/[id].tsx',
+    'networth.tsx',
+    'split/[id].tsx',
+    'transaction/[id].tsx',
+  ]) {
+    const source = fs.readFileSync(path.join(root, 'src/app', rel), 'utf8');
+    assert.match(source, /inputLocked|mutationLocked|modalLocked/, `${rel} must define combined mutation input lock`);
+    assert.match(source, /editable=\{!/, `${rel} must disable text inputs while locked`);
+  }
 });
 
 test('multi-action screens pass activitySeq into banner coordinator', () => {

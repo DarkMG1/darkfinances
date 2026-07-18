@@ -8,8 +8,10 @@ const {
   shouldPersistMutationFormDraft,
 } = require('../src/lib/mutation-form-hydration');
 
+const { mutationFieldsEqual } = require('../src/lib/mutation-fields-equal');
+
 function fieldsEqual(a, b) {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return mutationFieldsEqual(a, b);
 }
 
 test('persist blocked until hydration ready identity matches current identity', () => {
@@ -81,6 +83,13 @@ test('success rebaseline suppresses persist while reset fields differ from old b
     shouldPersistMutationFormDraft(key, key, resetFields, resetFields, fieldsEqual, false),
     false,
   );
+});
+
+test('canonical field equality treats nested key order as clean baseline', () => {
+  const key = buildMutationFormIdentityKey('demo', 0, 'nested-form');
+  const a = { meta: { z: 1, y: 2 }, name: 'x' };
+  const b = { name: 'x', meta: { y: 2, z: 1 } };
+  assert.equal(shouldPersistMutationFormDraft(key, key, a, b, fieldsEqual, false), false);
 });
 
 test('persist skipped when fields match baseline or rebaseline suppression active', () => {

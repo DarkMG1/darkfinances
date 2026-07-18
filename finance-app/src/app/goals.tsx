@@ -111,7 +111,10 @@ export default function Goals() {
     { key: 'delete', outcome: deleteAction.outcome, retry: deleteAction.retry, announce: deleteAction.announce, isLocked: deleteAction.isLocked, activitySeq: deleteAction.activitySeq },
   ], [deleteAction.activitySeq, deleteAction.announce, deleteAction.isLocked, deleteAction.outcome, deleteAction.retry, form.activitySeq, form.announce, form.isLocked, form.outcome, form.retry]));
 
+  const inputLocked = banner.isLocked;
+
   const openNew = () => {
+    if (inputLocked) return;
     form.clearErrors();
     setName('');
     setTarget('');
@@ -121,6 +124,7 @@ export default function Goals() {
     setEditing({ isNew: true });
   };
   const openEdit = (g: Goal) => {
+    if (inputLocked) return;
     form.clearErrors();
     setName(g.name);
     setTarget(String(g.target));
@@ -160,7 +164,7 @@ export default function Goals() {
             <EmptyState icon="target">No goals yet — add one below</EmptyState>
           ) : (
             (goals.data ?? []).map((g) => (
-              <Pressable testID={`goals-row-${g.id}`} key={g.id} onPress={() => openEdit(g)} style={({ pressed }) => pressed && { opacity: 0.7 }}>
+              <Pressable testID={`goals-row-${g.id}`} key={g.id} onPress={() => openEdit(g)} disabled={inputLocked} style={({ pressed }) => [pressed && !inputLocked && { opacity: 0.7 }, inputLocked && { opacity: 0.5 }]}>
                 <Card style={{ marginBottom: 12 }}>
                   <View style={styles.head}>
                     <Text style={styles.name}>{g.name}</Text>
@@ -180,7 +184,7 @@ export default function Goals() {
             ))
           )}
 
-          <Pressable testID="goals-add-button" style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.7 }]} onPress={openNew}>
+          <Pressable testID="goals-add-button" style={({ pressed }) => [styles.addBtn, pressed && !inputLocked && { opacity: 0.7 }, inputLocked && { opacity: 0.5 }]} onPress={openNew} disabled={inputLocked}>
             <Text style={styles.addText}>+ Add goal</Text>
           </Pressable>
         </>
@@ -203,6 +207,7 @@ export default function Goals() {
           style={[styles.input, form.getFieldError('name') && styles.inputError]}
           value={name}
           onChangeText={setName}
+          editable={!inputLocked}
           placeholder="Emergency fund"
           placeholderTextColor={colors.muted}
           accessibilityLabel="Goal name"
@@ -217,6 +222,7 @@ export default function Goals() {
           style={[styles.input, form.getFieldError('target') && styles.inputError]}
           value={target}
           onChangeText={setTarget}
+          editable={!inputLocked}
           placeholder="5000"
           placeholderTextColor={colors.muted}
           keyboardType="decimal-pad"
@@ -230,6 +236,7 @@ export default function Goals() {
           style={[styles.input, form.getFieldError('current') && styles.inputError]}
           value={current}
           onChangeText={setCurrent}
+          editable={!inputLocked}
           placeholder="0"
           placeholderTextColor={colors.muted}
           keyboardType="decimal-pad"
@@ -245,6 +252,7 @@ export default function Goals() {
           style={[styles.input, form.getFieldError('deadline') && styles.inputError]}
           value={deadline}
           onChangeText={setDeadline}
+          editable={!inputLocked}
           placeholder="YYYY-MM"
           placeholderTextColor={colors.muted}
           autoCapitalize="none"
@@ -254,11 +262,11 @@ export default function Goals() {
 
         <Text style={styles.field}>Track an account (optional)</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
-          <Pressable testID={`goals-account-manual${accountId === null ? '-selected' : ''}`} onPress={() => { haptics.tap(); setAccountId(null); }} style={[styles.chip, accountId === null && styles.chipActive]}>
+          <Pressable testID={`goals-account-manual${accountId === null ? '-selected' : ''}`} onPress={() => { if (inputLocked) return; haptics.tap(); setAccountId(null); }} disabled={inputLocked} style={[styles.chip, accountId === null && styles.chipActive, inputLocked && { opacity: 0.5 }]}>
             <Text style={[styles.chipText, accountId === null && styles.chipTextActive]}>Manual</Text>
           </Pressable>
           {(accounts.data ?? []).map((a) => (
-            <Pressable testID={`goals-account-${a.id}${accountId === a.id ? '-selected' : ''}`} key={a.id} onPress={() => { haptics.tap(); setAccountId(a.id); }} style={[styles.chip, accountId === a.id && styles.chipActive]}>
+            <Pressable testID={`goals-account-${a.id}${accountId === a.id ? '-selected' : ''}`} key={a.id} onPress={() => { if (inputLocked) return; haptics.tap(); setAccountId(a.id); }} disabled={inputLocked} style={[styles.chip, accountId === a.id && styles.chipActive, inputLocked && { opacity: 0.5 }]}>
               <Text style={[styles.chipText, accountId === a.id && styles.chipTextActive]} numberOfLines={1}>{a.name}</Text>
             </Pressable>
           ))}
@@ -269,10 +277,10 @@ export default function Goals() {
           label="Save"
           pendingLabel="Saving…"
           onPress={form.submit}
-          disabled={banner.isLocked}
+          disabled={inputLocked}
         />
         {!editing?.isNew ? (
-          <Pressable testID="goals-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={remove} disabled={banner.isLocked}>
+          <Pressable testID="goals-delete-button" style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]} onPress={remove} disabled={inputLocked}>
             <Text style={styles.deleteText}>{deleteAction.isLocked ? 'Deleting…' : 'Delete goal'}</Text>
           </Pressable>
         ) : null}

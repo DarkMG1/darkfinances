@@ -137,7 +137,7 @@ test('mutation hooks bind dispatch lease and release before token guard', () => 
     assert.match(source, /useMutationAdmissionLifecycle/, `${rel} uses admission lifecycle`);
     assert.match(source, /const lease = acquireAdmission\(\)/, `${rel} captures dispatch lease`);
     assert.match(source, /releaseAdmissionForLease\(lease\)/, `${rel} releases bound lease on settled/catch`);
-    assert.match(source, /onSettled:\s*\(\)\s*=>\s*\{[\s\S]*releaseAdmissionForLease\(lease\)/, `${rel} settles with bound lease`);
+    assert.match(source, /onSettled:\s*async \(\) => \{[\s\S]*awaitMutationErrorReconciliation[\s\S]*releaseAdmissionForLease\(lease\)/, `${rel} settles with bound lease`);
   }
 });
 

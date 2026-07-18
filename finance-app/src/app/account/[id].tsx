@@ -84,6 +84,7 @@ export default function AccountDetail() {
   });
 
   const openEdit = () => {
+    if (form.isLocked) return;
     haptics.tap();
     form.clearErrors();
     setNameText(title);
@@ -95,6 +96,8 @@ export default function AccountDetail() {
   const closeSheet = () => {
     form.requestDismiss(() => setEditing(false));
   };
+
+  const inputLocked = form.isLocked;
 
   const sections = useMemo(() => {
     const list = (txns.data ?? []).slice().sort((a, b) => b.date.localeCompare(a.date));
@@ -142,7 +145,7 @@ export default function AccountDetail() {
         options={{
           title,
           headerRight: () => (
-            <Pressable testID="account-edit-button" onPress={openEdit} hitSlop={8}>
+            <Pressable testID="account-edit-button" onPress={openEdit} hitSlop={8} disabled={inputLocked} style={({ pressed }) => [pressed && !inputLocked && { opacity: 0.6 }, inputLocked && { opacity: 0.4 }]}>
               <Text style={styles.editBtn}>Edit</Text>
             </Pressable>
           ),
@@ -192,6 +195,7 @@ export default function AccountDetail() {
           style={[styles.input, form.getFieldError('nameText') && { borderColor: '#ff6b6b' }]}
           value={nameText}
           onChangeText={setNameText}
+          editable={!inputLocked}
           placeholder="Account name"
           placeholderTextColor={colors.muted}
           autoFocus
@@ -207,8 +211,9 @@ export default function AccountDetail() {
               accessibilityRole="button"
               accessibilityState={{ selected: role === option.value }}
               testID={`account-role-${option.value}`}
-              onPress={() => setRole(option.value)}
-              style={[styles.roleChip, role === option.value && styles.roleChipOn]}
+              onPress={() => { if (inputLocked) return; setRole(option.value); }}
+              disabled={inputLocked}
+              style={[styles.roleChip, role === option.value && styles.roleChipOn, inputLocked && { opacity: 0.5 }]}
             >
               <Text style={[styles.roleText, role === option.value && styles.roleTextOn]}>{option.label}</Text>
             </Pressable>
@@ -221,7 +226,7 @@ export default function AccountDetail() {
             <Text style={styles.hideLabel}>Hide account</Text>
             <Text style={styles.hintText}>Removes it from lists and net worth.</Text>
           </View>
-          <Switch testID="account-hidden-switch" value={hidden} onValueChange={setHidden} trackColor={{ true: colors.accent }} />
+          <Switch testID="account-hidden-switch" value={hidden} onValueChange={setHidden} disabled={inputLocked} trackColor={{ true: colors.accent }} />
         </View>
         <MutationFieldError error={form.getFieldError('hidden')} testID="account-hidden-error" />
         <MutationFormBanner outcome={form.outcome} onRetry={form.retry} onRefetch={() => accounts.refetch()} />
@@ -230,7 +235,7 @@ export default function AccountDetail() {
           label="Save"
           pendingLabel="Saving…"
           onPress={() => form.submit()}
-          disabled={form.isLocked}
+          disabled={inputLocked}
         />
       </MutationSheet>
     </View>
