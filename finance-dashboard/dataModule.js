@@ -147,6 +147,7 @@ const {
 const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
 const {
   ACCOUNT_METRIC,
+  ACCOUNT_PROJECTION_REASON,
   attachInclusionToAccountRow,
   buildBalanceMetric,
   buildNetWorthMetric,
@@ -913,9 +914,9 @@ function accountDisplayNamesFromOverrides(overrides = {}) {
 // ---------------------------------------------------------------------------
 // Core getters (mirror legacy endpoints)
 // ---------------------------------------------------------------------------
-async function getAccounts() {
+async function getAccounts({ projectionInputs = null } = {}) {
   return withApi(async (api) => {
-    const projection = await buildAccountProjection(api, ACCOUNT_METRIC.displayList);
+    const projection = await buildAccountProjection(api, ACCOUNT_METRIC.displayList, { inputs: projectionInputs });
     const overrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
     const financeDate = todayYMD();
     return Promise.all(
@@ -4415,6 +4416,7 @@ async function getToday() {
     const nwProjection = await buildAccountProjection(api, ACCOUNT_METRIC.netWorthLive, { inputs: projectionInputs });
     const operatingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.operatingCash, { inputs: projectionInputs });
     const liquidProjection = await buildAccountProjection(api, ACCOUNT_METRIC.liquidCash, { inputs: projectionInputs });
+    const goalsBundle = await materializeGoals(api, { projectionInputs });
     const rows = await fetchOnBudgetRows(api, prev.start, monthEndDate, {
       accountFilter: spendingProjection.accountFilter,
     });
@@ -4449,21 +4451,22 @@ async function getToday() {
         operating: operatingProjection,
         liquid: liquidProjection,
       },
+      goalsBundle,
+      projectionInputs,
     };
   });
   const spending = spendingBundle.spending;
-  const [accounts, budgets, recurring, goalsBundle, income, review, recent, reimb] = await Promise.all([
-    getAccounts(),
+  const [accounts, budgets, recurring, income, review, recent, reimb] = await Promise.all([
+    getAccounts({ projectionInputs: spendingBundle.projectionInputs }),
     getBudgets({ month }),
     getRecurring({}),
-    getGoalsWithAdvisory(),
     getIncome({}),
     getReview({ month, classifiedLeaves: spendingBundle.classifiedLeaves }),
     getTransactions({ start: addDays(financeDate, -14), end: financeDate, collapse: true }),
     getReimbursement({}),
   ]);
-  const goals = goalsBundle.goals;
-  const goalAdvisory = goalsBundle.goalAdvisory;
+  const goals = spendingBundle.goalsBundle.goals;
+  const goalAdvisory = spendingBundle.goalsBundle.goalAdvisory;
   const bills = await getBills({ days: 45, recurring });
   const manualAssets = getManualAssets();
   const { projections } = spendingBundle;
@@ -4471,7 +4474,11 @@ async function getToday() {
   const operatingAccounts = accounts.filter((account) => account.inclusion?.operatingCash);
   const visibleAccounts = accounts.filter((account) => !account.hidden);
   const obligationAccounts = accounts.filter((account) => account.inclusion?.obligations);
-  const cashCents = sumIncludedBalanceCents(projections.operating);
+  const operatingProjectionComplete = projections.operating.incompleteReasons.length === 0;
+  let cashCents = null;
+  if (operatingProjectionComplete) {
+    cashCents = sumIncludedBalanceCents(projections.operating);
+  }
   const { graph, summary: obligationSummary, liabilityPolicies } = await buildObligationGraphBundle({
     financeDate,
     windowStart: financeDate,
@@ -4486,11 +4493,13 @@ async function getToday() {
     operatingAccounts,
     txnContext: spendingBundle.txnContext,
   });
-  const stfFromGraph = safeToSpendFromGraph(graph, {
-    operatingCashCents: cashCents,
-    monthStart: financeDate,
-    monthEnd: monthEndDate,
-  });
+  const stfFromGraph = Number.isSafeInteger(cashCents)
+    ? safeToSpendFromGraph(graph, {
+      operatingCashCents: cashCents,
+      monthStart: financeDate,
+      monthEnd: monthEndDate,
+    })
+    : { valueCents: null, method: 'obligation-graph', reservations: [] };
   const incompleteReasons = safeToSpendIncompleteReasons({
     accounts,
     visibleAccounts,
@@ -4501,18 +4510,26 @@ async function getToday() {
     obligationGraph: graph,
     liabilityPolicies,
   });
+  if (!operatingProjectionComplete) {
+    for (const reason of projections.operating.incompleteReasons) {
+      if (!incompleteReasons.includes(reason)) incompleteReasons.push(reason);
+    }
+  }
+  const safeToSpendComplete = incompleteReasons.length === 0 && operatingProjectionComplete;
   const safeToSpend = metricValue({
     metric: 'safe_to_spend',
-    value: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+    value: safeToSpendComplete && Number.isSafeInteger(stfFromGraph.valueCents)
       ? fromCents(stfFromGraph.valueCents)
       : null,
-    valueCents: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+    valueCents: safeToSpendComplete && Number.isSafeInteger(stfFromGraph.valueCents)
       ? stfFromGraph.valueCents
       : null,
-    complete: incompleteReasons.length === 0,
+    complete: safeToSpendComplete,
     asOf,
     financeDate,
-    sources: operatingAccounts.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
+    sources: safeToSpendComplete
+      ? operatingAccounts.map((account) => ({ type: 'actual-account', id: account.id, role: account.role }))
+      : [],
     method: stfFromGraph.method,
     excludes: ['protected savings', 'investments', 'credit availability', 'possible reimbursements', 'unfunded goals'],
     incompleteReasons,
@@ -6192,24 +6209,29 @@ async function setTransactionDate({ id, date, isLeg }) {
 // Savings goals — funded allocations; linked accounts are capacity constraints,
 // never balances that multiple goals may each claim in full.
 // ---------------------------------------------------------------------------
-async function materializeGoals(api) {
+async function materializeGoals(api, { projectionInputs = null } = {}) {
   const financeDate = todayYMD();
   const storedGoals = readJsonSafe(GOALS_PATH, []);
-  const accounts = await api.getAccounts();
-  const openAccounts = accounts.filter((a) => !a.closed);
-  const bals = await Promise.all(openAccounts.map((a) => api.getAccountBalance(a.id)));
-  const balanceCentsById = new Map();
-  openAccounts.forEach((a, i) => { balanceCentsById.set(a.id, bals[i]); });
-  const accountRoles = readAccountOverrides(ACCOUNT_OVERRIDES_PATH);
-  const accountsWithRoles = accounts.map((account) => {
-    const override = accountRoles.accounts?.[account.id];
+  const inputs = projectionInputs || await loadAccountProjectionInputs(api);
+  const { accountsRaw, balancesById, balanceUnavailableIds, overrides } = inputs;
+  const accountsWithRoles = (accountsRaw || []).map((account) => {
+    const override = overrides[account.id] || {};
     return {
       ...account,
       role: override?.role || account.role || 'unknown',
-      hidden: !!override?.hidden || !!account.hidden,
+      hidden: !!override?.hidden,
       closed: !!account.closed,
     };
   });
+  const balanceCentsById = new Map();
+  for (const account of accountsRaw || []) {
+    const cents = balancesById[account.id];
+    if (Number.isSafeInteger(cents)) balanceCentsById.set(account.id, cents);
+    else if (balanceUnavailableIds.has(account.id)) balanceCentsById.set(account.id, null);
+  }
+  const balanceIncompleteReasons = balanceUnavailableIds.size
+    ? [ACCOUNT_PROJECTION_REASON.accountBalanceUnavailable]
+    : [];
   const normalizedGoals = storedGoals.map((g) => {
     const current = Math.max(0, Number(g.current) || 0);
     return {
@@ -6223,6 +6245,7 @@ async function materializeGoals(api) {
     accounts: accountsWithRoles,
     balanceCentsById,
     financeDate,
+    balanceIncompleteReasons,
   });
   const goals = enriched.goals.map((goal) => {
     const accountId = goal.accountId;
@@ -6233,14 +6256,16 @@ async function materializeGoals(api) {
       ...goal,
       pct: goal.target > 0 ? Math.min(999, Math.round((goal.current / goal.target) * 100)) : null,
       fundingSource: accountId ? 'allocated-account' : 'manual',
-      availableInAccount: linkedOpen && balCents != null ? Math.max(0, fromCents(Math.max(0, balCents))) : null,
+      availableInAccount: linkedOpen && Number.isSafeInteger(balCents)
+        ? Math.max(0, fromCents(Math.max(0, balCents)))
+        : null,
     };
   });
   return { goals, goalAdvisory: enriched.goalAdvisory };
 }
 
-async function getGoalsWithAdvisory() {
-  return withApi(async (api) => materializeGoals(api));
+async function getGoalsWithAdvisory(options = {}) {
+  return withApi(async (api) => materializeGoals(api, options));
 }
 
 async function getGoals() {
@@ -6594,6 +6619,7 @@ module.exports = {
   setTransactionNotes,
   setTransactionDate,
   getGoals,
+  getGoalsWithAdvisory,
   saveGoal,
   deleteGoal,
 };

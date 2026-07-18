@@ -673,10 +673,12 @@
         }
       } catch (_) { /* keep local fallback when server metric absent */ }
       accounts = (await (await fetch('/api/accounts')).json()).filter((account) => !account.hidden);
+      const hasInclusion = accounts.some((account) => account.inclusion);
       let totalAssets = 0, totalLiabilities = 0;
       const grid = document.getElementById('accountsGrid');
       grid.innerHTML = '';
       accounts.forEach(a => {
+        if (hasInclusion && !a.inclusion?.netWorth) return;
         if (a.balance > 0) totalAssets += a.balance; else totalLiabilities += a.balance;
         const [type, cls] = accountBadge(a.name);
         const active = state.accountFilter && state.accountFilter.id === a.id;
@@ -708,7 +710,7 @@
           ? `${fmtPos(totalAssets)} assets · ${fmtPos(Math.abs(totalLiabilities))} liabilities · server projection`
           : (state.netWorthHasServerMetric && (state.netWorthIncompleteReasons || []).length
             ? 'Net worth incomplete — assign account roles or resolve overrides'
-            : `${fmtPos(totalAssets)} assets · ${fmtPos(Math.abs(totalLiabilities))} liabilities · local estimate`);
+            : `${fmtPos(totalAssets)} assets · ${fmtPos(Math.abs(totalLiabilities))} liabilities · local estimate (inclusion-aware)`);
       renderNetWorthChange();
     }
 

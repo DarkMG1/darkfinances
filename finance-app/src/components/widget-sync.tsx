@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { Platform } from 'react-native';
 import { useAccounts, useBills, useManualAssets, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { getFinanceCapabilities } from '@/lib/capabilities';
-import { resolveMoneyMetric } from '@/lib/account-metrics';
+import { computeFallbackNetWorth, hasServerMetric, resolveMoneyMetric } from '@/lib/account-metrics';
 import { clearFinanceWidget, pushFinanceWidget } from '@/lib/widgets';
 import { useServerConfig } from '@/state/server';
 import { useFinanceToday } from '@/lib/date-only';
@@ -32,24 +32,23 @@ export function WidgetSync() {
     }
     const accts = accounts.data;
     if (!accts) return;
-    const visible = accts.filter((account) => !account.hidden);
-    const syncedNetWorth = visible.reduce((sum, account) => sum + account.balance, 0);
-    const manualComplete = manual.data?.complete !== false;
-    const fallbackNetWorth = syncedNetWorth
-      + (manualComplete ? (manual.data?.assets ?? 0) : 0)
-      - (manualComplete ? (manual.data?.liabilities ?? 0) : 0);
-    const resolvedNetWorth = resolveMoneyMetric(today.data?.metrics?.netWorth, fallbackNetWorth);
+    const serverMetric = today.data?.metrics?.netWorth;
+    if (hasServerMetric(serverMetric) && serverMetric?.complete === false) return;
+
+    const fallbackNetWorth = computeFallbackNetWorth(accts, manual.data);
+    const resolvedNetWorth = resolveMoneyMetric(serverMetric, fallbackNetWorth);
+    if (resolvedNetWorth.unavailable) return;
+
     const netWorth = resolvedNetWorth.authoritative && resolvedNetWorth.value != null
       ? resolvedNetWorth.value
-      : (resolvedNetWorth.unavailable ? null : (resolvedNetWorth.value ?? fallbackNetWorth));
-    if (netWorth == null) return;
+      : (resolvedNetWorth.value ?? fallbackNetWorth);
 
     const months = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
     let change = '';
     let changeUp = true;
     if (months.length >= 2 && months[months.length - 2].netWorth != null) {
       const prevNW = months[months.length - 2].netWorth as number;
-      const diff = syncedNetWorth - prevNW;
+      const diff = netWorth - prevNW;
       changeUp = diff >= 0;
       change = `${diff >= 0 ? '+' : '-'}${fmtPos(diff)} this mo`;
     }

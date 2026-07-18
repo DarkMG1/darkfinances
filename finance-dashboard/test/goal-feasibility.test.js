@@ -49,12 +49,25 @@ test('deadline pressure includes overdue flag and monthly advisory cents', () =>
 
 test('buildGoalAdvisory stays complete even when over-allocated', () => {
   const advisory = buildGoalAdvisory({
-    accountSummaries: [{ accountId: 'acc1', overAllocatedCents: toCents(20), goalIds: ['g1'] }],
+    accountSummaries: [{ accountId: 'acc1', overAllocatedCents: toCents(20), goalIds: ['g1'], balanceUnavailable: false }],
     goals: [{ id: 'g1', target: 100, current: 10, feasibility: { remainingCents: toCents(50), monthlyRequiredCents: toCents(50), advisoryOnly: true } }],
   });
   assert.equal(advisory.complete, true);
   assert.equal(advisory.advisoryOnly, true);
   assert.equal(advisory.overAllocatedAccountCount, 1);
+});
+
+test('balance-unavailable linked account keeps feasible null and advisory incomplete', () => {
+  const enriched = enrichGoalsResponse({
+    financeDate: '2026-07-18',
+    accounts: [{ id: 'save', role: 'operating_cash', closed: false, hidden: false }],
+    balanceCentsById: new Map([['save', null]]),
+    balanceIncompleteReasons: ['account_balance_unavailable'],
+    goals: [{ id: 'g1', name: 'Trip', target: 500, current: 100, accountId: 'save' }],
+  });
+  assert.equal(enriched.goals[0].feasibility.feasible, null);
+  assert.equal(enriched.goalAdvisory.complete, false);
+  assert.deepEqual(enriched.goalAdvisory.incompleteReasons, ['account_balance_unavailable']);
 });
 
 test('missing linked account surfaces false feasibility without throwing', () => {

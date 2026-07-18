@@ -988,20 +988,21 @@ export interface GoalAccountSummary {
   accountId: string;
   role: string | null;
   accountStatus: string;
-  capacityCents: number;
+  capacityCents: number | null;
   allocatedCents: number;
-  unallocatedCents: number;
-  overAllocatedCents: number;
+  unallocatedCents: number | null;
+  overAllocatedCents: number | null;
   goalIds: string[];
-  capacity: number;
+  capacity: number | null;
   allocated: number;
-  unallocated: number;
-  overAllocated: number;
+  unallocated: number | null;
+  overAllocated: number | null;
 }
 
 export interface GoalAdvisory {
-  complete: true;
+  complete: boolean;
   advisoryOnly: true;
+  incompleteReasons?: string[];
   totalRemainingCents: number;
   monthlyPressureCents: number;
   overAllocatedAccounts: GoalAccountSummary[];
