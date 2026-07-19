@@ -9,7 +9,10 @@ import {
   MutationLiveRegion,
   MutationSubmitButton,
 } from '@/components/mutation-form';
-import { Card, CardTitle } from '@/components/ui';
+import { Card, CardTitle, ErrorState } from '@/components/ui';
+import { QueryRefetchBanners } from '@/components/query-display';
+import { SkeletonList } from '@/components/skeleton';
+import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
 import { useMutationForm } from '@/hooks/useMutationForm';
 import { haptics } from '@/lib/haptics';
 import {
@@ -131,12 +134,22 @@ export default function AddTransaction() {
   }, [form, navigation]);
 
   const inputLocked = form.isLocked;
+  const accountsLoading = shouldShowInitialLoad(accounts.isLoading, accounts.data);
+  const accountsFatal = shouldShowFatalError(accounts.isError, accounts.data);
 
   return (
     <KeyboardAvoidingView testID="add-transaction-screen" style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
     <ScrollView style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
       <MutationLiveRegion message={form.announce} />
       <MutationFormBanner outcome={form.outcome} onRetry={form.retry} />
+
+      {accountsLoading ? (
+        <SkeletonList rows={3} />
+      ) : accountsFatal ? (
+        <ErrorState error={accounts.error?.error} onRetry={() => accounts.refetch()} />
+      ) : (
+        <>
+      <QueryRefetchBanners queries={[accounts, categories]} testID="add-transaction-refetch-banner" />
 
       <View style={styles.typeRow}>
         {(['expense', 'income'] as Kind[]).map((k) => (
@@ -245,6 +258,8 @@ export default function AddTransaction() {
           </View>
         </Pressable>
       </Modal>
+        </>
+      )}
     </ScrollView>
     </KeyboardAvoidingView>
   );

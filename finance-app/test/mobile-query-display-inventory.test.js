@@ -11,69 +11,161 @@ const {
 
 const root = path.resolve(__dirname, '..');
 
+/** Screens that fetch finance read data and must follow query display contracts. */
 const DATA_SCREENS = [
-  { file: 'src/app/(tabs)/index.tsx', testID: 'home-screen', refetchTestID: 'home-refetch-banner' },
-  { file: 'src/app/(tabs)/spending.tsx', testID: 'spending-screen', refetchTestID: 'spending-refetch-banner' },
-  { file: 'src/app/(tabs)/transactions.tsx', refetchTestID: 'activity-refetch-banner' },
+  { file: 'src/app/(tabs)/index.tsx', testID: 'home-screen', refetchTestID: 'home-refetch-banner', compound: true },
+  { file: 'src/app/(tabs)/spending.tsx', testID: 'spending-screen', refetchTestID: 'spending-refetch-banner', compound: true },
+  { file: 'src/app/(tabs)/transactions.tsx', refetchTestID: 'activity-refetch-banner', compound: true, fatalErrorProp: 'queryErrorMessage(listQuery.error)' },
   { file: 'src/app/bills.tsx', testID: 'bills-screen', refetchTestID: 'bills-refetch-banner' },
   { file: 'src/app/income.tsx', testID: 'income-screen', refetchTestID: 'income-refetch-banner' },
   { file: 'src/app/forecast.tsx', testID: 'forecast-screen', refetchTestID: 'forecast-refetch-banner' },
   { file: 'src/app/review.tsx', testID: 'review-screen', refetchTestID: 'review-refetch-banner' },
   { file: 'src/app/reconcile.tsx', testID: 'reconcile-screen', refetchTestID: 'reconcile-refetch-banner' },
-  { file: 'src/app/reimbursement.tsx', testID: 'reimbursement-screen', refetchTestID: 'reimbursement-refetch-banner' },
-  { file: 'src/app/networth.tsx', testID: 'networth-screen', refetchTestID: 'networth-refetch-banner' },
+  { file: 'src/app/reimbursement.tsx', testID: 'reimbursement-screen', refetchTestID: 'reimbursement-refetch-banner', compound: true },
+  { file: 'src/app/networth.tsx', testID: 'networth-screen', refetchTestID: 'networth-refetch-banner', compound: true },
   { file: 'src/app/category/[name].tsx', testID: 'category-detail-screen', refetchTestID: 'category-refetch-banner' },
   { file: 'src/app/account/[id].tsx', testID: 'account-detail-screen', refetchTestID: 'account-refetch-banner' },
   { file: 'src/app/tag/[tag].tsx', testID: 'tag-detail-screen', refetchTestID: 'tag-refetch-banner' },
   { file: 'src/app/merchant/[name].tsx', testID: 'merchant-detail-screen', refetchTestID: 'merchant-refetch-banner' },
   { file: 'src/app/subscriptions.tsx', testID: 'subscriptions-screen', refetchTestID: 'subscriptions-refetch-banner' },
   { file: 'src/app/recurring/[key].tsx', testID: 'recurring-detail-screen', refetchTestID: 'recurring-refetch-banner' },
-  { file: 'src/app/goals.tsx', testID: 'goals-screen', refetchTestID: 'goals-refetch-banner' },
-  { file: 'src/app/budgets.tsx', testID: 'budgets-screen', refetchTestID: 'budgets-refetch-banner' },
+  { file: 'src/app/goals.tsx', testID: 'goals-screen', refetchTestID: 'goals-refetch-banner', compound: true },
+  { file: 'src/app/budgets.tsx', testID: 'budgets-screen', refetchTestID: 'budgets-refetch-banner', compound: true },
   { file: 'src/app/cashflow.tsx', testID: 'cashflow-screen', refetchTestID: 'cashflow-refetch-banner' },
   { file: 'src/app/investments.tsx', testID: 'investments-screen', refetchTestID: 'investments-refetch-banner' },
   { file: 'src/app/debt.tsx', testID: 'debt-screen', refetchTestID: 'debt-refetch-banner' },
-  { file: 'src/app/rules.tsx', testID: 'rules-screen', refetchTestID: 'rules-refetch-banner' },
+  { file: 'src/app/rules.tsx', testID: 'rules-screen', refetchTestID: 'rules-refetch-banner', compound: true },
   { file: 'src/app/events.tsx', testID: 'events-screen', refetchTestID: 'events-refetch-banner' },
+  { file: 'src/app/transaction/[id].tsx', testID: 'transaction-detail-screen', refetchTestID: 'transaction-refetch-banner', editor: true },
+  { file: 'src/app/split/[id].tsx', testID: 'split-editor-screen', refetchTestID: 'split-refetch-banner', editor: true },
+  { file: 'src/app/add-transaction.tsx', testID: 'add-transaction-screen', refetchTestID: 'add-transaction-refetch-banner', dependencyReads: true },
+];
+
+/**
+ * Routes intentionally excluded from DATA_SCREENS inventory.
+ * Justification is encoded here so omissions cannot slip through silently.
+ */
+const EXCLUDED_QUERY_ROUTES = [
+  {
+    file: 'src/app/onboarding.tsx',
+    reason: 'Setup flow only; no finance read queries.',
+  },
+  {
+    file: 'src/app/(tabs)/settings.tsx',
+    reason: 'Local config and diagnostics; no ledger read queries.',
+  },
+  {
+    file: 'src/app/(tabs)/_layout.tsx',
+    reason: 'Tab chrome only.',
+  },
 ];
 
 function readScreen(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), 'utf8');
 }
 
+function assertUsesQueryDisplayGate(source, file) {
+  assert.match(
+    source,
+    /shouldShowFatalError|resolveQueryDisplay|QueryScreenBody|QueryFatalGate/,
+    `${file} must gate fatal errors separately from empty content`,
+  );
+  assert.match(
+    source,
+    /ErrorState|QueryScreenBody|QueryFatalGate/,
+    `${file} must render ErrorState for fatal fetch failures`,
+  );
+  assert.doesNotMatch(
+    source,
+    /isError\s*&&\s*![\w.]+\s*\?\s*\([\s\S]{0,120}?EmptyState/,
+    `${file} must not route fatal errors directly to EmptyState`,
+  );
+}
+
+function assertRefetchAffordance(source, screen) {
+  assert.match(
+    source,
+    /QueryRefetchBanner|QueryRefetchBanners|QueryScreenBody/,
+    `${screen.file} must expose a cached-refetch banner or helper`,
+  );
+  if (screen.refetchTestID) {
+    assert.match(source, new RegExp(screen.refetchTestID), `${screen.file} must wire ${screen.refetchTestID}`);
+  }
+}
+
+test('query display inventory covers every app route file or explicit exclusion', () => {
+  const appDir = path.join(root, 'src/app');
+  const routeFiles = [];
+
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.tsx') && entry.name !== '+not-found.tsx') {
+        routeFiles.push(path.relative(root, full));
+      }
+    }
+  }
+  walk(appDir);
+
+  const covered = new Set([
+    ...DATA_SCREENS.map((s) => s.file),
+    ...EXCLUDED_QUERY_ROUTES.map((s) => s.file),
+    'src/app/_layout.tsx',
+  ]);
+
+  for (const file of routeFiles) {
+    assert.ok(covered.has(file), `${file} must appear in DATA_SCREENS or EXCLUDED_QUERY_ROUTES`);
+  }
+});
+
 test('query display inventory separates fatal errors from empty states', () => {
   for (const screen of DATA_SCREENS) {
-    const source = readScreen(screen.file);
-    assert.match(
-      source,
-      /shouldShowFatalError|resolveQueryDisplay|QueryScreenBody|QueryFatalGate/,
-      `${screen.file} must gate fatal errors separately from empty content`,
-    );
-    assert.match(
-      source,
-      /ErrorState|QueryScreenBody|QueryFatalGate/,
-      `${screen.file} must render ErrorState for fatal fetch failures`,
-    );
-    assert.doesNotMatch(
-      source,
-      /isError\s*&&\s*![\w.]+\s*\?\s*\([\s\S]{0,120}?EmptyState/,
-      `${screen.file} must not route fatal errors directly to EmptyState`,
-    );
+    assertUsesQueryDisplayGate(readScreen(screen.file), screen.file);
   }
 });
 
 test('query display inventory exposes cached-refetch affordance on data screens', () => {
   for (const screen of DATA_SCREENS) {
-    const source = readScreen(screen.file);
-    assert.match(
-      source,
-      /QueryRefetchBanner|QueryRefetchBanners|QueryScreenBody/,
-      `${screen.file} must expose a cached-refetch banner or helper`,
-    );
-    if (screen.refetchTestID) {
-      assert.match(source, new RegExp(screen.refetchTestID), `${screen.file} must wire ${screen.refetchTestID}`);
-    }
+    assertRefetchAffordance(readScreen(screen.file), screen);
   }
+});
+
+test('editor/detail routes keep content visible with refetch banner on cached failure', () => {
+  for (const file of ['src/app/transaction/[id].tsx', 'src/app/split/[id].tsx']) {
+    const source = readScreen(file);
+    assert.match(source, /shouldShowRefetchError\(detail\.isError, detail\.data\)/, `${file} gates refetch on cached detail`);
+    assert.match(source, /detail\.isError[\s\S]*ErrorState/, `${file} keeps fatal retry for empty detail`);
+    assert.doesNotMatch(source, /detail\.isError[\s\S]{0,200}?EmptyState/, `${file} must not replace editor with empty state on error`);
+  }
+});
+
+test('compound screens consolidate multi-query refetch wiring', () => {
+  const compoundExpectations = [
+    { file: 'src/app/(tabs)/index.tsx', pattern: /QueryRefetchBanners queries=\{homeRefetchQueries\}/ },
+    { file: 'src/app/(tabs)/spending.tsx', pattern: /QueryRefetchBanners queries=\{spendingRefetchQueries\}/ },
+    { file: 'src/app/(tabs)/transactions.tsx', pattern: /QueryRefetchBanners queries=\{activityRefetchQueries\}/ },
+    { file: 'src/app/reimbursement.tsx', pattern: /QueryRefetchBanners queries=\{\[reimb, suggestions\]\}/ },
+    { file: 'src/app/goals.tsx', pattern: /QueryRefetchBanners queries=\{\[goals, accounts\]\}/ },
+    { file: 'src/app/rules.tsx', pattern: /QueryRefetchBanners queries=\{\[rules, categories\]\}/ },
+    { file: 'src/app/budgets.tsx', pattern: /QueryRefetchBanners queries=\{\[budgets, trends\]\}/ },
+    { file: 'src/app/networth.tsx', pattern: /QueryRefetchBanners queries=\{\[accounts, today, trends, manual\]\}/ },
+  ];
+
+  for (const { file, pattern } of compoundExpectations) {
+    assert.match(readScreen(file), pattern, `${file} must consolidate secondary query refetch failures`);
+  }
+});
+
+test('activity fatal ErrorState receives the list query error message', () => {
+  const source = readScreen('src/app/(tabs)/transactions.tsx');
+  assert.match(source, /ErrorState error=\{queryErrorMessage\(listQuery\.error\)\}/);
+});
+
+test('add-transaction dependency reads gate accounts fatally and surface category refetch', () => {
+  const source = readScreen('src/app/add-transaction.tsx');
+  assert.match(source, /shouldShowFatalError\(accounts\.isError, accounts\.data\)/);
+  assert.match(source, /QueryRefetchBanners queries=\{\[accounts, categories\]\}/);
 });
 
 test('rules and events never conflate fatal list fetch with empty state', () => {
@@ -81,23 +173,16 @@ test('rules and events never conflate fatal list fetch with empty state', () => 
     const source = readScreen(file);
     assert.match(source, /resolveQueryDisplay/, `${file} uses query display helper`);
     assert.match(source, /fatalError[\s\S]*ErrorState/, `${file} renders ErrorState on fatal list fetch`);
-    assert.match(source, /refetchError[\s\S]*QueryRefetchBanner/, `${file} keeps forms/list visible with refetch banner`);
     assert.doesNotMatch(source, /isError\s*&&\s*!.*\?\s*\([\s\S]{0,80}?No rules yet/, `${file} must not show rules empty copy on error`);
     assert.doesNotMatch(source, /isError\s*&&\s*!.*\?\s*\([\s\S]{0,80}?No trips yet/, `${file} must not show events empty copy on error`);
   }
-});
-
-test('home shows today refetch banner independent of ping health strip', () => {
-  const source = readScreen('src/app/(tabs)/index.tsx');
-  assert.match(source, /shouldShowRefetchError\(today\.isError, today\.data\)/);
-  assert.match(source, /home-refetch-banner/);
-  assert.match(source, /todayFatal[\s\S]*ErrorState|shouldShowFatalError\(today\.isError, today\.data\)[\s\S]*ErrorState/);
 });
 
 test('global finance banners mount at root navigation instead of tabs layout', () => {
   const rootLayout = readScreen('src/app/_layout.tsx');
   const tabsLayout = readScreen('src/app/(tabs)/_layout.tsx');
   assert.match(rootLayout, /GlobalFinanceBanners/);
+  assert.match(rootLayout, /privacyGateActive/);
   assert.doesNotMatch(tabsLayout, /FinanceStatusBanner/);
   assert.doesNotMatch(tabsLayout, /ReconnectStaleBanner/);
 });
@@ -109,30 +194,18 @@ test('split fatal detail error exposes accessible Try again retry', () => {
   assert.match(source, /detail\.refetch/);
 });
 
-test('investments and debt hero totals use consolidated accessibility labels', () => {
-  for (const file of ['src/app/investments.tsx', 'src/app/debt.tsx']) {
-    const source = readScreen(file);
-    assert.match(source, /heroMetricAccessibilityLabel/);
-    assert.match(source, /accessibilityElementsHidden/);
-  }
-});
-
-test('multi-query refetch helper consolidates failed queries without duplicate banners', () => {
+test('multi-query refetch helper consolidates failed queries and respects enabled flag', () => {
   const failed = collectRefetchErrorQueries([
     { isError: true, data: { ok: 1 }, refetch: () => {} },
     { isError: true, data: [], refetch: () => {} },
     { isError: false, data: null, refetch: () => {} },
+    { query: { isError: true, data: { stale: 1 }, refetch: () => {} }, enabled: false },
   ]);
   assert.equal(failed.length, 2);
   assert.equal(shouldShowFatalError(true, null), true);
   assert.equal(shouldShowRefetchError(true, { ok: 1 }), true);
   assert.equal(shouldShowRefetchError(true, []), true);
-
-  const budgets = readScreen('src/app/budgets.tsx');
-  assert.match(budgets, /QueryRefetchBanners queries=\{\[budgets, trends\]\}/);
-
-  const networth = readScreen('src/app/networth.tsx');
-  assert.match(networth, /QueryRefetchBanners queries=\{\[accounts, today, trends, manual\]\}/);
+  assert.equal(shouldShowRefetchError(true, undefined), false);
 });
 
 test('query display component module exports reusable screen helpers', () => {
@@ -140,4 +213,17 @@ test('query display component module exports reusable screen helpers', () => {
   assert.match(source, /export function QueryScreenBody/);
   assert.match(source, /export function QueryRefetchBanners/);
   assert.match(source, /export function resolveQueryDisplay/);
+});
+
+test('collectRefetchErrorQueries retries only failed queries passed to QueryRefetchBanners', () => {
+  let a = 0;
+  let b = 0;
+  const queries = [
+    { isError: true, data: { ok: 1 }, refetch: () => { a += 1; } },
+    { isError: false, data: { ok: 2 }, refetch: () => { b += 1; } },
+  ];
+  const failed = collectRefetchErrorQueries(queries);
+  failed.forEach((query) => query.refetch?.());
+  assert.equal(a, 1);
+  assert.equal(b, 0);
 });

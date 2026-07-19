@@ -30,10 +30,20 @@ function queryErrorMessage(error) {
 }
 
 /**
- * @param {Array<{ isError?: boolean; data?: unknown; refetch?: () => unknown }>} queries
+ * @param {Array<
+ *   | { isError?: boolean; data?: unknown; refetch?: () => unknown }
+ *   | { query: { isError?: boolean; data?: unknown; refetch?: () => unknown }; enabled?: boolean }
+ * >} queries
  */
 function collectRefetchErrorQueries(queries) {
-  return queries.filter((query) => shouldShowRefetchError(!!query.isError, query.data));
+  return queries
+    .filter((entry) => {
+      const query = entry?.query ?? entry;
+      const enabled = entry?.enabled ?? true;
+      if (!enabled) return false;
+      return shouldShowRefetchError(!!query.isError, query.data);
+    })
+    .map((entry) => entry?.query ?? entry);
 }
 
 module.exports = {

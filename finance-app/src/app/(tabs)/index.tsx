@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
@@ -15,8 +15,8 @@ import { useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { useFinanceToday } from '@/lib/date-only';
 import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
-import { QueryRefetchBanner } from '@/components/query-refetch-banner';
-import { shouldShowFatalError, shouldShowInitialLoad, shouldShowRefetchError } from '@/lib/query-display-state.js';
+import { QueryRefetchBanners } from '@/components/query-display';
+import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -137,7 +137,11 @@ export default function Overview() {
   const incompleteReasons = today.data?.liquidity.safeToSpend.incompleteReasons ?? [];
   const todayInitialLoad = shouldShowInitialLoad(today.isLoading, today.data);
   const todayFatal = shouldShowFatalError(today.isError, today.data);
-  const todayRefetchError = shouldShowRefetchError(today.isError, today.data);
+  const homeRefetchQueries = useMemo(() => [
+    today,
+    ...(widgets.netWorth ? [trends, manual] : []),
+    ...(widgets.subscriptions ? [recurring] : []),
+  ], [manual, recurring, today, trends, widgets.netWorth, widgets.subscriptions]);
 
   return (
     <Screen title="dark" accent="finances" onRefresh={onRefresh} testID="home-screen">
@@ -149,9 +153,7 @@ export default function Overview() {
         <ErrorState error={today.error?.error} onRetry={onRefresh} />
       ) : (
         <>
-          {todayRefetchError ? (
-            <QueryRefetchBanner onRetry={onRefresh} testID="home-refetch-banner" />
-          ) : null}
+          <QueryRefetchBanners queries={homeRefetchQueries} testID="home-refetch-banner" />
           <View testID="today-health-strip" style={styles.healthStrip}>
             <View style={[styles.healthDot, { backgroundColor: ping.isError ? colors.red : today.data?.health.ready ? colors.green : colors.yellow }]} />
             <Text style={styles.healthText}>

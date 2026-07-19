@@ -17,6 +17,8 @@ export type QueryLike = {
   refetch?: () => unknown;
 };
 
+export type RefetchQueryEntry = QueryLike | { query: QueryLike; enabled?: boolean };
+
 export function resolveQueryDisplay(query: QueryLike) {
   const data = query.data;
   return {
@@ -41,11 +43,13 @@ export function QueryRefetchBanners({
   testID = 'query-refetch-banner',
   message,
 }: {
-  queries: QueryLike[];
+  queries: RefetchQueryEntry[];
   testID?: string;
   message?: string;
 }) {
-  const failed = collectRefetchErrorQueries(queries);
+  const failed = collectRefetchErrorQueries(
+    queries as (QueryLike | { query: QueryLike; enabled?: boolean })[],
+  );
   if (!failed.length) return null;
 
   const onRetry = () => refetchQueries(failed);

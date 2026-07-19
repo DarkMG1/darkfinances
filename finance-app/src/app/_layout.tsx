@@ -352,7 +352,11 @@ function RootNav() {
   return (
     <View style={styles.appShell}>
       {content}
-      {configured ? <GlobalFinanceBanners /> : null}
+      {configured ? (
+        <GlobalFinanceBanners
+          privacyGateActive={!!faceId && (privacyVisible || !unlocked || lockFading)}
+        />
+      ) : null}
       {configured ? <NotificationReconciliationOwner /> : null}
       {configured ? <ReconnectRefreshOwner /> : null}
       {configured ? <NotificationRouter /> : null}

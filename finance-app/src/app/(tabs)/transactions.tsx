@@ -13,14 +13,14 @@ import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-fo
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { SkeletonList } from '@/components/skeleton';
-import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { QueryRefetchBanners } from '@/components/query-display';
 import { haptics } from '@/lib/haptics';
 import { startMonthsAgo, useFinanceToday } from '@/lib/date-only';
 import {
   isSearchQuerySettled,
+  queryErrorMessage,
   shouldShowFatalError,
   shouldShowInitialLoad,
-  shouldShowRefetchError,
 } from '@/lib/query-display-state.js';
 import { colors, fmtMoney, fmtDay } from '@/theme/colors';
 
@@ -83,7 +83,12 @@ export default function Transactions() {
   const listPending = searching && !searchSettled;
   const loading = shouldShowInitialLoad(listQuery.isLoading || listPending, listPayload);
   const fatal = shouldShowFatalError(listQuery.isError, listPayload);
-  const refetchError = shouldShowRefetchError(listQuery.isError, listPayload);
+  const activityRefetchQueries = useMemo(() => [
+    listQuery,
+    accounts,
+    categories,
+    { query: events, enabled: groupEvents && !searching },
+  ], [accounts, categories, events, groupEvents, listQuery, searching]);
   const onRefresh = () => searching ? searchRes.refetch() : txns.refetch();
 
   const base = useMemo(
@@ -367,8 +372,8 @@ export default function Transactions() {
         </Text>
       ) : null}
 
-      {refetchError ? (
-        <QueryRefetchBanner onRetry={onRefresh} testID="activity-refetch-banner" />
+      {!loading && !fatal ? (
+        <QueryRefetchBanners queries={activityRefetchQueries} testID="activity-refetch-banner" />
       ) : null}
 
       {loading ? (
@@ -376,7 +381,7 @@ export default function Transactions() {
           <SkeletonList rows={8} />
         </View>
       ) : fatal ? (
-        <ErrorState onRetry={onRefresh} />
+        <ErrorState error={queryErrorMessage(listQuery.error)} onRetry={onRefresh} />
       ) : (
         <SectionList
           style={styles.list}

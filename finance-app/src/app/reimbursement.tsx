@@ -3,8 +3,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-nati
 import { useRouter } from 'expo-router';
 import { useConfirmRepayment, useDismissRepayment, useReimbursement, useRepaymentSuggestions } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
-import { QueryRefetchBanner } from '@/components/query-refetch-banner';
-import { resolveQueryDisplay } from '@/components/query-display';
+import { QueryRefetchBanners, resolveQueryDisplay } from '@/components/query-display';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, Pill } from '@/components/ui';
 import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { SkeletonList } from '@/components/skeleton';
@@ -177,9 +176,7 @@ export default function Reimbursement() {
         <ErrorState error={reimbDisplay.errorMessage} onRetry={reimb.refetch} />
       ) : (
         <>
-          {reimbDisplay.refetchError ? (
-            <QueryRefetchBanner onRetry={reimb.refetch} testID="reimbursement-refetch-banner" />
-          ) : null}
+          <QueryRefetchBanners queries={[reimb, suggestions]} testID="reimbursement-refetch-banner" />
           <Card style={{ marginBottom: 16 }}>
             <Text style={styles.total}>
               {grandTotal != null ? fmtPos(grandTotal) : grandLowerBound != null ? `${totalOwedMetric?.lowerBoundLabel || 'at least'} ${fmtPos(grandLowerBound)}` : '—'}

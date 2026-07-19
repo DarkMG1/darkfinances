@@ -4,6 +4,8 @@ import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-rout
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCategories, useSplitTransaction, useTransaction, useUnsplitTransaction } from '@/api/hooks/finance.hooks';
 import { Avatar, ErrorState } from '@/components/ui';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { shouldShowFatalError, shouldShowRefetchError } from '@/lib/query-display-state.js';
 import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
@@ -325,13 +327,16 @@ export default function SplitEditor() {
           onRefetch={() => detail.refetch()}
         />
         {!d ? (
-          detail.isError ? (
+          shouldShowFatalError(detail.isError, detail.data) ? (
             <ErrorState error={detail.error?.error} onRetry={() => detail.refetch()} retryLabel="Try again" />
           ) : (
             <Text style={styles.loading}>Loading…</Text>
           )
         ) : (
           <>
+            {shouldShowRefetchError(detail.isError, detail.data) ? (
+              <QueryRefetchBanner onRetry={() => detail.refetch()} testID="split-refetch-banner" />
+            ) : null}
             <View style={styles.hero}>
               <Avatar label={d.payee} category={d.category || undefined} size={44} style={{ marginBottom: 8 }} />
               <Text style={styles.heroPayee} numberOfLines={1}>{d.payee || '(no payee)'}</Text>

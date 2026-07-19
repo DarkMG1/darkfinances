@@ -9,9 +9,10 @@ import {
 } from '@/lib/reconnect-refresh-registry';
 import { colors } from '@/theme/colors';
 
-export function FinanceStatusBanner() {
+export function FinanceStatusBanner({ top }: { top?: number }) {
   const insets = useSafeAreaInsets();
   const ping = usePing();
+  const bannerTop = top ?? insets.top + 4;
   const recoveryState = useRef({ wasUnavailable: false });
 
   useEffect(() => {
@@ -44,7 +45,7 @@ export function FinanceStatusBanner() {
       }}
       style={({ pressed }) => [
         styles.banner,
-        { top: insets.top + 4 },
+        { top: bannerTop },
         pressed && { opacity: 0.8 },
       ]}
     >
@@ -56,7 +57,6 @@ export function FinanceStatusBanner() {
 const styles = StyleSheet.create({
   banner: {
     position: 'absolute',
-    zIndex: 10_000,
     alignSelf: 'center',
     maxWidth: '92%',
     borderRadius: 999,

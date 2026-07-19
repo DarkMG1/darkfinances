@@ -10,9 +10,8 @@ import {
   MutationSubmitButton,
 } from '@/components/mutation-form';
 import { Card, CardTitle, ErrorState } from '@/components/ui';
-import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { QueryRefetchBanners, resolveQueryDisplay } from '@/components/query-display';
 import { SkeletonList } from '@/components/skeleton';
-import { resolveQueryDisplay } from '@/components/query-display';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { useMutationForm } from '@/hooks/useMutationForm';
@@ -107,9 +106,7 @@ export default function Rules() {
         onRefetch={() => rules.refetch()}
       />
 
-      {rulesDisplay.refetchError ? (
-        <QueryRefetchBanner onRetry={() => rules.refetch()} testID="rules-refetch-banner" />
-      ) : null}
+      <QueryRefetchBanners queries={[rules, categories]} testID="rules-refetch-banner" />
 
       <Text style={styles.intro}>Automatically categorize transactions whose payee contains your text. Rules apply to matching uncategorized transactions now and to new ones as they sync.</Text>
 

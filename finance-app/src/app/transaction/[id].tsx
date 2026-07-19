@@ -28,8 +28,10 @@ import {
   useTransaction,
 } from '@/api/hooks/finance.hooks';
 import { ReimbLinkEndpoint, ReimbTxnRef, Transaction } from '@/api/generated/types';
-import { Card, CardTitle, TagChips } from '@/components/ui';
+import { Card, CardTitle, TagChips, ErrorState } from '@/components/ui';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
 import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
+import { shouldShowFatalError, shouldShowRefetchError } from '@/lib/query-display-state.js';
 import { useMutationScreen } from '@/hooks/useMutationScreen';
 import { useMutationScreenFieldInvalidation } from '@/hooks/useMutationScreenFieldInvalidation';
 import { resolveTransactionDateAttempt } from '@/lib/mutation-transaction-date-attempt';
@@ -678,21 +680,23 @@ export default function TransactionDetail() {
   const amountColor = income ? colors.green : colors.text;
 
   if (!canonical) {
+    const detailFatal = shouldShowFatalError(detail.isError, detail.data);
+    if (detailFatal) {
+      return (
+        <View testID="transaction-detail-screen" style={styles.loadBox}>
+          <Stack.Screen options={{ headerShown: false }} />
+          <ErrorState error={detail.error?.error} onRetry={() => detail.refetch()} retryLabel="Try again" />
+        </View>
+      );
+    }
     const message = !p.date
       ? 'This transaction link is missing its date.'
-      : detail.isError
-        ? detail.error?.error || 'Could not load the latest transaction.'
-        : 'Loading transaction…';
+      : 'Loading transaction…';
     return (
       <View testID="transaction-detail-screen" style={styles.loadBox}>
         <Stack.Screen options={{ headerShown: false }} />
         {!detail.isError && p.date ? <ActivityIndicator color={colors.accentLight} /> : null}
         <Text style={styles.loadText}>{message}</Text>
-        {detail.isError ? (
-          <Pressable style={styles.retryButton} onPress={() => detail.refetch()}>
-            <Text style={styles.retryText}>Try again</Text>
-          </Pressable>
-        ) : null}
       </View>
     );
   }
@@ -717,6 +721,10 @@ export default function TransactionDetail() {
         onRetry={screen.retry}
         onRefetch={() => { void screen.refetchStale(); detail.refetch(); links.refetch(); receipts.refetch(); }}
       />
+
+      {shouldShowRefetchError(detail.isError, detail.data) ? (
+        <QueryRefetchBanner onRetry={() => detail.refetch()} testID="transaction-refetch-banner" />
+      ) : null}
 
       <View style={[styles.menuHero, { paddingTop: insets.top + 14 }]}>
         <View style={styles.menuTopBar}>
