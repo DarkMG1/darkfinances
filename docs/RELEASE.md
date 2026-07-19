@@ -2,9 +2,9 @@
 
 DarkFinances ships through three coordinated paths:
 
-1. **Full native build** — widgets, App Groups, push-notification entitlement, EAS Update on the `production` channel.
-2. **Free sideload IPA** — `FREE_IOS_SIDELOAD=1` removes widget/push entitlements; local notifications remain.
-3. **OTA updates** — JavaScript/assets only when the installed `runtimeVersion` matches.
+1. **Full native build** â€” widgets, App Groups, push-notification entitlement, EAS Update on the `production` channel.
+2. **Free sideload IPA** â€” `FREE_IOS_SIDELOAD=1` removes widget/push entitlements; local notifications remain.
+3. **OTA updates** â€” JavaScript/assets only when the installed `runtimeVersion` matches.
 
 ## Content-addressed release manifest
 
@@ -154,7 +154,7 @@ instead.
 - **Coordinated restore preview** (`restore-coordinated.sh --dry-run` or `RESTORE_DRY_RUN=1`): same
   read-only writer boundary checks inside the coordinated session; does not stop services or mutate
   destination bytes. `RESTORE_DRY_RUN` applies only to coordinated restore, not the standalone helper.
-- **Live restore** — standalone: `CONFIRM=1` with a PR-18 quiescence admission token; coordinated:
+- **Live restore** â€” standalone: `CONFIRM=1` with a PR-18 quiescence admission token; coordinated:
   live session without `--dry-run`/`RESTORE_DRY_RUN`. Both paths re-verify **all** inventoried writers
   with live state checks (`assertAllWritersQuiescentForAdmission`) immediately before the first
   destination mutation. Stale tokens or post-token writer activity fail closed.
