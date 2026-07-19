@@ -89,6 +89,15 @@ async function postJson(base, pathname, body, headers = {}) {
   return { response, body: parsed };
 }
 
+function writePasskeyCredentials(dir) {
+  fs.writeFileSync(path.join(dir, 'credentials.json'), JSON.stringify([{
+    credentialID: 'cred-id',
+    credentialPublicKey: Buffer.from('public-key').toString('base64'),
+    counter: 0,
+    transports: [],
+  }]));
+}
+
 test('direct exposure ignores spoofed X-Forwarded-For for enrollment rate limits', async (t) => {
   const port = await unusedPort();
   const base = `http://127.0.0.1:${port}`;
@@ -144,13 +153,7 @@ test('login and demo rate limits share the direct-exposure client key', async (t
   const port = await unusedPort();
   const base = `http://127.0.0.1:${port}`;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-login-demo-'));
-  const creds = [{
-    credentialID: 'cred-id',
-    credentialPublicKey: Buffer.from('public-key').toString('base64'),
-    counter: 0,
-    transports: [],
-  }];
-  fs.writeFileSync(path.join(dir, 'credentials.json'), JSON.stringify(creds));
+  writePasskeyCredentials(dir);
   const { child, logs } = spawnServer(t, baseServerEnv(port, dir, {
     FINANCE_TRUST_PROXY_HOPS: '0',
   }));
@@ -195,39 +198,94 @@ test('login and demo rate limits share the direct-exposure client key', async (t
   assert.equal(demoLimited.status, 429);
 });
 
-test('malformed trust proxy config and missing production setting fail startup', async (t) => {
+test('trusted proxy hop honors forwarded client IP for login and demo rate limits', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-trusted-login-demo-'));
+  writePasskeyCredentials(dir);
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, {
+    FINANCE_TRUST_PROXY_HOPS: '1',
+  }));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+
+  for (let i = 0; i < 30; i += 1) {
+    const result = await postJson(base, '/auth/login/start', {}, {
+      'X-Forwarded-For': '198.51.100.20',
+    });
+    assert.notEqual(result.response.status, 429, `login attempt ${i + 1} should not be limited yet`);
+  }
+  const loginLimited = await postJson(base, '/auth/login/start', {}, {
+    'X-Forwarded-For': '198.51.100.20',
+  });
+  assert.equal(loginLimited.response.status, 429);
+
+  const loginOtherClient = await postJson(base, '/auth/login/start', {}, {
+    'X-Forwarded-For': '198.51.100.21',
+  });
+  assert.notEqual(loginOtherClient.response.status, 429);
+
+  for (let i = 0; i < 240; i += 1) {
+    const response = await fetch(`${base}/api/v1/accounts`, {
+      headers: {
+        'X-Demo-Mode': '1',
+        'X-Forwarded-For': '198.51.100.30',
+      },
+    });
+    assert.notEqual(response.status, 429, `demo attempt ${i + 1} should not be limited yet`);
+  }
+  const demoLimited = await fetch(`${base}/api/v1/accounts`, {
+    headers: {
+      'X-Demo-Mode': '1',
+      'X-Forwarded-For': '198.51.100.30',
+    },
+  });
+  assert.equal(demoLimited.status, 429);
+
+  const demoOtherClient = await fetch(`${base}/api/v1/accounts`, {
+    headers: {
+      'X-Demo-Mode': '1',
+      'X-Forwarded-For': '198.51.100.31',
+    },
+  });
+  assert.notEqual(demoOtherClient.status, 429);
+});
+
+test('absent FINANCE_TRUST_PROXY_HOPS starts on non-loopback with a proxy-bucket warning', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-default-prod-'));
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, {
+    PUBLIC_ORIGIN: 'https://finances.example.test',
+    WEBAUTHN_ORIGIN: 'https://finances.example.test',
+    WEBAUTHN_RP_ID: 'finances.example.test',
+  }));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+  assert.match(logs.value, /\[trust-proxy\].*defaulting to 0.*FINANCE_TRUST_PROXY_HOPS=1/s);
+});
+
+test('malformed trust proxy config fails startup', async (t) => {
   const cases = [
     {
-      name: 'malformed hop count',
-      env: {
-        FINANCE_TRUST_PROXY_HOPS: 'not-a-number',
-        PUBLIC_ORIGIN: 'https://finances.example.test',
-        WEBAUTHN_ORIGIN: 'https://finances.example.test',
-        WEBAUTHN_RP_ID: 'finances.example.test',
-        NODE_ENV: 'production',
-      },
-      pattern: /FINANCE_TRUST_PROXY_HOPS must be an integer/,
+      name: 'non-numeric hop count',
+      env: { FINANCE_TRUST_PROXY_HOPS: 'not-a-number' },
+      pattern: /\^\[0-3\]\$/,
     },
     {
       name: 'hop count above cap',
-      env: {
-        FINANCE_TRUST_PROXY_HOPS: '99',
-        PUBLIC_ORIGIN: 'https://finances.example.test',
-        WEBAUTHN_ORIGIN: 'https://finances.example.test',
-        WEBAUTHN_RP_ID: 'finances.example.test',
-        NODE_ENV: 'production',
-      },
-      pattern: /FINANCE_TRUST_PROXY_HOPS must be an integer/,
+      env: { FINANCE_TRUST_PROXY_HOPS: '99' },
+      pattern: /\^\[0-3\]\$/,
     },
     {
-      name: 'missing production setting',
-      env: {
-        PUBLIC_ORIGIN: 'https://finances.example.test',
-        WEBAUTHN_ORIGIN: 'https://finances.example.test',
-        WEBAUTHN_RP_ID: 'finances.example.test',
-        NODE_ENV: 'production',
-      },
-      pattern: /FINANCE_TRUST_PROXY_HOPS is required/,
+      name: 'whitespace suffix',
+      env: { FINANCE_TRUST_PROXY_HOPS: '1 ' },
+      pattern: /\^\[0-3\]\$/,
+    },
+    {
+      name: 'hex radix',
+      env: { FINANCE_TRUST_PROXY_HOPS: '0x1' },
+      pattern: /\^\[0-3\]\$/,
     },
   ];
 
@@ -241,6 +299,10 @@ test('malformed trust proxy config and missing production setting fail startup',
         env: {
           ...process.env,
           PORT: String(port),
+          DEMO_ONLY: '1',
+          PUBLIC_ORIGIN: 'https://finances.example.test',
+          WEBAUTHN_ORIGIN: 'https://finances.example.test',
+          WEBAUTHN_RP_ID: 'finances.example.test',
           FINANCE_API_TOKEN: 'test-api-token',
           SESSION_SECRET: 'test-session-secret-with-sufficient-length',
           SESSION_DIR: path.join(dir, 'sessions'),
@@ -248,7 +310,6 @@ test('malformed trust proxy config and missing production setting fail startup',
           PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
           PASSKEY_ENROLLMENT_TOKEN_HASH: crypto.createHash('sha256').update('closed').digest('hex'),
           PASSKEY_ENROLLMENT_EXPIRES_AT: String(Date.now() + 60_000),
-          FINANCE_QUERY_CURSOR_SECRET: 'test-cursor-secret-with-sufficient-length',
           ...testCase.env,
         },
         stdio: ['ignore', 'pipe', 'pipe'],

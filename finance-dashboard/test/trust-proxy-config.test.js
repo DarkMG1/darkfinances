@@ -5,35 +5,56 @@ const assert = require('node:assert/strict');
 const {
   loadTrustProxyConfig,
   parseTrustProxyHops,
+  formatTrustProxyStartupWarning,
   rateLimitClientKey,
   MAX_TRUST_PROXY_HOPS,
+  TRUST_PROXY_HOPS_PATTERN,
 } = require('../lib/trust-proxy-config');
 
-test('parseTrustProxyHops accepts bounded hop counts and rejects malformed values', () => {
-  assert.equal(parseTrustProxyHops('0'), 0);
-  assert.equal(parseTrustProxyHops('1'), 1);
-  assert.equal(parseTrustProxyHops(String(MAX_TRUST_PROXY_HOPS)), MAX_TRUST_PROXY_HOPS);
-  assert.throws(() => parseTrustProxyHops('-1'), /integer from 0 through/);
-  assert.throws(() => parseTrustProxyHops('abc'), /integer from 0 through/);
-  assert.throws(
-    () => parseTrustProxyHops(String(MAX_TRUST_PROXY_HOPS + 1)),
-    /integer from 0 through/,
+test('parseTrustProxyHops accepts exact single-digit hop counts only', () => {
+  for (let hops = 0; hops <= MAX_TRUST_PROXY_HOPS; hops += 1) {
+    assert.equal(parseTrustProxyHops(String(hops)), hops);
+    assert.equal(TRUST_PROXY_HOPS_PATTERN.test(String(hops)), true);
+  }
+  assert.throws(() => parseTrustProxyHops('-1'), /\^\[0-3\]\$/);
+  assert.throws(() => parseTrustProxyHops('abc'), /\^\[0-3\]\$/);
+  assert.throws(() => parseTrustProxyHops('10'), /\^\[0-3\]\$/);
+  assert.throws(() => parseTrustProxyHops('01'), /\^\[0-3\]\$/);
+  assert.throws(() => parseTrustProxyHops('1 '), /\^\[0-3\]\$/);
+  assert.throws(() => parseTrustProxyHops(' 1'), /\^\[0-3\]\$/);
+  assert.throws(() => parseTrustProxyHops('0x1'), /\^\[0-3\]\$/);
+  assert.throws(() => parseTrustProxyHops('1.0'), /\^\[0-3\]\$/);
+  assert.throws(() => parseTrustProxyHops('1abc'), /\^\[0-3\]\$/);
+});
+
+test('loadTrustProxyConfig defaults absent values to zero hops everywhere', () => {
+  assert.deepEqual(loadTrustProxyConfig({}), { hops: 0, explicit: false });
+  assert.deepEqual(
+    loadTrustProxyConfig({ FINANCE_TRUST_PROXY_HOPS: '1' }),
+    { hops: 1, explicit: true },
+  );
+  assert.deepEqual(
+    loadTrustProxyConfig({ FINANCE_TRUST_PROXY_HOPS: '0' }),
+    { hops: 0, explicit: true },
   );
 });
 
-test('loadTrustProxyConfig defaults to zero hops on loopback and requires explicit production choice', () => {
-  assert.deepEqual(loadTrustProxyConfig({}, { localOrigin: true }), { hops: 0 });
-  assert.throws(
-    () => loadTrustProxyConfig({}, { localOrigin: false }),
-    /FINANCE_TRUST_PROXY_HOPS is required/,
+test('formatTrustProxyStartupWarning advises reverse-proxy deployments when hops stay at zero', () => {
+  assert.equal(
+    formatTrustProxyStartupWarning({ hops: 0, explicit: false }, { localOrigin: true }),
+    null,
   );
-  assert.deepEqual(
-    loadTrustProxyConfig({ FINANCE_TRUST_PROXY_HOPS: '1' }, { localOrigin: false }),
-    { hops: 1 },
+  assert.equal(
+    formatTrustProxyStartupWarning({ hops: 1, explicit: true }, { localOrigin: false }),
+    null,
   );
-  assert.deepEqual(
-    loadTrustProxyConfig({ FINANCE_TRUST_PROXY_HOPS: '0' }, { localOrigin: false }),
-    { hops: 0 },
+  assert.match(
+    formatTrustProxyStartupWarning({ hops: 0, explicit: false }, { localOrigin: false }),
+    /defaulting to 0.*FINANCE_TRUST_PROXY_HOPS=1/s,
+  );
+  assert.match(
+    formatTrustProxyStartupWarning({ hops: 0, explicit: true }, { localOrigin: false }),
+    /FINANCE_TRUST_PROXY_HOPS=0.*sole ingress/s,
   );
 });
 

@@ -144,3 +144,23 @@ ops/bin/verify-backup.sh /path/to/dashboard-runtime-<timestamp>.tgz
 ```
 
 Restore remains `CONFIRM=1` gated and refuses to run while `finance-dashboard.service` is active.
+
+## Dashboard trust-proxy migration
+
+Upgrades that include explicit trust-proxy configuration remain available without a configuration
+outage: when `FINANCE_TRUST_PROXY_HOPS` is absent the dashboard defaults fail-safe to `0`, ignores
+client-supplied `X-Forwarded-For` for rate limiting, and logs a `[trust-proxy]` startup warning on
+non-loopback deployments.
+
+Before restarting production after such an upgrade:
+
+1. Add `FINANCE_TRUST_PROXY_HOPS=1` to the private dashboard environment when the process sits behind
+   the usual trusted HTTPS reverse proxy on loopback.
+2. Keep that reverse proxy as the sole ingress to Node and configure it to overwrite or append
+   `X-Forwarded-For` with the real client address.
+3. Restart `finance-dashboard.service` and confirm the `[trust-proxy]` warning disappears once hops
+   are set to `1`.
+
+Leaving the variable unset preserves security during the rollout but shares one rate-limit bucket
+across all proxied clients until step 1 is applied. See [`ops/README.md`](../ops/README.md) for the
+full pre-restart checklist.

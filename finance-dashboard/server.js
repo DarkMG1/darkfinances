@@ -62,6 +62,7 @@ const {
 const { loadQueryScalingConfig } = require('./lib/query-scaling-config');
 const {
   applyExpressTrustProxy,
+  formatTrustProxyStartupWarning,
   loadTrustProxyConfig,
   rateLimitClientKey,
 } = require('./lib/trust-proxy-config');
@@ -183,7 +184,8 @@ const localOrigin = publicHostname === 'localhost' || publicHostname === '127.0.
 if (!process.env.SESSION_SECRET && !localOrigin) {
   throw new Error('SESSION_SECRET is required for a non-local deployment');
 }
-const trustProxyConfig = loadTrustProxyConfig(process.env, { localOrigin });
+const trustProxyConfig = loadTrustProxyConfig(process.env);
+const trustProxyStartupWarning = formatTrustProxyStartupWarning(trustProxyConfig, { localOrigin });
 if (!localOrigin && process.env.DEMO_ONLY !== '1') {
   assertCursorSigningConfigured();
 }
@@ -1909,6 +1911,7 @@ const httpServer = app.listen(PORT, '127.0.0.1', () => {
     allowedOrigin = `http://127.0.0.1:${boundPort}`;
   }
   console.log(`Finance dashboard running on http://127.0.0.1:${boundPort}`);
+  if (trustProxyStartupWarning) console.warn(`[trust-proxy] ${trustProxyStartupWarning}`);
   const testInstanceId = exposeTestServerInstanceId();
   if (testInstanceId) {
     console.log(`FINANCE_TEST_SERVER_READY ${boundPort} ${testInstanceId}`);

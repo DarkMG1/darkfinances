@@ -30,7 +30,8 @@ reverse-proxy settings, and alert delivery before installation.
 - Services run as an unprivileged dedicated user.
 - Actual and Finance Dashboard listen on loopback and are exposed only through a trusted HTTPS reverse
   proxy/private access layer. Set `FINANCE_TRUST_PROXY_HOPS=1` in the dashboard environment so
-  rate limits and forwarded client addresses honor the proxy hop.
+  rate limits and forwarded client addresses honor the proxy hop. The trusted proxy must be the sole
+  ingress to Node and must overwrite or append `X-Forwarded-For` with the real client address.
 - The repository is deployed as `~/finance-dashboard` and supporting tools as `~/actual-tools`.
 - Service secrets live in `~/.openclaw/finance-dashboard.env` with mode `0600`.
 - User systemd is available and, if needed after logout, lingering is enabled for the service account.
@@ -88,6 +89,28 @@ install -m 600 /path/to/finance-dashboard.env "$HOME/.openclaw/finance-dashboard
 Set `SESSION_DIR` and sidecar paths in the environment if they do not live under
 `$HOME/finance-dashboard`. Configure first-passkey enrollment only for the short provisioning window
 described in [`../finance-dashboard/README.md`](../finance-dashboard/README.md).
+
+### Trust-proxy migration checklist (pre-restart)
+
+When upgrading to dashboard code that enforces explicit trust-proxy configuration, edit
+`~/.openclaw/finance-dashboard.env` **before** restarting `finance-dashboard.service`:
+
+1. If the dashboard sits behind the normal trusted HTTPS reverse proxy on loopback, add
+   `FINANCE_TRUST_PROXY_HOPS=1`.
+2. Confirm the reverse proxy is the **sole ingress** to `127.0.0.1:5007` and overwrites or appends
+   `X-Forwarded-For` with the real client address. Do not expose Node directly to the internet.
+3. Leave `FINANCE_TRUST_PROXY_HOPS` unset or set it to `0` only when Node is reached without a
+   trusted proxy (direct exposure). This is fail-safe: spoofed `X-Forwarded-For` values are ignored,
+   but all proxied clients may share one rate-limit bucket until step 1 is applied.
+4. Restart the dashboard service after saving the environment file:
+
+```bash
+systemctl --user restart finance-dashboard.service
+journalctl --user -u finance-dashboard.service --since "5 min ago" | rg trust-proxy
+```
+
+Look for `[trust-proxy]` in the journal when hops remain at `0` on a non-loopback deployment; that
+warning means per-client rate limits still key on the proxy connection address.
 
 ## 3. Install the dashboard service
 

@@ -1,28 +1,37 @@
 'use strict';
 
 const MAX_TRUST_PROXY_HOPS = 3;
+const TRUST_PROXY_HOPS_PATTERN = /^[0-3]$/;
 
 function parseTrustProxyHops(raw, fieldName = 'FINANCE_TRUST_PROXY_HOPS') {
   if (raw == null || raw === '') return null;
-  const parsed = Number.parseInt(String(raw), 10);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > MAX_TRUST_PROXY_HOPS) {
-    throw new Error(`${fieldName} must be an integer from 0 through ${MAX_TRUST_PROXY_HOPS}`);
+  const value = String(raw);
+  if (!TRUST_PROXY_HOPS_PATTERN.test(value)) {
+    throw new Error(
+      `${fieldName} must match ^[0-3]$ exactly (no whitespace, suffix, or alternate radix)`,
+    );
   }
-  return parsed;
+  return Number(value);
 }
 
-function loadTrustProxyConfig(env = process.env, { localOrigin = false } = {}) {
-  const parsed = parseTrustProxyHops(env.FINANCE_TRUST_PROXY_HOPS);
-  if (parsed == null) {
-    if (!localOrigin) {
-      throw new Error(
-        'FINANCE_TRUST_PROXY_HOPS is required for non-loopback deployments '
-        + `(set 0 for direct Node exposure or 1 when behind one trusted reverse proxy; max ${MAX_TRUST_PROXY_HOPS})`,
-      );
-    }
-    return Object.freeze({ hops: 0 });
-  }
-  return Object.freeze({ hops: parsed });
+function loadTrustProxyConfig(env = process.env) {
+  const raw = env.FINANCE_TRUST_PROXY_HOPS;
+  const explicit = raw != null && raw !== '';
+  const hops = explicit ? parseTrustProxyHops(raw) : 0;
+  return Object.freeze({ hops, explicit });
+}
+
+function formatTrustProxyStartupWarning(config, { localOrigin = false } = {}) {
+  if (localOrigin || config.hops !== 0) return null;
+  const prefix = config.explicit
+    ? 'FINANCE_TRUST_PROXY_HOPS=0'
+    : 'FINANCE_TRUST_PROXY_HOPS is unset (defaulting to 0)';
+  return (
+    `${prefix}: rate limits ignore X-Forwarded-For and key on the TCP remote address. `
+    + 'Reverse-proxy deployments must set FINANCE_TRUST_PROXY_HOPS=1, keep the trusted proxy as the '
+    + 'sole ingress to Node, and configure it to overwrite or append X-Forwarded-For with the real '
+    + 'client address so per-client buckets work.'
+  );
 }
 
 function applyExpressTrustProxy(app, config) {
@@ -39,7 +48,9 @@ function rateLimitClientKey(req, trustProxyHops) {
 
 module.exports = {
   MAX_TRUST_PROXY_HOPS,
+  TRUST_PROXY_HOPS_PATTERN,
   applyExpressTrustProxy,
+  formatTrustProxyStartupWarning,
   loadTrustProxyConfig,
   parseTrustProxyHops,
   rateLimitClientKey,
