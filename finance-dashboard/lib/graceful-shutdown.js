@@ -39,7 +39,8 @@ function defaultLogPhase(phase, extra) {
  * 2. requestAdmission.closeAdmission() — reject new HTTP admission waiters/slots.
  * 3. mutationQueue.close() — reject new serial mutation enqueue on keep-alive connections.
  * 4. httpServer.close() + await callback — drain active HTTP handlers (GET + in-flight mutations).
- *    closeIdleConnections() runs when admission stops so idle keep-alive sockets do not block drain.
+ *    closeIdleConnections() is swept on a bounded interval so idle keep-alive sockets that become
+ *    idle after drain starts do not block the close callback.
  * 5. mutationQueue.drain() — finish accepted non-HTTP queue work (e.g. in-flight periodic sync).
  * 6. shutdownApi() — coordinator shutdownHandoff (Actual saga sync + api.shutdown).
  *

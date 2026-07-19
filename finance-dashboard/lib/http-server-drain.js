@@ -8,6 +8,10 @@ class HttpDrainTimeoutError extends Error {
   }
 }
 
+const IDLE_KEEP_ALIVE_SWEEP_MS = 50;
+
+const inFlightClosePromises = new WeakMap();
+
 function canDrainImmediately(server) {
   return !server || typeof server.close !== 'function' || !server.listening;
 }
@@ -34,30 +38,70 @@ function forceCloseHttpConnections(server) {
   }
 }
 
-function closeHttpServer(server) {
-  return new Promise((resolve, reject) => {
-    if (!server || typeof server.close !== 'function') {
-      resolve({ wasListening: false, alreadyClosed: true });
-      return;
-    }
-    if (!server.listening) {
-      resolve({ wasListening: false, alreadyClosed: true });
-      return;
-    }
+function isWeakMapServer(server) {
+  return server != null && typeof server === 'object';
+}
 
+function closeHttpServer(server) {
+  if (!server || typeof server.close !== 'function') {
+    return Promise.resolve({ wasListening: false, alreadyClosed: true });
+  }
+
+  if (isWeakMapServer(server) && inFlightClosePromises.has(server)) {
+    return inFlightClosePromises.get(server);
+  }
+
+  if (!server.listening) {
+    return Promise.resolve({ wasListening: false, alreadyClosed: true });
+  }
+
+  const promise = new Promise((resolve, reject) => {
     let settled = false;
+    let idleSweepTimer = null;
+
+    const cleanup = () => {
+      if (idleSweepTimer != null) {
+        clearInterval(idleSweepTimer);
+        idleSweepTimer = null;
+      }
+      if (isWeakMapServer(server)) {
+        inFlightClosePromises.delete(server);
+      }
+    };
+
     const finish = (error, result) => {
       if (settled) return;
       settled = true;
+      cleanup();
       if (error) reject(error);
       else resolve(result);
     };
 
-    server.close((error) => {
-      finish(error, { wasListening: true, drained: true });
-    });
-    closeIdleKeepAlive(server);
+    const sweepIdleKeepAlive = () => {
+      if (settled) return;
+      closeIdleKeepAlive(server);
+    };
+
+    try {
+      server.close((error) => {
+        finish(error, { wasListening: true, drained: true });
+      });
+    } catch (error) {
+      finish(error);
+      return;
+    }
+
+    sweepIdleKeepAlive();
+    if (!settled && typeof server.closeIdleConnections === 'function') {
+      idleSweepTimer = setInterval(sweepIdleKeepAlive, IDLE_KEEP_ALIVE_SWEEP_MS);
+      idleSweepTimer.unref?.();
+    }
   });
+
+  if (isWeakMapServer(server)) {
+    inFlightClosePromises.set(server, promise);
+  }
+  return promise;
 }
 
 function rejectHttpDrainTimeout(server, error, onDiagnostic) {
