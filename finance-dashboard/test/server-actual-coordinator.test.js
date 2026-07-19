@@ -5,7 +5,12 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
+const { startEphemeralDashboardServer, waitForChildExit } = require('./helpers/ephemeral-dashboard-server');
+const {
+  markPrelude,
+  sidecarReleasePrelude,
+  waitForMarkerDir,
+} = require('./helpers/test-sync-barriers');
 
 async function apiRequest(base, pathname, { method = 'GET', key, body } = {}) {
   const response = await fetch(`${base}${pathname}`, {
@@ -26,12 +31,8 @@ async function apiRequest(base, pathname, { method = 'GET', key, body } = {}) {
 function markLine() {
   return `
     const fs = require('fs');
-    const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');
-    const waitSidecarRelease = async () => {
-      while (!fs.existsSync(process.env.TEST_RELEASE_PATH)) {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
-    };
+    ${markPrelude()}
+    ${sidecarReleasePrelude()}
   `;
 }
 
@@ -57,17 +58,8 @@ async function startCoordinatorServerWithSidecarGate(t, preloadBody) {
   };
 }
 
-async function waitForMarker(dir, line, timeoutMs = 10_000) {
-  const markerPath = path.join(dir, 'marker.log');
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(markerPath)) {
-      const content = fs.readFileSync(markerPath, 'utf8');
-      if (content.includes(`${line}\n`) || content.trimEnd().endsWith(line)) return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  throw new Error(`marker line not seen: ${line}\n${fs.existsSync(markerPath) ? fs.readFileSync(markerPath, 'utf8') : ''}`);
+async function waitForMarker(dir, line, { child, logs, timeoutMs } = {}) {
+  return waitForMarkerDir(dir, line, { child, logs, timeoutMs, context: `marker ${line}` });
 }
 
 test('queued write blocks overlapping Actual-backed GET', async (t) => {
@@ -104,7 +96,7 @@ test('queued write blocks overlapping Actual-backed GET', async (t) => {
     key: 'budget-block-get',
     body: { month: '2026-07', categoryId: 'food', amount: 100 },
   });
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  await waitForMarker(dir, 'setBudget:start', { child, logs });
   const getPromise = apiRequest(base, '/api/v1/accounts');
   const [getResult, postResult] = await Promise.all([getPromise, postPromise]);
   assert.equal(getResult.response.status, 200);
@@ -214,7 +206,7 @@ test('local rules read is not blocked by in-flight Actual read', async (t) => {
     require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
   `);
   const actualRead = apiRequest(base, '/api/v1/accounts');
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  await waitForMarker(dir, 'actual-read:start', { child, logs });
   const localRead = apiRequest(base, '/api/v1/rules');
   await Promise.all([actualRead, localRead]);
   const marker = fs.readFileSync(path.join(dir, 'marker.log'), 'utf8').trim().split('\n');
@@ -303,13 +295,12 @@ test('shutdown drains mutations then shutdownApi without pre-closing coordinator
     key: 'shutdown-write',
     body: { month: '2026-07', categoryId: 'food', amount: 5 },
   });
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  await waitForMarker(dir, 'mutation:start', { child, logs });
   child.kill('SIGTERM');
-  const exitCode = await new Promise((resolve) => {
-    child.on('exit', (code) => resolve(code));
-    setTimeout(() => resolve(undefined), 15_000);
-  });
-  await pending;
+  const [exitCode] = await Promise.all([
+    waitForChildExit(child, 15_000),
+    pending,
+  ]);
   const marker = fs.readFileSync(path.join(dir, 'marker.log'), 'utf8').trim().split('\n');
   assert.ok(marker.includes('mutation:start'));
   assert.ok(marker.includes('mutation:end'));
@@ -319,6 +310,7 @@ test('shutdown drains mutations then shutdownApi without pre-closing coordinator
 
 test('production-path cachedActual fill cannot republish after mutation invalidates generation', async (t) => {
   const { base, child, logs, dir } = await startCoordinatorServer(t, `
+    ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
     let accountsCall = 0;
@@ -329,6 +321,7 @@ test('production-path cachedActual fill cannot republish after mutation invalida
       syncNow: async () => ({ ok: true }),
       getAccounts: async () => {
         accountsCall += 1;
+        mark('accounts:inflight');
         await new Promise((resolve) => setTimeout(resolve, 50));
         return [{ id: 'a1', name: accountsCall === 1 ? 'StaleDuringFill' : 'FreshAfterInvalidate' }];
       },
@@ -339,7 +332,7 @@ test('production-path cachedActual fill cannot republish after mutation invalida
   const { body: pingBefore } = await apiRequest(base, '/api/v1/ping');
   const genBefore = pingBefore.data.actualCoordinator.generation;
   const readPromise = apiRequest(base, '/api/v1/accounts');
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  await waitForMarker(dir, 'accounts:inflight', { child, logs });
   const invalidatePromise = apiRequest(base, '/api/v1/recurring/test-key/override', {
     method: 'POST',
     key: 'stale-repub-invalidate',

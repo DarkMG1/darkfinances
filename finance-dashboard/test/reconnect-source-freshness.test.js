@@ -15,7 +15,8 @@ const {
 const { DASHBOARD_RUNTIME_FILES } = require('../lib/release-files');
 const { ActualCoordinator } = require('../lib/actual-coordinator');
 const NodeCache = require('node-cache');
-const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
+const { startEphemeralDashboardServer, waitForChildExit } = require('./helpers/ephemeral-dashboard-server');
+const { waitForMarkerFile } = require('./helpers/test-sync-barriers');
 
 async function apiRequest(base, pathname, { method = 'GET', key, body, demo = false, token = 'test-api-token', headers = {} } = {}) {
   const response = await fetch(`${base}${pathname}`, {
@@ -80,9 +81,20 @@ function manifestFor(runtimeDir, contractFingerprint = 'a1b2c3d4e5f67890') {
   };
 }
 
-function accountsMockBody({ markLine = '', useSourceFile = false } = {}) {
+function accountsMockBody({ markLine = '', useSourceFile = false, holdAccountsUntilRelease = false, slowAccountsMs = 0 } = {}) {
+  const holdLogic = holdAccountsUntilRelease ? `
+    if (typeof mark === 'function') mark('accounts:blocked');
+    while (!fs.existsSync(process.env.TEST_RELEASE_PATH)) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  ` : '';
+  const slowLogic = slowAccountsMs > 0 ? `
+    if (typeof mark === 'function') mark('accounts:inflight');
+    await new Promise((resolve) => setTimeout(resolve, ${slowAccountsMs}));
+  ` : '';
   const sourceFileLogic = useSourceFile ? `
     getAccounts: async () => {
+      ${holdLogic}${slowLogic}
       const variant = fs.readFileSync(process.env.TEST_ACCOUNTS_SOURCE_FILE, 'utf8').trim();
       const entry = variant === 'B'
         ? { id: 'a1', name: 'Source-B', balance: 200 }
@@ -92,6 +104,7 @@ function accountsMockBody({ markLine = '', useSourceFile = false } = {}) {
     },
   ` : `
       getAccounts: async () => {
+        ${holdLogic}${slowLogic}
         if (typeof mark === 'function') mark('probe:' + accountsSource[0].name);
         return accountsSource.map((entry) => ({ ...entry }));
       },
@@ -186,16 +199,8 @@ function releaseGate(dir, name) {
   fs.writeFileSync(path.join(dir, `${name}.gate`), '1');
 }
 
-async function waitForMarkerLine(marker, line, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(marker)) {
-      const content = fs.readFileSync(marker, 'utf8');
-      if (content.split('\n').includes(line)) return;
-    }
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  throw new Error(`marker line not seen: ${line}`);
+async function waitForMarkerLine(marker, line, { child, logs, timeoutMs = 10_000 } = {}) {
+  return waitForMarkerFile(marker, line, { child, logs, timeoutMs, context: `marker ${line}` });
 }
 
 test('deriveSourceObservedRevision changes when probe source changes', () => {
@@ -340,7 +345,7 @@ test('reconnect probe rejects after coordinator shutdown finalizes', async (t) =
     tempPrefix: 'df-reconnect-shutdown-',
   });
   child.kill('SIGTERM');
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await waitForChildExit(child, 10_000);
   let probeStatus = 0;
   try {
     const probe = await apiRequest(base, '/api/v1/reconnect-freshness');
@@ -352,7 +357,11 @@ test('reconnect probe rejects after coordinator shutdown finalizes', async (t) =
 });
 
 test('control-lane flood keeps reconnect freshness and ping responsive', async (t) => {
-  const { base } = await startReconnectServer(t, accountsMockBody(), {
+  const markLine = `const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');`;
+  const { base, child, logs, markerPath } = await startReconnectServer(t, accountsMockBody({
+    markLine,
+    slowAccountsMs: 40,
+  }), {
     tempPrefix: 'df-reconnect-control-flood-',
     extraEnv: {
       FINANCE_ADMISSION_READ_GLOBAL_PENDING: '12',
@@ -367,12 +376,12 @@ test('control-lane flood keeps reconnect freshness and ping responsive', async (
   });
 
   const blocked = apiRequest(base, '/api/v1/accounts?month=2026-07');
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForMarkerLine(markerPath, 'accounts:inflight', { child, logs });
   const ping = await apiRequest(base, '/api/v1/ping');
   const probe = await apiRequest(base, '/api/v1/reconnect-freshness');
   assert.equal(ping.response.status, 200);
   assert.equal(probe.response.status, 200);
-  await blocked.catch(() => {});
+  await blocked;
 });
 
 test('repeated reconnect probes bump cache generation monotonically', async (t) => {

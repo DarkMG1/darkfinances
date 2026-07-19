@@ -514,7 +514,10 @@ test('hard cap exits once when shutdown phase never settles', async (t) => {
 
   const started = Date.now();
   void startShutdown('SIGTERM');
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline && exitCodes.length === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 
   assert.ok(Date.now() - started < 500, 'hard cap must fire promptly');
   assert.deepEqual(exitCodes, [1]);

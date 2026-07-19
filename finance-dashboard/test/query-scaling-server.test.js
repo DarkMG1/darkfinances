@@ -47,12 +47,24 @@ async function waitForAbortSentinel(base, headers, { minAbortCount = 1, timeoutM
       lastState = state;
       if (state.abortSentinel.abortCount >= minAbortCount) return state;
     }
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise((resolve) => setImmediate(resolve));
   }
   if (lastState) {
     assert.fail(`abort sentinel not recorded: ${JSON.stringify(lastState)}`);
   }
   assert.fail('abort sentinel state unavailable before shutdown completed');
+}
+
+async function waitForScalingListenersDisposed(base, headers, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const settled = await tryFetchScalingState(base, headers);
+    if (settled && settled.abortSentinel.listenersDisposed >= settled.abortSentinel.listenersAttached) {
+      return settled;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error('query scaling listeners were not disposed before deadline');
 }
 
 test('v1 read responses include query instrumentation headers', async (t) => {
@@ -66,7 +78,7 @@ test('v1 read responses include query instrumentation headers', async (t) => {
       response.status === 200
       && Number(response.headers.get('x-finance-query-accounts') || 0) > 0
     ) break;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setImmediate(resolve));
   }
   assert.equal(response.status, 200);
   assert.match(response.headers.get('x-finance-query-accounts'), /^[1-9]\d*$/);
@@ -102,7 +114,7 @@ test('production server startup fails closed without cursor signing secret', asy
 
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline && child.exitCode == null) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise((resolve) => setImmediate(resolve));
   }
   assert.notEqual(child.exitCode, 0);
   assert.match(logs.value, /Query cursor signing requires FINANCE_QUERY_CURSOR_SECRET/);
@@ -283,8 +295,7 @@ test('concurrent disconnecting reads stay bounded and dispose listeners', async 
   })));
 
   const serverState = await waitForAbortSentinel(base, headers, { minAbortCount: 1, timeoutMs: 8_000 });
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  const settled = await fetchScalingState(base, headers);
+  const settled = await waitForScalingListenersDisposed(base, headers);
   assert.ok(serverState.abortSentinel.abortCount >= 1);
   assert.ok(settled.abortSentinel.listenersDisposed >= settled.abortSentinel.listenersAttached);
   // Concurrent abort races may finish one in-flight account fetch beyond the nominal parallel budget.
