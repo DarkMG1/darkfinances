@@ -50,10 +50,7 @@ function monthShift(key, delta) {
   return `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
-function buildPrevMonthTransferMismatchFixture() {
-  const fixture = fixtures.buildFixture();
-  const today = financeToday();
-  const prevMonth = monthShift(today.slice(0, 7), -1);
+function withSecondAccount(fixture) {
   fixture.accounts.push({
     id: 'acc-savings',
     name: 'Savings',
@@ -62,6 +59,13 @@ function buildPrevMonthTransferMismatchFixture() {
     balance: 100000,
     role: 'operating_cash',
   });
+  return fixture;
+}
+
+function buildPrevMonthTransferMismatchFixture() {
+  const fixture = withSecondAccount(fixtures.buildFixture());
+  const today = financeToday();
+  const prevMonth = monthShift(today.slice(0, 7), -1);
   fixture.transactions.push(
     {
       id: 'xfer-a',
@@ -85,6 +89,69 @@ function buildPrevMonthTransferMismatchFixture() {
   return fixture;
 }
 
+function buildPrevMonthOnlyMismatchFixture() {
+  const fixture = withSecondAccount(fixtures.buildFixture());
+  const today = financeToday();
+  const prevMonth = monthShift(today.slice(0, 7), -1);
+  fixture.transactions.push(
+    {
+      id: 'prev-a',
+      account: 'acc-check',
+      date: `${prevMonth}-10`,
+      amount: -50000,
+      transfer_id: 'prev-b',
+      category: 'groceries',
+      payee: 'dining-payee',
+      cleared: true,
+    },
+    {
+      id: 'prev-b',
+      account: 'acc-savings',
+      date: `${prevMonth}-11`,
+      amount: 25000,
+      transfer_id: 'prev-a',
+      cleared: true,
+    },
+    {
+      id: 'mtd-spend',
+      account: 'acc-check',
+      date: `${today.slice(0, 7)}-05`,
+      amount: -1000,
+      category: 'groceries',
+      payee: 'dining-payee',
+      cleared: true,
+    },
+  );
+  return fixture;
+}
+
+function buildFutureNextMonthCounterpartMismatchFixture() {
+  const fixture = withSecondAccount(fixtures.buildFixture());
+  const today = financeToday();
+  const nextMonth = monthShift(today.slice(0, 7), 1);
+  fixture.transactions.push(
+    {
+      id: 'mtd-a',
+      account: 'acc-check',
+      date: `${today.slice(0, 7)}-10`,
+      amount: -50000,
+      transfer_id: 'future-b',
+      category: 'groceries',
+      payee: 'dining-payee',
+      cleared: true,
+    },
+    {
+      id: 'future-b',
+      account: 'acc-savings',
+      date: `${nextMonth}-05`,
+      amount: 25000,
+      transfer_id: 'mtd-a',
+      cleared: true,
+    },
+  );
+  return fixture;
+}
+
 async function bootstrap(fixture) {
   fixtures.configure(fixture);
   writeJson(process.env.ACCOUNT_OVERRIDES_PATH, {
@@ -99,30 +166,84 @@ async function bootstrap(fixture) {
   resetApi();
 }
 
-test('getForecast STS containment mirrors Today when prev-month transfer pairing is unresolved', async () => {
-  await bootstrap(buildPrevMonthTransferMismatchFixture());
-  const today = await getToday();
-  const forecast = await getForecast({ days: 45 });
-  assert.equal(today.liquidity.safeToSpend.complete, false);
-  assert.ok(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.transferIdentityUnresolved));
-  assert.equal(forecast.assumptions.stsContainment.complete, today.liquidity.safeToSpend.complete);
+function assertTransferIdentityParity(today, forecast) {
+  const todayHas = today.liquidity.safeToSpend.incompleteReasons
+    .includes(SAFE_TO_SPEND_REASON.transferIdentityUnresolved);
+  const forecastHas = forecast.assumptions.stsContainment.incompleteReasons
+    .includes(SAFE_TO_SPEND_REASON.transferIdentityUnresolved);
+  assert.equal(forecastHas, todayHas, 'transfer_identity_unresolved parity');
+}
+
+function assertTodayStsReasonsSubsetOfForecast(today, forecast) {
   for (const reason of today.liquidity.safeToSpend.incompleteReasons) {
     assert.ok(
       forecast.assumptions.stsContainment.incompleteReasons.includes(reason),
-      `forecast STS missing ${reason}`,
+      `forecast STS missing Today reason ${reason}`,
     );
   }
+}
+
+test('getForecast STS transfer quarantine mirrors Today for prev+current transfer mismatch', async () => {
+  await bootstrap(buildPrevMonthTransferMismatchFixture());
+  const today = await getToday();
+  const forecast = await getForecast({ days: 45 });
+  assert.equal(today.spending.current.completeness.complete, false);
+  assert.equal(today.liquidity.safeToSpend.complete, false);
+  assert.ok(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.transferIdentityUnresolved));
+  assertTransferIdentityParity(today, forecast);
+  assertTodayStsReasonsSubsetOfForecast(today, forecast);
   assert.equal(forecast.assumptions.projectionContainment.stsContainmentIncomplete, true);
+});
+
+test('getForecast STS ignores prev-month-only transfer mismatch when current month is clean', async () => {
+  await bootstrap(buildPrevMonthOnlyMismatchFixture());
+  const today = await getToday();
+  const forecast = await getForecast({ days: 45 });
+  assert.equal(today.spending.current.completeness.complete, true);
+  assert.equal(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.transferIdentityUnresolved), false);
+  assertTransferIdentityParity(today, forecast);
+  assert.equal(
+    forecast.assumptions.stsContainment.incompleteReasons.includes(SAFE_TO_SPEND_REASON.transferIdentityUnresolved),
+    false,
+  );
+});
+
+test('getForecast STS ignores future next-month counterpart mismatch outside Today envelope', async () => {
+  await bootstrap(buildFutureNextMonthCounterpartMismatchFixture());
+  const today = await getToday();
+  const forecast = await getForecast({ days: 120 });
+  assert.equal(today.spending.current.completeness.complete, true);
+  assertTransferIdentityParity(today, forecast);
+  assert.equal(
+    forecast.assumptions.stsContainment.incompleteReasons.includes(SAFE_TO_SPEND_REASON.transferIdentityUnresolved),
+    false,
+  );
 });
 
 test('getForecast STS containment mirrors Today rollover quarantine reasons', async () => {
   await bootstrap(fixtures.buildFixture({ rolloverExplicit: false }));
-  const [today, forecast] = await Promise.all([
-    getToday(),
-    getForecast({ days: 30 }),
-  ]);
+  const today = await getToday();
+  const forecast = await getForecast({ days: 30 });
   assert.ok(today.liquidity.safeToSpend.incompleteReasons.includes(SAFE_TO_SPEND_REASON.rolloverTreatmentUnknown));
-  for (const reason of today.liquidity.safeToSpend.incompleteReasons) {
-    assert.ok(forecast.assumptions.stsContainment.incompleteReasons.includes(reason));
+  assertTodayStsReasonsSubsetOfForecast(today, forecast);
+});
+
+test('getForecast STS derivation reuses the horizon scan without extra ledger reads', async () => {
+  await bootstrap(fixtures.buildFixture());
+  let ledgerCalls = 0;
+  const original = fixtures.getTransactions;
+  fixtures.getTransactions = async (...args) => {
+    ledgerCalls += 1;
+    return original(...args);
+  };
+  try {
+    await getForecast({ days: 90 });
+    const firstPassCalls = ledgerCalls;
+    ledgerCalls = 0;
+    await getForecast({ days: 90 });
+    assert.equal(ledgerCalls, firstPassCalls);
+    assert.ok(firstPassCalls > 0);
+  } finally {
+    fixtures.getTransactions = original;
   }
 });

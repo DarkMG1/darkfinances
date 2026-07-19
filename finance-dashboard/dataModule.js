@@ -818,32 +818,42 @@ function enrichCurrentLeavesWithPayee(leaves, rows, payeeMap) {
   }));
 }
 
-function mergeStsSpendingCompletenessFromRows({
+function rowsWithinDateEnvelope(rows, start, end) {
+  return (rows || []).filter((row) => {
+    const date = row.transaction?.date;
+    return date && date >= start && date <= end;
+  });
+}
+
+/**
+ * Safe-to-Spend transfer quarantine uses spending.current.completeness semantics:
+ * classify month-to-date leaves with a transfer index built only from the Today
+ * bounded row envelope (prev.start through monthEndDate). Prior-month leaves may
+ * participate in pairing but their completeness never quarantines STS.
+ */
+function currentMonthSpendingCompletenessForSts({
   rows,
   catInfo,
-  transferIndex,
+  envelopeStart,
+  envelopeEnd,
   curStart,
   curEnd,
-  prevStart,
-  prevEnd,
   spendingProjection,
 }) {
-  const currentLeaves = classifyLeavesInDateRange(rows, catInfo, curStart, curEnd, transferIndex);
-  const previousLeaves = classifyLeavesInDateRange(rows, catInfo, prevStart, prevEnd, transferIndex);
-  let spendingCompleteness = mergeProjectionCompleteness([
-    summarize(currentLeaves).completeness,
-    summarize(previousLeaves).completeness,
-  ]);
+  const stsRows = rowsWithinDateEnvelope(rows, envelopeStart, envelopeEnd);
+  const transferIndex = buildTransferIndex(stsRows);
+  const currentLeaves = classifyLeavesInDateRange(stsRows, catInfo, curStart, curEnd, transferIndex);
+  let completeness = summarize(currentLeaves).completeness;
   if (spendingProjection.incompleteReasons.length) {
-    spendingCompleteness = {
-      ...spendingCompleteness,
+    completeness = {
+      ...completeness,
       complete: false,
       incompleteReasons: [
-        ...new Set([...(spendingCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+        ...new Set([...(completeness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
       ],
     };
   }
-  return spendingCompleteness;
+  return completeness;
 }
 
 async function fetchOnBudgetRows(api, start, end, { accountFilter, config } = {}) {
@@ -4382,21 +4392,20 @@ async function getForecast({ days = 90 } = {}) {
     const [financeYear, financeMonth] = today.slice(0, 7).split('-').map(Number);
     const cur = monthRange(financeYear, financeMonth - 1);
     const prev = monthRange(financeYear, financeMonth - 2);
+    const monthEndDate = cur.end;
     const rows = await fetchOnBudgetRows(api, prev.start, horizon, {
       accountFilter: spendingProjection.accountFilter,
     });
-    const transferIndex = buildTransferIndex(rows);
-    const spendingCompleteness = mergeStsSpendingCompletenessFromRows({
+    const currentMonthSpendingCompleteness = currentMonthSpendingCompletenessForSts({
       rows,
       catInfo,
-      transferIndex,
+      envelopeStart: prev.start,
+      envelopeEnd: monthEndDate,
       curStart: cur.start,
       curEnd: today,
-      prevStart: prev.start,
-      prevEnd: prev.end,
       spendingProjection,
     });
-    return { catInfo, rows, forecastProjection, spendingProjection, spendingCompleteness, transferIndex };
+    return { catInfo, rows, forecastProjection, spendingProjection, currentMonthSpendingCompleteness };
   });
   const [accounts, income, recurring, budgets, reimb] = await Promise.all([
     getAccounts(),
@@ -4405,7 +4414,7 @@ async function getForecast({ days = 90 } = {}) {
     getBudgets({}),
     getReimbursement({}),
   ]);
-  const { catInfo, rows, forecastProjection, spendingProjection, spendingCompleteness } = forecastBundle;
+  const { catInfo, rows, forecastProjection, spendingProjection, currentMonthSpendingCompleteness } = forecastBundle;
   const bills = await getBills({ days: horizonDays, recurring });
   const liquidAccounts = accounts.filter((account) => account.inclusion?.forecast);
   const operatingProjectionComplete = forecastProjection.incompleteReasons.length === 0;
@@ -4464,7 +4473,7 @@ async function getForecast({ days = 90 } = {}) {
     operatingAccounts,
     budgets,
     recurring,
-    spendingCompleteness,
+    spendingCompleteness: currentMonthSpendingCompleteness,
     obligationGraph: graph,
     liabilityPolicies,
   });
