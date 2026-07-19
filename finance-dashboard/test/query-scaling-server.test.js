@@ -10,6 +10,7 @@ const {
   spawnEphemeralDashboardServer,
   waitForChildExit,
 } = require('./helpers/ephemeral-dashboard-server');
+const { pollBackoff } = require('./helpers/test-sync-barriers');
 const { startQueryScalingServer } = require('./helpers/query-scaling-ephemeral-server');
 const { runGracefulShutdownInFlightReadCase } = require('./helpers/query-scaling-shutdown-case');
 
@@ -47,7 +48,7 @@ async function waitForAbortSentinel(base, headers, { minAbortCount = 1, timeoutM
       lastState = state;
       if (state.abortSentinel.abortCount >= minAbortCount) return state;
     }
-    await new Promise((resolve) => setImmediate(resolve));
+    await pollBackoff();
   }
   if (lastState) {
     assert.fail(`abort sentinel not recorded: ${JSON.stringify(lastState)}`);
@@ -62,7 +63,7 @@ async function waitForScalingListenersDisposed(base, headers, timeoutMs = 8_000)
     if (settled && settled.abortSentinel.listenersDisposed >= settled.abortSentinel.listenersAttached) {
       return settled;
     }
-    await new Promise((resolve) => setImmediate(resolve));
+    await pollBackoff();
   }
   throw new Error('query scaling listeners were not disposed before deadline');
 }
@@ -78,7 +79,7 @@ test('v1 read responses include query instrumentation headers', async (t) => {
       response.status === 200
       && Number(response.headers.get('x-finance-query-accounts') || 0) > 0
     ) break;
-    await new Promise((resolve) => setImmediate(resolve));
+    await pollBackoff();
   }
   assert.equal(response.status, 200);
   assert.match(response.headers.get('x-finance-query-accounts'), /^[1-9]\d*$/);
@@ -114,7 +115,7 @@ test('production server startup fails closed without cursor signing secret', asy
 
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline && child.exitCode == null) {
-    await new Promise((resolve) => setImmediate(resolve));
+    await pollBackoff();
   }
   assert.notEqual(child.exitCode, 0);
   assert.match(logs.value, /Query cursor signing requires FINANCE_QUERY_CURSOR_SECRET/);

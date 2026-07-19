@@ -15,6 +15,13 @@ const {
 const { bindGracefulShutdownSignals, runGracefulShutdown } = require('../lib/graceful-shutdown');
 const { registerProcessShutdownTestIsolation } = require('./helpers/process-shutdown-test-isolation');
 const { waitForChildExit } = require('./helpers/ephemeral-dashboard-server');
+const {
+  childWatchContext,
+  markPrelude,
+  pollBackoff,
+  sidecarReleasePrelude,
+  waitForMarkerFile,
+} = require('./helpers/test-sync-barriers');
 const { startShutdownDashboard } = require('./helpers/graceful-shutdown-ephemeral-server');
 
 registerProcessShutdownTestIsolation(test);
@@ -58,25 +65,14 @@ function phaseCount(logs, phase) {
 function markLine() {
   return `
     const fs = require('fs');
-    const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');
-    const waitForRelease = async () => {
-      while (!fs.existsSync(process.env.TEST_RELEASE_PATH)) {
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    };
+    ${markPrelude()}
+    ${sidecarReleasePrelude()}
+    const waitForRelease = waitSidecarRelease;
   `;
 }
 
-async function waitForMarker(markerPath, line, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(markerPath)) {
-      const content = fs.readFileSync(markerPath, 'utf8');
-      if (content.includes(`${line}\n`) || content.trimEnd().endsWith(line)) return;
-    }
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  throw new Error(`marker line not seen: ${line}`);
+async function waitForMarker(markerPath, line, watch = {}, timeoutMs = 10_000) {
+  return waitForMarkerFile(markerPath, line, { ...watch, timeoutMs, context: `marker ${line}` });
 }
 
 function mockDataModuleBlock(preloadExtras = '') {
@@ -232,7 +228,7 @@ test('blocked Actual-backed GET completes before Actual shutdown marker', async 
   const readPromise = fetch(`${base}/api/v1/accounts`, {
     headers: { 'X-Finance-Token': 'test-api-token' },
   });
-  await waitForMarker(markerPath, 'getAccounts:start');
+  await waitForMarker(markerPath, 'getAccounts:start', childWatchContext({ child, logs }));
   child.kill('SIGTERM');
   fs.writeFileSync(releasePath, '1');
 
@@ -266,7 +262,7 @@ test('active mutation finishes before Actual shutdown', async (t) => {
     },
     body: JSON.stringify({ month: '2026-07', categoryId: 'food', amount: 5 }),
   });
-  await waitForMarker(markerPath, 'mutation:start');
+  await waitForMarker(markerPath, 'mutation:start', childWatchContext({ child, logs }));
   child.kill('SIGTERM');
   fs.writeFileSync(releasePath, '1');
 
@@ -330,7 +326,7 @@ test('hung request hits bounded timeout with nonzero exit and no Actual shutdown
   void fetch(`${base}/api/v1/accounts`, {
     headers: { 'X-Finance-Token': 'test-api-token' },
   }).catch(() => {});
-  await waitForMarker(markerPath, 'getAccounts:hung');
+  await waitForMarker(markerPath, 'getAccounts:hung', childWatchContext({ child, logs }));
 
   const started = Date.now();
   child.kill('SIGTERM');
@@ -445,7 +441,7 @@ test('in-flight non-HTTP mutation queue task completes before Actual shutdown', 
     await release.promise;
     markers.push('periodic-sync:end');
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await pollBackoff();
   assert.equal(mutationQueue.size, 1);
 
   const shutdownPromise = runGracefulShutdown({
@@ -462,7 +458,7 @@ test('in-flight non-HTTP mutation queue task completes before Actual shutdown', 
     log: (phase) => { phases.push(phase); },
   });
 
-  await new Promise((resolve) => setImmediate(resolve));
+  await pollBackoff();
   assert.ok(phases.includes('mutation-admission-stopped'));
   assert.ok(phases.includes('http-admission-stopped'));
   assert.ok(markers.includes('periodic-sync:start'));
@@ -495,6 +491,7 @@ test('hard cap exits once when shutdown phase never settles', async (t) => {
     for (const listener of sigintListeners) process.on('SIGINT', listener);
   });
 
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const timeoutLogs = [];
   const exitCodes = [];
   let shutdownCalls = 0;
@@ -512,14 +509,10 @@ test('hard cap exits once when shutdown phase never settles', async (t) => {
     },
   });
 
-  const started = Date.now();
   void startShutdown('SIGTERM');
-  const deadline = Date.now() + 500;
-  while (Date.now() < deadline && exitCodes.length === 0) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+  t.mock.timers.tick(80);
+  await Promise.resolve();
 
-  assert.ok(Date.now() - started < 500, 'hard cap must fire promptly');
   assert.deepEqual(exitCodes, [1]);
   assert.equal(shutdownCalls, 0);
   assert.equal(timeoutLogs.length, 1);
@@ -530,4 +523,5 @@ test('hard cap exits once when shutdown phase never settles', async (t) => {
     'listening',
     'step',
   ]);
+  t.mock.timers.reset();
 });

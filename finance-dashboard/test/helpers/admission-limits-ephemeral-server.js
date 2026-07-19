@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('path');
+const { sidecarReleasePrelude } = require('./test-sync-barriers');
 const { startEphemeralDashboardServer } = require('./ephemeral-dashboard-server');
 
 const ADMISSION_PRELOAD_BODY = `
@@ -9,11 +10,8 @@ const ADMISSION_PRELOAD_BODY = `
     const root = process.env.TEST_DASHBOARD_ROOT;
     const dataPath = require.resolve(path.join(root, 'dataModule.js'));
     const mark = (value) => fs.appendFileSync(process.env.TEST_EFFECT_MARKER, value + '\\n');
-    const waitForRelease = async () => {
-      while (!fs.existsSync(process.env.TEST_RELEASE_PATH)) {
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    };
+    ${sidecarReleasePrelude()}
+    const waitForRelease = waitSidecarRelease;
     const mock = new Proxy({
       initApi: async () => ({ ok: true }),
       shutdownApi: async () => ({ ok: true }),

@@ -1,5 +1,6 @@
 'use strict';
 
+const { pollBackoff } = require('./test-sync-barriers');
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
@@ -136,6 +137,9 @@ async function waitForEphemeralServer(child, logs, instanceId, {
     if (spawnError) {
       throw readinessTimeoutError(logs, instanceId, child, spawnError, timeoutMs);
     }
+    if (child.signalCode != null) {
+      throw new Error(`server terminated early (signal=${child.signalCode}, code=${child.exitCode}): ${logs.value}`);
+    }
     if (child.exitCode != null) {
       throw new Error(`server exited early (code=${child.exitCode}, signal=${child.signalCode ?? 'none'}): ${logs.value}`);
     }
@@ -155,7 +159,7 @@ async function waitForEphemeralServer(child, logs, instanceId, {
         }
       } catch (_) {}
     }
-    await new Promise((resolve) => setImmediate(resolve));
+    await pollBackoff();
   }
   throw readinessTimeoutError(logs, instanceId, child, spawnError, timeoutMs);
 }

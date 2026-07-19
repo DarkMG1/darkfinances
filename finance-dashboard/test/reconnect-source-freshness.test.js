@@ -16,7 +16,14 @@ const { DASHBOARD_RUNTIME_FILES } = require('../lib/release-files');
 const { ActualCoordinator } = require('../lib/actual-coordinator');
 const NodeCache = require('node-cache');
 const { startEphemeralDashboardServer, waitForChildExit } = require('./helpers/ephemeral-dashboard-server');
-const { waitForMarkerFile } = require('./helpers/test-sync-barriers');
+const {
+  childWatchContext,
+  gateWaitPrelude,
+  markPrelude,
+  pollBackoff,
+  sidecarReleasePrelude,
+  waitForMarkerFile,
+} = require('./helpers/test-sync-barriers');
 
 async function apiRequest(base, pathname, { method = 'GET', key, body, demo = false, token = 'test-api-token', headers = {} } = {}) {
   const response = await fetch(`${base}${pathname}`, {
@@ -83,10 +90,8 @@ function manifestFor(runtimeDir, contractFingerprint = 'a1b2c3d4e5f67890') {
 
 function accountsMockBody({ markLine = '', useSourceFile = false, holdAccountsUntilRelease = false, slowAccountsMs = 0 } = {}) {
   const holdLogic = holdAccountsUntilRelease ? `
-    if (typeof mark === 'function') mark('accounts:blocked');
-    while (!fs.existsSync(process.env.TEST_RELEASE_PATH)) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
+    if (typeof mark === 'function') mark('accounts:inflight');
+    await waitSidecarRelease();
   ` : '';
   const slowLogic = slowAccountsMs > 0 ? `
     if (typeof mark === 'function') mark('accounts:inflight');
@@ -113,6 +118,7 @@ function accountsMockBody({ markLine = '', useSourceFile = false, holdAccountsUn
     ${markLine}
     const fs = require('fs');
     const path = require('path');
+    ${sidecarReleasePrelude()}
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
     let accountsSource = [{ id: 'a1', name: 'Source-A', balance: 100 }];
     const mock = {
@@ -161,14 +167,9 @@ function barrierMockBody({ markLine = '' } = {}) {
     ${markLine}
     const fs = require('fs');
     const path = require('path');
+    ${gateWaitPrelude()}
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
     let accountsSource = [{ id: 'a1', name: 'Source-A', balance: 100 }];
-    const gatePath = (name) => path.join(path.dirname(process.env.TEST_MARKER), name + '.gate');
-    const waitGate = async (name) => {
-      while (!fs.existsSync(gatePath(name))) {
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    };
     const mock = {
       initApi: async () => ({ ok: true }),
       shutdownApi: async () => ({ ok: true }),
@@ -199,8 +200,8 @@ function releaseGate(dir, name) {
   fs.writeFileSync(path.join(dir, `${name}.gate`), '1');
 }
 
-async function waitForMarkerLine(marker, line, { child, logs, timeoutMs = 10_000 } = {}) {
-  return waitForMarkerFile(marker, line, { child, logs, timeoutMs, context: `marker ${line}` });
+async function waitForMarkerLine(marker, line, watch = {}) {
+  return waitForMarkerFile(marker, line, { ...watch, context: `marker ${line}` });
 }
 
 test('deriveSourceObservedRevision changes when probe source changes', () => {
@@ -241,7 +242,7 @@ test('concurrent probe requests coalesce to one direct read', async () => {
     coordinator,
     readAccountsProbe: async () => {
       reads += 1;
-      await new Promise((resolve) => setImmediate(resolve));
+      await pollBackoff();
       return [{ id: 'a1', name: 'X', balance: 1 }];
     },
     financeTimeZone: 'America/Los_Angeles',
@@ -260,7 +261,7 @@ test('probe coalescing is scoped per principal and never crosses auth', async ()
     coordinator,
     readAccountsProbe: async () => {
       reads += 1;
-      await new Promise((resolve) => setImmediate(resolve));
+      await pollBackoff();
       return [{ id: 'a1', name: `Read-${reads}`, balance: reads }];
     },
     financeTimeZone: 'America/Los_Angeles',
@@ -358,7 +359,7 @@ test('reconnect probe rejects after coordinator shutdown finalizes', async (t) =
 
 test('control-lane flood keeps reconnect freshness and ping responsive', async (t) => {
   const markLine = `const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');`;
-  const { base, child, logs, markerPath } = await startReconnectServer(t, accountsMockBody({
+  const { base, child, logs, childState, markerPath } = await startReconnectServer(t, accountsMockBody({
     markLine,
     slowAccountsMs: 40,
   }), {
@@ -376,7 +377,7 @@ test('control-lane flood keeps reconnect freshness and ping responsive', async (
   });
 
   const blocked = apiRequest(base, '/api/v1/accounts?month=2026-07');
-  await waitForMarkerLine(markerPath, 'accounts:inflight', { child, logs });
+  await waitForMarkerLine(markerPath, 'accounts:inflight', childWatchContext({ child, logs, childState }));
   const ping = await apiRequest(base, '/api/v1/ping');
   const probe = await apiRequest(base, '/api/v1/reconnect-freshness');
   assert.equal(ping.response.status, 200);
@@ -397,13 +398,13 @@ test('repeated reconnect probes bump cache generation monotonically', async (t) 
 
 test('Promise.all probe then write serializes with barriers and write wins cache', async (t) => {
   const markLine = `const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');`;
-  const { base, dir, markerPath: marker } = await startReconnectServer(t, barrierMockBody({ markLine }), {
+  const { base, dir, markerPath: marker, child, logs, childState } = await startReconnectServer(t, barrierMockBody({ markLine }), {
     tempPrefix: 'df-reconnect-probe-first-',
   });
   await apiRequest(base, '/api/v1/accounts');
 
   const probePromise = apiRequest(base, '/api/v1/reconnect-freshness');
-  await waitForMarkerLine(marker, 'probe:enter');
+  await waitForMarkerLine(marker, 'probe:enter', childWatchContext({ child, logs, childState }));
   const mutationPromise = apiRequest(base, '/api/v1/recurring/r1/override', {
     method: 'POST',
     key: 'probe-first-barrier',
@@ -415,8 +416,8 @@ test('Promise.all probe then write serializes with barriers and write wins cache
     'mutation must wait behind in-flight probe read',
   );
   releaseGate(dir, 'probe');
-  await waitForMarkerLine(marker, 'probe:read:Source-A');
-  await waitForMarkerLine(marker, 'mutation:enter');
+  await waitForMarkerLine(marker, 'probe:read:Source-A', childWatchContext({ child, logs, childState }));
+  await waitForMarkerLine(marker, 'mutation:enter', childWatchContext({ child, logs, childState }));
   releaseGate(dir, 'mutation');
   const [probe, mutation] = await Promise.all([probePromise, mutationPromise]);
   assert.equal(probe.response.status, 200);
@@ -433,7 +434,7 @@ test('Promise.all probe then write serializes with barriers and write wins cache
 
 test('Promise.all write then probe serializes with barriers and write wins cache', async (t) => {
   const markLine = `const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');`;
-  const { base, dir, markerPath: marker } = await startReconnectServer(t, barrierMockBody({ markLine }), {
+  const { base, dir, markerPath: marker, child, logs, childState } = await startReconnectServer(t, barrierMockBody({ markLine }), {
     tempPrefix: 'df-reconnect-write-first-',
   });
   await apiRequest(base, '/api/v1/accounts');
@@ -443,7 +444,7 @@ test('Promise.all write then probe serializes with barriers and write wins cache
     key: 'write-first-barrier',
     body: { status: 'active', hidden: false },
   });
-  await waitForMarkerLine(marker, 'mutation:enter');
+  await waitForMarkerLine(marker, 'mutation:enter', childWatchContext({ child, logs, childState }));
   const probePromise = apiRequest(base, '/api/v1/reconnect-freshness');
   assert.equal(
     fs.existsSync(marker) && fs.readFileSync(marker, 'utf8').includes('probe:enter'),
@@ -451,10 +452,10 @@ test('Promise.all write then probe serializes with barriers and write wins cache
     'probe must wait behind in-flight mutation write',
   );
   releaseGate(dir, 'mutation');
-  await waitForMarkerLine(marker, 'mutation:end');
-  await waitForMarkerLine(marker, 'probe:enter');
+  await waitForMarkerLine(marker, 'mutation:end', childWatchContext({ child, logs, childState }));
+  await waitForMarkerLine(marker, 'probe:enter', childWatchContext({ child, logs, childState }));
   releaseGate(dir, 'probe');
-  await waitForMarkerLine(marker, 'probe:read:Source-Write');
+  await waitForMarkerLine(marker, 'probe:read:Source-Write', childWatchContext({ child, logs, childState }));
   const [mutation, probe] = await Promise.all([mutationPromise, probePromise]);
   assert.equal(mutation.response.status, 200);
   assert.equal(probe.response.status, 200);

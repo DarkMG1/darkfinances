@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const { startEphemeralDashboardServer, waitForChildExit } = require('./helpers/ephemeral-dashboard-server');
 const {
+  childWatchContext,
   markPrelude,
   sidecarReleasePrelude,
   waitForMarkerDir,
@@ -58,12 +59,8 @@ async function startCoordinatorServerWithSidecarGate(t, preloadBody) {
   };
 }
 
-async function waitForMarker(dir, line, { child, logs, timeoutMs } = {}) {
-  return waitForMarkerDir(dir, line, { child, logs, timeoutMs, context: `marker ${line}` });
-}
-
 test('queued write blocks overlapping Actual-backed GET', async (t) => {
-  const { base, child, logs, dir } = await startCoordinatorServer(t, `
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
     ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -77,13 +74,12 @@ test('queued write blocks overlapping Actual-backed GET', async (t) => {
       getAccounts: async () => {
         if (writeStarted) readDuringWrite = true;
         mark('getAccounts');
-        await new Promise((resolve) => setTimeout(resolve, 30));
         return [{ id: 'a1', name: 'Checking' }];
       },
       setBudgetAmount: async () => {
         writeStarted = true;
         mark('setBudget:start');
-        await new Promise((resolve) => setTimeout(resolve, 40));
+        await waitSidecarRelease();
         mark('setBudget:end');
         return { ok: true, needsSync: true };
       },
@@ -96,8 +92,9 @@ test('queued write blocks overlapping Actual-backed GET', async (t) => {
     key: 'budget-block-get',
     body: { month: '2026-07', categoryId: 'food', amount: 100 },
   });
-  await waitForMarker(dir, 'setBudget:start', { child, logs });
+  await waitForMarkerDir(dir, 'setBudget:start', childWatchContext({ child, logs, childState }));
   const getPromise = apiRequest(base, '/api/v1/accounts');
+  releaseFill();
   const [getResult, postResult] = await Promise.all([getPromise, postPromise]);
   assert.equal(getResult.response.status, 200);
   assert.equal(postResult.response.status, 200);
@@ -185,7 +182,7 @@ test('failed read does not strand mutation queue or coordinator lane', async (t)
 });
 
 test('local rules read is not blocked by in-flight Actual read', async (t) => {
-  const { base, child, logs, dir } = await startCoordinatorServer(t, `
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
     ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -196,7 +193,7 @@ test('local rules read is not blocked by in-flight Actual read', async (t) => {
       syncNow: async () => {},
       getAccounts: async () => {
         mark('actual-read:start');
-        await new Promise((resolve) => setTimeout(resolve, 40));
+        await waitSidecarRelease();
         mark('actual-read:end');
         return [];
       },
@@ -206,8 +203,10 @@ test('local rules read is not blocked by in-flight Actual read', async (t) => {
     require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
   `);
   const actualRead = apiRequest(base, '/api/v1/accounts');
-  await waitForMarker(dir, 'actual-read:start', { child, logs });
+  await waitForMarkerDir(dir, 'actual-read:start', childWatchContext({ child, logs, childState }));
   const localRead = apiRequest(base, '/api/v1/rules');
+  await waitForMarkerDir(dir, 'local-rules', childWatchContext({ child, logs, childState }));
+  releaseFill();
   await Promise.all([actualRead, localRead]);
   const marker = fs.readFileSync(path.join(dir, 'marker.log'), 'utf8').trim().split('\n');
   const rulesIdx = marker.indexOf('local-rules');
@@ -272,7 +271,7 @@ test('ping exposes bounded coordinator diagnostics without payloads', async (t) 
 });
 
 test('shutdown drains mutations then shutdownApi without pre-closing coordinator', async (t) => {
-  const { base, child, logs, dir } = await startCoordinatorServer(t, `
+  const { base, child, logs, dir, childState } = await startCoordinatorServer(t, `
     ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -295,7 +294,7 @@ test('shutdown drains mutations then shutdownApi without pre-closing coordinator
     key: 'shutdown-write',
     body: { month: '2026-07', categoryId: 'food', amount: 5 },
   });
-  await waitForMarker(dir, 'mutation:start', { child, logs });
+  await waitForMarkerDir(dir, 'mutation:start', childWatchContext({ child, logs, childState }));
   child.kill('SIGTERM');
   const [exitCode] = await Promise.all([
     waitForChildExit(child, 15_000),
@@ -309,7 +308,7 @@ test('shutdown drains mutations then shutdownApi without pre-closing coordinator
 });
 
 test('production-path cachedActual fill cannot republish after mutation invalidates generation', async (t) => {
-  const { base, child, logs, dir } = await startCoordinatorServer(t, `
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
     ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -322,7 +321,7 @@ test('production-path cachedActual fill cannot republish after mutation invalida
       getAccounts: async () => {
         accountsCall += 1;
         mark('accounts:inflight');
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await waitSidecarRelease();
         return [{ id: 'a1', name: accountsCall === 1 ? 'StaleDuringFill' : 'FreshAfterInvalidate' }];
       },
       setRecurringOverride: async () => ({ ok: true }),
@@ -332,12 +331,13 @@ test('production-path cachedActual fill cannot republish after mutation invalida
   const { body: pingBefore } = await apiRequest(base, '/api/v1/ping');
   const genBefore = pingBefore.data.actualCoordinator.generation;
   const readPromise = apiRequest(base, '/api/v1/accounts');
-  await waitForMarker(dir, 'accounts:inflight', { child, logs });
+  await waitForMarkerDir(dir, 'accounts:inflight', childWatchContext({ child, logs, childState }));
   const invalidatePromise = apiRequest(base, '/api/v1/recurring/test-key/override', {
     method: 'POST',
     key: 'stale-repub-invalidate',
     body: { status: 'active', hidden: false },
   });
+  releaseFill();
   const [{ body: firstBody }, { response: invalidateResponse }] = await Promise.all([readPromise, invalidatePromise]);
   assert.equal(invalidateResponse.status, 200);
   assert.ok(['StaleDuringFill', 'FreshAfterInvalidate'].includes(firstBody.data[0].name));
@@ -348,7 +348,7 @@ test('production-path cachedActual fill cannot republish after mutation invalida
 });
 
 test('account override sidecar mutation discards in-flight accounts fill', async (t) => {
-  const { base, child, logs, dir, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
     ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -363,7 +363,6 @@ test('account override sidecar mutation discards in-flight accounts fill', async
         mark('getAccounts:' + accountsCall);
         mark('fill:start');
         await waitSidecarRelease();
-        await new Promise((resolve) => setTimeout(resolve, 50));
         return [{ id: 'a1', name: accountsCall === 1 ? 'BeforeOverride' : 'AfterOverride' }];
       },
       setAccountOverride: async () => ({ ok: true }),
@@ -373,7 +372,7 @@ test('account override sidecar mutation discards in-flight accounts fill', async
   const { body: pingBefore } = await apiRequest(base, '/api/v1/ping');
   const genBefore = pingBefore.data.actualCoordinator.generation;
   const readPromise = apiRequest(base, '/api/v1/accounts');
-  await waitForMarker(dir, 'fill:start');
+  await waitForMarkerDir(dir, 'fill:start', childWatchContext({ child, logs, childState }));
   const mutatePromise = apiRequest(base, '/api/v1/accounts/a1/override', {
     method: 'POST',
     key: 'override-stale',
@@ -392,7 +391,7 @@ test('account override sidecar mutation discards in-flight accounts fill', async
 });
 
 test('events sidecar mutation discards in-flight events fill', async (t) => {
-  const { base, child, logs, dir, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
     ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -406,7 +405,6 @@ test('events sidecar mutation discards in-flight events fill', async (t) => {
         eventsCall += 1;
         mark('fill:start');
         await waitSidecarRelease();
-        await new Promise((resolve) => setTimeout(resolve, 50));
         return { events: [{ slug: 'trip', name: eventsCall === 1 ? 'StaleEvent' : 'FreshEvent', taggedCount: 0 }] };
       },
       saveEvent: async () => ({ ok: true, slug: 'trip' }),
@@ -416,7 +414,7 @@ test('events sidecar mutation discards in-flight events fill', async (t) => {
   const { body: pingBefore } = await apiRequest(base, '/api/v1/ping');
   const genBefore = pingBefore.data.actualCoordinator.generation;
   const readPromise = apiRequest(base, '/api/v1/events');
-  await waitForMarker(dir, 'fill:start');
+  await waitForMarkerDir(dir, 'fill:start', childWatchContext({ child, logs, childState }));
   const mutatePromise = apiRequest(base, '/api/v1/events', {
     method: 'POST',
     key: 'events-stale',
@@ -435,7 +433,7 @@ test('events sidecar mutation discards in-flight events fill', async (t) => {
 });
 
 test('goals sidecar mutation discards in-flight goals fill', async (t) => {
-  const { base, child, logs, dir, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
     ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -449,7 +447,6 @@ test('goals sidecar mutation discards in-flight goals fill', async (t) => {
         goalsCall += 1;
         mark('fill:start');
         await waitSidecarRelease();
-        await new Promise((resolve) => setTimeout(resolve, 50));
         return [{ id: 'g1', name: goalsCall === 1 ? 'StaleGoal' : 'FreshGoal', target: 100, current: 0 }];
       },
       saveGoal: async () => ({ ok: true, id: 'g1' }),
@@ -459,7 +456,7 @@ test('goals sidecar mutation discards in-flight goals fill', async (t) => {
   const { body: pingBefore } = await apiRequest(base, '/api/v1/ping');
   const genBefore = pingBefore.data.actualCoordinator.generation;
   const readPromise = apiRequest(base, '/api/v1/goals');
-  await waitForMarker(dir, 'fill:start');
+  await waitForMarkerDir(dir, 'fill:start', childWatchContext({ child, logs, childState }));
   const mutatePromise = apiRequest(base, '/api/v1/goals', {
     method: 'POST',
     key: 'goals-stale',
@@ -550,7 +547,7 @@ test('projection mutation invalidates cache when journal local_applied persisten
 });
 
 test('recurring sidecar mutation discards in-flight recurring fill', async (t) => {
-  const { base, child, logs, dir, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
     ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -564,7 +561,6 @@ test('recurring sidecar mutation discards in-flight recurring fill', async (t) =
         recurringCall += 1;
         mark('fill:start');
         await waitSidecarRelease();
-        await new Promise((resolve) => setTimeout(resolve, 50));
         return [{ key: 'rent', name: recurringCall === 1 ? 'StaleRecurring' : 'FreshRecurring' }];
       },
       setRecurringOverride: async () => ({ ok: true }),
@@ -574,7 +570,7 @@ test('recurring sidecar mutation discards in-flight recurring fill', async (t) =
   const { body: pingBefore } = await apiRequest(base, '/api/v1/ping');
   const genBefore = pingBefore.data.actualCoordinator.generation;
   const readPromise = apiRequest(base, '/api/v1/recurring?window=18');
-  await waitForMarker(dir, 'fill:start');
+  await waitForMarkerDir(dir, 'fill:start', childWatchContext({ child, logs, childState }));
   const mutatePromise = apiRequest(base, '/api/v1/recurring/rent/override', {
     method: 'POST',
     key: 'recurring-stale',
@@ -593,7 +589,7 @@ test('recurring sidecar mutation discards in-flight recurring fill', async (t) =
 });
 
 test('bills sidecar mutation completes before subsequent GET returns fresh projection', async (t) => {
-  const { base, child, logs, dir, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
     ${markLine()}
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -607,7 +603,6 @@ test('bills sidecar mutation completes before subsequent GET returns fresh proje
         billsCall += 1;
         mark('fill:start');
         await waitSidecarRelease();
-        await new Promise((resolve) => setTimeout(resolve, 50));
         return [{ id: 'b1', name: billsCall === 1 ? 'StaleBill' : 'FreshBill', paid: billsCall > 1 }];
       },
       setBillPaid: async () => {
@@ -618,7 +613,7 @@ test('bills sidecar mutation completes before subsequent GET returns fresh proje
     require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
   `);
   const readPromise = apiRequest(base, '/api/v1/bills?days=45');
-  await waitForMarker(dir, 'fill:start');
+  await waitForMarkerDir(dir, 'fill:start', childWatchContext({ child, logs, childState }));
   const mutatePromise = apiRequest(base, '/api/v1/bills/paid', {
     method: 'POST',
     key: 'bills-fresh',
@@ -662,7 +657,7 @@ function sidecarMockShell(extraMock) {
 }
 
 test('recurring sidecar mutation fully invalidates every warmed horizon variant', async (t) => {
-  const { base, child, logs, dir, releaseFill } = await startCoordinatorServerWithSidecarGate(t, sidecarMockShell(`
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, sidecarMockShell(`
       callsByWindow: {},
       getRecurring: async function({ window } = {}) {
         const w = String(window ?? 18);
@@ -699,7 +694,7 @@ test('recurring sidecar mutation fully invalidates every warmed horizon variant'
 });
 
 test('bills sidecar mutation fully invalidates every warmed days horizon variant', async (t) => {
-  const { base, child, logs, dir, releaseFill } = await startCoordinatorServerWithSidecarGate(t, sidecarMockShell(`
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, sidecarMockShell(`
       callsByDays: {},
       getBills: async function({ days } = {}) {
         const d = String(days ?? 45);
@@ -735,7 +730,7 @@ test('bills sidecar mutation fully invalidates every warmed days horizon variant
 });
 
 test('owes sidecar mutation fully invalidates every warmed reimbursement projection key', async (t) => {
-  const { base, child, logs, dir, releaseFill } = await startCoordinatorServerWithSidecarGate(t, sidecarMockShell(`
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, sidecarMockShell(`
       callsByKey: {},
       bump(key) {
         this.callsByKey[key] = (this.callsByKey[key] || 0) + 1;
@@ -791,7 +786,7 @@ test('owes sidecar mutation fully invalidates every warmed reimbursement project
 });
 
 test('reimb link sidecar mutation fully invalidates every warmed reimbursement projection key', async (t) => {
-  const { base, child, logs, dir, releaseFill } = await startCoordinatorServerWithSidecarGate(t, sidecarMockShell(`
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, sidecarMockShell(`
       callsByKey: {},
       bump(key) {
         this.callsByKey[key] = (this.callsByKey[key] || 0) + 1;
@@ -845,7 +840,7 @@ test('reimb link sidecar mutation fully invalidates every warmed reimbursement p
 });
 
 test('dismiss repayment sidecar mutation uses projection write lane with full invalidation', async (t) => {
-  const { base, child, logs, dir, releaseFill } = await startCoordinatorServerWithSidecarGate(t, sidecarMockShell(`
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, sidecarMockShell(`
       callsByKey: {},
       fillCount: 0,
       bump(key) {
@@ -859,7 +854,6 @@ test('dismiss repayment sidecar mutation uses projection write lane with full in
         if (this.fillCount === 2) {
           mark('fill:start');
           await waitSidecarRelease();
-          await new Promise((resolve) => setTimeout(resolve, 50));
         }
         const pass = this.bump(key);
         return { suggestions: [], pass };
@@ -871,7 +865,7 @@ test('dismiss repayment sidecar mutation uses projection write lane with full in
   assert.equal(warm.body.data.pass, 1);
 
   const readPromise = apiRequest(base, '/api/v1/repayments/suggestions?from=2026-08-01&to=2026-09-30');
-  await waitForMarker(dir, 'fill:start');
+  await waitForMarkerDir(dir, 'fill:start', childWatchContext({ child, logs, childState }));
   const mutatePromise = apiRequest(base, '/api/v1/repayments/sg_in1/dismiss', {
     method: 'POST',
     key: 'dismiss-family',

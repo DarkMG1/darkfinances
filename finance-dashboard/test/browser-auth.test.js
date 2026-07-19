@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
+const { pollBackoff } = require('./helpers/test-sync-barriers');
 
 async function request(base, pathname, options = {}) {
   const response = await fetch(`${base}${pathname}`, options);
@@ -26,7 +27,7 @@ async function patchSessionAuthenticated(sessionDir, setCookieHeader) {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
     if (fs.existsSync(sessionPath)) break;
-    await new Promise((resolve) => setImmediate(resolve));
+    await pollBackoff();
   }
   assert.ok(fs.existsSync(sessionPath), `session file missing: ${sessionPath}`);
   const session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
