@@ -33,17 +33,48 @@ function queryErrorMessage(error) {
  * @param {Array<
  *   | { isError?: boolean; data?: unknown; refetch?: () => unknown }
  *   | { query: { isError?: boolean; data?: unknown; refetch?: () => unknown }; enabled?: boolean }
+ * >} entries
+ */
+function isRefetchEntryEnabled(entry) {
+  return entry?.enabled ?? true;
+}
+
+/**
+ * @param {Array<
+ *   | { isError?: boolean; data?: unknown; refetch?: () => unknown }
+ *   | { query: { isError?: boolean; data?: unknown; refetch?: () => unknown }; enabled?: boolean }
+ * >} entry
+ */
+function unwrapRefetchQuery(entry) {
+  return entry?.query ?? entry;
+}
+
+/**
+ * @param {Array<
+ *   | { isError?: boolean; data?: unknown; refetch?: () => unknown }
+ *   | { query: { isError?: boolean; data?: unknown; refetch?: () => unknown }; enabled?: boolean }
+ * >} entries
+ */
+function collectEnabledRefetchQueries(entries) {
+  return entries
+    .filter(isRefetchEntryEnabled)
+    .map(unwrapRefetchQuery);
+}
+
+/**
+ * @param {Array<
+ *   | { isError?: boolean; data?: unknown; refetch?: () => unknown }
+ *   | { query: { isError?: boolean; data?: unknown; refetch?: () => unknown }; enabled?: boolean }
  * >} queries
  */
 function collectRefetchErrorQueries(queries) {
   return queries
     .filter((entry) => {
-      const query = entry?.query ?? entry;
-      const enabled = entry?.enabled ?? true;
-      if (!enabled) return false;
+      if (!isRefetchEntryEnabled(entry)) return false;
+      const query = unwrapRefetchQuery(entry);
       return shouldShowRefetchError(!!query.isError, query.data);
     })
-    .map((entry) => entry?.query ?? entry);
+    .map(unwrapRefetchQuery);
 }
 
 module.exports = {
@@ -53,5 +84,8 @@ module.exports = {
   shouldShowRefetchError,
   isSearchQuerySettled,
   queryErrorMessage,
+  isRefetchEntryEnabled,
+  unwrapRefetchQuery,
+  collectEnabledRefetchQueries,
   collectRefetchErrorQueries,
 };

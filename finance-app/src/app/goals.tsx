@@ -11,7 +11,7 @@ import {
   MutationSubmitButton,
 } from '@/components/mutation-form';
 import { PushScreen } from '@/components/screen';
-import { QueryRefetchBanners, QueryScreenBody } from '@/components/query-display';
+import { QueryScreenBody, refetchEnabledQueries } from '@/components/query-display';
 import { buildGoalsRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { Card, EmptyState } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
@@ -157,14 +157,17 @@ export default function Goals() {
     () => buildGoalsRefetchQueries({ goals, accounts }),
     [accounts, goals],
   );
+  const refreshGoals = () => refetchEnabledQueries(goalsRefetchQueries);
 
   return (
-    <PushScreen testID="goals-screen" onRefresh={goals.refetch}>
+    <PushScreen testID="goals-screen" onRefresh={refreshGoals}>
       <MutationLiveRegion message={banner.announce} />
       <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => goals.refetch()} />
-      <QueryRefetchBanners queries={goalsRefetchQueries} testID="goals-refetch-banner" />
       <QueryScreenBody
         query={goals}
+        compoundRefetchQueries={goalsRefetchQueries}
+        refetchBannerTestID="goals-refetch-banner"
+        onRetry={refreshGoals}
         loading={<SkeletonList rows={4} />}
         empty={null}
         hasContent

@@ -7,6 +7,7 @@ const {
   shouldShowFatalError,
   shouldShowRefetchError,
   collectRefetchErrorQueries,
+  collectEnabledRefetchQueries,
 } = require('../src/lib/query-display-state.js');
 const {
   PRIMARY_QUERY_GATE_ORDER,
@@ -15,6 +16,7 @@ const {
   buildSpendingRefetchQueries,
   buildActivityRefetchQueries,
   buildAddTransactionRefetchQueries,
+  buildGoalsRefetchQueries,
 } = require('../src/lib/screen-query-display-config.js');
 const {
   buildTransactionEditorAuxiliaryRefetchQueries,
@@ -340,6 +342,7 @@ test('query display component module exports reusable screen helpers', () => {
   assert.match(source, /export function QueryScreenBody/);
   assert.match(source, /export function QueryRefetchBanners/);
   assert.match(source, /export function resolveQueryDisplay/);
+  assert.match(source, /export function refetchEnabledQueries/);
 });
 
 test('collectRefetchErrorQueries retries only failed queries passed to QueryRefetchBanners', () => {
@@ -353,4 +356,96 @@ test('collectRefetchErrorQueries retries only failed queries passed to QueryRefe
   failed.forEach((query) => query.refetch?.());
   assert.equal(a, 1);
   assert.equal(b, 0);
+});
+
+test('collectEnabledRefetchQueries unwraps entries and skips disabled members', () => {
+  const enabled = { id: 'enabled', refetch: () => {} };
+  const wrapped = { query: { id: 'wrapped', refetch: () => {} }, enabled: true };
+  const disabled = { query: { id: 'disabled', refetch: () => {} }, enabled: false };
+  const queries = [enabled, wrapped, disabled];
+  assert.deepEqual(collectEnabledRefetchQueries(queries), [enabled, wrapped.query]);
+});
+
+test('goals consolidates compound refetch banner inside QueryScreenBody', () => {
+  const source = readScreen('src/app/goals.tsx');
+  assert.match(source, /compoundRefetchQueries=\{goalsRefetchQueries\}/);
+  assert.match(source, /refetchBannerTestID="goals-refetch-banner"/);
+  assert.match(source, /refetchEnabledQueries\(goalsRefetchQueries\)/);
+  assert.doesNotMatch(source, /<QueryRefetchBanners queries=\{goalsRefetchQueries\}/);
+});
+
+test('QueryScreenBody compound contract uses one mutually exclusive refetch banner branch', () => {
+  const source = readScreen('src/components/query-display.tsx');
+  assert.match(source, /compoundRefetchQueries\?: RefetchQueryEntry\[\]/);
+  assert.match(
+    source,
+    /const refetchBanner = compoundRefetchQueries\?\.length \? \([\s\S]*QueryRefetchBanners queries=\{compoundRefetchQueries\}/,
+  );
+  assert.match(
+    source,
+    /: display\.refetchError \? \([\s\S]*<QueryRefetchBanner onRetry=\{retry\}/,
+  );
+});
+
+test('compound screens refresh enabled refetch members on pull-to-refresh', () => {
+  const activity = readScreen('src/app/(tabs)/transactions.tsx');
+  assert.match(activity, /refreshActivity = \(\) => refetchEnabledQueries\(activityRefetchQueries\)/);
+  assert.match(activity, /GestureRefreshControl onRefresh=\{refreshActivity\}/);
+  assert.match(activity, /onRefetch: onRefreshList/);
+  assert.match(activity, /ErrorState error=\{queryErrorMessage\(listQuery\.error\)\} onRetry=\{refreshActivity\}/);
+
+  const goals = readScreen('src/app/goals.tsx');
+  assert.match(goals, /onRefresh=\{refreshGoals\}/);
+
+  const home = readScreen('src/app/(tabs)/index.tsx');
+  assert.match(home, /onRefresh = \(\) => refetchEnabledQueries\(homeRefetchQueries\)/);
+});
+
+test('home pull-to-refresh skips widget-disabled refetch members', () => {
+  let todayCalls = 0;
+  let trendsCalls = 0;
+  const today = { refetch: () => { todayCalls += 1; return Promise.resolve(); } };
+  const trends = { refetch: () => { trendsCalls += 1; return Promise.resolve(); } };
+  const manual = { refetch: () => Promise.resolve() };
+  const recurring = { refetch: () => Promise.resolve() };
+  const minimal = buildHomeRefetchQueries({
+    today,
+    trends,
+    manual,
+    recurring,
+    widgets: { netWorth: false, subscriptions: false },
+  });
+  collectEnabledRefetchQueries(minimal).forEach((query) => query.refetch?.());
+  assert.equal(todayCalls, 1);
+  assert.equal(trendsCalls, 0);
+});
+
+test('activity pull-to-refresh skips events when grouping is disabled', () => {
+  let listCalls = 0;
+  let eventCalls = 0;
+  const listQuery = { refetch: () => { listCalls += 1; return Promise.resolve(); } };
+  const accounts = { refetch: () => Promise.resolve() };
+  const categories = { refetch: () => Promise.resolve() };
+  const events = { refetch: () => { eventCalls += 1; return Promise.resolve(); } };
+  const queries = buildActivityRefetchQueries({
+    listQuery,
+    accounts,
+    categories,
+    events,
+    groupEvents: false,
+    searching: false,
+  });
+  collectEnabledRefetchQueries(queries).forEach((query) => query.refetch?.());
+  assert.equal(listCalls, 1);
+  assert.equal(eventCalls, 0);
+});
+
+test('goals pull-to-refresh includes accounts dependency', () => {
+  let goalCalls = 0;
+  let accountCalls = 0;
+  const goals = { refetch: () => { goalCalls += 1; return Promise.resolve(); } };
+  const accounts = { refetch: () => { accountCalls += 1; return Promise.resolve(); } };
+  collectEnabledRefetchQueries(buildGoalsRefetchQueries({ goals, accounts })).forEach((query) => query.refetch?.());
+  assert.equal(goalCalls, 1);
+  assert.equal(accountCalls, 1);
 });

@@ -2,6 +2,7 @@ import React from 'react';
 import { ErrorState } from '@/components/ui';
 import { QueryRefetchBanner } from '@/components/query-refetch-banner';
 import {
+  collectEnabledRefetchQueries,
   collectRefetchErrorQueries,
   queryErrorMessage,
   shouldShowFatalError,
@@ -36,6 +37,10 @@ export function refetchQueries(queries: QueryLike[]) {
       .map((query) => query.refetch?.())
       .filter((refetch) => refetch != null),
   );
+}
+
+export function refetchEnabledQueries(entries: RefetchQueryEntry[]) {
+  return refetchQueries(collectEnabledRefetchQueries(entries));
 }
 
 export function QueryRefetchBanners({
@@ -104,6 +109,7 @@ export function QueryScreenBody({
   children,
   retryLabel,
   refetchBannerTestID,
+  compoundRefetchQueries,
 }: {
   query: QueryLike;
   onRetry?: () => void;
@@ -113,6 +119,8 @@ export function QueryScreenBody({
   children: React.ReactNode;
   retryLabel?: string;
   refetchBannerTestID?: string;
+  /** When set, one consolidated banner covers the primary query and compound members. */
+  compoundRefetchQueries?: RefetchQueryEntry[];
 }) {
   const display = resolveQueryDisplay(query);
   const retry = onRetry ?? (() => query.refetch?.());
@@ -128,11 +136,15 @@ export function QueryScreenBody({
     );
   }
 
+  const refetchBanner = compoundRefetchQueries?.length ? (
+    <QueryRefetchBanners queries={compoundRefetchQueries} testID={refetchBannerTestID} />
+  ) : display.refetchError ? (
+    <QueryRefetchBanner onRetry={retry} testID={refetchBannerTestID} />
+  ) : null;
+
   return (
     <>
-      {display.refetchError ? (
-        <QueryRefetchBanner onRetry={retry} testID={refetchBannerTestID} />
-      ) : null}
+      {refetchBanner}
       {!hasContent ? empty : children}
     </>
   );

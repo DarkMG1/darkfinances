@@ -15,7 +15,7 @@ import { useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { useFinanceToday } from '@/lib/date-only';
 import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
-import { QueryRefetchBanners } from '@/components/query-display';
+import { QueryRefetchBanners, refetchEnabledQueries } from '@/components/query-display';
 import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
 import { buildHomeRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
@@ -68,12 +68,11 @@ export default function Overview() {
     });
   };
 
-  const onRefresh = () => Promise.all([
-    today.refetch(),
-    trends.refetch(),
-    recurring.refetch(),
-    manual.refetch(),
-  ]);
+  const homeRefetchQueries = useMemo(
+    () => buildHomeRefetchQueries({ today, trends, manual, recurring, widgets }),
+    [manual, recurring, today, trends, widgets],
+  );
+  const onRefresh = () => refetchEnabledQueries(homeRefetchQueries);
 
   const accts = (today.data?.accounts ?? []).filter((a) => !a.hidden);
   const hasInclusion = accountsHaveInclusion(accts);
@@ -138,10 +137,6 @@ export default function Overview() {
   const incompleteReasons = today.data?.liquidity.safeToSpend.incompleteReasons ?? [];
   const todayInitialLoad = shouldShowInitialLoad(today.isLoading, today.data);
   const todayFatal = shouldShowFatalError(today.isError, today.data);
-  const homeRefetchQueries = useMemo(
-    () => buildHomeRefetchQueries({ today, trends, manual, recurring, widgets }),
-    [manual, recurring, today, trends, widgets],
-  );
 
   return (
     <Screen title="dark" accent="finances" onRefresh={onRefresh} testID="home-screen">
