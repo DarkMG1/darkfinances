@@ -29,11 +29,36 @@ function pathWithoutShellcheck() {
     .join(':');
 }
 
-test('check-shell skips cleanly when shellcheck is unavailable', () => {
-  const result = runCheckShell({ PATH: pathWithoutShellcheck() });
+function envWithoutShellcheck(extra = {}) {
+  const { CI, GITHUB_ACTIONS, ...base } = process.env;
+  return {
+    ...base,
+    PATH: '/usr/bin:/bin',
+    ...extra,
+  };
+}
+
+test('check-shell skips cleanly when shellcheck is unavailable locally', () => {
+  const result = runCheckShell(envWithoutShellcheck());
 
   assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
-  assert.match(result.stdout, /shellcheck: skipped/);
+  assert.match(result.stdout, /shellcheck: skipped \(not installed/);
+});
+
+test('check-shell fails when shellcheck is unavailable in CI=true', () => {
+  const result = runCheckShell(envWithoutShellcheck({ CI: 'true' }));
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /shellcheck: required in CI but not installed/);
+  assert.doesNotMatch(result.stdout, /skipped/);
+});
+
+test('check-shell fails when shellcheck is unavailable in GITHUB_ACTIONS=true', () => {
+  const result = runCheckShell(envWithoutShellcheck({ GITHUB_ACTIONS: 'true' }));
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /shellcheck: required in CI but not installed/);
+  assert.doesNotMatch(result.stdout, /skipped/);
 });
 
 test('check-shell fails when shellcheck reports warnings', (t) => {

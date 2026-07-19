@@ -9,6 +9,10 @@ targets=(
 )
 
 if ! command -v shellcheck >/dev/null 2>&1; then
+  if [ "${CI:-}" = 'true' ] || [ "${GITHUB_ACTIONS:-}" = 'true' ]; then
+    echo 'shellcheck: required in CI but not installed (install shellcheck on the runner image)' >&2
+    exit 1
+  fi
   echo 'shellcheck: skipped (not installed; install shellcheck locally to run this gate)'
   exit 0
 fi

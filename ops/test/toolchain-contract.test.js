@@ -248,3 +248,12 @@ test('CI avoids duplicate feature-branch push runs while keeping pull_request an
   assert.match(workflow, /branches:\s*\n\s+- main/);
   assert.doesNotMatch(workflow, /push:\s*\n\s+branches:\s*\n\s+-\s+\*/);
 });
+
+test('CI concurrency groups cancel per pull request or ref, not across unrelated PRs', () => {
+  const workflow = fs.readFileSync(path.join(workflowsDir, 'ci.yml'), 'utf8');
+  assert.match(
+    workflow,
+    /group:\s*ci-\$\{\{\s*github\.event\.pull_request\.number\s*\|\|\s*github\.ref\s*\}\}/,
+  );
+  assert.doesNotMatch(workflow, /group:\s*ci-\$\{\{\s*github\.ref\s*\}\}/);
+});

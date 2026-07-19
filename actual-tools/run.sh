@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Reusable runner for the Actual reporting tools. Usage: bash ~/actual-tools/run.sh <script.js>
 set -euo pipefail
+umask 077
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/.actual.env"
 # Optional: Splitwise creds so reporting tools can pull live authoritative balances. Non-fatal.
