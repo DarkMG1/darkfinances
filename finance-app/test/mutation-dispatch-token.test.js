@@ -6,7 +6,7 @@ const {
   invalidateMutationDispatch,
   isMutationDispatchTokenCurrent,
 } = require('../src/lib/mutation-hook-identity');
-const { createMutationDispatchGuard } = require('../src/lib/mutation-dispatch-guard');
+const { createMutationDispatchGuard } = require('./helpers/mutation-dispatch-guard');
 
 test('dispatch token rejects superseded dispatch id within same identity', () => {
   const epochRef = { value: 0 };

@@ -5,18 +5,14 @@ const path = require('node:path');
 
 const appRoot = path.resolve(__dirname, '../src/app');
 
-const screensMustNotBareMutate = [
-  'transaction/[id].tsx',
-  'reconcile.tsx',
-  'networth.tsx',
-  'account/[id].tsx',
-  'review.tsx',
-  '(tabs)/index.tsx',
-  '(tabs)/settings.tsx',
-  '(tabs)/transactions.tsx',
-  'recurring/[key].tsx',
-  'subscriptions.tsx',
-];
+function listAppScreens(dir = appRoot, files = []) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) listAppScreens(full, files);
+    else if (entry.name.endsWith('.tsx')) files.push(full);
+  }
+  return files;
+}
 
 const screensMustNotAlertMutationErrors = [
   'networth.tsx',
@@ -24,9 +20,12 @@ const screensMustNotAlertMutationErrors = [
   '(tabs)/index.tsx',
 ];
 
-test('audited screens route mutations through shared action hooks', () => {
-  for (const rel of screensMustNotBareMutate) {
-    const source = fs.readFileSync(path.join(appRoot, rel), 'utf8');
+test('every app screen routes mutations through shared action hooks', () => {
+  const screens = listAppScreens().sort();
+  assert.ok(screens.length > 0, 'expected at least one app screen');
+  for (const file of screens) {
+    const rel = path.relative(appRoot, file);
+    const source = fs.readFileSync(file, 'utf8');
     assert.doesNotMatch(source, /\.mutate\(/, `${rel} must not call mutation.mutate directly`);
   }
 });

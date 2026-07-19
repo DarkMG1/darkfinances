@@ -35,6 +35,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/process-shutdown-abort.js',
   'lib/query-completeness.js',
   'lib/query-scaling-config.js',
+  'lib/atomic-markers.js',
   'lib/query-abort-sentinel.js',
   'lib/operation-reconciliation.js',
   'lib/bounded-json.js',

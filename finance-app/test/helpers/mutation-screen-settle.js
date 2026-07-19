@@ -1,5 +1,5 @@
 /**
- * Pure settle + identity-reset helpers for useMutationScreen lock state.
+ * Pure settle + identity-reset models for useMutationScreen behavioral tests.
  */
 
 /**

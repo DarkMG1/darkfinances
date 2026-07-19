@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const {
   applyMutationScreenSettled,
   resetMutationScreenIdentityState,
-} = require('../src/lib/mutation-screen-settle');
+} = require('./helpers/mutation-screen-settle');
 const {
   bumpMutationHookEpoch,
   captureMutationDispatchToken,
