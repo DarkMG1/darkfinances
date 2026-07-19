@@ -105,6 +105,7 @@ test('production server startup fails closed without cursor signing secret', asy
       ACTUAL_SYNC_ID: '',
       PASSKEY_ENROLLMENT_TOKEN_HASH: crypto.createHash('sha256').update('closed').digest('hex'),
       PASSKEY_ENROLLMENT_EXPIRES_AT: String(Date.now() + 60_000),
+      FINANCE_TRUST_PROXY_HOPS: '0',
     }),
   });
   t.after(async () => {

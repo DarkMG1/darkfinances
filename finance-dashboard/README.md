@@ -78,6 +78,7 @@ Recommended:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `5007` | Loopback listener port. |
+| `FINANCE_TRUST_PROXY_HOPS` | `0` on loopback; required elsewhere | Trusted reverse-proxy hop count used for `req.ip` and rate limiting (`0` = direct Node exposure, `1` = one trusted proxy). |
 | `SESSION_DIR` | `finance-dashboard/.sessions` | Persistent file-backed browser sessions. |
 | `FINANCE_TIME_ZONE` | `TZ`, then `America/Los_Angeles` | Timezone for financial date boundaries. |
 | `WEBAUTHN_RP_ID` | Hostname from `PUBLIC_ORIGIN` | Passkey relying-party ID. |
@@ -159,6 +160,8 @@ file can lock browser users out.
 - Browser writes reject requests that carry an `Origin` different from the configured origin; session
   cookies are `SameSite=Lax`, secure outside loopback, and HTTP-only.
 - CORS allows only the configured browser origin; native requests do not need a browser origin.
+- Rate limits key clients by socket address by default. Set `FINANCE_TRUST_PROXY_HOPS=1` when a trusted
+  HTTPS reverse proxy terminates client connections so per-client limits use the forwarded address.
 - Every authenticated `/api/v1` write requires a unique `Idempotency-Key`. Completed results replay
   safely; an operation left `started` after a crash remains outcome-unknown and is inspectable at
   `GET /api/v1/operations/:key` rather than being applied twice.

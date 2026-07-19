@@ -29,7 +29,8 @@ reverse-proxy settings, and alert delivery before installation.
 
 - Services run as an unprivileged dedicated user.
 - Actual and Finance Dashboard listen on loopback and are exposed only through a trusted HTTPS reverse
-  proxy/private access layer.
+  proxy/private access layer. Set `FINANCE_TRUST_PROXY_HOPS=1` in the dashboard environment so
+  rate limits and forwarded client addresses honor the proxy hop.
 - The repository is deployed as `~/finance-dashboard` and supporting tools as `~/actual-tools`.
 - Service secrets live in `~/.openclaw/finance-dashboard.env` with mode `0600`.
 - User systemd is available and, if needed after logout, lingering is enabled for the service account.
@@ -72,6 +73,7 @@ ACTUAL_DATA_DIR=/home/<user>/.cache/actual-dashboard
 FINANCE_API_TOKEN=...
 SESSION_SECRET=...
 PUBLIC_ORIGIN=https://finances.example.com
+FINANCE_TRUST_PROXY_HOPS=1
 FINANCE_TIME_ZONE=America/Los_Angeles
 TZ=America/Los_Angeles
 ```

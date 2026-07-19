@@ -84,6 +84,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/transaction-references.js',
   'lib/transaction-replacement-references.js',
   'lib/transaction-replacement-saga.js',
+  'lib/trust-proxy-config.js',
   'lib/validation.js',
   'package-lock.json',
   'package.json',

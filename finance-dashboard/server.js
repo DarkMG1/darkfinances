@@ -61,6 +61,11 @@ const {
 } = require('./lib/bounded-ledger-access');
 const { loadQueryScalingConfig } = require('./lib/query-scaling-config');
 const {
+  applyExpressTrustProxy,
+  loadTrustProxyConfig,
+  rateLimitClientKey,
+} = require('./lib/trust-proxy-config');
+const {
   DEFAULT_MAX_JSON_BYTES,
   RECEIPT_MAX_JSON_BYTES,
 } = require('./lib/receipt-limits');
@@ -178,6 +183,7 @@ const localOrigin = publicHostname === 'localhost' || publicHostname === '127.0.
 if (!process.env.SESSION_SECRET && !localOrigin) {
   throw new Error('SESSION_SECRET is required for a non-local deployment');
 }
+const trustProxyConfig = loadTrustProxyConfig(process.env, { localOrigin });
 if (!localOrigin && process.env.DEMO_ONLY !== '1') {
   assertCursorSigningConfigured();
 }
@@ -218,7 +224,7 @@ const rateBuckets = new Map();
 function rateLimit(name, max, windowMs) {
   return (req, res, next) => {
     const now = Date.now();
-    const key = `${name}:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+    const key = `${name}:${rateLimitClientKey(req, trustProxyConfig.hops)}`;
     let bucket = rateBuckets.get(key);
     if (!bucket || bucket.resetAt <= now) bucket = { count: 0, resetAt: now + windowMs };
     bucket.count += 1;
@@ -244,7 +250,7 @@ function rateLimit(name, max, windowMs) {
   };
 }
 
-app.set('trust proxy', 1);
+applyExpressTrustProxy(app, trustProxyConfig);
 app.disable('x-powered-by');
 app.disable('etag');
 fs.mkdirSync(SESSION_DIR, { recursive: true, mode: 0o700 });

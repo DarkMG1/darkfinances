@@ -184,7 +184,9 @@ full-entitlement bundle cannot reach it. Local notifications continue to work. S
 - Production browser origins must be HTTPS.
 - Application security headers include CSP, frame denial, no-sniff, no-referrer, and a restrictive
   permissions policy; the HTTPS reverse proxy should add HSTS.
-- Authentication, passkey enrollment, demo access, and expensive endpoints are rate-limited.
+- Authentication, passkey enrollment, demo access, and expensive endpoints are rate-limited. Production
+  reverse-proxy deployments must set `FINANCE_TRUST_PROXY_HOPS=1`; direct Node exposure keeps the
+  secure default of `0`, which ignores spoofed `X-Forwarded-For` values.
 - Sidecar JSON writes are atomic, schema-validated where applicable, and recover through last-good copies.
 - Receipt paths and MIME content are validated before storage.
 - App diagnostics redact tokens, URLs, query contents, transaction details, and personal labels.
