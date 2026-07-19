@@ -8,6 +8,11 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const {
+  TRUST_SEMANTICS_ENV_KEYS,
+  finalizeTrustProxyHopsEnv,
+  parentEnvWithoutTrustSemantics,
+} = require('./helpers/ephemeral-dashboard-server');
 
 async function unusedPort() {
   return new Promise((resolve, reject) => {
@@ -43,8 +48,8 @@ async function waitForExit(child, logs, timeoutMs = 5_000) {
 
 function baseServerEnv(port, dir, overrides = {}) {
   const code = 'test-enrollment-code';
-  return {
-    ...process.env,
+  const env = {
+    ...parentEnvWithoutTrustSemantics(),
     NODE_ENV: 'test',
     PORT: String(port),
     DEMO_ONLY: '1',
@@ -60,6 +65,7 @@ function baseServerEnv(port, dir, overrides = {}) {
     PASSKEY_ENROLLMENT_EXPIRES_AT: String(Date.now() + 60_000),
     ...overrides,
   };
+  return finalizeTrustProxyHopsEnv(env, overrides);
 }
 
 function spawnServer(t, env) {
@@ -259,6 +265,46 @@ function nonLoopbackOrigin() {
   };
 }
 
+function withParentTrustSemanticsExport(t, values) {
+  const saved = {};
+  for (const key of TRUST_SEMANTICS_ENV_KEYS) {
+    saved[key] = process.env[key];
+    if (Object.prototype.hasOwnProperty.call(values, key)) {
+      process.env[key] = values[key];
+    }
+  }
+  t.after(() => {
+    for (const key of TRUST_SEMANTICS_ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+}
+
+test('baseServerEnv isolates trust semantics from parent process.env', () => {
+  const saved = {};
+  for (const key of TRUST_SEMANTICS_ENV_KEYS) {
+    saved[key] = process.env[key];
+    process.env[key] = key === 'FINANCE_TRUST_PROXY_HOPS'
+      ? '1'
+      : 'https://parent.example.test';
+  }
+  try {
+    const absent = baseServerEnv(4321, '/tmp', nonLoopbackOrigin());
+    assert.equal(absent.FINANCE_TRUST_PROXY_HOPS, undefined);
+    assert.equal(absent.PUBLIC_ORIGIN, 'https://finances.example.test');
+
+    const explicit = baseServerEnv(4321, '/tmp', { FINANCE_TRUST_PROXY_HOPS: '0' });
+    assert.equal(explicit.FINANCE_TRUST_PROXY_HOPS, '0');
+    assert.equal(explicit.PUBLIC_ORIGIN, 'http://localhost:4321');
+  } finally {
+    for (const key of TRUST_SEMANTICS_ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+});
+
 test('absent FINANCE_TRUST_PROXY_HOPS starts on non-loopback with a proxy-bucket warning', async (t) => {
   const port = await unusedPort();
   const base = `http://127.0.0.1:${port}`;
@@ -304,6 +350,34 @@ test('non-loopback default hops share one bucket and resist X-Forwarded-For rota
   assert.equal(limited.body.error, 'Too many requests');
 });
 
+test('absent FINANCE_TRUST_PROXY_HOPS ignores parent FINANCE_TRUST_PROXY_HOPS=1 export', async (t) => {
+  withParentTrustSemanticsExport(t, {
+    FINANCE_TRUST_PROXY_HOPS: '1',
+    PUBLIC_ORIGIN: 'https://parent.example.test',
+  });
+
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-parent-export-'));
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, nonLoopbackOrigin()));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+  assert.match(logs.value, /\[trust-proxy\].*defaulting to 0.*FINANCE_TRUST_PROXY_HOPS=1/s);
+  assert.doesNotMatch(logs.value, /\[trust-proxy\].*FINANCE_TRUST_PROXY_HOPS=0:/);
+
+  for (let i = 0; i < 10; i += 1) {
+    const result = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+      'X-Forwarded-For': `203.0.113.${i + 1}`,
+    });
+    assert.equal(result.response.status, 403, `attempt ${i + 1} should count toward the shared bucket`);
+  }
+
+  const limited = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+    'X-Forwarded-For': '203.0.113.99',
+  });
+  assert.equal(limited.response.status, 429);
+});
+
 test('malformed trust proxy config fails startup', async (t) => {
   const cases = [
     {
@@ -335,22 +409,10 @@ test('malformed trust proxy config fails startup', async (t) => {
       const logs = { value: '' };
       const child = spawn(process.execPath, ['server.js'], {
         cwd: path.resolve(__dirname, '..'),
-        env: {
-          ...process.env,
-          PORT: String(port),
-          DEMO_ONLY: '1',
-          PUBLIC_ORIGIN: 'https://finances.example.test',
-          WEBAUTHN_ORIGIN: 'https://finances.example.test',
-          WEBAUTHN_RP_ID: 'finances.example.test',
-          FINANCE_API_TOKEN: 'test-api-token',
-          SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-          SESSION_DIR: path.join(dir, 'sessions'),
-          OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
-          PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-          PASSKEY_ENROLLMENT_TOKEN_HASH: crypto.createHash('sha256').update('closed').digest('hex'),
-          PASSKEY_ENROLLMENT_EXPIRES_AT: String(Date.now() + 60_000),
+        env: baseServerEnv(port, dir, {
+          ...nonLoopbackOrigin(),
           ...testCase.env,
-        },
+        }),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       child.stdout.on('data', (chunk) => { logs.value += chunk; });

@@ -83,6 +83,35 @@ test('validateExtraEnv rejects reserved identity overrides', () => {
   }
 });
 
+test('buildDashboardServerEnv isolates trust semantics from parent process.env', () => {
+  const parentEnv = {
+    FINANCE_TRUST_PROXY_HOPS: '1',
+    PUBLIC_ORIGIN: 'https://parent.example.test',
+    WEBAUTHN_ORIGIN: 'https://parent.example.test',
+    WEBAUTHN_RP_ID: 'parent.example.test',
+    PATH: '/usr/bin',
+  };
+  const dir = '/tmp/darkfinances-trust-env-contract';
+  const absent = buildDashboardServerEnv({
+    dir,
+    instanceId: 'a'.repeat(32),
+    parentEnv,
+    extraEnv: {},
+  });
+  assert.equal(absent.FINANCE_TRUST_PROXY_HOPS, undefined);
+  assert.equal(absent.PUBLIC_ORIGIN, 'http://127.0.0.1:0');
+  assert.equal(absent.WEBAUTHN_RP_ID, 'localhost');
+  assert.equal(absent.PATH, '/usr/bin');
+
+  const explicit = buildDashboardServerEnv({
+    dir,
+    instanceId: 'b'.repeat(32),
+    parentEnv,
+    extraEnv: { FINANCE_TRUST_PROXY_HOPS: '0' },
+  });
+  assert.equal(explicit.FINANCE_TRUST_PROXY_HOPS, '0');
+});
+
 test('production mode ignores TEST_SERVER_INSTANCE_ID in ping and startup logs', async (t) => {
   const instanceId = 'a'.repeat(32);
   const { child, logs, dir } = await spawnPingProbe({
