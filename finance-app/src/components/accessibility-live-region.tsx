@@ -1,66 +1,77 @@
 import React, { useEffect, useRef } from 'react';
-import { AccessibilityInfo, Platform, StyleSheet, Text, View } from 'react-native';
+import { AccessibilityInfo, Platform, StyleSheet, View, ViewProps } from 'react-native';
 import {
   resolveAccessibilityAnnouncement,
-  shouldUseExplicitAccessibilityAnnouncement,
-  shouldUseVisibleLiveRegion,
+  shouldUseExplicitNativeMutationAnnouncement,
+  shouldUseExplicitVisibleStatusAnnouncement,
+  shouldUseVisibleStatusLiveRegion,
+  shouldUseWebMutationLiveRegionSurface,
 } from '@/lib/accessibility-announcement.js';
 
-export function useAccessibilityAnnouncement(message: string) {
+function useDedupedAccessibilityAnnouncement(message: string, enabled: boolean) {
   const previous = useRef('');
   useEffect(() => {
-    if (!shouldUseExplicitAccessibilityAnnouncement(Platform.OS)) return;
+    if (!enabled) return;
     const result = resolveAccessibilityAnnouncement(previous.current, message);
     if (!result.announce || !result.message) return;
     previous.current = result.next;
     AccessibilityInfo.announceForAccessibility(result.message);
-  }, [message]);
+  }, [message, enabled]);
 }
 
-/** iOS-only explicit announce; renders nothing and is never focusable. */
+/** Visible status only: iOS explicit announce via effect. */
+export function useVisibleStatusAnnouncement(message: string) {
+  useDedupedAccessibilityAnnouncement(
+    message,
+    shouldUseExplicitVisibleStatusAnnouncement(Platform.OS),
+  );
+}
+
+/** Mutation status only: native iOS and Android explicit announce via effect. */
+export function useNativeMutationAnnouncement(message: string) {
+  useDedupedAccessibilityAnnouncement(
+    message,
+    shouldUseExplicitNativeMutationAnnouncement(Platform.OS),
+  );
+}
+
+/** Visible status only: iOS explicit announce; renders nothing and is never focusable. */
 export function AccessibilityAnnouncementEffect({ message }: { message: string }) {
-  useAccessibilityAnnouncement(message);
+  useVisibleStatusAnnouncement(message);
   return null;
 }
 
-/** Live region on visible status surfaces (Android/web only). */
-export function visibleStatusLiveRegionProps(): { accessibilityLiveRegion?: 'polite' } {
-  return shouldUseVisibleLiveRegion(Platform.OS) ? { accessibilityLiveRegion: 'polite' } : {};
+/** Visible status only: attach polite live region to the visible control (Android/web). */
+export function visibleStatusLiveRegionProps(): Pick<ViewProps, 'accessibilityLiveRegion'> {
+  return shouldUseVisibleStatusLiveRegion(Platform.OS) ? { accessibilityLiveRegion: 'polite' } : {};
 }
 
 /**
- * Screen-reader-only live region for mutation status (no visible target).
- * iOS: explicit announce only. Android/web: non-focusable polite live region.
+ * Mutation status only (no visible target).
+ * Native iOS/Android: explicit announce, render null.
+ * Web: non-keyboard-focusable polite live-region surface.
  */
 export function MutationStatusLiveRegion({ message }: { message: string }) {
-  useAccessibilityAnnouncement(message);
+  useNativeMutationAnnouncement(message);
   const label = typeof message === 'string' ? message.trim() : '';
-  if (!shouldUseVisibleLiveRegion(Platform.OS)) return null;
-  if (!label) return null;
+  if (!shouldUseWebMutationLiveRegionSurface(Platform.OS) || !label) return null;
   return (
     <View
       accessibilityLiveRegion="polite"
-      importantForAccessibility="no"
-      accessible={false}
-      style={styles.srOnly}
-    >
-      <Text style={styles.srOnlyText}>{label}</Text>
-    </View>
+      accessibilityLabel={label}
+      accessible
+      focusable={false}
+      style={styles.webMutationLiveRegion}
+    />
   );
 }
 
 const styles = StyleSheet.create({
-  srOnly: {
+  webMutationLiveRegion: {
     position: 'absolute',
     width: 1,
     height: 1,
     opacity: 0,
     overflow: 'hidden',
-  },
-  srOnlyText: {
-    position: 'absolute',
-    width: 1,
-    height: 1,
-    opacity: 0,
   },
 });

@@ -17,26 +17,66 @@ function resolveAccessibilityAnnouncement(previous, next) {
 }
 
 /**
+ * Visible query/status banners and ErrorState copy:
  * iOS VoiceOver needs explicit announcements for dynamically appearing status.
- * Android TalkBack and web rely on accessibilityLiveRegion on the visible surface.
  *
  * @param {string} platform React Native Platform.OS value
  * @returns {boolean}
  */
-function shouldUseExplicitAccessibilityAnnouncement(platform) {
+function shouldUseExplicitVisibleStatusAnnouncement(platform) {
   return platform === 'ios';
 }
 
 /**
+ * Visible query/status banners and ErrorState copy:
+ * Android TalkBack and web read polite live-region updates from the visible surface.
+ *
  * @param {string} platform React Native Platform.OS value
  * @returns {boolean}
  */
-function shouldUseVisibleLiveRegion(platform) {
+function shouldUseVisibleStatusLiveRegion(platform) {
   return platform === 'android' || platform === 'web';
+}
+
+/**
+ * Mutation status has no visible target on native platforms.
+ * Both iOS VoiceOver and Android TalkBack need explicit announcements.
+ *
+ * @param {string} platform React Native Platform.OS value
+ * @returns {boolean}
+ */
+function shouldUseExplicitNativeMutationAnnouncement(platform) {
+  return platform === 'ios' || platform === 'android';
+}
+
+/**
+ * Mutation status on web uses a standards-compatible live-region surface only.
+ *
+ * @param {string} platform React Native Platform.OS value
+ * @returns {boolean}
+ */
+function shouldUseWebMutationLiveRegionSurface(platform) {
+  return platform === 'web';
+}
+
+/**
+ * @param {string} platform React Native Platform.OS value
+ * @param {string | undefined | null} message
+ * @returns {{ explicitAnnounce: boolean; webLiveRegionSurface: boolean }}
+ */
+function resolveMutationStatusPresentation(platform, message) {
+  const label = typeof message === 'string' ? message.trim() : '';
+  return {
+    explicitAnnounce: shouldUseExplicitNativeMutationAnnouncement(platform) && !!label,
+    webLiveRegionSurface: shouldUseWebMutationLiveRegionSurface(platform) && !!label,
+  };
 }
 
 module.exports = {
   resolveAccessibilityAnnouncement,
-  shouldUseExplicitAccessibilityAnnouncement,
-  shouldUseVisibleLiveRegion,
+  shouldUseExplicitVisibleStatusAnnouncement,
+  shouldUseVisibleStatusLiveRegion,
+  shouldUseExplicitNativeMutationAnnouncement,
+  shouldUseWebMutationLiveRegionSurface,
+  resolveMutationStatusPresentation,
 };
