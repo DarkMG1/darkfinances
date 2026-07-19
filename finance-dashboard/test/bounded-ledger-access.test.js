@@ -1,6 +1,6 @@
 'use strict';
 
-const { describe, it } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   buildQueryCacheFingerprint,
@@ -25,8 +25,12 @@ const {
   QueryRangeExceededError,
   QueryResultLimitExceededError,
 } = require('../lib/errors');
+const { resetProcessShutdownAbortForTests } = require('../lib/process-shutdown-abort');
+const { registerProcessShutdownTestIsolation } = require('./helpers/process-shutdown-test-isolation');
 
 process.env.FINANCE_QUERY_CURSOR_SECRET = 'test-cursor-secret';
+
+registerProcessShutdownTestIsolation({ beforeEach, afterEach });
 
 describe('bounded ledger access', () => {
   it('validates canonical date ranges and rejects oversized windows', () => {

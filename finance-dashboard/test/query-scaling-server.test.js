@@ -9,6 +9,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { runGracefulShutdownInFlightReadCase } = require('./helpers/query-scaling-shutdown-case');
 
 async function unusedPort() {
   return new Promise((resolve, reject) => {
@@ -146,28 +147,6 @@ async function waitForAbortSentinel(base, headers, { minAbortCount = 1, timeoutM
     assert.fail(`abort sentinel not recorded: ${JSON.stringify(lastState)}`);
   }
   assert.fail('abort sentinel state unavailable before shutdown completed');
-}
-
-async function waitForScalingBarrierEntered(barrierDir, { timeoutMs = 5_000 } = {}) {
-  const enteredPath = path.join(barrierDir, 'entered');
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(enteredPath)) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.fail(`query-scaling barrier not entered: ${barrierDir}`);
-}
-
-async function waitForShutdownAbortRecorded(barrierDir, { timeoutMs = 8_000 } = {}) {
-  const abortPath = path.join(barrierDir, 'abort-recorded');
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(abortPath)) {
-      return JSON.parse(fs.readFileSync(abortPath, 'utf8'));
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.fail(`graceful shutdown abort marker not recorded under ${barrierDir}`);
 }
 
 test('v1 read responses include query instrumentation headers', async (t) => {
@@ -416,53 +395,9 @@ test('concurrent disconnecting reads stay bounded and dispose listeners', async 
 });
 
 test('graceful shutdown during in-flight read records abort without unbounded Actual calls', async (t) => {
-  const accountCount = 6;
-  const barrierDir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-query-scaling-barrier-'));
-  t.after(() => {
-    fs.rmSync(barrierDir, { recursive: true, force: true });
+  await runGracefulShutdownInFlightReadCase({
+    spawnQueryScalingServer,
+    resetScalingState,
+    t,
   });
-  const { base, headers, port, child } = await spawnQueryScalingServer(t, {
-    accountCount,
-    rowsPerAccount: 40,
-    fetchDelayMs: 80,
-    barrierDir,
-  });
-  await resetScalingState(base, headers);
-
-  const readReq = http.request({
-    hostname: '127.0.0.1',
-    port,
-    path: '/api/v1/transactions?start=2024-01-01&end=2024-12-31',
-    method: 'GET',
-    headers,
-  }, (res) => {
-    res.on('data', () => {});
-  });
-  readReq.on('error', () => {});
-  readReq.end();
-
-  await waitForScalingBarrierEntered(barrierDir, { timeoutMs: 5_000 });
-  await new Promise((resolve) => setTimeout(resolve, 15));
-  child.kill('SIGTERM');
-  const abortMarker = await waitForShutdownAbortRecorded(barrierDir, { timeoutMs: 8_000 });
-  assert.ok(abortMarker.abortCount >= 1);
-  assert.equal(abortMarker.phase, 'graceful shutdown');
-  let callLogLength = null;
-  const callLogDeadline = Date.now() + 1_000;
-  while (Date.now() < callLogDeadline) {
-    const serverState = await tryFetchScalingState(base, headers);
-    if (serverState?.callLog) {
-      callLogLength = serverState.callLog.length;
-      assert.ok(serverState.abortSentinel.abortCount >= 1);
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  if (callLogLength == null) {
-    const entered = JSON.parse(fs.readFileSync(path.join(barrierDir, 'entered'), 'utf8'));
-    assert.ok(entered.accountId, `missing in-flight account marker: ${JSON.stringify(entered)}`);
-    callLogLength = 1;
-  }
-  assert.ok(callLogLength <= accountCount + 1);
-  readReq.destroy();
 });

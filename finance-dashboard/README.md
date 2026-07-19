@@ -249,10 +249,10 @@ production budget.
 
 ## Graceful shutdown
 
-On `SIGTERM` or `SIGINT` the dashboard stops HTTP admission, **awaits the HTTP close/drain
-callback** (including active Actual-backed GET responses), drains the mutation queue, then calls
-`data.shutdownApi()` / coordinator `shutdownHandoff`. See [`ACTUAL_COORDINATOR.md`](./ACTUAL_COORDINATOR.md)
-for the full ordering contract.
+On `SIGTERM` or `SIGINT` the dashboard aborts accepted ledger reads, stops HTTP admission,
+**awaits the HTTP close/drain callback** (including active Actual-backed GET responses),
+drains the mutation queue, then calls `data.shutdownApi()` / coordinator `shutdownHandoff`.
+See [`ACTUAL_COORDINATOR.md`](./ACTUAL_COORDINATOR.md) for the full ordering contract.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |

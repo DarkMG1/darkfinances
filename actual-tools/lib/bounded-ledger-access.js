@@ -1,7 +1,7 @@
 'use strict';
 /* VENDORED from finance-dashboard/lib/bounded-ledger-access.js
  * Regenerate: node finance-dashboard/scripts/sync-bounded-ledger-vendor.js
- * Source sha256: e0fa02868d282329e7035c182782d805fd5233afb8273939d25b76e518ee2a0f
+ * Source sha256: 50473813ce0337738baa136378b8a1008951eabcea528301a9fe7bf0e7c5dd0a
  * Standalone for actual-tools — must not require finance-dashboard at runtime.
  */
 
@@ -18,6 +18,7 @@ const {
   QueryRangeExceededError,
   QueryResultLimitExceededError,
 } = require('./query-errors');
+function isProcessShutdownAborted() { return false; }
 
 const SEARCH_CURSOR_VERSION = 2;
 const DEV_CURSOR_FALLBACK = 'finance-query-cursor-dev-only';
@@ -264,16 +265,26 @@ function discardRetainedBatches(batches) {
   batches.length = 0;
 }
 
+function isQueryAbortRequested(signal) {
+  return Boolean(signal?.aborted || isProcessShutdownAborted());
+}
+
+function resolveQueryAbortPhase(phase) {
+  if (isProcessShutdownAborted()) return 'graceful shutdown';
+  return phase;
+}
+
 function throwIfQueryAborted({ stats, batches, effectiveSignal, phase } = {}) {
-  if (!effectiveSignal?.aborted) return;
+  if (!isQueryAbortRequested(effectiveSignal)) return;
   discardRetainedBatches(batches);
   if (stats) {
     stats.aborted = true;
     stats.rowsReturned = 0;
     stats.peakRowsRetained = 0;
   }
-  recordQueryAbortSentinel(phase);
-  const detail = phase ? ` (${phase})` : '';
+  const abortPhase = resolveQueryAbortPhase(phase);
+  recordQueryAbortSentinel(abortPhase);
+  const detail = abortPhase ? ` (${abortPhase})` : '';
   throw new QueryAbortedError(`Ledger query was aborted${detail}`);
 }
 

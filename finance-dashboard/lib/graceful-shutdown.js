@@ -33,7 +33,8 @@ function defaultLogPhase(phase, extra) {
 }
 
 /**
- * Graceful shutdown ordering (PR-14 / PR-30):
+ * Graceful shutdown ordering (PR-14 / PR-30 / query-scaling):
+ * 0. abortInFlightHttpReads() — abort accepted ledger reads at the next bounded fetch boundary.
  * 1. Stop periodic sync timer (no new background sync).
  * 2. requestAdmission.closeAdmission() — reject new HTTP admission waiters/slots.
  * 3. mutationQueue.close() — reject new serial mutation enqueue on keep-alive connections.

@@ -13,8 +13,10 @@ const {
 } = require('../lib/query-abort-sentinel');
 const {
   abortInFlightHttpReads,
-  resetProcessShutdownAbortForTests,
 } = require('../lib/process-shutdown-abort');
+const { registerProcessShutdownTestIsolation } = require('./helpers/process-shutdown-test-isolation');
+
+registerProcessShutdownTestIsolation(test);
 
 function mockReq(overrides = {}) {
   const req = new EventEmitter();
@@ -34,7 +36,6 @@ function mockRes(overrides = {}) {
 test.beforeEach(() => {
   process.env.NODE_ENV = 'test';
   resetQueryAbortSentinel();
-  resetProcessShutdownAbortForTests();
 });
 
 test('responseEndedSuccessfully recognizes a finished response', () => {
