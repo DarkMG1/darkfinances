@@ -142,9 +142,16 @@ const {
 } = require('./lib/domain/classification');
 const {
   mergeProjectionCompleteness,
+  merchantTrendsConservationOk,
+  merchantTrendsFromClassifiedLeaves,
   projectionCompletenessFromLeaves,
   spendSummaryFromClassifiedLeaves,
 } = require('./lib/domain/projection-completeness');
+const {
+  buildForecastProjectionContainment,
+  buildForecastStsContainment,
+  forecastContainmentWarnings,
+} = require('./lib/domain/forecast-containment');
 const { fromCents, sumCents, toCents } = require('./lib/domain/money');
 const { categoryEnvelopeFields, isRolloverTreatmentResolved } = require('./lib/domain/budget-envelope');
 const { enrichGoalsResponse } = require('./lib/domain/goal-feasibility');
@@ -791,6 +798,22 @@ function classifyLeavesInDateRange(rows, catInfo, start, end, transferIndex) {
         accountId: row.accountId,
         transferIndex,
       }));
+    }
+  }
+  return out;
+}
+
+function enrichClassifiedLeavesWithPayee(rows, catInfo, start, end, transferIndex, payeeMap) {
+  const out = [];
+  for (const row of rows) {
+    const t = row.transaction;
+    if (t.date < start || t.date > end) continue;
+    const payee = displayPayeeName(payeeMap[t.payee] || t.imported_payee, t.notes, '(no payee)');
+    for (const leaf of classifyTransactionLeaves(t, catInfo, {
+      accountId: row.accountId,
+      transferIndex,
+    })) {
+      out.push({ ...leaf, payee });
     }
   }
   return out;
@@ -4332,7 +4355,7 @@ async function getForecast({ days = 90 } = {}) {
     const rows = await fetchOnBudgetRows(api, today, horizon, {
       accountFilter: spendingProjection.accountFilter,
     });
-    return { catInfo, rows, forecastProjection };
+    return { catInfo, rows, forecastProjection, spendingProjection };
   });
   const [accounts, income, recurring, budgets, reimb] = await Promise.all([
     getAccounts(),
@@ -4341,16 +4364,30 @@ async function getForecast({ days = 90 } = {}) {
     getBudgets({}),
     getReimbursement({}),
   ]);
-  const { catInfo, rows, forecastProjection } = forecastBundle;
+  const { catInfo, rows, forecastProjection, spendingProjection } = forecastBundle;
   const bills = await getBills({ days: horizonDays, recurring });
   const liquidAccounts = accounts.filter((account) => account.inclusion?.forecast);
   const operatingProjectionComplete = forecastProjection.incompleteReasons.length === 0;
+  const month = today.slice(0, 7);
+  const monthWindow = monthRange(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1);
+  const transferIndex = buildTransferIndex(rows);
+  const currentMonthLeaves = classifyLeavesInDateRange(rows, catInfo, monthWindow.start, today, transferIndex);
+  let spendingCompleteness = summarize(currentMonthLeaves).completeness;
+  if (spendingProjection.incompleteReasons.length) {
+    spendingCompleteness = {
+      ...spendingCompleteness,
+      complete: false,
+      incompleteReasons: [
+        ...new Set([...(spendingCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+      ],
+    };
+  }
   let startBalanceCents = null;
   if (operatingProjectionComplete) {
     startBalanceCents = sumOperatingCashBalanceCents(liquidAccounts);
   }
   const obligationAccounts = accounts.filter((account) => account.inclusion?.obligations);
-  const { graph } = await buildObligationGraphBundle({
+  const { graph, liabilityPolicies } = await buildObligationGraphBundle({
     financeDate: today,
     windowStart: today,
     windowEnd: horizon,
@@ -4392,15 +4429,46 @@ async function getForecast({ days = 90 } = {}) {
       .map((category) => category)
   );
   const genericBudget = buildForecastGenericBudgetContext(genericCategories);
-  const forecastWarnings = [...genericBudget.warnings];
+  const visibleAccounts = accounts.filter((account) => !account.hidden);
+  const operatingAccounts = accounts.filter((account) => account.inclusion?.operatingCash);
+  let stsIncompleteReasons = safeToSpendIncompleteReasons({
+    accounts,
+    visibleAccounts,
+    operatingAccounts,
+    budgets,
+    recurring,
+    spendingCompleteness,
+    obligationGraph: graph,
+    liabilityPolicies,
+  });
+  if (!operatingProjectionComplete) {
+    for (const reason of forecastProjection.incompleteReasons) {
+      if (!stsIncompleteReasons.includes(reason)) stsIncompleteReasons.push(reason);
+    }
+  }
+  const stsContainment = buildForecastStsContainment({
+    incompleteReasons: stsIncompleteReasons,
+    complete: stsIncompleteReasons.length === 0 && operatingProjectionComplete,
+  });
+  const withholdGraphEvents = !graphCompleteness.complete;
+  const knownGraphEventCount = withholdGraphEvents
+    ? 0
+    : forecastCashEventsFromGraph(graph, { windowStart: today, windowEnd: horizon }).length;
+  const projectionContainment = buildForecastProjectionContainment({
+    stsContainment,
+    withholdGraphEvents,
+    knownEventCount: knownGraphEventCount,
+  });
+  const forecastWarnings = [
+    ...genericBudget.warnings,
+    ...forecastContainmentWarnings({
+      stsContainment,
+      projectionContainment,
+      obligationGraphIncompleteReasons: graphCompleteness.incompleteReasons || [],
+    }),
+  ];
   if (!operatingProjectionComplete) {
     forecastWarnings.push('Operating cash projection incomplete; forecast start balance withheld.');
-  }
-  if (!graphCompleteness.complete) {
-    forecastWarnings.push('Obligation graph incomplete; scheduled cash events withheld.');
-    for (const reason of graphCompleteness.incompleteReasons || []) {
-      forecastWarnings.push(`Obligation graph: ${reason}`);
-    }
   }
   if (genericBudget.complete) {
     const budgetEntries = buildForecastBudgetDailyCents({
@@ -4482,6 +4550,8 @@ async function getForecast({ days = 90 } = {}) {
         complete: graphCompleteness.complete,
         incompleteReasons: graphCompleteness.incompleteReasons,
       },
+      stsContainment,
+      projectionContainment,
     },
     possibleReimbursement,
     warnings: [
@@ -6545,36 +6615,80 @@ async function getTags({ start, end } = {}) {
   return { tags };
 }
 
+async function loadMonthlyReportSpendingBundle(api, month) {
+  const [Y, M] = month.split('-').map(Number);
+  const cur = monthRange(Y, M - 1);
+  const prev = monthRange(Y, M - 2);
+  const isCurrent = cur.key === todayYMD().slice(0, 7);
+  const curEnd = isCurrent ? todayYMD() : cur.end;
+  const groups = await api.getCategoryGroups();
+  const catInfo = buildCatInfo(groups);
+  const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution);
+  const ctx = await loadLedgerReadContext(api, {
+    accountFilter: spendingProjection.accountFilter,
+    includeClosed: false,
+  });
+  const { current: currentLeaves } = await onBudgetLeavesPartitioned(api, {
+    scanStart: prev.start,
+    scanEnd: curEnd,
+    curStart: cur.start,
+    curEnd,
+    prevStart: prev.start,
+    prevEnd: prev.end,
+    catInfo,
+    ctx,
+    accountFilter: spendingProjection.accountFilter,
+  });
+  const rows = await fetchOnBudgetRows(api, cur.start, curEnd, {
+    accountFilter: spendingProjection.accountFilter,
+  });
+  const transferIndex = buildTransferIndex(rows);
+  const classifiedLeaves = enrichClassifiedLeavesWithPayee(
+    rows,
+    catInfo,
+    cur.start,
+    curEnd,
+    transferIndex,
+    ctx.payeeMap,
+  );
+  const summary = summarize(currentLeaves);
+  if (spendingProjection.incompleteReasons.length) {
+    summary.completeness = {
+      ...summary.completeness,
+      complete: false,
+      incompleteReasons: [
+        ...new Set([...(summary.completeness?.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+      ],
+    };
+  }
+  return { cur, curEnd, summary, classifiedLeaves };
+}
+
 async function getMonthlyReport({ month } = {}) {
   const m = month || todayYMD().slice(0, 7);
-  const [Y, M] = m.split('-').map(Number);
-  const start = `${m}-01`;
-  const end = monthRange(Y, M - 1).end;
-  const [transactions, spending] = await Promise.all([
-    getTransactions({ start, end, budgetOnly: true }),
-    getSpending({ month: m }),
-  ]);
-  return { month: m, start, end, transactions, summary: spending.current };
+  const spendingBundle = await withApi((api) => loadMonthlyReportSpendingBundle(api, m));
+  const { cur, curEnd, summary, classifiedLeaves } = spendingBundle;
+  const transactions = await getTransactions({ start: cur.start, end: curEnd, budgetOnly: true });
+  return {
+    month: m,
+    start: cur.start,
+    end: cur.end,
+    transactions,
+    summary,
+    classifiedLeaves,
+  };
 }
 
 function buildReportsPayload({ month, monthly, trends, insights, tags, generatedAt = new Date().toISOString() }) {
   const summaryComplete = monthly.summary?.completeness?.complete !== false;
-  const merchants = {};
-  if (summaryComplete) {
-    for (const t of monthly.transactions || []) {
-      if (t.amount >= 0) continue;
-      if (t.transfer) continue;
-      const key = t.payee || 'Unknown';
-      const cur = merchants[key] || { payee: key, spend: 0, count: 0 };
-      cur.spend = round2(cur.spend + Math.abs(t.amount));
-      cur.count++;
-      merchants[key] = cur;
-    }
-  }
-  const topMerchants = summaryComplete
-    ? Object.values(merchants).sort((a, b) => b.spend - a.spend).slice(0, 12)
-    : [];
   const totalSpend = summaryComplete ? (monthly.summary?.totalSpend ?? 0) : null;
+  let topMerchants = [];
+  let merchantTrendsComplete = false;
+  if (summaryComplete) {
+    topMerchants = merchantTrendsFromClassifiedLeaves(monthly.classifiedLeaves || []);
+    merchantTrendsComplete = merchantTrendsConservationOk(topMerchants, totalSpend);
+    if (!merchantTrendsComplete) topMerchants = [];
+  }
   const categories = summaryComplete
     ? Object.entries(monthly.summary?.spending || {})
       .map(([name, spend]) => ({
@@ -6613,7 +6727,7 @@ function buildReportsPayload({ month, monthly, trends, insights, tags, generated
     categoryTrends: categories,
     merchantTrends: topMerchants,
     categoryTrendsComplete: summaryComplete,
-    merchantTrendsComplete: summaryComplete,
+    merchantTrendsComplete,
     tagSummary: tags.tags || [],
     cashFlow: trends.months || [],
   };

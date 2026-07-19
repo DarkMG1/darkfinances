@@ -1,7 +1,7 @@
 'use strict';
 
-const { PROVENANCE } = require('./classification');
-const { fromCents } = require('./money');
+const { leafCountsAsRealSpend, PROVENANCE } = require('./classification');
+const { fromCents, sumCents, toCents } = require('./money');
 
 const PROJECTION_INCOMPLETE_REASON = 'transfer_identity_unresolved';
 
@@ -70,9 +70,33 @@ function spendSummaryFromClassifiedLeaves(classifiedLeaves) {
   };
 }
 
+function merchantTrendsFromClassifiedLeaves(classifiedLeaves, { limit = 12 } = {}) {
+  const merchants = new Map();
+  for (const leaf of classifiedLeaves || []) {
+    if (!leafCountsAsRealSpend(leaf) || !Number.isSafeInteger(leaf.amount) || leaf.amount >= 0) continue;
+    const payee = leaf.payee || '(no payee)';
+    const cur = merchants.get(payee) || { payee, spendCents: 0, count: 0 };
+    cur.spendCents = sumCents([cur.spendCents, -leaf.amount]);
+    cur.count += 1;
+    merchants.set(payee, cur);
+  }
+  return [...merchants.values()]
+    .map((row) => ({ payee: row.payee, spend: fromCents(row.spendCents), count: row.count }))
+    .sort((a, b) => b.spend - a.spend || a.payee.localeCompare(b.payee))
+    .slice(0, limit);
+}
+
+function merchantTrendsConservationOk(merchantTrends, totalSpend) {
+  if (totalSpend == null || !Number.isFinite(totalSpend)) return false;
+  const trendCents = sumCents((merchantTrends || []).map((row) => toCents(row.spend)));
+  return trendCents === toCents(totalSpend);
+}
+
 module.exports = {
   PROJECTION_INCOMPLETE_REASON,
   mergeProjectionCompleteness,
+  merchantTrendsConservationOk,
+  merchantTrendsFromClassifiedLeaves,
   projectionCompletenessFromLeaves,
   spendSummaryFromClassifiedLeaves,
 };
