@@ -5,6 +5,40 @@
 
 let nextSettingsConnectionLeaseId = 1;
 
+const CONNECTION_SAVE_ACTIONS = Object.freeze({
+  TEST: 'test',
+  SAVE_URL: 'save-url',
+  SAVE_TOKEN: 'save-token',
+  DEMO: 'demo',
+  FACE_ID: 'face-id',
+  DISCONNECT: 'disconnect',
+});
+
+function settingsConnectionSaveSkippedMessage(action) {
+  switch (action) {
+    case CONNECTION_SAVE_ACTIONS.DISCONNECT:
+      return 'Could not disconnect — another connection change is in progress. Try again shortly.';
+    case CONNECTION_SAVE_ACTIONS.FACE_ID:
+      return 'Could not update Face ID lock — another connection change is in progress. Try again shortly.';
+    case CONNECTION_SAVE_ACTIONS.SAVE_URL:
+      return 'Could not save server URL — another connection change is in progress. Try again shortly.';
+    case CONNECTION_SAVE_ACTIONS.SAVE_TOKEN:
+      return 'Could not update token — another connection change is in progress. Try again shortly.';
+    case CONNECTION_SAVE_ACTIONS.DEMO:
+      return 'Could not change demo mode — another connection change is in progress. Try again shortly.';
+    case CONNECTION_SAVE_ACTIONS.TEST:
+      return 'Could not test connection — another connection change is in progress. Try again shortly.';
+    default:
+      return 'Another connection change is in progress. Try again shortly.';
+  }
+}
+
+function disconnectButtonAccessibilityLabel(busyOwner) {
+  if (!busyOwner) return 'Disconnect';
+  if (busyOwner.action === CONNECTION_SAVE_ACTIONS.DISCONNECT) return 'Disconnecting';
+  return 'Disconnect unavailable while a connection change is in progress';
+}
+
 function createSettingsConnectionSaveAdmission() {
   return { ownerLease: null };
 }
@@ -47,10 +81,13 @@ function resetSettingsConnectionLeaseCounter() {
 }
 
 module.exports = {
+  CONNECTION_SAVE_ACTIONS,
   createSettingsConnectionSaveAdmission,
+  disconnectButtonAccessibilityLabel,
   tryAcquireSettingsConnectionSave,
   releaseSettingsConnectionSave,
   isSettingsConnectionSaveBusy,
   runSettingsConnectionSave,
   resetSettingsConnectionLeaseCounter,
+  settingsConnectionSaveSkippedMessage,
 };

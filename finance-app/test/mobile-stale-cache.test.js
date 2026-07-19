@@ -10,11 +10,14 @@ const {
   isSearchQuerySettled,
 } = require('../src/lib/query-display-state.js');
 const {
+  CONNECTION_SAVE_ACTIONS,
   createSettingsConnectionSaveAdmission,
+  disconnectButtonAccessibilityLabel,
   isSettingsConnectionSaveBusy,
   releaseSettingsConnectionSave,
   resetSettingsConnectionLeaseCounter,
   runSettingsConnectionSave,
+  settingsConnectionSaveSkippedMessage,
   tryAcquireSettingsConnectionSave,
 } = require('../src/lib/settings-connection-save.js');
 const { statCardAccessibilityLabel, heroMetricAccessibilityLabel } = require('../src/lib/metric-a11y.js');
@@ -22,14 +25,15 @@ const { statCardAccessibilityLabel, heroMetricAccessibilityLabel } = require('..
 const root = path.resolve(__dirname, '..');
 
 function createBusyUi() {
-  let busyLease = null;
+  let busyOwner = null;
   return {
     hooks: {
-      onAcquired: (lease) => { busyLease = lease; },
-      onReleased: (lease) => { if (busyLease === lease) busyLease = null; },
+      onAcquired: (lease, action = 'test') => { busyOwner = { lease, action }; },
+      onReleased: (lease) => { if (busyOwner?.lease === lease) busyOwner = null; },
     },
-    isBusy: () => busyLease != null,
-    lease: () => busyLease,
+    isBusy: () => busyOwner != null,
+    owner: () => busyOwner,
+    lease: () => busyOwner?.lease ?? null,
   };
 }
 
@@ -199,19 +203,99 @@ test('review navigation is gated while acknowledge mutation is locked', () => {
   assert.match(source, /if \(navLocked\) return/);
 });
 
+test('disconnect button a11y distinguishes disconnect-in-flight from unrelated busy', () => {
+  assert.equal(disconnectButtonAccessibilityLabel(null), 'Disconnect');
+  assert.equal(
+    disconnectButtonAccessibilityLabel({ lease: 1, action: CONNECTION_SAVE_ACTIONS.SAVE_URL }),
+    'Disconnect unavailable while a connection change is in progress',
+  );
+  assert.equal(
+    disconnectButtonAccessibilityLabel({ lease: 2, action: CONNECTION_SAVE_ACTIONS.DISCONNECT }),
+    'Disconnecting',
+  );
+});
+
+test('skipped connection save exposes deterministic user-facing message', () => {
+  assert.match(
+    settingsConnectionSaveSkippedMessage(CONNECTION_SAVE_ACTIONS.DISCONNECT),
+    /Could not disconnect/,
+  );
+  assert.match(
+    settingsConnectionSaveSkippedMessage(CONNECTION_SAVE_ACTIONS.FACE_ID),
+    /Face ID lock/,
+  );
+});
+
+test('face id flow keeps admission lease held through authenticate prompt', async () => {
+  resetSettingsConnectionLeaseCounter();
+  const admission = createSettingsConnectionSaveAdmission();
+  const ui = createBusyUi();
+  let authStarted = false;
+  let unblockAuth;
+  const pending = runSettingsConnectionSave(
+    admission,
+    async () => {
+      authStarted = true;
+      assert.equal(ui.isBusy(), true);
+      assert.equal(ui.owner()?.action, CONNECTION_SAVE_ACTIONS.FACE_ID);
+      await new Promise((resolve) => { unblockAuth = resolve; });
+      return 'saved';
+    },
+    {
+      onAcquired: (lease) => ui.hooks.onAcquired(lease, CONNECTION_SAVE_ACTIONS.FACE_ID),
+      onReleased: ui.hooks.onReleased,
+    },
+  );
+  assert.equal(ui.isBusy(), true);
+  assert.equal(authStarted, true);
+  unblockAuth();
+  await pending;
+  assert.equal(ui.isBusy(), false);
+});
+
+test('stale disconnect confirm reports skipped message instead of silent no-op', async () => {
+  resetSettingsConnectionLeaseCounter();
+  const admission = createSettingsConnectionSaveAdmission();
+  let finishSave;
+  const save = runSettingsConnectionSave(
+    admission,
+    () => new Promise((resolve) => { finishSave = resolve; }),
+    { onAcquired: (lease) => {}, onReleased: () => {} },
+  );
+  const skipped = await runSettingsConnectionSave(
+    admission,
+    async () => { throw new Error('clear should not run'); },
+    { onAcquired: (lease) => {}, onReleased: () => {} },
+  );
+  assert.equal(skipped.skipped, true);
+  assert.match(
+    settingsConnectionSaveSkippedMessage(CONNECTION_SAVE_ACTIONS.DISCONNECT),
+    /Try again shortly/,
+  );
+  finishSave();
+  await save;
+});
+
 test('settings profile-changing actions share lease-owned admission guard', () => {
   const source = fs.readFileSync(path.join(root, 'src/app/(tabs)/settings.tsx'), 'utf8');
   assert.match(source, /createSettingsConnectionSaveAdmission/);
   assert.match(source, /runSettingsConnectionSave/);
   assert.match(source, /onAcquired/);
   assert.match(source, /onReleased/);
-  assert.match(source, /busyLease/);
-  assert.match(source, /runConnectionSave\('Disconnecting/);
-  assert.match(source, /runConnectionSave\('Updating security/);
+  assert.match(source, /busyOwner/);
+  assert.match(source, /disconnectBusy/);
+  assert.match(source, /settingsConnectionSaveSkippedMessage/);
+  assert.match(source, /announceConnectionStatus/);
+  assert.match(source, /CONNECTION_SAVE_ACTIONS\.DISCONNECT/);
+  assert.match(source, /CONNECTION_SAVE_ACTIONS\.FACE_ID/);
+  assert.match(source, /await authenticate\('Enable Face ID lock'\)/);
   assert.match(source, /await setConfig\(verified\)/);
   assert.match(source, /await clear\(\)/);
+  assert.match(source, /disconnectBusy \? 'Disconnecting/);
+  assert.doesNotMatch(source, /connectionBusy \? 'Disconnecting/);
+  assert.match(source, /disconnectButtonAccessibilityLabel\(busyOwner\)/);
   assert.match(source, /disabled={connectionBusy}/);
-  assert.match(source, /accessibilityState={{ disabled: connectionBusy, busy: connectionBusy }}/);
+  assert.match(source, /accessibilityState={{ disabled: connectionBusy, busy: disconnectBusy }}/);
 });
 
 test('reimbursement range chips disable while confirm/dismiss in flight', () => {

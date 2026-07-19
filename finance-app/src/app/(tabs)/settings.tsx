@@ -14,7 +14,13 @@ import { authenticate, isBiometricAvailable } from '@/lib/biometric';
 import { checkForUpdatesManual, useOtaUpdateStatus } from '@/lib/auto-update';
 import { DASHBOARD_WIDGETS, useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { buildRedactedDiagnostics } from '@/lib/diagnostics';
-import { createSettingsConnectionSaveAdmission, runSettingsConnectionSave } from '@/lib/settings-connection-save.js';
+import {
+  CONNECTION_SAVE_ACTIONS,
+  createSettingsConnectionSaveAdmission,
+  disconnectButtonAccessibilityLabel,
+  runSettingsConnectionSave,
+  settingsConnectionSaveSkippedMessage,
+} from '@/lib/settings-connection-save.js';
 import { DEFAULT_LOW_BALANCE, DEFAULT_THRESHOLD, ensurePermission, getNotifSettings, NOTIF, notifyNotifSettingsChanged } from '@/lib/notifications';
 import { getFinanceCapabilities } from '@/lib/capabilities';
 import { isNotificationReconciliationActive } from '@/lib/notification-reconciliation-active';
@@ -25,6 +31,8 @@ type NotifKey = 'bills' | 'largeCharge' | 'newSub' | 'weekly' | 'lowBalance' | '
 
 const mask = (t: string | null) => (t ? `••••${t.slice(-4)}` : '—');
 
+type ConnectionSaveAction = typeof CONNECTION_SAVE_ACTIONS[keyof typeof CONNECTION_SAVE_ACTIONS];
+
 export default function Settings() {
   const { serverUrl, token, faceId, demo, setConfig, clear } = useServerConfig();
   const router = useRouter();
@@ -33,11 +41,13 @@ export default function Settings() {
   const [newToken, setNewToken] = useState('');
   const [status, setStatus] = useState<string | null>(null);
   const connectionAdmissionRef = useRef(createSettingsConnectionSaveAdmission());
-  const [busyLease, setBusyLease] = useState<number | null>(null);
-  const connectionBusy = busyLease != null;
+  const [busyOwner, setBusyOwner] = useState<{ lease: number; action: ConnectionSaveAction } | null>(null);
+  const [connectionAnnounce, setConnectionAnnounce] = useState('');
+  const connectionBusy = busyOwner != null;
+  const disconnectBusy = busyOwner?.action === CONNECTION_SAVE_ACTIONS.DISCONNECT;
   const connectionSaveHooks = useMemo(() => ({
-    onAcquired: (lease: number) => setBusyLease(lease),
-    onReleased: (lease: number) => setBusyLease((current) => (current === lease ? null : current)),
+    onAcquired: (lease: number, action: ConnectionSaveAction) => setBusyOwner({ lease, action }),
+    onReleased: (lease: number) => setBusyOwner((current) => (current?.lease === lease ? null : current)),
   }), []);
   const liveUpdateStatus = useOtaUpdateStatus();
   const [notif, setNotif] = useState(getNotifSettings());
@@ -107,32 +117,45 @@ export default function Settings() {
     });
   };
 
+  const announceConnectionStatus = (message: string) => {
+    setStatus(message);
+    setConnectionAnnounce(message);
+  };
+
   const toggleFaceId = async (value: boolean) => {
-    if (connectionBusy) return;
-    if (value) {
-      const ok = await authenticate('Enable Face ID lock');
-      if (!ok) return;
-    }
-    await runConnectionSave('Updating security…', async () => {
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.FACE_ID, value ? 'Confirm Face ID…' : 'Updating security…', async () => {
+      if (value) {
+        const ok = await authenticate('Enable Face ID lock');
+        if (!ok) {
+          setStatus('Face ID lock not enabled');
+          return;
+        }
+      }
       await setConfig({ faceId: value });
       setStatus(value ? 'Face ID lock enabled' : 'Face ID lock disabled');
     });
   };
 
-  const runConnectionSave = async (statusLabel: string, task: () => Promise<void>) => {
+  const runConnectionSave = async (action: ConnectionSaveAction, statusLabel: string, task: () => Promise<void>) => {
     const outcome = await runSettingsConnectionSave(
       connectionAdmissionRef.current,
       async () => {
         setStatus(statusLabel);
         await task();
       },
-      connectionSaveHooks,
+      {
+        ...connectionSaveHooks,
+        onAcquired: (lease: number) => connectionSaveHooks.onAcquired(lease, action),
+      },
     );
+    if (outcome.skipped) {
+      announceConnectionStatus(settingsConnectionSaveSkippedMessage(action));
+    }
     return outcome;
   };
 
   const test = async () => {
-    await runConnectionSave('Testing…', async () => {
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.TEST, 'Testing…', async () => {
       try {
         const candidateUrl = editUrl.trim() || serverUrl || '';
         const candidateToken = newToken.trim() || token || '';
@@ -146,7 +169,7 @@ export default function Settings() {
 
   const saveUrl = async () => {
     if (!editUrl.trim()) return;
-    await runConnectionSave('Verifying server…', async () => {
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.SAVE_URL, 'Verifying server…', async () => {
       try {
         const verified = await verifyConnectionConfig({
           serverUrl: editUrl,
@@ -164,7 +187,7 @@ export default function Settings() {
   };
   const saveToken = async () => {
     if (!newToken.trim()) return;
-    await runConnectionSave('Verifying token…', async () => {
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.SAVE_TOKEN, 'Verifying token…', async () => {
       try {
         const verified = await verifyConnectionConfig({
           serverUrl: editUrl.trim() || serverUrl || '',
@@ -181,7 +204,7 @@ export default function Settings() {
     });
   };
   const setDemoMode = async (value: boolean) => {
-    await runConnectionSave(value ? 'Enabling demo…' : 'Disabling demo…', async () => {
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.DEMO, value ? 'Enabling demo…' : 'Disabling demo…', async () => {
       try {
         const verified = await verifyConnectionConfig({
           serverUrl: editUrl.trim() || serverUrl || '',
@@ -204,7 +227,7 @@ export default function Settings() {
         text: 'Disconnect',
         style: 'destructive',
         onPress: () => {
-          void runConnectionSave('Disconnecting…', async () => {
+          void runConnectionSave(CONNECTION_SAVE_ACTIONS.DISCONNECT, 'Disconnecting…', async () => {
             try {
               await clear();
               setStatus('Disconnected');
@@ -222,7 +245,7 @@ export default function Settings() {
 
   return (
     <Screen title="Settings" testID="settings-screen">
-      <MutationLiveRegion message={reconcileToggleAction.announce} />
+      <MutationLiveRegion message={connectionAnnounce || reconcileToggleAction.announce} />
       <MutationFormBanner outcome={reconcileToggleAction.outcome} onRetry={reconcileToggleAction.retry} onRefetch={() => reconPending.refetch()} />
       <CardTitle>Connection</CardTitle>
       <Card style={{ marginBottom: 16 }}>
@@ -242,7 +265,9 @@ export default function Settings() {
         <Pressable testID="settings-test-connection-button" accessibilityRole="button" accessibilityLabel={connectionBusy ? 'Testing connection' : 'Test Connection'} accessibilityState={{ disabled: connectionBusy, busy: connectionBusy }} style={({ pressed }) => [styles.smallBtn, { marginTop: 16, backgroundColor: colors.surface2 }, (pressed && !connectionBusy) && { opacity: 0.7 }, connectionBusy && { opacity: 0.6 }]} disabled={connectionBusy} onPress={test}>
           {connectionBusy ? <ActivityIndicator color={colors.accentLight} /> : <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>Test Connection</Text>}
         </Pressable>
-        {status ? <Text style={styles.status}>{status}</Text> : null}
+        {status ? (
+          <Text testID="settings-connection-status" accessibilityRole="text" style={styles.status}>{status}</Text>
+        ) : null}
       </Card>
 
       <CardTitle>Security</CardTitle>
@@ -385,13 +410,13 @@ export default function Settings() {
       <Pressable
         testID="settings-disconnect-button"
         accessibilityRole="button"
-        accessibilityLabel={connectionBusy ? 'Disconnect unavailable while saving connection settings' : 'Disconnect'}
-        accessibilityState={{ disabled: connectionBusy, busy: connectionBusy }}
+        accessibilityLabel={disconnectButtonAccessibilityLabel(busyOwner)}
+        accessibilityState={{ disabled: connectionBusy, busy: disconnectBusy }}
         style={({ pressed }) => [styles.disconnect, connectionBusy && { opacity: 0.45 }, pressed && !connectionBusy && { opacity: 0.7 }]}
         disabled={connectionBusy}
         onPress={disconnect}
       >
-        <Text style={styles.disconnectText}>{connectionBusy ? 'Disconnecting…' : 'Disconnect'}</Text>
+        <Text style={styles.disconnectText}>{disconnectBusy ? 'Disconnecting…' : 'Disconnect'}</Text>
       </Pressable>
     </Screen>
   );
