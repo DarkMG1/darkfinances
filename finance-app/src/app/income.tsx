@@ -6,6 +6,7 @@ import { PushScreen } from '@/components/screen';
 import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { useFinanceToday } from '@/lib/date-only';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { cadenceLabel, colors, dueLabel, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
@@ -46,10 +47,20 @@ export default function Income() {
         <EmptyState icon="dollarsign.circle">No recurring income detected yet</EmptyState>
       ) : (
         <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>MONTHLY INCOME</Text>
-            <Text style={styles.heroValue}>{fmtMoney(data.monthlyTotal)}</Text>
-            <Text style={styles.heroSub}>
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              'Monthly income',
+              fmtMoney(data.monthlyTotal),
+              data.nextPayday
+                ? `Next: ${cap(data.nextPaydayPayee ?? 'paycheck')}, ${dueLabel(data.nextPayday, financeToday)}, ${fmtPos(data.nextPaydayAmount ?? 0)}`
+                : `${data.activeCount} active stream${data.activeCount === 1 ? '' : 's'}`,
+            )}
+          >
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">MONTHLY INCOME</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(data.monthlyTotal)}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
               {data.nextPayday
                 ? `Next: ${cap(data.nextPaydayPayee ?? 'paycheck')} · ${dueLabel(data.nextPayday, financeToday)} · ${fmtPos(data.nextPaydayAmount ?? 0)}`
                 : `${data.activeCount} active stream${data.activeCount === 1 ? '' : 's'}`}

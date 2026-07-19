@@ -5,8 +5,14 @@ import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { colors } from '@/theme/colors';
 import { categoryIcon, monogramColor } from '@/theme/categoryIcons';
 
-export function Card({ children, style, testID }: { children: React.ReactNode; style?: ViewStyle; testID?: string }) {
-  return <View testID={testID} style={[styles.card, style]}>{children}</View>;
+export function Card({ children, style, testID, ...a11y }: {
+  children: React.ReactNode;
+  style?: ViewStyle;
+  testID?: string;
+  accessible?: boolean;
+  accessibilityLabel?: string;
+}) {
+  return <View testID={testID} style={[styles.card, style]} {...a11y}>{children}</View>;
 }
 
 export function SectionLabel({ children, right }: { children: React.ReactNode; right?: React.ReactNode }) {
@@ -22,31 +28,34 @@ export function CardTitle({ children, style }: { children: React.ReactNode; styl
   return <Text style={[styles.cardTitle, style]}>{children}</Text>;
 }
 
-export function StatCard({ label, value, valueColor, sub, subColor, onPress, testID }: {
-  label: string; value: string; valueColor?: string; sub?: string; subColor?: string; onPress?: () => void; testID?: string;
+export function StatCard({ label, value, valueColor, sub, subColor, onPress, testID, accessibilityLabel }: {
+  label: string; value: string; valueColor?: string; sub?: string; subColor?: string; onPress?: () => void; testID?: string; accessibilityLabel?: string;
 }) {
+  const a11yLabel = accessibilityLabel ?? (sub ? `${label}, ${value}, ${sub}` : `${label}, ${value}`);
   const body = (
     <>
-      <Text style={styles.statLabel}>{label}</Text>
+      <Text style={styles.statLabel} accessibilityElementsHidden importantForAccessibility="no">{label}</Text>
       <Text
         style={[styles.statValue, valueColor ? { color: valueColor } : null]}
         numberOfLines={1}
         adjustsFontSizeToFit
         minimumFontScale={0.6}
+        accessibilityElementsHidden
+        importantForAccessibility="no"
       >
         {value}
       </Text>
-      {sub ? <Text style={[styles.statSub, subColor ? { color: subColor } : null]}>{sub}</Text> : null}
+      {sub ? <Text style={[styles.statSub, subColor ? { color: subColor } : null]} accessibilityElementsHidden importantForAccessibility="no">{sub}</Text> : null}
     </>
   );
   if (onPress) {
     return (
-      <Pressable testID={testID} style={({ pressed }) => [styles.card, styles.statCard, pressed && { opacity: 0.6 }]} onPress={onPress}>
+      <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={a11yLabel} style={({ pressed }) => [styles.card, styles.statCard, pressed && { opacity: 0.6 }]} onPress={onPress}>
         {body}
       </Pressable>
     );
   }
-  return <View testID={testID} style={[styles.card, styles.statCard]}>{body}</View>;
+  return <View testID={testID} accessible accessibilityLabel={a11yLabel} style={[styles.card, styles.statCard]}>{body}</View>;
 }
 
 // Offline merchant/category avatar. Pass `label` (payee) for a colored monogram,

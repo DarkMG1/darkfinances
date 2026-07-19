@@ -15,6 +15,13 @@ appId: ${MAESTRO_APP_ID}
     id: settings-server-url-input
 - assertVisible:
     id: settings-token-input
+- assertVisible:
+    id: settings-save-url-button
+- tapOn:
+    id: settings-save-url-button
+    optional: true
+- assertVisible:
+    id: settings-screen
 - tapOn:
     id: settings-test-connection-button
 - assertVisible:

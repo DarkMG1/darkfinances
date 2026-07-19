@@ -14,6 +14,7 @@ import { haptics } from '@/lib/haptics';
 import { useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { useFinanceToday } from '@/lib/date-only';
 import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -173,11 +174,16 @@ export default function Overview() {
           )}
 
           {safeToSpend?.complete && safeToSpend.value != null ? (
-            <Card testID="today-safe-to-spend" style={styles.liquidityCard}>
+            <Card
+              testID="today-safe-to-spend"
+              style={styles.liquidityCard}
+              accessible
+              accessibilityLabel={heroMetricAccessibilityLabel('Available after this month\'s plan', fmtMoney(safeToSpend.value), safeToSpend.provenance.method)}
+            >
               <View style={{ flex: 1 }}>
-                <Text style={styles.heroLabel}>AVAILABLE AFTER THIS MONTH&apos;S PLAN</Text>
-                <Text style={[styles.liquidityValue, { color: safeToSpend.value >= 0 ? colors.text : colors.red }]}>{fmtMoney(safeToSpend.value)}</Text>
-                <Text style={styles.heroSub}>{safeToSpend.provenance.method}</Text>
+                <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">AVAILABLE AFTER THIS MONTH&apos;S PLAN</Text>
+                <Text style={[styles.liquidityValue, { color: safeToSpend.value >= 0 ? colors.text : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(safeToSpend.value)}</Text>
+                <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{safeToSpend.provenance.method}</Text>
               </View>
               <SymbolView name="wallet.pass.fill" tintColor={colors.accentLight} size={28} resizeMode="scaleAspectFit" />
             </Card>
@@ -219,24 +225,38 @@ export default function Overview() {
           ) : null}
 
           {widgets.netWorth ? (
-            <Pressable testID="home-networth-hero" onPress={() => { haptics.tap(); router.push('/networth' as never); }} style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}>
-              <Text style={styles.heroLabel}>NET WORTH</Text>
-              <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>
+            <Pressable
+              testID="home-networth-hero"
+              accessibilityRole="button"
+              accessibilityLabel={heroMetricAccessibilityLabel(
+                'Net worth',
+                netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth)),
+                !netWorthAuthoritative && netWorthIncompleteReasons.length
+                  ? 'Local estimate hidden, server projection incomplete'
+                  : aggregateDisplay.showAggregates
+                    ? `${fmtPos(aggregateDisplay.assets!)} assets, ${fmtPos(Math.abs(aggregateDisplay.liabilities!))} liabilities`
+                    : aggregateDisplay.unavailableLabel,
+              )}
+              onPress={() => { haptics.tap(); router.push('/networth' as never); }}
+              style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}
+            >
+              <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">NET WORTH</Text>
+              <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">
                 {netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth))}
               </Text>
               {!netWorthAuthoritative && netWorthIncompleteReasons.length ? (
-                <Text style={styles.heroSub}>Local estimate hidden — server projection incomplete</Text>
+                <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">Local estimate hidden — server projection incomplete</Text>
               ) : null}
               <View style={styles.heroMetaRow}>
                 {nwDelta != null ? (
-                  <Text style={[styles.heroDelta, { color: nwDelta >= 0 ? colors.green : colors.red }]}>
+                  <Text style={[styles.heroDelta, { color: nwDelta >= 0 ? colors.green : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">
                     {nwDelta >= 0 ? '▲' : '▼'} {fmtPos(Math.abs(nwDelta))} this month
                   </Text>
                 ) : null}
                 {aggregateDisplay.showAggregates ? (
-                  <Text style={styles.heroSub}>{fmtPos(aggregateDisplay.assets!)} assets · {fmtPos(Math.abs(aggregateDisplay.liabilities!))} liabilities · details ›</Text>
+                  <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{fmtPos(aggregateDisplay.assets!)} assets · {fmtPos(Math.abs(aggregateDisplay.liabilities!))} liabilities · details ›</Text>
                 ) : (
-                  <Text style={styles.heroSub}>{aggregateDisplay.unavailableLabel} · details ›</Text>
+                  <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{aggregateDisplay.unavailableLabel} · details ›</Text>
                 )}
               </View>
             </Pressable>

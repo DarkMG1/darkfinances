@@ -11,6 +11,9 @@ appId: ${MAESTRO_APP_ID}
     optional: true
 - assertVisible:
     id: spending-screen
+- assertNotVisible:
+    id: spending-refetch-banner
+    optional: true
 - assertVisible: Spending
 - assertVisible:
     id: spending-period-month-selected

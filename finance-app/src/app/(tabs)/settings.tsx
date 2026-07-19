@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, Pressable, Share, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, Share, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
 import * as Updates from 'expo-updates';
@@ -14,6 +14,15 @@ import { authenticate, isBiometricAvailable } from '@/lib/biometric';
 import { checkForUpdatesManual, useOtaUpdateStatus } from '@/lib/auto-update';
 import { DASHBOARD_WIDGETS, useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { buildRedactedDiagnostics } from '@/lib/diagnostics';
+import {
+  CONNECTION_SAVE_ACTIONS,
+  connectionButtonControlState,
+  connectionSwitchAccessibilityLabel,
+  createSettingsConnectionSaveAdmission,
+  disconnectButtonVisibleLabel,
+  runSettingsConnectionSave,
+  settingsConnectionSaveSkippedMessage,
+} from '@/lib/settings-connection-save.js';
 import { DEFAULT_LOW_BALANCE, DEFAULT_THRESHOLD, ensurePermission, getNotifSettings, NOTIF, notifyNotifSettingsChanged } from '@/lib/notifications';
 import { getFinanceCapabilities } from '@/lib/capabilities';
 import { isNotificationReconciliationActive } from '@/lib/notification-reconciliation-active';
@@ -24,6 +33,8 @@ type NotifKey = 'bills' | 'largeCharge' | 'newSub' | 'weekly' | 'lowBalance' | '
 
 const mask = (t: string | null) => (t ? `••••${t.slice(-4)}` : '—');
 
+type ConnectionSaveAction = typeof CONNECTION_SAVE_ACTIONS[keyof typeof CONNECTION_SAVE_ACTIONS];
+
 export default function Settings() {
   const { serverUrl, token, faceId, demo, setConfig, clear } = useServerConfig();
   const router = useRouter();
@@ -31,6 +42,18 @@ export default function Settings() {
   const [editUrl, setEditUrl] = useState(serverUrl ?? '');
   const [newToken, setNewToken] = useState('');
   const [status, setStatus] = useState<string | null>(null);
+  const connectionAdmissionRef = useRef(createSettingsConnectionSaveAdmission());
+  const [busyOwner, setBusyOwner] = useState<{ lease: number; action: ConnectionSaveAction } | null>(null);
+  const [connectionAnnounce, setConnectionAnnounce] = useState('');
+  const connectionBusy = busyOwner != null;
+  const saveUrlControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.SAVE_URL, busyOwner);
+  const saveTokenControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.SAVE_TOKEN, busyOwner);
+  const testControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.TEST, busyOwner);
+  const disconnectControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.DISCONNECT, busyOwner);
+  const connectionSaveHooks = useMemo(() => ({
+    onAcquired: (lease: number, action: ConnectionSaveAction) => setBusyOwner({ lease, action }),
+    onReleased: (lease: number) => setBusyOwner((current) => (current?.lease === lease ? null : current)),
+  }), []);
   const liveUpdateStatus = useOtaUpdateStatus();
   const [notif, setNotif] = useState(getNotifSettings());
   const [thresholdText, setThresholdText] = useState(String(getNotifSettings().threshold || DEFAULT_THRESHOLD));
@@ -99,29 +122,59 @@ export default function Settings() {
     });
   };
 
+  const announceConnectionStatus = (message: string) => {
+    setStatus(message);
+    setConnectionAnnounce(message);
+  };
+
   const toggleFaceId = async (value: boolean) => {
-    if (value) {
-      const ok = await authenticate('Enable Face ID lock');
-      if (!ok) return;
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.FACE_ID, value ? 'Confirm Face ID…' : 'Updating security…', async () => {
+      if (value) {
+        const ok = await authenticate('Enable Face ID lock');
+        if (!ok) {
+          announceConnectionStatus('Face ID lock not enabled');
+          return;
+        }
+      }
+      await setConfig({ faceId: value });
+      announceConnectionStatus(value ? 'Face ID lock enabled' : 'Face ID lock disabled');
+    });
+  };
+
+  const runConnectionSave = async (action: ConnectionSaveAction, statusLabel: string, task: () => Promise<void>) => {
+    const outcome = await runSettingsConnectionSave(
+      connectionAdmissionRef.current,
+      async () => {
+        setStatus(statusLabel);
+        await task();
+      },
+      {
+        ...connectionSaveHooks,
+        onAcquired: (lease: number) => connectionSaveHooks.onAcquired(lease, action),
+      },
+    );
+    if (outcome.skipped) {
+      announceConnectionStatus(settingsConnectionSaveSkippedMessage(action));
     }
-    await setConfig({ faceId: value });
+    return outcome;
   };
 
   const test = async () => {
-    setStatus('Testing…');
-    try {
-      const candidateUrl = editUrl.trim() || serverUrl || '';
-      const candidateToken = newToken.trim() || token || '';
-      await verifyConnectionConfig({ serverUrl: candidateUrl, token: candidateToken, demo });
-      setStatus('Connected ✓');
-    } catch (e: any) {
-      setStatus(e?.error || e?.message || 'Failed');
-    }
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.TEST, 'Testing…', async () => {
+      try {
+        const candidateUrl = editUrl.trim() || serverUrl || '';
+        const candidateToken = newToken.trim() || token || '';
+        await verifyConnectionConfig({ serverUrl: candidateUrl, token: candidateToken, demo });
+        setStatus('Connected ✓');
+      } catch (e: any) {
+        setStatus(e?.error || e?.message || 'Failed');
+      }
+    });
   };
 
   const saveUrl = async () => {
-    if (editUrl.trim()) {
-      setStatus('Verifying server…');
+    if (!editUrl.trim()) return;
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.SAVE_URL, 'Verifying server…', async () => {
       try {
         const verified = await verifyConnectionConfig({
           serverUrl: editUrl,
@@ -135,11 +188,11 @@ export default function Settings() {
       } catch (e: any) {
         setStatus(e?.error || e?.message || 'Could not verify server');
       }
-    }
+    });
   };
   const saveToken = async () => {
-    if (newToken.trim()) {
-      setStatus('Verifying token…');
+    if (!newToken.trim()) return;
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.SAVE_TOKEN, 'Verifying token…', async () => {
       try {
         const verified = await verifyConnectionConfig({
           serverUrl: editUrl.trim() || serverUrl || '',
@@ -153,21 +206,23 @@ export default function Settings() {
       } catch (e: any) {
         setStatus(e?.error || e?.message || 'Could not verify token');
       }
-    }
+    });
   };
   const setDemoMode = async (value: boolean) => {
-    try {
-      const verified = await verifyConnectionConfig({
-        serverUrl: editUrl.trim() || serverUrl || '',
-        token: newToken.trim() || token || '',
-        demo: value,
-      });
-      await setConfig(verified);
-      setEditUrl(verified.serverUrl);
-      if (newToken.trim()) setNewToken('');
-    } catch (e: any) {
-      Alert.alert('Could not change demo mode', e?.error || e?.message || 'Please try again.');
-    }
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.DEMO, value ? 'Enabling demo…' : 'Disabling demo…', async () => {
+      try {
+        const verified = await verifyConnectionConfig({
+          serverUrl: editUrl.trim() || serverUrl || '',
+          token: newToken.trim() || token || '',
+          demo: value,
+        });
+        await setConfig(verified);
+        setEditUrl(verified.serverUrl);
+        if (newToken.trim()) setNewToken('');
+      } catch (e: any) {
+        Alert.alert('Could not change demo mode', e?.error || e?.message || 'Please try again.');
+      }
+    });
   };
 
   const disconnect = () => {
@@ -176,15 +231,18 @@ export default function Settings() {
       {
         text: 'Disconnect',
         style: 'destructive',
-        onPress: async () => {
-          try {
-            await clear();
-          } catch (e: any) {
-            Alert.alert(
-              'Could not disconnect',
-              e?.error || e?.message || 'A pending finance operation must be reconciled first.',
-            );
-          }
+        onPress: () => {
+          void runConnectionSave(CONNECTION_SAVE_ACTIONS.DISCONNECT, 'Disconnecting…', async () => {
+            try {
+              await clear();
+              setStatus('Disconnected');
+            } catch (e: any) {
+              Alert.alert(
+                'Could not disconnect',
+                e?.error || e?.message || 'A pending finance operation must be reconciled first.',
+              );
+            }
+          });
         },
       },
     ]);
@@ -192,23 +250,53 @@ export default function Settings() {
 
   return (
     <Screen title="Settings" testID="settings-screen">
-      <MutationLiveRegion message={reconcileToggleAction.announce} />
+      <MutationLiveRegion message={connectionAnnounce || reconcileToggleAction.announce} />
       <MutationFormBanner outcome={reconcileToggleAction.outcome} onRetry={reconcileToggleAction.retry} onRefetch={() => reconPending.refetch()} />
       <CardTitle>Connection</CardTitle>
       <Card style={{ marginBottom: 16 }}>
         <Text style={styles.label}>Server URL</Text>
-        <TextInput testID="settings-server-url-input" style={styles.input} value={editUrl} onChangeText={setEditUrl} autoCapitalize="none" autoCorrect={false} />
-        <Pressable testID="settings-save-url-button" style={({ pressed }) => [styles.smallBtn, pressed && { opacity: 0.85 }]} onPress={saveUrl}><Text style={styles.smallBtnText}>Save URL</Text></Pressable>
+        <TextInput testID="settings-server-url-input" style={styles.input} value={editUrl} onChangeText={setEditUrl} autoCapitalize="none" autoCorrect={false} editable={!connectionBusy} />
+        <Pressable
+          testID="settings-save-url-button"
+          accessibilityRole="button"
+          accessibilityLabel={saveUrlControl.accessibilityLabel}
+          accessibilityState={{ disabled: saveUrlControl.disabled, busy: saveUrlControl.busy }}
+          style={({ pressed }) => [styles.smallBtn, (pressed && !saveUrlControl.disabled) && { opacity: 0.85 }, saveUrlControl.disabled && { opacity: 0.6 }]}
+          disabled={saveUrlControl.disabled}
+          onPress={saveUrl}
+        >
+          {saveUrlControl.showSpinner ? <ActivityIndicator color="#fff" /> : <Text style={styles.smallBtnText}>{saveUrlControl.visibleLabel}</Text>}
+        </Pressable>
 
         <Text style={[styles.label, { marginTop: 16 }]}>API Token</Text>
         <Text style={styles.maskedToken}>{mask(token)}</Text>
-        <TextInput testID="settings-token-input" style={styles.input} value={newToken} onChangeText={setNewToken} autoCapitalize="none" autoCorrect={false} secureTextEntry placeholder="Replace token…" placeholderTextColor={colors.muted} />
-        <Pressable testID="settings-save-token-button" style={({ pressed }) => [styles.smallBtn, pressed && { opacity: 0.85 }]} onPress={saveToken}><Text style={styles.smallBtnText}>Update Token</Text></Pressable>
-
-        <Pressable testID="settings-test-connection-button" style={({ pressed }) => [styles.smallBtn, { marginTop: 16, backgroundColor: colors.surface2 }, pressed && { opacity: 0.7 }]} onPress={test}>
-          <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>Test Connection</Text>
+        <TextInput testID="settings-token-input" style={styles.input} value={newToken} onChangeText={setNewToken} autoCapitalize="none" autoCorrect={false} secureTextEntry placeholder="Replace token…" placeholderTextColor={colors.muted} editable={!connectionBusy} />
+        <Pressable
+          testID="settings-save-token-button"
+          accessibilityRole="button"
+          accessibilityLabel={saveTokenControl.accessibilityLabel}
+          accessibilityState={{ disabled: saveTokenControl.disabled, busy: saveTokenControl.busy }}
+          style={({ pressed }) => [styles.smallBtn, (pressed && !saveTokenControl.disabled) && { opacity: 0.85 }, saveTokenControl.disabled && { opacity: 0.6 }]}
+          disabled={saveTokenControl.disabled}
+          onPress={saveToken}
+        >
+          {saveTokenControl.showSpinner ? <ActivityIndicator color="#fff" /> : <Text style={styles.smallBtnText}>{saveTokenControl.visibleLabel}</Text>}
         </Pressable>
-        {status ? <Text style={styles.status}>{status}</Text> : null}
+
+        <Pressable
+          testID="settings-test-connection-button"
+          accessibilityRole="button"
+          accessibilityLabel={testControl.accessibilityLabel}
+          accessibilityState={{ disabled: testControl.disabled, busy: testControl.busy }}
+          style={({ pressed }) => [styles.smallBtn, { marginTop: 16, backgroundColor: colors.surface2 }, (pressed && !testControl.disabled) && { opacity: 0.7 }, testControl.disabled && { opacity: 0.6 }]}
+          disabled={testControl.disabled}
+          onPress={test}
+        >
+          {testControl.showSpinner ? <ActivityIndicator color={colors.accentLight} /> : <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>{testControl.visibleLabel}</Text>}
+        </Pressable>
+        {status ? (
+          <Text testID="settings-connection-status" accessibilityRole="text" style={styles.status}>{status}</Text>
+        ) : null}
       </Card>
 
       <CardTitle>Security</CardTitle>
@@ -218,7 +306,15 @@ export default function Settings() {
             <Text style={styles.switchLabel}>Face ID Lock</Text>
             <Text style={styles.switchSub}>{bioAvailable ? 'Require Face ID on open' : 'Not available on this device'}</Text>
           </View>
-          <Switch testID="settings-face-id-switch" value={faceId} onValueChange={toggleFaceId} disabled={!bioAvailable} trackColor={{ true: colors.accent }} />
+          <Switch
+            testID="settings-face-id-switch"
+            value={faceId}
+            onValueChange={toggleFaceId}
+            disabled={!bioAvailable || connectionBusy}
+            accessibilityLabel={connectionSwitchAccessibilityLabel(CONNECTION_SAVE_ACTIONS.FACE_ID, busyOwner)}
+            accessibilityState={{ disabled: !bioAvailable || connectionBusy, busy: busyOwner?.action === CONNECTION_SAVE_ACTIONS.FACE_ID }}
+            trackColor={{ true: colors.accent }}
+          />
         </View>
       </Card>
 
@@ -229,7 +325,15 @@ export default function Settings() {
             <Text style={styles.switchLabel}>Show demo data</Text>
             <Text style={styles.switchSub}>Replace everything with sample finances — safe to show others. Your real data is never touched.</Text>
           </View>
-          <Switch testID="settings-demo-mode-switch" value={demo} onValueChange={setDemoMode} trackColor={{ true: colors.accent }} />
+          <Switch
+            testID="settings-demo-mode-switch"
+            value={demo}
+            onValueChange={setDemoMode}
+            disabled={connectionBusy}
+            accessibilityLabel={connectionSwitchAccessibilityLabel(CONNECTION_SAVE_ACTIONS.DEMO, busyOwner)}
+            accessibilityState={{ disabled: connectionBusy, busy: busyOwner?.action === CONNECTION_SAVE_ACTIONS.DEMO }}
+            trackColor={{ true: colors.accent }}
+          />
         </View>
       </Card>
 
@@ -348,8 +452,16 @@ export default function Settings() {
         {liveUpdateStatus ? <Text style={styles.status}>{liveUpdateStatus}</Text> : null}
       </Card>
 
-      <Pressable testID="settings-disconnect-button" style={({ pressed }) => [styles.disconnect, pressed && { opacity: 0.7 }]} onPress={disconnect}>
-        <Text style={styles.disconnectText}>Disconnect</Text>
+      <Pressable
+        testID="settings-disconnect-button"
+        accessibilityRole="button"
+        accessibilityLabel={disconnectControl.accessibilityLabel}
+        accessibilityState={{ disabled: disconnectControl.disabled, busy: disconnectControl.busy }}
+        style={({ pressed }) => [styles.disconnect, disconnectControl.disabled && { opacity: 0.45 }, pressed && !disconnectControl.disabled && { opacity: 0.7 }]}
+        disabled={disconnectControl.disabled}
+        onPress={disconnect}
+      >
+        <Text style={styles.disconnectText}>{disconnectButtonVisibleLabel(busyOwner)}</Text>
       </Pressable>
     </Screen>
   );

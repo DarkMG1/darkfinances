@@ -413,7 +413,7 @@ export function useSearch(q: string) {
     const timer = setTimeout(() => setDebounced(q.trim()), 300);
     return () => clearTimeout(timer);
   }, [q]);
-  return useFinanceQuery<SearchResult>({
+  const query = useFinanceQuery<SearchResult>({
     endpoint: API_ENDPOINTS.search.endpoint,
     method: API_ENDPOINTS.search.method,
     params: { q: debounced },
@@ -421,6 +421,7 @@ export function useSearch(q: string) {
     enabled: debounced.length >= 2,
     staleTime: 30_000,
   });
+  return { ...query, activeQuery: debounced };
 }
 
 export function useTags() {
