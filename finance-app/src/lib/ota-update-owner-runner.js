@@ -45,6 +45,7 @@ function createOtaUpdateOwnerRunner(deps) {
     owner,
     persistence,
     flushSchedules,
+    whenIdle: () => owner.whenIdle(),
     promptCount: () => promptCount,
     lastPrompt: () => lastPrompt,
     scheduledCount: () => scheduled.filter((item) => !item.cancelled).length,

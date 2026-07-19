@@ -36,10 +36,30 @@ function createOtaUpdateOwner(deps) {
   let promptGateOpen = false;
   let promptTimer = null;
   let cooldownTimer = null;
-  let inFlight = null;
+  let inFlightKind = null;
+  let inFlightToken = 0;
   let checkGeneration = 0;
   let activeCheckGeneration = 0;
   let queuedNativePending = null;
+  let initialized = false;
+  const idleWaiters = [];
+
+  function notifyIdleIfReady() {
+    if (inFlightKind != null) return;
+    const waiters = idleWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+  }
+
+  function whenIdle() {
+    if (inFlightKind == null) return Promise.resolve();
+    return new Promise((resolve) => idleWaiters.push(resolve));
+  }
+
+  function releaseInFlightWork() {
+    inFlightKind = null;
+    inFlightToken += 1;
+    notifyIdleIfReady();
+  }
 
   function emit() {
     for (const listener of listeners) listener();
@@ -86,8 +106,8 @@ function createOtaUpdateOwner(deps) {
 
   function invalidateInFlightWork() {
     activeCheckGeneration = ++checkGeneration;
-    inFlight = null;
     queuedNativePending = null;
+    releaseInFlightWork();
   }
 
   function applyNativePending(native) {
@@ -177,10 +197,11 @@ function createOtaUpdateOwner(deps) {
   }
 
   async function runCheck(source) {
-    if (inFlight === 'check') return;
+    if (inFlightKind != null) return;
     const generation = ++checkGeneration;
     activeCheckGeneration = generation;
-    inFlight = 'check';
+    const pipelineToken = ++inFlightToken;
+    inFlightKind = 'check-pipeline';
     try {
       const result = await deps.checkForUpdate();
       if (generation !== activeCheckGeneration) return;
@@ -197,7 +218,7 @@ function createOtaUpdateOwner(deps) {
       if (generation !== activeCheckGeneration) return;
 
       if (state.phase === OTA_UPDATE_PHASES.AVAILABLE) {
-        await runDownload(generation);
+        await runDownload(generation, pipelineToken);
       } else if (state.phase === OTA_UPDATE_PHASES.DOWNLOADED) {
         schedulePromptIfReady();
       }
@@ -208,21 +229,34 @@ function createOtaUpdateOwner(deps) {
         message: error?.message || 'Update check failed',
       });
     } finally {
-      if (activeCheckGeneration === generation) {
-        inFlight = null;
-        activeCheckGeneration = 0;
-        if (source === CHECK_SOURCES.AUTO) lastAutoCheckAt = now();
-        flushQueuedNativePending();
+      if (inFlightToken === pipelineToken) {
+        inFlightKind = null;
+        if (activeCheckGeneration === generation) {
+          activeCheckGeneration = 0;
+          if (source === CHECK_SOURCES.AUTO) lastAutoCheckAt = now();
+          flushQueuedNativePending();
+        }
+        notifyIdleIfReady();
       }
     }
   }
 
-  async function runDownload(expectedGeneration = activeCheckGeneration) {
-    if (inFlight === 'download') return;
-    if (state.phase !== OTA_UPDATE_PHASES.AVAILABLE && state.phase !== OTA_UPDATE_PHASES.DOWNLOADING) {
+  async function runDownload(expectedGeneration = activeCheckGeneration, pipelineToken = null) {
+    const standalone = pipelineToken == null;
+    if (standalone) {
+      if (inFlightKind != null) return;
+      pipelineToken = ++inFlightToken;
+      inFlightKind = 'download';
+    } else if (inFlightToken !== pipelineToken) {
       return;
     }
-    inFlight = 'download';
+    if (state.phase !== OTA_UPDATE_PHASES.AVAILABLE && state.phase !== OTA_UPDATE_PHASES.DOWNLOADING) {
+      if (standalone && inFlightToken === pipelineToken) {
+        inFlightKind = null;
+        notifyIdleIfReady();
+      }
+      return;
+    }
     dispatch({ type: 'download_started' });
     try {
       const result = await deps.fetchUpdate();
@@ -243,7 +277,10 @@ function createOtaUpdateOwner(deps) {
         message: error?.message || 'Update download failed',
       });
     } finally {
-      inFlight = null;
+      if (standalone && inFlightToken === pipelineToken) {
+        inFlightKind = null;
+        notifyIdleIfReady();
+      }
     }
   }
 
@@ -281,7 +318,7 @@ function createOtaUpdateOwner(deps) {
     const native = getNativePending();
     if (!native.pending || !native.updateId) return;
 
-    if (inFlight === 'check') {
+    if (inFlightKind != null) {
       queuedNativePending = native;
       return;
     }
@@ -297,6 +334,9 @@ function createOtaUpdateOwner(deps) {
   }
 
   function initialize() {
+    if (initialized) return;
+    initialized = true;
+
     clearScheduledWork();
     invalidateInFlightWork();
 
@@ -353,6 +393,7 @@ function createOtaUpdateOwner(deps) {
   }
 
   function dispose() {
+    initialized = false;
     clearScheduledWork();
     invalidateInFlightWork();
     listeners.clear();
@@ -378,6 +419,7 @@ function createOtaUpdateOwner(deps) {
     setPromptGateOpen,
     subscribe,
     syncNativePending,
+    whenIdle,
   };
 }
 

@@ -31,6 +31,7 @@ export interface OtaUpdateOwner {
   setPromptGateOpen: (open: boolean) => void;
   syncNativePending: () => void;
   dispose: () => void;
+  whenIdle: () => Promise<void>;
 }
 
 export function getOtaUpdateDisplayStatus(state: OtaUpdateSnapshot): string | null;
@@ -57,6 +58,7 @@ export function nativePendingFromUpdates(updates: {
 export function createOtaUpdateOwnerRunner(deps: Record<string, unknown>): {
   owner: OtaUpdateOwner;
   flushSchedules: (maxDelay?: number) => void;
+  whenIdle: () => Promise<void>;
   promptCount: () => number;
   lastPrompt: () => { onRestart: () => void; onLater: () => void } | null;
   scheduledCount: () => number;
