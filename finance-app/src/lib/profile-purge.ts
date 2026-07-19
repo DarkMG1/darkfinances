@@ -5,6 +5,7 @@ import {
 } from '@/lib/finance-operations';
 import { purgeOtaProfileState } from '@/lib/auto-update';
 import { mutationOutcomeHaptics } from '@/lib/haptics';
+import { purgeMutationFormDrafts } from '@/lib/mutation-form-draft-store';
 import { purgeNotificationProfileState } from '@/lib/notifications';
 import { purgeProfileGeneration } from '@/lib/notification-reconciliation';
 import { purgeReconnectRefreshProfileState } from '@/lib/reconnect-refresh-registry';
@@ -27,6 +28,7 @@ export async function purgeFinanceProfile(
   operationScope: string | null,
 ): Promise<void> {
   prepareFinanceOperationProfilePurge(operationScope);
+  purgeMutationFormDrafts(operationScope ?? undefined);
   purgeProfileGeneration(scope);
   purgeReconnectRefreshProfileState(scope);
   purgeOtaProfileState();

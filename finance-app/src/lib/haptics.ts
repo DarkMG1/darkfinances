@@ -27,7 +27,7 @@ export const haptics = {
 
 /** Client-side validation rejected before a network mutation is sent. */
 export function hapticClientValidationRejected(): void {
-  haptics.warning();
+  mutationOutcomeHaptics.emitClientValidationError();
 }
 
 export const mutationOutcomeHaptics = createMutationOutcomeHapticGate(haptics);

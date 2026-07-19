@@ -175,6 +175,38 @@ haptic errors are swallowed and never change mutation results.
 Inventory and behavioral tests live in `test/haptic-call-site-inventory.js` and
 `test/mutation-outcome-haptics.test.js`.
 
+## Mutation form UX (PR-37)
+
+Sheets and full-screen mutation flows preserve user input on recoverable errors.
+Shared helpers live under `src/lib/mutation-form-*.js`, `src/hooks/useMutationForm.ts`,
+`src/hooks/useMutationAction.ts`, `src/hooks/useMutationScreen.ts`, and
+`src/components/mutation-form.tsx`.
+
+- Client validation uses the same strict money, date, and allocation rules as the
+  request contract; the server remains authoritative for terminal outcomes.
+- API `issues[]` paths map to inline field errors with VoiceOver live-region
+  announcements and focus on the first invalid field.
+- Recoverable transport/admission/sync-unknown failures keep the sheet open and
+  offer **Retry** with the same idempotency key — copy never tells users to mint
+  new keys. PR-07 retains the same key across 429/503 admission retries.
+- Multi-action screens (transaction detail, reconcile toggles) use
+  `useMutationScreen` for a single global lock, banner retry/dismiss, and stale
+  refetch on 409 conflicts. Screens with separate form/delete/apply actions use
+  `useMutationBannerCoordinator` so **Retry** replays only the action that owns
+  the displayed outcome.
+- Stale/conflict responses trigger targeted refetch; saga-owned 409s stay open
+  with retry guidance.
+- Submit buttons lock while `useFinanceMutation` is pending (including status
+  reconciliation); dismiss is blocked until the in-flight operation settles.
+- Profile purge clears in-memory mutation drafts via `purgeMutationFormDrafts`.
+- Outcome haptics remain owned exclusively by `useFinanceMutation` (PR-40).
+
+Tests: `test/mutation-form-*.test.js`, `test/mutation-inventory.test.js`,
+`test/mutation-banner-coordinator.test.js`,
+`test/request-operation-state.test.js`, `test/request-operation-fake-server.test.js`.
+Maestro: `.maestro/mutation-validation-errors.yaml`, `.maestro/mutation-retry-dismiss.yaml`,
+`.maestro/mutation-offline-retry.yaml`.
+
 ## Demo mode
 
 Tap **Use demo data** during onboarding. Demo mode uses the dashboard's isolated synthetic fixtures,

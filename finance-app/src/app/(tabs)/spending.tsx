@@ -107,7 +107,7 @@ export default function Spending() {
     return trimmed.length ? trimmed : [{ month: curKey, spend: fallbackSpend, income: fallbackIncome, net: fallbackSpend != null && fallbackIncome != null ? fallbackIncome - fallbackSpend : null, netWorth: 0 }];
   }, [trends.data, curKey, cur, spendingComplete]);
   const chartMonths = useMemo(() => availMonths.slice(-6), [availMonths]);
-  const chartHasIncomplete = chartMonths.some((m) => m.spend == null || m.income == null);
+  const chartHasIncomplete = chartMonths.some((m) => !trendPeriodComplete(m));
 
   const entries = useMemo(
     () => (cur ? Object.entries(cur.spending).sort((a, b) => b[1] - a[1]) : []),

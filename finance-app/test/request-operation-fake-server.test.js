@@ -183,6 +183,35 @@ test('fake server restart rehydrates and queries the original key', async () => 
   server.assertAtMostOneMutationPerKey();
 });
 
+test('fake server 429 admission retry succeeds on second dispatch with same key', async () => {
+  const store = durableStore();
+  const state = newMachine(store);
+  let attempts = 0;
+  const server = {
+    async mutate(key) {
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          kind: 'retry_same_key',
+          error: { status: 429, code: 'ADMISSION_OVERLOADED', message: 'busy' },
+        };
+      }
+      return { kind: 'completed', result: { ok: true, id: 'txn-admission' } };
+    },
+    async status() {
+      throw new Error('status should not be queried for admission overload');
+    },
+  };
+  await assert.rejects(
+    state.execute(operation(server)),
+    (error) => error.code === 'ADMISSION_OVERLOADED' && error.requiresIdempotencyKeyReuse === true,
+  );
+  const result = await state.execute(operation(server));
+  assert.deepEqual(result, { ok: true, id: 'txn-admission' });
+  assert.equal(attempts, 2);
+  assert.deepEqual(store.read()?.operations ?? {}, {});
+});
+
 test('fake server concurrent taps issue one mutation request', async () => {
   const store = durableStore();
   let release;

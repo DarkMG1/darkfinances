@@ -15,14 +15,31 @@ import {
 } from '@/lib/request-operation-state';
 import { useServerConfig } from '@/state/server';
 
-export type FinanceError = Error & { error: string; status?: number; code?: string; requestId?: string };
+export type ValidationIssue = { path: string; message: string };
 
-function createError(message: string, status?: number, code?: string, requestId?: string): FinanceError {
+export type FinanceError = Error & {
+  error: string;
+  status?: number;
+  code?: string;
+  requestId?: string;
+  issues?: ValidationIssue[];
+  requiresIdempotencyKeyReuse?: boolean;
+};
+
+function createError(
+  message: string,
+  status?: number,
+  code?: string,
+  requestId?: string,
+  extras?: Pick<FinanceError, 'issues' | 'requiresIdempotencyKeyReuse'>,
+): FinanceError {
   const err = new Error(message) as FinanceError;
   err.error = message;
   err.status = status;
   err.code = code;
   err.requestId = requestId;
+  if (extras?.issues) err.issues = extras.issues;
+  if (extras?.requiresIdempotencyKeyReuse) err.requiresIdempotencyKeyReuse = true;
   return err;
 }
 
@@ -107,10 +124,18 @@ export async function buildQuery<T, D = unknown>({
     const response = await fetch(url.toString(), options);
     const text = await response.text();
 
-    let parsed: { data?: T; error?: string; code?: string; requestId?: string } | undefined;
+    let parsed: {
+      data?: T;
+      error?: string;
+      code?: string;
+      requestId?: string;
+      issues?: ValidationIssue[];
+      requiresIdempotencyKeyReuse?: boolean;
+      admission?: { requiresIdempotencyKeyReuse?: boolean };
+    } | undefined;
     if (text) {
       try {
-        parsed = JSON.parse(text) as { data?: T; error?: string; code?: string; requestId?: string };
+        parsed = JSON.parse(text) as typeof parsed;
       } catch {
         if (!response.ok) throw createError(`Request failed with status ${response.status}`, response.status);
         if (method !== 'GET') {
@@ -121,11 +146,17 @@ export async function buildQuery<T, D = unknown>({
     }
 
     if (!response.ok) {
+      const requiresIdempotencyKeyReuse = parsed?.requiresIdempotencyKeyReuse === true
+        || parsed?.admission?.requiresIdempotencyKeyReuse === true;
       throw createError(
         parsed?.error || `Request failed with status ${response.status}`,
         response.status,
         parsed?.code,
         parsed?.requestId,
+        {
+          issues: Array.isArray(parsed?.issues) ? parsed.issues : undefined,
+          requiresIdempotencyKeyReuse: requiresIdempotencyKeyReuse || undefined,
+        },
       );
     }
     if (method !== 'GET' && (!parsed || !Object.prototype.hasOwnProperty.call(parsed, 'data'))) {

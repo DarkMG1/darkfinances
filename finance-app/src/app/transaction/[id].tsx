@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { Image } from 'expo-image';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   useAddReceipt,
@@ -29,6 +29,10 @@ import {
 } from '@/api/hooks/finance.hooks';
 import { ReimbLinkEndpoint, ReimbTxnRef, Transaction } from '@/api/generated/types';
 import { Card, CardTitle, TagChips } from '@/components/ui';
+import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationScreen } from '@/hooks/useMutationScreen';
+import { useMutationScreenFieldInvalidation } from '@/hooks/useMutationScreenFieldInvalidation';
+import { resolveTransactionDateAttempt } from '@/lib/mutation-transaction-date-attempt';
 import { haptics } from '@/lib/haptics';
 import { formatAllocationDollars, parseStrictAllocationDollars } from '@/lib/allocation-parse';
 import { CapturedReceipt, pickReceiptFromLibrary, scanReceiptFromCamera } from '@/lib/receipts';
@@ -59,6 +63,7 @@ export default function TransactionDetail() {
     isSplit?: string; splitCount?: string; imported?: string;
   }>();
   const router = useRouter();
+  const navigation = useNavigation();
   const financeTodayValue = useFinanceToday();
   const insets = useSafeAreaInsets();
 
@@ -90,6 +95,7 @@ export default function TransactionDetail() {
   const splitLegs = detail.data?.legs ?? [];
   const splitCount = Number(p.splitCount) || splitLegs.length;
   const goSplit = () => {
+    if (modalLocked) return;
     haptics.tap();
     router.push({ pathname: '/split/[id]', params: { id: txnId, accountId, date: currentDate } });
   };
@@ -125,6 +131,7 @@ export default function TransactionDetail() {
   const [linkQuery, setLinkQuery] = useState('');
   const [linkTarget, setLinkTarget] = useState<Transaction | null>(null);
   const [allocationText, setAllocationText] = useState('');
+  const allocationInputRef = useRef<TextInput>(null);
   const loadedIdentity = useRef<string | null>(null);
   useEffect(() => {
     if (!canonical) return;
@@ -152,8 +159,37 @@ export default function TransactionDetail() {
 
   const links = useReimbLinks(txnId);
   const counterpartyLinks = useReimbLinks(linkTarget?.id);
+  const receipts = useReceipts(txnId);
+  const addReceipt = useAddReceipt();
+  const delReceipt = useDeleteReceipt();
   const addLink = useAddReimbLink();
   const delLink = useDeleteReimbLink();
+  const screen = useMutationScreen({
+    onRefetchStale: async () => {
+      const result = await detail.refetch();
+      return result.isError !== true;
+    },
+  });
+  const linkAction = screen.bind({ key: 'link', mutation: addLink, mutationLabel: 'Link reimbursement', fieldOrder: ['allocationCents'] });
+  const unlinkAction = screen.bind({ key: 'unlink', mutation: delLink, mutationLabel: 'Unlink reimbursement' });
+  const receiptAction = screen.bind({ key: 'receipt', mutation: addReceipt, mutationLabel: 'Upload receipt' });
+  const deleteReceiptAction = screen.bind({ key: 'deleteReceipt', mutation: delReceipt, mutationLabel: 'Delete receipt' });
+  const deleteTxnAction = screen.bind({ key: 'deleteTxn', mutation: del, mutationLabel: 'Delete transaction' });
+  const categoryAction = screen.bind({ key: 'category', mutation: setCategory, mutationLabel: 'Change category' });
+  const saveRuleAction = screen.bind({ key: 'saveRule', mutation: saveRule, mutationLabel: 'Save rule' });
+  const markRecAction = screen.bind({ key: 'markRec', mutation: markRec, mutationLabel: 'Mark recurring' });
+  const dateAction = screen.bind({ key: 'date', mutation: setDate, mutationLabel: 'Change date', fieldOrder: ['date'] });
+  const payeeAction = screen.bind({ key: 'payee', mutation: setPayee, mutationLabel: 'Rename payee' });
+  const notesAction = screen.bind({ key: 'notes', mutation: setNotes, mutationLabel: 'Save notes', fieldOrder: ['notes'] });
+  const modalLocked = screen.isLocked;
+  const actionSaving = (key: string) => modalLocked && screen.activeKey === key;
+  const savingNotes = actionSaving('notes');
+  const dateSaving = actionSaving('date');
+  const allowBackRef = useRef(false);
+  const requestModalClose = (close: () => void) => {
+    if (modalLocked) return;
+    close();
+  };
   const search = useSearch(linkQuery);
 
   const thisRef: ReimbTxnRef = {
@@ -188,18 +224,18 @@ export default function TransactionDetail() {
   };
 
   const submitLink = () => {
-    if (!linkTarget) return;
+    if (!linkTarget || screen.isLocked) return;
     const cents = parseStrictAllocationDollars(allocationText);
     if (cents == null || cents <= 0) {
-      Alert.alert('Invalid amount', 'Enter a positive dollar amount with at most two decimal places (e.g. 20.00).');
+      screen.reportClientValidation('Enter a positive dollar amount with at most two decimal places (e.g. 20.00).', { allocationCents: 'Invalid allocation amount.' }, ['allocationCents'], 'link');
       return;
     }
     if (suggestedAllocationCents == null) {
-      Alert.alert('Capacity unavailable', 'Link capacity is still loading or needs legacy review. Refresh and try again.');
+      screen.reportClientValidation('Link capacity is still loading or needs legacy review. Refresh and try again.', {}, [], 'link');
       return;
     }
     if (cents > suggestedAllocationCents) {
-      Alert.alert('Too much', `This link can allocate at most ${fmtPos(suggestedAllocationCents / 100)} based on remaining capacity on both sides.`);
+      screen.reportClientValidation(`This link can allocate at most ${fmtPos(suggestedAllocationCents / 100)} based on remaining capacity on both sides.`, { allocationCents: 'Allocation exceeds remaining capacity.' }, ['allocationCents'], 'link');
       return;
     }
     const ref: ReimbTxnRef = {
@@ -215,7 +251,7 @@ export default function TransactionDetail() {
       ? { inflow: thisRef, expense: ref, allocationCents: cents }
       : { inflow: ref, expense: thisRef, allocationCents: cents };
     haptics.tap();
-    addLink.mutate(vars, {
+    linkAction.run(vars, {
       onSuccess: () => {
         setLinking(false);
         setLinkTarget(null);
@@ -224,44 +260,28 @@ export default function TransactionDetail() {
         links.refetch();
         counterpartyLinks.refetch();
       },
-      onError: (e) => {
-        if (e.status === 409) {
-          links.refetch();
-          counterpartyLinks.refetch();
-          Alert.alert('Could not link', e.error || 'This transaction changed. Refresh and try again.');
-          return;
-        }
-        Alert.alert('Could not link', e.error || 'Please try again.');
-      },
     });
   };
   // The picker lists the opposite sign: an inflow links to expenses, vice versa.
   const candidates = (search.data?.transactions ?? []).filter((t) => t.id !== txnId && (income ? t.amount < 0 : t.amount > 0));
 
-  const openTxn = (t: ReimbTxnRef) =>
+  const openTxn = (t: ReimbTxnRef) => {
+    if (modalLocked) return;
     router.push({
       pathname: '/transaction/[id]',
       params: { id: t.id, date: t.date ?? '', accountId: t.accountId ?? '' },
     });
+  };
 
   const createLink = (t: Transaction) => openAllocationFor(t);
   const removeLink = (other: ReimbLinkEndpoint) => {
+    if (screen.isLocked) return;
     haptics.tap();
-    delLink.mutate(
+    unlinkAction.run(
       income
         ? { inflowId: txnId, expenseId: other.id, expectedVersion: other.linkVersion }
         : { inflowId: other.id, expenseId: txnId, expectedVersion: other.linkVersion },
-      {
-        onSuccess: () => { links.refetch(); },
-        onError: (e) => {
-          if (e.status === 409) {
-            links.refetch();
-            Alert.alert('Could not unlink', e.error || 'This link changed. Refresh and try again.');
-            return;
-          }
-          Alert.alert('Could not unlink', e.error || 'Please try again.');
-        },
-      },
+      { onSuccess: () => { links.refetch(); counterpartyLinks.refetch(); } },
     );
   };
 
@@ -276,18 +296,18 @@ export default function TransactionDetail() {
   };
 
   const pickCategory = (cid: string, categoryName: string) => {
+    if (modalLocked) return;
     const previous = { category, categoryId };
     setCategoryName(categoryName);
     setCategoryId(cid);
     setPicking(false);
-    setCategory.mutate(
+    categoryAction.run(
       { id: txnId, categoryId: cid, isLeg, parentId, accountId, date: currentDate },
       {
-        onSuccess: followReplacement,
-        onError: (error) => {
+        onSuccess: (data) => followReplacement(data as { id?: string } | undefined),
+        rollback: () => {
           setCategoryName(previous.category);
           setCategoryId(previous.categoryId);
-          Alert.alert('Could not change category', error.error || 'Please try again.');
         },
       },
     );
@@ -299,26 +319,26 @@ export default function TransactionDetail() {
 
   const applyRuleForPayee = () => {
     if (!categoryId) return;
-    saveRule.mutate(
+    saveRuleAction.run(
       { match: payeeName, categoryId, categoryName: category },
       {
-        onSuccess: (r) =>
+        onSuccess: (r) => {
+          const result = r as { applied?: number } | undefined;
           Alert.alert(
             'Rule saved',
-            `“${payeeName}” will always be categorized as ${category}.` +
-              (r?.applied ? `\n\nApplied to ${r.applied} past transaction${r.applied === 1 ? '' : 's'}.` : ''),
-          ),
-        onError: (e) => Alert.alert('Could not save rule', e.error || 'Please try again.'),
-      }
+            `"${payeeName}" will always be categorized as ${category}.` +
+              (result?.applied ? `\n\nApplied to ${result.applied} past transaction${result.applied === 1 ? '' : 's'}.` : ''),
+          );
+        },
+      },
     );
   };
   const doMarkRecurring = () => {
-    markRec.mutate(
+    markRecAction.run(
       { payee: payeeName },
       {
-        onSuccess: () => Alert.alert('Marked as recurring', `“${payeeName}” will appear in Subscriptions once it has at least two charges.`),
-        onError: (e) => Alert.alert('Could not mark recurring', e.error || 'Please try again.'),
-      }
+        onSuccess: () => Alert.alert('Marked as recurring', `"${payeeName}" will appear in Subscriptions once it has at least two charges.`),
+      },
     );
   };
   const doDelete = () => {
@@ -334,21 +354,15 @@ export default function TransactionDetail() {
           text: 'Delete',
           style: 'destructive',
           onPress: () =>
-            del.mutate(
+            deleteTxnAction.run(
               { id: txnId, accountId, date: currentDate },
-              {
-                onSuccess: () => { router.back(); },
-                onError: (e) => Alert.alert('Could not delete', e.error || 'Please try again.'),
-              }
+              { onSuccess: () => { router.back(); } },
             ),
         },
       ]
     );
   };
   // Receipts — scan/attach, view full-screen, delete. OCR runs on-device (Vision).
-  const receipts = useReceipts(txnId);
-  const addReceipt = useAddReceipt();
-  const delReceipt = useDeleteReceipt();
   const receiptSource = useReceiptImageSource();
   const receiptList = receipts.data?.receipts ?? [];
   const [scanning, setScanning] = useState(false);
@@ -356,13 +370,10 @@ export default function TransactionDetail() {
 
   const uploadCapture = (cap: CapturedReceipt | null) => {
     if (!cap) { setScanning(false); return; }
-    if (!cap.base64) { setScanning(false); Alert.alert('Could not read image', 'Please try again.'); return; }
-    addReceipt.mutate(
+    if (!cap.base64) { setScanning(false); screen.reportClientValidation('Could not read image. Please try again.', {}, [], 'receipt'); return; }
+    receiptAction.run(
       { txnId, accountId, transactionDate: currentDate, imageBase64: cap.base64, mime: cap.mime, ocrText: cap.ocrText, ocrLines: cap.ocrLines, amount: cap.amount, date: cap.date, source: cap.source ?? 'camera' },
-      {
-        onSuccess: () => { setScanning(false); },
-        onError: (e) => { setScanning(false); Alert.alert('Upload failed', e.error || 'Please try again.'); },
-      }
+      { onSettled: () => setScanning(false) },
     );
   };
   const reviewCapture = (cap: CapturedReceipt | null) => {
@@ -378,7 +389,7 @@ export default function TransactionDetail() {
     ]);
   };
   const startScan = () => {
-    if (scanning) return;
+    if (scanning || modalLocked) return;
     haptics.tap();
     Alert.alert('Add receipt', 'The image is resized and text is read on-device, then the receipt is uploaded to your server.', [
       { text: 'Take Photo', onPress: async () => { setScanning(true); try { reviewCapture(await scanReceiptFromCamera()); } catch (e: any) { setScanning(false); Alert.alert('Camera unavailable', e?.message || 'Please try again.'); } } },
@@ -387,10 +398,26 @@ export default function TransactionDetail() {
     ]);
   };
   const removeReceipt = (id: string) => {
+    if (modalLocked || actionSaving('deleteReceipt')) return;
     Alert.alert('Delete receipt', 'Remove this receipt image?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => delReceipt.mutate({ id }, { onSuccess: () => { setViewerId(null); } }) },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => deleteReceiptAction.run({ id }, { onSuccess: () => { setViewerId(null); } }),
+      },
     ]);
+  };
+  const receiptDeleting = actionSaving('deleteReceipt');
+  const receiptViewerLocked = modalLocked || receiptDeleting;
+  const openReceiptViewer = (id: string) => {
+    if (receiptViewerLocked) return;
+    haptics.tap();
+    setViewerId(id);
+  };
+  const closeReceiptViewer = () => {
+    if (receiptViewerLocked) return;
+    setViewerId(null);
   };
 
   // See History (N) — merchant monthly history. Shared query key with the merchant
@@ -398,7 +425,11 @@ export default function TransactionDetail() {
   const canHistory = !!payeeName;
   const mhist = useMerchantHistory(canHistory ? payeeName : undefined, 12);
   const histCount = mhist.data?.count;
-  const goHistory = () => { haptics.tap(); router.push({ pathname: '/merchant/[name]', params: { name: payeeName } }); };
+  const goHistory = () => {
+    if (modalLocked) return;
+    haptics.tap();
+    router.push({ pathname: '/merchant/[name]', params: { name: payeeName } });
+  };
 
   // Move to Reimbursements — file an expense someone else pays under the
   // Reimbursement category so it leaves personal spending and shows as owed.
@@ -410,16 +441,15 @@ export default function TransactionDetail() {
     const previous = { category, categoryId };
     setCategoryName(reimbCat.name);
     setCategoryId(reimbCat.id);
-    setCategory.mutate(
+    categoryAction.run(
       { id: txnId, categoryId: reimbCat.id, isLeg, parentId, accountId, date: currentDate },
       {
-        onSuccess: followReplacement,
-        onError: (e) => {
+        onSuccess: (data) => followReplacement(data as { id?: string } | undefined),
+        rollback: () => {
           setCategoryName(previous.category);
           setCategoryId(previous.categoryId);
-          Alert.alert('Could not move', e.error || 'Please try again.');
         },
-      }
+      },
     );
   };
 
@@ -432,6 +462,7 @@ export default function TransactionDetail() {
     return ymd(new Date(y, m - 1, 0));
   };
   const openDate = () => {
+    if (modalLocked) return;
     const current = currentDate || financeTodayValue;
     const d = parseYmd(current);
     setDateText(current);
@@ -441,10 +472,18 @@ export default function TransactionDetail() {
     haptics.tap();
   };
   const doSetDate = (picked?: string) => {
-    const next = (picked || dateText || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(next)) { Alert.alert('Invalid date', 'Use the format YYYY-MM-DD, e.g. 2026-06-30.'); return; }
+    if (modalLocked) return;
+    const { next, dateText: attemptDateText } = resolveTransactionDateAttempt(dateText, picked);
+    if (attemptDateText !== dateText) {
+      setDateText(attemptDateText);
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(next)) {
+      screen.reportClientValidation('Use the format YYYY-MM-DD, e.g. 2026-06-30.', { date: 'Invalid date format.' }, ['date'], 'date');
+      return;
+    }
     if (next === currentDate) { setDating(false); return; }
-    setDate.mutate(
+    haptics.tap();
+    dateAction.run(
       { id: txnId, date: next, isLeg },
       {
         onSuccess: () => {
@@ -453,25 +492,30 @@ export default function TransactionDetail() {
           setDating(false);
           router.replace({ pathname: '/transaction/[id]', params: { id: txnId, accountId, date: next } });
         },
-        onError: (e) => { setDateText(currentDate || financeTodayValue); Alert.alert('Could not change date', e.error || 'Please try again.'); },
-      }
+      },
     );
   };
 
   const canRename = !isLeg;
-  const openRename = () => { setRenameText(payeeName); setRenaming(true); haptics.tap(); };
+  const openRename = () => {
+    if (modalLocked) return;
+    setRenameText(payeeName);
+    setRenaming(true);
+    haptics.tap();
+  };
   const doRename = () => {
+    if (modalLocked) return;
     const next = renameText.trim();
     setRenaming(false);
     if (next === payeeName) return;
     const prev = payeeName;
-    setPayeeNameLocal(next); // optimistic
-    setPayee.mutate(
+    setPayeeNameLocal(next);
+    payeeAction.run(
       { id: txnId, payee: next, isLeg, parentId, accountId, date: currentDate },
       {
-        onSuccess: followReplacement,
-        onError: (e) => { setPayeeNameLocal(prev); Alert.alert('Could not rename', e.error || 'Please try again.'); },
-      }
+        onSuccess: (data) => followReplacement(data as { id?: string } | undefined),
+        rollback: () => { setPayeeNameLocal(prev); },
+      },
     );
   };
 
@@ -481,19 +525,99 @@ export default function TransactionDetail() {
   const sameRaws = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
   const dirty = noteText.trim() !== baseText || !sameRaws(rawsOf(tags), baseRaws);
   const recombineNotes = () => [noteText.trim(), ...tags.map((t) => t.raw)].join(' ').replace(/\s{2,}/g, ' ').trim();
-  const save = () =>
-    setNotes.mutate(
+  const save = () => {
+    if (modalLocked) return;
+    notesAction.run(
       { id: txnId, notes: recombineNotes(), isLeg, parentId, accountId, date: currentDate },
       {
         onSuccess: (result) => {
           setBaseText(noteText.trim());
           setBaseRaws(rawsOf(tags));
-          followReplacement(result);
+          followReplacement(result as { id?: string } | undefined);
         },
-      }
+      },
     );
+  };
+  const notesFieldError = screen.outcome?.fieldErrors?.notes as string | undefined;
+  const dateFieldError = screen.activeKey === 'date'
+    ? (screen.outcome?.fieldErrors?.date as string | undefined)
+    : undefined;
+  const allocationFieldError = screen.activeKey === 'link'
+    ? (screen.outcome?.fieldErrors?.allocationCents as string | undefined)
+    : undefined;
+
+  const linkFields = useMemo(() => ({ allocationText: allocationText.trim() }), [allocationText]);
+  const dateFields = useMemo(() => ({ date: dateText.trim() }), [dateText]);
+  const payeeFields = useMemo(() => ({ payee: renameText.trim() }), [renameText]);
+  const notesFields = useMemo(() => ({ text: noteText.trim(), raws: rawsOf(tags) }), [noteText, tags]);
+
+  useMutationScreenFieldInvalidation(screen, 'link', linkFields);
+  useMutationScreenFieldInvalidation(screen, 'date', dateFields);
+  useMutationScreenFieldInvalidation(screen, 'payee', payeeFields);
+  useMutationScreenFieldInvalidation(screen, 'notes', notesFields);
+
+  const requestLeave = (leave: () => void) => {
+    if (modalLocked) return;
+    if (!dirty) {
+      leave();
+      return;
+    }
+    Alert.alert(
+      'Discard unsaved changes?',
+      'Your note and tag edits will be lost.',
+      [
+        { text: 'Keep editing', style: 'cancel' },
+        {
+          text: 'Discard',
+          style: 'destructive',
+          onPress: () => {
+            allowBackRef.current = true;
+            leave();
+          },
+        },
+      ],
+    );
+  };
+
+  useEffect(() => {
+    const unsub = navigation.addListener('beforeRemove', (e) => {
+      if (allowBackRef.current) {
+        allowBackRef.current = false;
+        return;
+      }
+      if (modalLocked) {
+        e.preventDefault();
+        return;
+      }
+      if (!dirty) return;
+      e.preventDefault();
+      Alert.alert(
+        'Discard unsaved changes?',
+        'Your note and tag edits will be lost.',
+        [
+          { text: 'Keep editing', style: 'cancel' },
+          {
+            text: 'Discard',
+            style: 'destructive',
+            onPress: () => {
+              allowBackRef.current = true;
+              navigation.dispatch(e.data.action);
+            },
+          },
+        ],
+      );
+    });
+    return unsub;
+  }, [baseRaws, baseText, dirty, modalLocked, navigation]);
+
+  useEffect(() => {
+    if (screen.activeKey !== 'link' || screen.outcome?.firstField !== 'allocationCents') return;
+    const frame = requestAnimationFrame(() => allocationInputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [screen.activeKey, screen.outcome]);
 
   const addTag = (input: string) => {
+    if (modalLocked) return;
     const token = toTagToken(input);
     setTagInput('');
     if (!token) return;
@@ -504,6 +628,7 @@ export default function TransactionDetail() {
     haptics.tap();
   };
   const removeTag = (raw: string) => {
+    if (modalLocked) return;
     const doRemove = () => { setTags(tags.filter((t) => t.raw !== raw)); haptics.tap(); };
     if (originalRaws.has(raw.toLowerCase())) {
       Alert.alert(
@@ -537,11 +662,13 @@ export default function TransactionDetail() {
     return cells;
   }, [calendarMonth]);
   const changeCalendarMonth = (delta: number) => {
+    if (modalLocked) return;
     setMonthPicking(false);
     setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + delta, 1));
     haptics.tap();
   };
   const pickShortcutDate = (next: string) => {
+    if (modalLocked) return;
     const d = parseYmd(next);
     setDateText(next);
     setCalendarMonth(new Date(d.getFullYear(), d.getMonth(), 1));
@@ -584,20 +711,27 @@ export default function TransactionDetail() {
         }}
       />
 
+      <MutationLiveRegion message={screen.announce} />
+      <MutationFormBanner
+        outcome={screen.outcome}
+        onRetry={screen.retry}
+        onRefetch={() => { void screen.refetchStale(); detail.refetch(); links.refetch(); receipts.refetch(); }}
+      />
+
       <View style={[styles.menuHero, { paddingTop: insets.top + 14 }]}>
         <View style={styles.menuTopBar}>
-          <Pressable onPress={save} disabled={!dirty || setNotes.isPending} hitSlop={8} style={styles.topSide}>
-            {dirty ? <Text style={styles.headerSave}>{setNotes.isPending ? 'Saving…' : 'Save'}</Text> : null}
+          <Pressable onPress={save} disabled={!dirty || savingNotes || modalLocked} hitSlop={8} style={[styles.topSide, (savingNotes || modalLocked) && { opacity: 0.35 }]} accessibilityState={{ disabled: !dirty || savingNotes || modalLocked }}>
+            {dirty ? <Text style={styles.headerSave}>{savingNotes ? 'Saving…' : 'Save'}</Text> : null}
           </Pressable>
           {canEditDate ? (
-            <Pressable testID="transaction-date-button" onPress={openDate} hitSlop={8} style={({ pressed }) => [styles.topDateBtn, pressed && { opacity: 0.65 }]}>
+            <Pressable testID="transaction-date-button" onPress={openDate} hitSlop={8} disabled={modalLocked} style={({ pressed }) => [styles.topDateBtn, pressed && !modalLocked && { opacity: 0.65 }, modalLocked && { opacity: 0.35 }]}>
               <Text style={styles.topDate}>{fmtMenuDay(currentDate)}</Text>
               <SymbolView name="chevron.down" tintColor={colors.text} size={11} resizeMode="scaleAspectFit" />
             </Pressable>
           ) : (
             <Text style={styles.topDate}>{fmtMenuDay(currentDate)}</Text>
           )}
-          <Pressable onPress={() => router.back()} hitSlop={10} style={({ pressed }) => [styles.topSide, styles.closeBtn, pressed && { opacity: 0.65 }]}>
+          <Pressable onPress={() => requestLeave(() => router.back())} disabled={modalLocked} hitSlop={10} style={({ pressed }) => [styles.topSide, styles.closeBtn, pressed && { opacity: 0.65 }, modalLocked && { opacity: 0.35 }]}>
             <SymbolView name="xmark" tintColor={colors.text} size={18} resizeMode="scaleAspectFit" />
           </Pressable>
         </View>
@@ -607,7 +741,7 @@ export default function TransactionDetail() {
           </View>
         ) : null}
         {canRename ? (
-          <Pressable onPress={openRename} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+          <Pressable onPress={openRename} hitSlop={8} disabled={modalLocked} style={({ pressed }) => [pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.35 }]}>
             <Text style={styles.payee}>{payeeName || 'Add name'}</Text>
           </Pressable>
         ) : (
@@ -621,7 +755,7 @@ export default function TransactionDetail() {
           </View>
         ) : null}
         {!isSplit ? (
-          <Pressable testID="transaction-category-pill" onPress={() => { haptics.tap(); setPicking(true); }} style={({ pressed }) => [styles.categoryPill, pressed && { opacity: 0.75 }]}>
+          <Pressable testID="transaction-category-pill" onPress={() => { if (modalLocked) return; haptics.tap(); setPicking(true); }} disabled={modalLocked} style={({ pressed }) => [styles.categoryPill, pressed && !modalLocked && { opacity: 0.75 }, modalLocked && { opacity: 0.45 }]} accessibilityState={{ disabled: modalLocked }}>
             <SymbolView name={catMeta.symbol} tintColor={catMeta.color} size={16} resizeMode="scaleAspectFit" />
             <Text style={styles.categoryPillText}>{category || 'Uncategorized'}</Text>
             <SymbolView name="chevron.down" tintColor={colors.text} size={10} resizeMode="scaleAspectFit" />
@@ -636,7 +770,13 @@ export default function TransactionDetail() {
 
       <View style={styles.menuBody}>
       {sub ? (
-        <Pressable onPress={() => router.push(`/recurring/${encodeURIComponent(sub.key)}`)} style={({ pressed }) => pressed && { opacity: 0.7 }}>
+        <Pressable
+          disabled={modalLocked}
+          onPress={() => { if (modalLocked) return; router.push(`/recurring/${encodeURIComponent(sub.key)}`); }}
+          style={({ pressed }) => [pressed && !modalLocked && { opacity: 0.7 }, modalLocked && { opacity: 0.45 }]}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: modalLocked }}
+        >
           <View style={styles.subBanner}>
             <Text style={styles.subText}>
               Part of a subscription · {cadenceLabel(sub.cadence)}
@@ -648,13 +788,13 @@ export default function TransactionDetail() {
       ) : null}
 
       <MenuGroup testID="transaction-action-menu">
-        {canRename ? <MenuActionRow testID="transaction-rename-row" icon="pencil" label="Rename" onPress={openRename} /> : null}
+        {canRename ? <MenuActionRow testID="transaction-rename-row" icon="pencil" label="Rename" onPress={openRename} disabled={modalLocked} /> : null}
         <MenuSwitchRow
           testID="transaction-recurring-switch-row"
           icon="arrow.clockwise.circle"
           label="Is Recurring?"
           value={!!sub}
-          disabled={!!sub || !canMarkRecurring || markRec.isPending}
+          disabled={!!sub || !canMarkRecurring || actionSaving('markRec') || modalLocked}
           onValueChange={() => {
             if (sub) router.push(`/recurring/${encodeURIComponent(sub.key)}`);
             else if (canMarkRecurring) doMarkRecurring();
@@ -665,9 +805,9 @@ export default function TransactionDetail() {
             testID="transaction-move-reimbursement-row"
             icon="person.2.fill"
             label="Move to Reimbursements"
-            right={setCategory.isPending ? 'Moving…' : 'Not personal spend'}
+            right={actionSaving('category') ? 'Moving…' : 'Not personal spend'}
             onPress={moveToReimb}
-            disabled={setCategory.isPending}
+            disabled={actionSaving('category') || modalLocked}
             last
           />
         ) : (
@@ -680,28 +820,30 @@ export default function TransactionDetail() {
           testID="transaction-tags-row"
           icon="tag"
           label={tags.length ? `Tags (${tags.length})` : 'Add Tags'}
-          onPress={() => { setShowTags(!showTags); haptics.tap(); }}
+          onPress={() => { if (modalLocked) return; setShowTags(!showTags); haptics.tap(); }}
+          disabled={modalLocked}
         />
         <MenuActionRow
           testID="transaction-notes-row"
           icon="note.text"
           label={noteText.trim() ? 'Edit Note' : 'Add Note'}
-          onPress={() => { setShowNotes(!showNotes); haptics.tap(); }}
+          onPress={() => { if (modalLocked) return; setShowNotes(!showNotes); haptics.tap(); }}
+          disabled={modalLocked}
         />
         {!isLeg && categoryId ? (
           <MenuActionRow
             testID="transaction-create-rule-row"
             icon="bolt.circle"
             label="Create Rule"
-            right={saveRule.isPending ? 'Saving…' : category}
+            right={actionSaving('saveRule') ? 'Saving…' : category}
             onPress={applyRuleForPayee}
-            disabled={saveRule.isPending}
+            disabled={actionSaving('saveRule') || modalLocked}
           />
         ) : null}
         {canSplit ? (
-          <MenuActionRow testID="transaction-split-row" icon="arrow.triangle.branch" label="Split" onPress={goSplit} />
+          <MenuActionRow testID="transaction-split-row" icon="arrow.triangle.branch" label="Split" onPress={goSplit} disabled={modalLocked} />
         ) : null}
-        <MenuActionRow testID="transaction-receipt-row" icon="doc.viewfinder" label={receiptList.length ? `Receipts (${receiptList.length})` : 'Add Receipt'} onPress={startScan} disabled={scanning} last />
+        <MenuActionRow testID="transaction-receipt-row" icon="doc.viewfinder" label={receiptList.length ? `Receipts (${receiptList.length})` : 'Add Receipt'} onPress={startScan} disabled={scanning || modalLocked} last />
       </MenuGroup>
 
       <CardTitle style={styles.sectionTitle}>{income ? 'Repayment for' : 'Repaid by'}</CardTitle>
@@ -718,7 +860,7 @@ export default function TransactionDetail() {
         {linked.length ? (
           linked.map((t) => (
             <View key={t.id} testID={`transaction-linked-row-${t.id}`} style={styles.linkRow}>
-              <Pressable testID={`transaction-linked-open-${t.id}`} style={({ pressed }) => [styles.linkMain, pressed && { opacity: 0.6 }]} onPress={() => openTxn(t)}>
+              <Pressable testID={`transaction-linked-open-${t.id}`} style={({ pressed }) => [styles.linkMain, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]} onPress={() => openTxn(t)} disabled={modalLocked} accessibilityState={{ disabled: modalLocked }}>
                 <Text style={styles.linkPayee} numberOfLines={1}>{t.payee || '(no payee)'}</Text>
                 <Text style={styles.linkSub}>
                   {t.date ? fmtDay(t.date) : ''}
@@ -729,7 +871,7 @@ export default function TransactionDetail() {
                       : ''}
                 </Text>
               </Pressable>
-              <Pressable testID={`transaction-linked-unlink-${t.id}`} hitSlop={10} onPress={() => removeLink(t)} disabled={delLink.isPending} style={({ pressed }) => pressed && { opacity: 0.5 }} accessibilityRole="button" accessibilityLabel={`Unlink ${t.payee || 'transaction'}`}>
+              <Pressable testID={`transaction-linked-unlink-${t.id}`} hitSlop={10} onPress={() => removeLink(t)} disabled={modalLocked} style={({ pressed }) => [pressed && !modalLocked && { opacity: 0.5 }, modalLocked && { opacity: 0.35 }]} accessibilityRole="button" accessibilityLabel={`Unlink ${t.payee || 'transaction'}`}>
                 <Text style={styles.unlink}>Unlink</Text>
               </Pressable>
             </View>
@@ -737,7 +879,7 @@ export default function TransactionDetail() {
         ) : (
           <Text style={styles.linkEmpty}>{income ? 'Not linked to any expense yet.' : 'No linked repayment yet.'}</Text>
         )}
-        <Pressable testID="transaction-link-repayment-button" style={({ pressed }) => [styles.linkBtn, pressed && { opacity: 0.6 }]} onPress={() => { haptics.tap(); setLinking(true); }}>
+        <Pressable testID="transaction-link-repayment-button" style={({ pressed }) => [styles.linkBtn, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]} onPress={() => { if (modalLocked) return; haptics.tap(); setLinking(true); }} disabled={modalLocked}>
           <Text style={styles.linkBtnText}>{income ? '+ Link to an expense' : '+ Link a repayment'}</Text>
         </Pressable>
       </Card>
@@ -759,7 +901,7 @@ export default function TransactionDetail() {
             ) : (
               <Text style={styles.linkEmpty}>{detail.isLoading ? 'Loading…' : 'No legs found.'}</Text>
             )}
-            <Pressable testID="transaction-edit-split-button" style={({ pressed }) => [styles.linkBtn, pressed && { opacity: 0.6 }]} onPress={goSplit}>
+            <Pressable testID="transaction-edit-split-button" style={({ pressed }) => [styles.linkBtn, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]} onPress={goSplit} disabled={modalLocked} accessibilityState={{ disabled: modalLocked }}>
               <Text style={styles.linkBtnText}>Edit split · {fmtPos(Math.abs(amount))} into {splitCount}</Text>
             </Pressable>
           </Card>
@@ -774,8 +916,9 @@ export default function TransactionDetail() {
           <TagChips
             tags={tags}
             style={{ marginBottom: 12 }}
-            onPressTag={(raw) => router.push({ pathname: '/tag/[tag]', params: { tag: raw } })}
+            onPressTag={(raw) => { if (modalLocked) return; router.push({ pathname: '/tag/[tag]', params: { tag: raw } }); }}
             onRemoveTag={removeTag}
+            disabled={modalLocked}
           />
         ) : null}
         <View style={styles.tagAddRow}>
@@ -785,6 +928,7 @@ export default function TransactionDetail() {
             style={styles.tagInput}
             value={tagInput}
             onChangeText={setTagInput}
+            editable={!modalLocked}
             placeholder="Add a tag…"
             placeholderTextColor={colors.muted}
             autoCapitalize="none"
@@ -793,7 +937,7 @@ export default function TransactionDetail() {
             onSubmitEditing={() => addTag(tagInput)}
           />
           {tagInput.trim() ? (
-            <Pressable testID="transaction-tag-add-button" onPress={() => addTag(tagInput)} style={({ pressed }) => [styles.tagAddBtn, pressed && { opacity: 0.7 }]}>
+            <Pressable testID="transaction-tag-add-button" onPress={() => addTag(tagInput)} disabled={modalLocked} style={({ pressed }) => [styles.tagAddBtn, pressed && !modalLocked && { opacity: 0.7 }, modalLocked && { opacity: 0.45 }]}>
               <Text style={styles.tagAddBtnText}>Add</Text>
             </Pressable>
           ) : null}
@@ -801,7 +945,7 @@ export default function TransactionDetail() {
         {tagSuggestions.length ? (
           <View style={styles.suggestRow}>
             {tagSuggestions.map((s) => (
-              <Pressable testID={`transaction-tag-suggestion-${s.token}`} key={s.raw} onPress={() => addTag(s.raw)} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
+              <Pressable testID={`transaction-tag-suggestion-${s.token}`} key={s.raw} onPress={() => addTag(s.raw)} disabled={modalLocked} style={({ pressed }) => [styles.suggestChip, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]}>
                 <Text style={styles.suggestText}>#{s.token}</Text>
               </Pressable>
             ))}
@@ -812,7 +956,7 @@ export default function TransactionDetail() {
             <Text style={styles.tripLabel}>Add to a trip</Text>
             <View style={styles.suggestRow}>
               {eventChips.map((e) => (
-                <Pressable testID={`transaction-event-chip-${e.slug}`} key={e.slug} onPress={() => addTag(`ev-${e.slug}`)} style={({ pressed }) => [styles.tripChip, pressed && { opacity: 0.6 }]}>
+                <Pressable testID={`transaction-event-chip-${e.slug}`} key={e.slug} onPress={() => addTag(`ev-${e.slug}`)} disabled={modalLocked} style={({ pressed }) => [styles.tripChip, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]}>
                   <Text style={styles.tripChipText} numberOfLines={1}>{e.name}</Text>
                 </Pressable>
               ))}
@@ -830,13 +974,17 @@ export default function TransactionDetail() {
       <Card>
         <TextInput
           testID="transaction-notes-input"
-          style={styles.notes}
+          style={[styles.notes, notesFieldError && { borderWidth: 1, borderColor: '#ff6b6b' }]}
           value={noteText}
           onChangeText={setNoteText}
+          editable={!modalLocked}
           placeholder="Add a note…"
           placeholderTextColor={colors.muted}
           multiline
+          accessibilityLabel="Transaction notes"
+          accessibilityHint={notesFieldError ? `Error: ${notesFieldError}` : undefined}
         />
+        <MutationFieldError error={notesFieldError} testID="transaction-notes-error" />
       </Card>
       </>
       ) : null}
@@ -849,12 +997,12 @@ export default function TransactionDetail() {
             vertical ScrollView caused scroll/layout jank on New Arch. */}
         <View style={styles.receiptRow}>
           {receiptList.map((r) => (
-            <Pressable testID={`transaction-receipt-${r.id}`} key={r.id} onPress={() => { haptics.tap(); setViewerId(r.id); }} style={({ pressed }) => [styles.thumb, pressed && { opacity: 0.7 }]}>
+            <Pressable testID={`transaction-receipt-${r.id}`} key={r.id} onPress={() => openReceiptViewer(r.id)} disabled={receiptViewerLocked} style={({ pressed }) => [styles.thumb, pressed && { opacity: 0.7 }, receiptViewerLocked && { opacity: 0.5 }]}>
               <Image source={receiptSource(r.id)} style={styles.thumbImg} contentFit="cover" transition={120} cachePolicy="memory-disk" />
               {r.amount != null ? <Text style={styles.thumbAmt}>{fmtPos(r.amount)}</Text> : null}
             </Pressable>
           ))}
-          <Pressable testID="transaction-receipt-scan-button" onPress={startScan} disabled={scanning} style={({ pressed }) => [styles.thumbAdd, pressed && { opacity: 0.7 }, scanning && { opacity: 0.5 }]}>
+          <Pressable testID="transaction-receipt-scan-button" onPress={startScan} disabled={scanning || modalLocked} style={({ pressed }) => [styles.thumbAdd, pressed && { opacity: 0.7 }, (scanning || modalLocked) && { opacity: 0.5 }]}>
             {scanning ? <ActivityIndicator color={colors.accentLight} /> : (
               <>
                 <Text style={styles.thumbAddPlus}>+</Text>
@@ -871,7 +1019,7 @@ export default function TransactionDetail() {
       ) : null}
 
       {canHistory ? (
-        <Pressable testID="transaction-history-button" onPress={goHistory} style={({ pressed }) => [styles.historyBtn, pressed && { opacity: 0.7 }]}>
+        <Pressable testID="transaction-history-button" onPress={goHistory} disabled={modalLocked} style={({ pressed }) => [styles.historyBtn, pressed && !modalLocked && { opacity: 0.7 }, modalLocked && { opacity: 0.45 }]} accessibilityState={{ disabled: modalLocked }}>
           <Text style={styles.historyText}>See History{histCount != null ? ` (${histCount})` : ''}</Text>
           <Text style={styles.historyArrow}>›</Text>
         </Pressable>
@@ -894,17 +1042,17 @@ export default function TransactionDetail() {
         <Pressable
           testID="transaction-delete-button"
           onPress={doDelete}
-          disabled={del.isPending}
-          style={({ pressed }) => [styles.deleteBtn, del.isPending && { opacity: 0.5 }, pressed && { opacity: 0.7 }]}
+          disabled={actionSaving('deleteTxn') || modalLocked}
+          style={({ pressed }) => [styles.deleteBtn, (actionSaving('deleteTxn') || modalLocked) && { opacity: 0.5 }, pressed && { opacity: 0.7 }]}
         >
-          <Text style={styles.deleteText}>{del.isPending ? 'Deleting…' : 'Delete transaction'}</Text>
+          <Text style={styles.deleteText}>{actionSaving('deleteTxn') ? 'Deleting…' : 'Delete transaction'}</Text>
         </Pressable>
       ) : null}
 
       </View>
 
-      <Modal visible={picking} animationType="slide" transparent onRequestClose={() => setPicking(false)}>
-        <Pressable style={styles.modalBg} onPress={() => setPicking(false)}>
+      <Modal visible={picking} animationType="slide" transparent onRequestClose={() => requestModalClose(() => setPicking(false))}>
+        <Pressable style={styles.modalBg} onPress={() => requestModalClose(() => setPicking(false))} disabled={modalLocked}>
           <View testID="transaction-category-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Set category</Text>
             <FlatList
@@ -912,7 +1060,7 @@ export default function TransactionDetail() {
               keyExtractor={(c) => c.id}
               style={{ maxHeight: 400 }}
               renderItem={({ item }) => (
-                <Pressable testID={`transaction-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => pickCategory(item.id, item.name)}>
+                <Pressable testID={`transaction-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]} onPress={() => pickCategory(item.id, item.name)} disabled={modalLocked}>
                   <Text style={styles.catOptionText}>{item.name}</Text>
                   <Text style={styles.catOptionGroup}>{item.group}</Text>
                 </Pressable>
@@ -922,9 +1070,9 @@ export default function TransactionDetail() {
         </Pressable>
       </Modal>
 
-      <Modal visible={linking} animationType="slide" transparent onRequestClose={() => { setLinking(false); setLinkTarget(null); }}>
+      <Modal visible={linking} animationType="slide" transparent onRequestClose={() => requestModalClose(() => { setLinking(false); setLinkTarget(null); })}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-          <Pressable style={styles.modalBg} onPress={() => { setLinking(false); setLinkTarget(null); }}>
+          <Pressable style={styles.modalBg} onPress={() => requestModalClose(() => { setLinking(false); setLinkTarget(null); })} disabled={modalLocked}>
             <Pressable testID="transaction-link-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
               {linkTarget ? (
                 <>
@@ -940,9 +1088,11 @@ export default function TransactionDetail() {
                   </Text>
                   <TextInput
                     testID="transaction-link-allocation-input"
-                    style={styles.searchInput}
+                    ref={allocationInputRef}
+                    style={[styles.searchInput, allocationFieldError && { borderWidth: 1, borderColor: '#ff6b6b' }]}
                     value={allocationText}
                     onChangeText={setAllocationText}
+                    editable={!modalLocked}
                     placeholder={suggestedAllocationCents != null && suggestedAllocationCents > 0
                       ? formatAllocationDollars(suggestedAllocationCents)
                       : 'Amount in dollars'}
@@ -950,13 +1100,14 @@ export default function TransactionDetail() {
                     keyboardType="decimal-pad"
                     autoFocus
                     accessibilityLabel="Reimbursement link allocation amount in dollars"
-                    accessibilityHint="Enter a positive amount with at most two decimal places"
+                    accessibilityHint={allocationFieldError ? `Error: ${allocationFieldError}` : 'Enter a positive amount with at most two decimal places'}
                   />
-                  <Pressable testID="transaction-link-confirm-button" style={styles.renameSave} onPress={submitLink} disabled={addLink.isPending || suggestedAllocationCents == null} accessibilityRole="button" accessibilityLabel="Confirm reimbursement link">
-                    <Text style={styles.renameSaveText}>{addLink.isPending ? 'Linking…' : 'Link'}</Text>
+                  <MutationFieldError error={allocationFieldError} testID="transaction-link-allocation-error" />
+                  <Pressable testID="transaction-link-confirm-button" style={styles.renameSave} onPress={submitLink} disabled={actionSaving('link') || suggestedAllocationCents == null || modalLocked} accessibilityRole="button" accessibilityLabel="Confirm reimbursement link">
+                    <Text style={styles.renameSaveText}>{actionSaving('link') ? 'Linking…' : 'Link'}</Text>
                   </Pressable>
-                  <Pressable testID="transaction-link-back-button" style={styles.linkBtn} onPress={() => setLinkTarget(null)}>
-                    <Text style={styles.linkBtnText}>Back to search</Text>
+                  <Pressable testID="transaction-link-back-button" style={styles.linkBtn} onPress={() => { if (modalLocked) return; setLinkTarget(null); }} disabled={actionSaving('link') || modalLocked}>
+                    <Text style={[styles.linkBtnText, (actionSaving('link') || modalLocked) && { opacity: 0.35 }]}>Back to search</Text>
                   </Pressable>
                 </>
               ) : (
@@ -967,6 +1118,7 @@ export default function TransactionDetail() {
                 style={styles.searchInput}
                 value={linkQuery}
                 onChangeText={setLinkQuery}
+                editable={!modalLocked}
                 placeholder="Search payee, note…"
                 placeholderTextColor={colors.muted}
                 autoFocus
@@ -982,7 +1134,7 @@ export default function TransactionDetail() {
                   <Text style={styles.linkEmpty}>{linkQuery.trim().length < 2 ? 'Type at least 2 characters to search.' : 'No matching transactions.'}</Text>
                 }
                 renderItem={({ item }) => (
-                  <Pressable testID={`transaction-link-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => createLink(item)} disabled={addLink.isPending}>
+                  <Pressable testID={`transaction-link-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.45 }]} onPress={() => createLink(item)} disabled={actionSaving('link') || modalLocked}>
                     <View style={{ flex: 1, minWidth: 0 }}>
                       <Text style={styles.catOptionText} numberOfLines={1}>{item.payee || '(no payee)'}</Text>
                       <Text style={styles.catOptionGroup}>{fmtDay(item.date)} · {item.account}</Text>
@@ -998,9 +1150,9 @@ export default function TransactionDetail() {
       </KeyboardAvoidingView>
       </Modal>
 
-      <Modal visible={renaming} animationType="slide" transparent onRequestClose={() => setRenaming(false)}>
+      <Modal visible={renaming} animationType="slide" transparent onRequestClose={() => requestModalClose(() => setRenaming(false))}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-          <Pressable style={styles.modalBg} onPress={() => setRenaming(false)}>
+          <Pressable style={styles.modalBg} onPress={() => requestModalClose(() => setRenaming(false))} disabled={modalLocked}>
             <Pressable testID="transaction-rename-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
               <Text style={styles.sheetTitle}>Rename transaction</Text>
               <TextInput
@@ -1008,6 +1160,7 @@ export default function TransactionDetail() {
                 style={styles.searchInput}
                 value={renameText}
                 onChangeText={setRenameText}
+                editable={!modalLocked}
                 placeholder="Merchant name"
                 placeholderTextColor={colors.muted}
                 autoFocus
@@ -1015,8 +1168,8 @@ export default function TransactionDetail() {
                 returnKeyType="done"
                 onSubmitEditing={doRename}
               />
-              <Pressable testID="transaction-rename-save-button" style={styles.renameSave} onPress={doRename} disabled={setPayee.isPending}>
-                <Text style={styles.renameSaveText}>{setPayee.isPending ? 'Saving…' : 'Save'}</Text>
+              <Pressable testID="transaction-rename-save-button" style={styles.renameSave} onPress={doRename} disabled={actionSaving('payee') || modalLocked}>
+                <Text style={styles.renameSaveText}>{actionSaving('payee') ? 'Saving…' : 'Save'}</Text>
               </Pressable>
               <Text style={styles.tagHint}>The original bank description is kept for matching future charges.</Text>
             </Pressable>
@@ -1024,18 +1177,19 @@ export default function TransactionDetail() {
         </KeyboardAvoidingView>
       </Modal>
 
-      <Modal visible={dating} animationType="slide" transparent onRequestClose={() => setDating(false)}>
-        <Pressable style={styles.modalBg} onPress={() => setDating(false)}>
+      <Modal visible={dating} animationType="slide" transparent onRequestClose={() => requestModalClose(() => setDating(false))}>
+        <Pressable style={styles.modalBg} onPress={() => requestModalClose(() => setDating(false))} disabled={modalLocked}>
           <Pressable testID="transaction-date-sheet" style={[styles.sheet, styles.calendarSheet, { paddingBottom: insets.bottom + 16 }]} onPress={() => {}}>
             <View style={styles.calendarSheetHeader}>
               <View>
                 <Text style={styles.sheetTitle}>Transaction date</Text>
-                <Text style={styles.calendarSub}>{selectedDay ? fmtDay(selectedDay) : 'Pick a date'}</Text>
+                <Text style={styles.calendarSub} accessibilityHint={dateFieldError ? `Error: ${dateFieldError}` : undefined}>{selectedDay ? fmtDay(selectedDay) : 'Pick a date'}</Text>
               </View>
-              <Pressable testID="transaction-date-done-button" onPress={() => setDating(false)} hitSlop={10}>
-                <Text style={styles.calendarDone}>Done</Text>
+              <Pressable testID="transaction-date-done-button" onPress={() => requestModalClose(() => setDating(false))} hitSlop={10} disabled={modalLocked}>
+                <Text style={[styles.calendarDone, modalLocked && { opacity: 0.35 }]}>Done</Text>
               </Pressable>
             </View>
+            <MutationFieldError error={dateFieldError} testID="transaction-date-error" />
 
             <View style={styles.calendarNav}>
               <Pressable
@@ -1045,14 +1199,16 @@ export default function TransactionDetail() {
                     ? setCalendarMonth(new Date(calendarMonth.getFullYear() - 1, calendarMonth.getMonth(), 1))
                     : changeCalendarMonth(-1)
                 }
-                style={({ pressed }) => [styles.calendarNavBtn, pressed && { opacity: 0.6 }]}
+                disabled={modalLocked}
+                style={({ pressed }) => [styles.calendarNavBtn, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.35 }]}
               >
                 <Text style={styles.calendarNavText}>‹</Text>
               </Pressable>
               <Pressable
                 testID="transaction-date-title-button"
-                onPress={() => { setMonthPicking(!monthPicking); haptics.tap(); }}
-                style={({ pressed }) => [styles.calendarTitleBtn, pressed && { opacity: 0.7 }]}
+                onPress={() => { if (modalLocked) return; setMonthPicking(!monthPicking); haptics.tap(); }}
+                disabled={modalLocked}
+                style={({ pressed }) => [styles.calendarTitleBtn, pressed && !modalLocked && { opacity: 0.7 }, modalLocked && { opacity: 0.35 }]}
               >
                 <Text style={styles.calendarTitle}>{monthPicking ? calendarMonth.getFullYear() : monthLabel(selectedMonthKey)}</Text>
                 <Text style={styles.calendarTitleCaret}>{monthPicking ? '⌃' : '⌄'}</Text>
@@ -1064,7 +1220,8 @@ export default function TransactionDetail() {
                     ? setCalendarMonth(new Date(calendarMonth.getFullYear() + 1, calendarMonth.getMonth(), 1))
                     : changeCalendarMonth(1)
                 }
-                style={({ pressed }) => [styles.calendarNavBtn, pressed && { opacity: 0.6 }]}
+                disabled={modalLocked}
+                style={({ pressed }) => [styles.calendarNavBtn, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.35 }]}
               >
                 <Text style={styles.calendarNavText}>›</Text>
               </Pressable>
@@ -1078,8 +1235,9 @@ export default function TransactionDetail() {
                     <Pressable
                       testID={`transaction-date-month-${idx}${active ? '-selected' : ''}`}
                       key={name}
-                      onPress={() => { setCalendarMonth(new Date(calendarMonth.getFullYear(), idx, 1)); setMonthPicking(false); haptics.tap(); }}
-                      style={({ pressed }) => [styles.monthCell, active && styles.monthCellActive, pressed && { opacity: 0.7 }]}
+                      onPress={() => { if (modalLocked) return; setCalendarMonth(new Date(calendarMonth.getFullYear(), idx, 1)); setMonthPicking(false); haptics.tap(); }}
+                      disabled={modalLocked}
+                      style={({ pressed }) => [styles.monthCell, active && styles.monthCellActive, pressed && !modalLocked && { opacity: 0.7 }, modalLocked && { opacity: 0.35 }]}
                     >
                       <Text style={[styles.monthCellText, active && styles.monthCellTextActive]}>{name}</Text>
                     </Pressable>
@@ -1101,13 +1259,14 @@ export default function TransactionDetail() {
                       <Pressable
                         testID={day ? `transaction-date-day-${Number(day.slice(8))}${active ? '-selected' : ''}` : undefined}
                         key={day ?? `blank-${idx}`}
-                        disabled={!day || setDate.isPending}
+                        disabled={!day || modalLocked}
                         onPress={() => day && doSetDate(day)}
                         style={({ pressed }) => [
                           styles.dayCell,
                           active && styles.dayCellActive,
                           today && !active && styles.dayCellToday,
-                          pressed && { opacity: 0.7 },
+                          pressed && !modalLocked && { opacity: 0.7 },
+                          modalLocked && { opacity: 0.35 },
                         ]}
                       >
                         <Text style={[styles.dayText, active && styles.dayTextActive, !day && { opacity: 0 }]}>{day ? Number(day.slice(8)) : '0'}</Text>
@@ -1119,14 +1278,14 @@ export default function TransactionDetail() {
             )}
 
             <View style={styles.suggestRow}>
-              <Pressable testID="transaction-date-today-button" onPress={() => pickShortcutDate(todayKey)} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
+              <Pressable testID="transaction-date-today-button" onPress={() => pickShortcutDate(todayKey)} disabled={modalLocked} style={({ pressed }) => [styles.suggestChip, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.35 }]}>
                 <Text style={styles.suggestText}>Today</Text>
               </Pressable>
-              <Pressable testID="transaction-date-last-month-button" onPress={() => pickShortcutDate(lastMonthLastDay())} style={({ pressed }) => [styles.suggestChip, pressed && { opacity: 0.6 }]}>
+              <Pressable testID="transaction-date-last-month-button" onPress={() => pickShortcutDate(lastMonthLastDay())} disabled={modalLocked} style={({ pressed }) => [styles.suggestChip, pressed && !modalLocked && { opacity: 0.6 }, modalLocked && { opacity: 0.35 }]}>
                 <Text style={styles.suggestText}>End of last month</Text>
               </Pressable>
             </View>
-            {setDate.isPending ? <Text style={styles.calendarSaving}>Saving…</Text> : null}
+            {dateSaving ? <Text style={styles.calendarSaving}>Saving…</Text> : null}
             <Text style={styles.tagHint}>
               {income
                 ? 'A refund dated in the month you made the purchase subtracts from that month’s spending instead of this one.'
@@ -1136,10 +1295,10 @@ export default function TransactionDetail() {
         </Pressable>
       </Modal>
 
-      <Modal visible={!!viewerId} animationType="fade" transparent onRequestClose={() => setViewerId(null)}>
-        <Pressable style={styles.viewerBg} onPress={() => setViewerId(null)}>
-          <Pressable style={[styles.viewerClose, { top: insets.top + 12 }]} onPress={() => setViewerId(null)}>
-            <Text style={styles.viewerCloseText}>Done</Text>
+      <Modal visible={!!viewerId} animationType="fade" transparent onRequestClose={closeReceiptViewer}>
+        <Pressable style={styles.viewerBg} onPress={closeReceiptViewer}>
+          <Pressable style={[styles.viewerClose, { top: insets.top + 12 }]} onPress={closeReceiptViewer} disabled={receiptViewerLocked}>
+            <Text style={[styles.viewerCloseText, receiptViewerLocked && { opacity: 0.4 }]}>Done</Text>
           </Pressable>
           {viewerId ? (
             <Image source={receiptSource(viewerId)} style={styles.viewerImg} contentFit="contain" transition={150} cachePolicy="memory-disk" />
@@ -1154,8 +1313,8 @@ export default function TransactionDetail() {
                     {r.amount != null ? fmtPos(r.amount) : ''}{r.amount != null && r.date ? ' · ' : ''}{r.date || ''}
                   </Text>
                 ) : null}
-                <Pressable testID="transaction-receipt-delete-button" onPress={() => removeReceipt(r.id)} disabled={delReceipt.isPending} style={({ pressed }) => [styles.viewerDelete, pressed && { opacity: 0.7 }]}>
-                  <Text style={styles.viewerDeleteText}>{delReceipt.isPending ? 'Deleting…' : 'Delete receipt'}</Text>
+                <Pressable testID="transaction-receipt-delete-button" onPress={() => removeReceipt(r.id)} disabled={receiptViewerLocked} style={({ pressed }) => [styles.viewerDelete, pressed && !receiptViewerLocked && { opacity: 0.7 }, receiptViewerLocked && { opacity: 0.5 }]}>
+                  <Text style={styles.viewerDeleteText}>{actionSaving('deleteReceipt') ? 'Deleting…' : 'Delete receipt'}</Text>
                 </Pressable>
               </View>
             );
@@ -1189,7 +1348,7 @@ function MenuActionRow({
   last?: boolean;
 }) {
   return (
-    <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={right ? `${label}, ${right}` : label} onPress={onPress} disabled={disabled || !onPress} style={({ pressed }) => [styles.menuRow, last && styles.menuRowLast, disabled && { opacity: 0.55 }, pressed && { opacity: 0.65 }]}>
+    <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={right ? `${label}, ${right}` : label} accessibilityState={{ disabled: !!disabled }} onPress={onPress} disabled={disabled || !onPress} style={({ pressed }) => [styles.menuRow, last && styles.menuRowLast, disabled && { opacity: 0.55 }, pressed && !disabled && { opacity: 0.65 }]}>
       <View style={styles.menuIconBubble}>
         <SymbolView name={icon} tintColor={colors.accentLight} size={15} resizeMode="scaleAspectFit" />
       </View>

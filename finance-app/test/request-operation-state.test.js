@@ -875,3 +875,82 @@ test('persisted snapshot contains only digests, key, lifecycle, and timestamps',
     'version',
   ]);
 });
+
+test('429 admission overload resets to prepared and reuses the same key on retry', async () => {
+  const store = memoryStore();
+  const state = machine(store);
+  let originalKey;
+  let dispatches = 0;
+  const input = request({
+    dispatch: async (key) => {
+      dispatches += 1;
+      originalKey = key;
+      if (dispatches === 1) {
+        return {
+          kind: 'retry_same_key',
+          error: { status: 429, code: 'ADMISSION_OVERLOADED', message: 'Server busy' },
+        };
+      }
+      return { kind: 'completed', result: { ok: true } };
+    },
+  });
+
+  await assert.rejects(state.execute(input), (error) => (
+    error.code === 'ADMISSION_OVERLOADED'
+    && error.requiresIdempotencyKeyReuse === true
+  ));
+  assert.equal(dispatches, 1);
+  const pending = recordFrom(store);
+  assert.equal(pending.state, 'prepared');
+  assert.equal(pending.idempotencyKey, originalKey);
+
+  const result = await state.execute(input);
+  assert.deepEqual(result, { ok: true });
+  assert.equal(dispatches, 2);
+  assert.deepEqual(store.snapshot().operations, {});
+});
+
+test('503 admission unavailable uses retry_same_key without status lookup', async () => {
+  const store = memoryStore();
+  const state = machine(store);
+  let statusChecks = 0;
+  await assert.rejects(state.execute(request({
+    dispatch: async () => ({
+      kind: 'retry_same_key',
+      error: { status: 503, code: 'ADMISSION_UNAVAILABLE', message: 'Unavailable' },
+    }),
+    queryStatus: async () => {
+      statusChecks += 1;
+      return { status: 'started', phase: 'started' };
+    },
+  })), (error) => error.code === 'ADMISSION_UNAVAILABLE');
+  assert.equal(statusChecks, 0);
+  assert.equal(recordFrom(store).state, 'prepared');
+});
+
+test('conflicting body after admission retry mints a new operation key', async () => {
+  const store = memoryStore();
+  const state = machine(store);
+  const firstBody = { categoryId: 'category-1', amount: 125 };
+  const secondBody = { categoryId: 'category-2', amount: 225 };
+  let firstKey;
+  await assert.rejects(state.execute(request({
+    body: firstBody,
+    dispatch: async (key) => {
+      firstKey = key;
+      return {
+        kind: 'retry_same_key',
+        error: { status: 429, code: 'ADMISSION_OVERLOADED', message: 'busy' },
+      };
+    },
+  })), (error) => error.code === 'ADMISSION_OVERLOADED');
+
+  const result = await state.execute(request({
+    body: secondBody,
+    dispatch: async (key) => {
+      assert.notEqual(key, firstKey);
+      return { kind: 'completed', result: { ok: true, id: 'other' } };
+    },
+  }));
+  assert.deepEqual(result, { ok: true, id: 'other' });
+});

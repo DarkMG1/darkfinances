@@ -1,4 +1,4 @@
-appId: dev.darkmg1.finances
+appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
@@ -30,6 +30,8 @@ appId: dev.darkmg1.finances
     point: 50%,20%
 - tapOn:
     id: add-transaction-submit-button
+- assertVisible:
+    id: add-transaction-screen
 - waitForAnimationToEnd
 - assertVisible:
     id: activity-screen

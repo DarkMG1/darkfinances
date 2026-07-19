@@ -1,5 +1,3 @@
-import type { MetricValue } from '@/api/generated/types';
-
 export type ResolvedMoneyMetric = {
   value: number | null;
   unavailable: boolean;
