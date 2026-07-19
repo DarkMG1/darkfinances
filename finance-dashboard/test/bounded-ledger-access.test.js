@@ -319,6 +319,21 @@ describe('bounded ledger access', () => {
       }));
     });
 
+    it('throws when graceful shutdown abort fires during an in-flight fetch delay', async () => {
+      const {
+        abortInFlightHttpReads,
+        resetProcessShutdownAbortForTests,
+      } = require('../lib/process-shutdown-abort');
+      resetProcessShutdownAbortForTests();
+      const api = makeApi({ delayMs: 40 });
+      const query = fetchAccountTransactionsBounded(api, { accounts, ...range });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      abortInFlightHttpReads();
+      await expectAbort(async () => query);
+      assert.ok(api.calls() <= 1);
+      resetProcessShutdownAbortForTests();
+    });
+
     it('throws after N account fetches without retaining partial batches', async () => {
       const controller = new AbortController();
       let calls = 0;

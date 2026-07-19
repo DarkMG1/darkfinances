@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 const state = {
   accounts: [],
   rowsByAccount: new Map(),
@@ -102,6 +105,11 @@ async function getPayees() {
 
 async function getTransactions(accountId, start, end) {
   state.callLog.push({ accountId, start, end });
+  const barrierDir = process.env.FINANCE_QUERY_TEST_BARRIER_DIR;
+  if (barrierDir) {
+    fs.mkdirSync(barrierDir, { recursive: true });
+    fs.writeFileSync(path.join(barrierDir, 'entered'), JSON.stringify({ accountId, at: Date.now() }));
+  }
   const delayMs = Number(process.env.FINANCE_QUERY_TEST_FETCH_DELAY_MS || 0);
   if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
   const rows = state.rowsByAccount.get(String(accountId)) || [];

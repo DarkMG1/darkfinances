@@ -68,6 +68,7 @@ async function spawnQueryScalingServer(t, {
   rowsPerAccount = 8,
   fetchDelayMs = 0,
   eventsSeed = null,
+  barrierDir = null,
 } = {}) {
   const port = await unusedPort();
   const base = `http://127.0.0.1:${port}`;
@@ -88,13 +89,19 @@ async function spawnQueryScalingServer(t, {
       FINANCE_QUERY_TEST_FETCH_DELAY_MS: String(fetchDelayMs),
       FINANCE_QUERY_TEST_ACCOUNT_COUNT: String(accountCount),
       FINANCE_QUERY_TEST_ROWS_PER_ACCOUNT: String(rowsPerAccount),
+      ...(barrierDir ? { FINANCE_QUERY_TEST_BARRIER_DIR: barrierDir } : {}),
     }),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.on('data', (chunk) => { logs.value += chunk; });
   child.stderr.on('data', (chunk) => { logs.value += chunk; });
   t.after(() => {
-    if (child.exitCode == null) child.kill('SIGTERM');
+    if (child.exitCode == null) {
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        if (child.exitCode == null) child.kill('SIGKILL');
+      }, 2_000).unref();
+    }
     fs.rmSync(dir, { recursive: true, force: true });
   });
   await waitForServer(base, child, logs);
@@ -108,6 +115,17 @@ async function fetchScalingState(base, headers) {
   return body.data;
 }
 
+async function tryFetchScalingState(base, headers) {
+  try {
+    const response = await fetch(`${base}/api/v1/test/query-scaling-state`, { headers });
+    if (response.status !== 200) return null;
+    const body = await response.json();
+    return body.data;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function resetScalingState(base, headers) {
   const response = await fetch(`${base}/api/v1/test/query-scaling-reset`, { headers });
   assert.equal(response.status, 200);
@@ -115,13 +133,41 @@ async function resetScalingState(base, headers) {
 
 async function waitForAbortSentinel(base, headers, { minAbortCount = 1, timeoutMs = 5_000 } = {}) {
   const deadline = Date.now() + timeoutMs;
+  let lastState = null;
   while (Date.now() < deadline) {
-    const state = await fetchScalingState(base, headers);
-    if (state.abortSentinel.abortCount >= minAbortCount) return state;
+    const state = await tryFetchScalingState(base, headers);
+    if (state) {
+      lastState = state;
+      if (state.abortSentinel.abortCount >= minAbortCount) return state;
+    }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  const finalState = await fetchScalingState(base, headers);
-  assert.fail(`abort sentinel not recorded: ${JSON.stringify(finalState.abortSentinel)}`);
+  if (lastState) {
+    assert.fail(`abort sentinel not recorded: ${JSON.stringify(lastState)}`);
+  }
+  assert.fail('abort sentinel state unavailable before shutdown completed');
+}
+
+async function waitForScalingBarrierEntered(barrierDir, { timeoutMs = 5_000 } = {}) {
+  const enteredPath = path.join(barrierDir, 'entered');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(enteredPath)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`query-scaling barrier not entered: ${barrierDir}`);
+}
+
+async function waitForShutdownAbortRecorded(barrierDir, { timeoutMs = 8_000 } = {}) {
+  const abortPath = path.join(barrierDir, 'abort-recorded');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(abortPath)) {
+      return JSON.parse(fs.readFileSync(abortPath, 'utf8'));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`graceful shutdown abort marker not recorded under ${barrierDir}`);
 }
 
 test('v1 read responses include query instrumentation headers', async (t) => {
@@ -371,14 +417,19 @@ test('concurrent disconnecting reads stay bounded and dispose listeners', async 
 
 test('graceful shutdown during in-flight read records abort without unbounded Actual calls', async (t) => {
   const accountCount = 6;
+  const barrierDir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-query-scaling-barrier-'));
+  t.after(() => {
+    fs.rmSync(barrierDir, { recursive: true, force: true });
+  });
   const { base, headers, port, child } = await spawnQueryScalingServer(t, {
     accountCount,
     rowsPerAccount: 40,
     fetchDelayMs: 80,
+    barrierDir,
   });
   await resetScalingState(base, headers);
 
-  http.request({
+  const readReq = http.request({
     hostname: '127.0.0.1',
     port,
     path: '/api/v1/transactions?start=2024-01-01&end=2024-12-31',
@@ -386,22 +437,32 @@ test('graceful shutdown during in-flight read records abort without unbounded Ac
     headers,
   }, (res) => {
     res.on('data', () => {});
-  }).end();
+  });
+  readReq.on('error', () => {});
+  readReq.end();
 
-  await new Promise((resolve) => setTimeout(resolve, 25));
+  await waitForScalingBarrierEntered(barrierDir, { timeoutMs: 5_000 });
+  await new Promise((resolve) => setTimeout(resolve, 15));
   child.kill('SIGTERM');
-
-  const deadline = Date.now() + 8_000;
-  let serverState;
-  while (Date.now() < deadline) {
-    try {
-      serverState = await fetchScalingState(base, headers);
-      if (serverState.abortSentinel.abortCount >= 1) break;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 50));
+  const abortMarker = await waitForShutdownAbortRecorded(barrierDir, { timeoutMs: 8_000 });
+  assert.ok(abortMarker.abortCount >= 1);
+  assert.equal(abortMarker.phase, 'graceful shutdown');
+  let callLogLength = null;
+  const callLogDeadline = Date.now() + 1_000;
+  while (Date.now() < callLogDeadline) {
+    const serverState = await tryFetchScalingState(base, headers);
+    if (serverState?.callLog) {
+      callLogLength = serverState.callLog.length;
+      assert.ok(serverState.abortSentinel.abortCount >= 1);
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  if (serverState) {
-    assert.ok(serverState.abortSentinel.abortCount >= 1);
-    assert.ok(serverState.callLog.length <= accountCount + 1);
+  if (callLogLength == null) {
+    const entered = JSON.parse(fs.readFileSync(path.join(barrierDir, 'entered'), 'utf8'));
+    assert.ok(entered.accountId, `missing in-flight account marker: ${JSON.stringify(entered)}`);
+    callLogLength = 1;
   }
+  assert.ok(callLogLength <= accountCount + 1);
+  readReq.destroy();
 });

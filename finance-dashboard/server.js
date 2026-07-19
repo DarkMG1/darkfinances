@@ -1799,9 +1799,11 @@ if (process.env.NODE_ENV === 'test') {
         }
       }
     } catch (_) { /* fixture unavailable */ }
+    const { getProcessShutdownAbortSignal, isProcessShutdownAborted } = require('./lib/process-shutdown-abort');
     return {
       callLog,
       abortSentinel: getQueryAbortSentinelSnapshot(),
+      shutdownAbortSignalAborted: isProcessShutdownAborted(),
     };
   }));
   v1.get('/test/query-scaling-events', env(async () => data.getEvents()));
@@ -1821,6 +1823,7 @@ if (process.env.NODE_ENV === 'test') {
       }
     } catch (_) { /* fixture unavailable */ }
     resetQueryAbortSentinel();
+    require('./lib/process-shutdown-abort').resetProcessShutdownAbortForTests();
     return { ok: true };
   }));
   v1.get('/test/query-scaling-throw', env(async () => {

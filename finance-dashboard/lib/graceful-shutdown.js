@@ -5,6 +5,7 @@ const {
   forceCloseHttpConnections,
   getRedactedHttpDiagnostics,
 } = require('./http-server-drain');
+const { abortInFlightHttpReads } = require('./process-shutdown-abort');
 
 const DEFAULT_TOTAL_TIMEOUT_MS = 15_000;
 const DEFAULT_MUTATION_DRAIN_TIMEOUT_MS = 10_000;
@@ -61,6 +62,9 @@ async function runGracefulShutdown({
 } = {}) {
   const budget = createBudget(totalTimeoutMs);
   log('signal-received', { signal });
+
+  abortInFlightHttpReads();
+  log('in-flight-reads-aborted');
 
   stopPeriodicSync();
   log('periodic-sync-stopped');

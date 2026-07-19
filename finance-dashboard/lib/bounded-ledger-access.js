@@ -14,6 +14,7 @@ const {
   QueryRangeExceededError,
   QueryResultLimitExceededError,
 } = require('./errors');
+const { isProcessShutdownAborted } = require('./process-shutdown-abort');
 
 const DEFAULT_CLASSIFICATION_PATTERNS = Object.freeze({
   incomeGroup: /^income$/i,
@@ -283,16 +284,26 @@ function discardRetainedBatches(batches) {
   batches.length = 0;
 }
 
+function isQueryAbortRequested(signal) {
+  return Boolean(signal?.aborted || isProcessShutdownAborted());
+}
+
+function resolveQueryAbortPhase(phase) {
+  if (isProcessShutdownAborted()) return 'graceful shutdown';
+  return phase;
+}
+
 function throwIfQueryAborted({ stats, batches, effectiveSignal, phase } = {}) {
-  if (!effectiveSignal?.aborted) return;
+  if (!isQueryAbortRequested(effectiveSignal)) return;
   discardRetainedBatches(batches);
   if (stats) {
     stats.aborted = true;
     stats.rowsReturned = 0;
     stats.peakRowsRetained = 0;
   }
-  recordQueryAbortSentinel(phase);
-  const detail = phase ? ` (${phase})` : '';
+  const abortPhase = resolveQueryAbortPhase(phase);
+  recordQueryAbortSentinel(abortPhase);
+  const detail = abortPhase ? ` (${abortPhase})` : '';
   throw new QueryAbortedError(`Ledger query was aborted${detail}`);
 }
 
