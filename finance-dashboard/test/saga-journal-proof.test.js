@@ -581,6 +581,142 @@ test('reimbursement link journal admission rejects fingerprint mismatch on same 
   );
 });
 
+test('terminal reimbursement link admission validates bound fingerprint and action before replay', () => {
+  const dir = tempDir('darkfinances-reimb-terminal-admission-');
+  const sagaPath = path.join(dir, 'reimb-link-sagas.json');
+  const linksPath = path.join(dir, 'links.json');
+  writeJson(linksPath, { schemaVersion: 2, links: [] });
+  const binding = linkBinding({ fingerprint: 't'.repeat(64) });
+  writeJson(sagaPath, {
+    schemaVersion: 1,
+    sagas: {
+      done: {
+        id: 'done',
+        recordVersion: 1,
+        action: 'link',
+        operationIdentity: 'terminal-key',
+        operationJournalFingerprint: binding.fingerprint,
+        operationJournalFingerprintVersion: 2,
+        operationJournalMethod: 'POST',
+        operationJournalRoute: '/api/v1/reimb-links',
+        phase: 'completed',
+        status: 'completed',
+        terminalAt: '2026-07-10T00:00:00.000Z',
+        updatedAt: '2026-07-10T00:00:00.000Z',
+        inflowId: 'in1',
+        expenseId: 'ex1',
+        resultVersion: 1,
+      },
+    },
+  });
+  const manager = createTestLinkSaga({ sagaPath, linksPath });
+  assert.doesNotThrow(() => manager.assertJournalAdmission({
+    operationKey: 'terminal-key',
+    journalBinding: binding,
+    action: 'link',
+  }));
+  assert.throws(
+    () => manager.assertJournalAdmission({
+      operationKey: 'terminal-key',
+      journalBinding: linkBinding({ fingerprint: 'u'.repeat(64) }),
+      action: 'link',
+    }),
+    (error) => error.code === 'IDEMPOTENCY_KEY_REUSED',
+  );
+  assert.throws(
+    () => manager.assertJournalAdmission({
+      operationKey: 'terminal-key',
+      journalBinding: binding,
+      action: 'unlink',
+    }),
+    (error) => error.code === 'IDEMPOTENCY_KEY_REUSED',
+  );
+});
+
+test('duplicate terminal reimbursement link records fail closed without choosing a winner', async (t) => {
+  const dir = tempDir('darkfinances-reimb-dup-terminal-');
+  const journalFile = path.join(dir, 'journal.json');
+  const sagaPath = path.join(dir, 'reimb-link-sagas.json');
+  const linksPath = path.join(dir, 'links.json');
+  writeJson(linksPath, { schemaVersion: 2, links: [] });
+  const key = 'dup-terminal-key';
+  const req = journalRequest();
+  const journal = new OperationJournal(journalFile);
+  journal.start(key, req);
+  const record = journal.get(key);
+  const binding = journalProofFromOperation(record);
+  writeJson(sagaPath, {
+    schemaVersion: 1,
+    sagas: {
+      first: {
+        id: 'first',
+        recordVersion: 1,
+        action: 'link',
+        operationIdentity: key,
+        operationJournalFingerprint: binding.fingerprint,
+        operationJournalFingerprintVersion: binding.fingerprintVersion,
+        operationJournalMethod: binding.method,
+        operationJournalRoute: binding.route,
+        phase: 'completed',
+        status: 'completed',
+        terminalAt: '2026-07-10T00:00:00.000Z',
+        updatedAt: '2026-07-10T00:00:00.000Z',
+        inflowId: 'in1',
+        expenseId: 'ex1',
+        allocationCents: 1000,
+        linkKey: 'in1:ex1',
+        resultVersion: 1,
+      },
+      second: {
+        id: 'second',
+        recordVersion: 1,
+        action: 'link',
+        operationIdentity: key,
+        operationJournalFingerprint: binding.fingerprint,
+        operationJournalFingerprintVersion: binding.fingerprintVersion,
+        operationJournalMethod: binding.method,
+        operationJournalRoute: binding.route,
+        phase: 'completed',
+        status: 'completed',
+        terminalAt: '2026-07-10T00:00:01.000Z',
+        updatedAt: '2026-07-10T00:00:01.000Z',
+        inflowId: 'in2',
+        expenseId: 'ex2',
+        allocationCents: 2000,
+        linkKey: 'in2:ex2',
+        resultVersion: 1,
+      },
+    },
+  });
+  const manager = createTestLinkSaga({ sagaPath, linksPath });
+  assert.throws(
+    () => manager.assertJournalAdmission({
+      operationKey: key,
+      journalBinding: binding,
+      action: 'link',
+    }),
+    (error) => error.code === 'IDEMPOTENCY_KEY_REUSED',
+  );
+  assert.equal(manager.proveTerminalJournalCompletion(key, binding), null);
+  const resolver = composeTerminalProofResolver([
+    (operationKey, journalOperation) => manager.proveTerminalJournalCompletion(operationKey, journalOperation),
+  ]);
+  let calls = 0;
+  await assert.rejects(
+    () => executeJournaledOperation({
+      journal,
+      key,
+      request: req,
+      terminalProofResolver: resolver,
+      handler: async () => { calls += 1; return { shouldNotRun: true }; },
+    }),
+    (error) => error.code === 'OUTCOME_UNKNOWN',
+  );
+  assert.equal(calls, 0);
+  assert.equal(journal.get(key).phase, 'started');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+});
+
 test('bulk proof still wins in composed resolver when both bulk and reimbursement sagas exist', async () => {
   const dir = tempDir('darkfinances-compose-bulk-');
   const bulkSagaPath = path.join(dir, 'bulk-sagas.json');

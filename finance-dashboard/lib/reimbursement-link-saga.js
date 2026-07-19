@@ -149,13 +149,13 @@ function createReimbursementLinkSaga({
     const matches = sagasForOperationKey(loadState(), operationKey);
     if (matches.length > 1) throw idempotencyKeyReuseError();
     const existing = matches[0];
-    if (!existing || isTerminalSaga(existing)) return;
-    assertJournalBinding(existing, normalized, {
-      expectedMethod: expectedMethodForAction(action),
-    });
+    if (!existing) return;
     if (action && existing.action && existing.action !== action) {
       throw idempotencyKeyReuseError();
     }
+    assertJournalBinding(existing, normalized, {
+      expectedMethod: expectedMethodForAction(action),
+    });
   }
 
   function proveTerminalJournalCompletion(operationKey, journalOperation) {

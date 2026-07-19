@@ -10,10 +10,10 @@ Actual transaction ids, signs, and capacities; client snapshots are hints only.
 - Legacy links with `amount: null` remain read-only, appear in `legacyReport`, and are excluded
   from trusted totals/completeness.
 - Updates require `expectedVersion` when changing an existing explicit allocation.
-- Link/unlink mutations run through `reimbursement-link-sagas.json` for crash convergence and
-journal terminal proof keyed by the same idempotency key. The saga store uses authoritative
-runtime-state semantics with bounded terminal pruning (100 records).
-  operation-journal idempotency.
+- Link/unlink mutations run through `reimbursement-link-sagas.json` for crash convergence,
+  journal terminal proof keyed by the same idempotency key, and operation-journal idempotency.
+  The saga store uses authoritative runtime-state semantics with bounded terminal pruning
+  (100 records).
 
 ## Reads
 

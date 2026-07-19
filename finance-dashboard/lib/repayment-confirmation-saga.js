@@ -252,7 +252,7 @@ function createRepaymentConfirmationSaga({
     const matches = sagasForOperationKey(loadState(), operationKey);
     if (matches.length > 1) throw idempotencyKeyReuseError();
     const existing = matches[0];
-    if (!existing || isTerminalSaga(existing)) return;
+    if (!existing) return;
     assertJournalBinding(existing, normalized, { expectedMethod: 'POST' });
   }
 
