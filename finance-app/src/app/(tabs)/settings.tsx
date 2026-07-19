@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, Share, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
@@ -33,7 +33,12 @@ export default function Settings() {
   const [newToken, setNewToken] = useState('');
   const [status, setStatus] = useState<string | null>(null);
   const connectionAdmissionRef = useRef(createSettingsConnectionSaveAdmission());
-  const [connectionBusy, setConnectionBusy] = useState(false);
+  const [busyLease, setBusyLease] = useState<number | null>(null);
+  const connectionBusy = busyLease != null;
+  const connectionSaveHooks = useMemo(() => ({
+    onAcquired: (lease: number) => setBusyLease(lease),
+    onReleased: (lease: number) => setBusyLease((current) => (current === lease ? null : current)),
+  }), []);
   const liveUpdateStatus = useOtaUpdateStatus();
   const [notif, setNotif] = useState(getNotifSettings());
   const [thresholdText, setThresholdText] = useState(String(getNotifSettings().threshold || DEFAULT_THRESHOLD));
@@ -103,23 +108,27 @@ export default function Settings() {
   };
 
   const toggleFaceId = async (value: boolean) => {
+    if (connectionBusy) return;
     if (value) {
       const ok = await authenticate('Enable Face ID lock');
       if (!ok) return;
     }
-    await setConfig({ faceId: value });
+    await runConnectionSave('Updating security…', async () => {
+      await setConfig({ faceId: value });
+      setStatus(value ? 'Face ID lock enabled' : 'Face ID lock disabled');
+    });
   };
 
   const runConnectionSave = async (statusLabel: string, task: () => Promise<void>) => {
-    if (connectionAdmissionRef.current.isBusy()) return;
-    setConnectionBusy(true);
-    setStatus(statusLabel);
-    const outcome = await runSettingsConnectionSave(connectionAdmissionRef.current, task);
-    if (outcome.skipped) {
-      setConnectionBusy(false);
-      return;
-    }
-    setConnectionBusy(false);
+    const outcome = await runSettingsConnectionSave(
+      connectionAdmissionRef.current,
+      async () => {
+        setStatus(statusLabel);
+        await task();
+      },
+      connectionSaveHooks,
+    );
+    return outcome;
   };
 
   const test = async () => {
@@ -194,15 +203,18 @@ export default function Settings() {
       {
         text: 'Disconnect',
         style: 'destructive',
-        onPress: async () => {
-          try {
-            await clear();
-          } catch (e: any) {
-            Alert.alert(
-              'Could not disconnect',
-              e?.error || e?.message || 'A pending finance operation must be reconciled first.',
-            );
-          }
+        onPress: () => {
+          void runConnectionSave('Disconnecting…', async () => {
+            try {
+              await clear();
+              setStatus('Disconnected');
+            } catch (e: any) {
+              Alert.alert(
+                'Could not disconnect',
+                e?.error || e?.message || 'A pending finance operation must be reconciled first.',
+              );
+            }
+          });
         },
       },
     ]);
@@ -240,7 +252,7 @@ export default function Settings() {
             <Text style={styles.switchLabel}>Face ID Lock</Text>
             <Text style={styles.switchSub}>{bioAvailable ? 'Require Face ID on open' : 'Not available on this device'}</Text>
           </View>
-          <Switch testID="settings-face-id-switch" value={faceId} onValueChange={toggleFaceId} disabled={!bioAvailable} trackColor={{ true: colors.accent }} />
+          <Switch testID="settings-face-id-switch" value={faceId} onValueChange={toggleFaceId} disabled={!bioAvailable || connectionBusy} trackColor={{ true: colors.accent }} />
         </View>
       </Card>
 
@@ -370,8 +382,16 @@ export default function Settings() {
         {liveUpdateStatus ? <Text style={styles.status}>{liveUpdateStatus}</Text> : null}
       </Card>
 
-      <Pressable testID="settings-disconnect-button" style={({ pressed }) => [styles.disconnect, pressed && { opacity: 0.7 }]} onPress={disconnect}>
-        <Text style={styles.disconnectText}>Disconnect</Text>
+      <Pressable
+        testID="settings-disconnect-button"
+        accessibilityRole="button"
+        accessibilityLabel={connectionBusy ? 'Disconnect unavailable while saving connection settings' : 'Disconnect'}
+        accessibilityState={{ disabled: connectionBusy, busy: connectionBusy }}
+        style={({ pressed }) => [styles.disconnect, connectionBusy && { opacity: 0.45 }, pressed && !connectionBusy && { opacity: 0.7 }]}
+        disabled={connectionBusy}
+        onPress={disconnect}
+      >
+        <Text style={styles.disconnectText}>{connectionBusy ? 'Disconnecting…' : 'Disconnect'}</Text>
       </Pressable>
     </Screen>
   );

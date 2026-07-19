@@ -24,20 +24,10 @@ function isSearchQuerySettled(inputQuery, activeQuery) {
   return activeQuery === trimmed;
 }
 
-function transactionsWindowKey({ start, accountId, collapse }) {
-  return `${start ?? ''}|${accountId ?? ''}|${collapse ? 'c' : 'x'}`;
-}
-
-function isQueryWindowCurrent(expectedKey, observedKey) {
-  return expectedKey === observedKey;
-}
-
 module.exports = {
   hasQueryData,
   shouldShowInitialLoad,
   shouldShowFatalError,
   shouldShowRefetchError,
   isSearchQuerySettled,
-  transactionsWindowKey,
-  isQueryWindowCurrent,
 };
