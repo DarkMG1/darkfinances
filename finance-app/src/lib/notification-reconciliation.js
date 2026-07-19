@@ -173,11 +173,6 @@ function resetNotificationReconciliationState() {
   resetNotificationScopeSuspensions();
 }
 
-/** @deprecated use cancelReconciliation(token) or cancelReconciliationLane(lane) */
-function cancelActiveReconciliation() {
-  cancelAllReconciliationLanes();
-}
-
 module.exports = {
   NOTIFICATION_RECONCILIATION_STALE_CODE,
   NOTIFICATION_SCOPE_SUSPENSION_PERSISTENCE_REQUIRED,
@@ -187,7 +182,6 @@ module.exports = {
   beginReconciliation,
   bindNotificationScopeSuspensionPersistence,
   bumpProfileGeneration,
-  cancelActiveReconciliation,
   cancelAllReconciliationLanes,
   cancelReconciliation,
   cancelReconciliationLane,

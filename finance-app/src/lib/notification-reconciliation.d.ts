@@ -40,9 +40,6 @@ export function cancelReconciliationLane(lane: ReconciliationLane): void;
 
 export function cancelAllReconciliationLanes(): void;
 
-/** @deprecated */
-export function cancelActiveReconciliation(): void;
-
 export function beginReconciliation(
   lane: ReconciliationLane,
   generation?: number,

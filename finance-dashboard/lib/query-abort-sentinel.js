@@ -15,7 +15,7 @@ function writeGracefulShutdownTestMarker(payload) {
   const dir = process.env.FINANCE_QUERY_TEST_BARRIER_DIR;
   if (!dir || !enabled()) return;
   try {
-    const { writeAtomicJsonMarker } = require('../test/helpers/atomic-markers');
+    const { writeAtomicJsonMarker } = require('./atomic-markers');
     writeAtomicJsonMarker(dir, 'abort-recorded', payload);
   } catch (_) { /* test-only marker */ }
 }

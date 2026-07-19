@@ -8,7 +8,7 @@ const {
   invalidateMutationDispatch,
   isMutationDispatchTokenCurrent,
   resetMutationHookPendingLock,
-} = require('./mutation-hook-identity');
+} = require('../../src/lib/mutation-hook-identity');
 
 function createMutationDispatchGuard(options = {}) {
   const epochRef = { value: 0 };
