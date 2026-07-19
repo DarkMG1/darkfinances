@@ -3,46 +3,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const net = require('net');
-const { spawn } = require('child_process');
-
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/api/v1/ping`, {
-        headers: { 'X-Finance-Token': 'test-api-token' },
-      });
-      if (response.status === 200) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`server did not start: ${logs.value}`);
-}
+const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
 
 test('rules apply binds operation journal to bulk saga identity', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-bulk-operation-'));
-  const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
-  const marker = path.join(dir, 'effects.log');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, `
+  const { base, dir } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-bulk-operation-',
+    preloadBody: `
     const fs = require('fs');
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -88,6 +55,19 @@ test('rules apply binds operation journal to bulk saga identity', async (t) => {
           auditOutcome: { status: 'completed', applied: 1, failed: 0, skipped: 0, failedItems: [] },
         };
       },
+      proveBulkOperationJournalCompletion: (operationKey, journalOperation) => {
+        mark('proof:' + operationKey);
+        if (!journalOperation?.fingerprint) return null;
+        return {
+          ok: true,
+          needsSync: false,
+          applied: 1,
+          settleUpsMoved: 0,
+          status: 'completed',
+          auditOutcome: { status: 'completed', applied: 1, failed: 0, skipped: 0, failedItems: [] },
+        };
+      },
+      assertBulkOperationJournalAdmission: () => {},
       syncNow: async () => {
         mark('sync');
         bulkPhase = 'completed';
@@ -111,39 +91,12 @@ test('rules apply binds operation journal to bulk saga identity', async (t) => {
       children: [],
       paths: [],
     };
-  `);
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      BULK_OPERATION_SAGAS_PATH: bulkPath,
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  `,
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+  const journalPath = path.join(dir, 'operation-journal.json');
+  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
+  const marker = path.join(dir, 'effects.log');
 
-  await waitForServer(base, child, logs);
   const key = 'bulk-rules-apply-journal';
   const response = await fetch(`${base}/api/v1/rules/apply`, {
     method: 'POST',
@@ -181,15 +134,9 @@ test('rules apply binds operation journal to bulk saga identity', async (t) => {
 });
 
 test('orphan operation journal reconciles from recovered bulk on status poll and replay', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-bulk-orphan-journal-'));
-  const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
-  const marker = path.join(dir, 'effects.log');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, `
+  const { base, dir } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-bulk-orphan-journal-',
+    preloadBody: `
     const fs = require('fs');
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -285,39 +232,12 @@ test('orphan operation journal reconciles from recovered bulk on status poll and
       children: [],
       paths: [],
     };
-  `);
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      BULK_OPERATION_SAGAS_PATH: bulkPath,
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  `,
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+  const journalPath = path.join(dir, 'operation-journal.json');
+  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
+  const marker = path.join(dir, 'effects.log');
 
-  await waitForServer(base, child, logs);
   const key = 'bulk-orphan-journal-key';
   const failed = await fetch(`${base}/api/v1/rules/apply`, {
     method: 'POST',
@@ -367,15 +287,9 @@ test('orphan operation journal reconciles from recovered bulk on status poll and
 });
 
 test('pruned journal cannot reconcile a different fingerprint from stale bulk evidence', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-bulk-prune-attack-'));
-  const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
-  const marker = path.join(dir, 'effects.log');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, `
+  const { base, dir } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-bulk-prune-attack-',
+    preloadBody: `
     const fs = require('fs');
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -458,37 +372,11 @@ test('pruned journal cannot reconcile a different fingerprint from stale bulk ev
       },
     });
     require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
-  `);
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      BULK_OPERATION_SAGAS_PATH: bulkPath,
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  `,
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
+  const journalPath = path.join(dir, 'operation-journal.json');
+  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
+  const marker = path.join(dir, 'effects.log');
 
   const key = 'prune-attack-key';
   const first = await fetch(`${base}/api/v1/rules/apply`, {
@@ -549,15 +437,9 @@ test('pruned journal cannot reconcile a different fingerprint from stale bulk ev
 });
 
 test('concurrent same-key bulk mutations execute one handler and preserve journal writes', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-bulk-concurrency-'));
-  const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
-  const marker = path.join(dir, 'effects.log');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, `
+  const { base, dir } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-bulk-concurrency-',
+    preloadBody: `
     const fs = require('fs');
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -632,37 +514,10 @@ test('concurrent same-key bulk mutations execute one handler and preserve journa
       },
     });
     require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
-  `);
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      BULK_OPERATION_SAGAS_PATH: bulkPath,
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  `,
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
+  const journalPath = path.join(dir, 'operation-journal.json');
+  const marker = path.join(dir, 'effects.log');
 
   const key = 'concurrent-bulk-key';
   const headers = { 'X-Finance-Token': 'test-api-token', 'Idempotency-Key': key };
@@ -685,15 +540,9 @@ test('concurrent same-key bulk mutations execute one handler and preserve journa
 });
 
 test('splitwise sync-shares binds operation journal to splitwise_mirror saga identity', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-splitwise-mirror-journal-'));
-  const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
-  const marker = path.join(dir, 'effects.log');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, `
+  const { base, dir } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-splitwise-mirror-journal-',
+    preloadBody: `
     const fs = require('fs');
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -784,39 +633,12 @@ test('splitwise sync-shares binds operation journal to splitwise_mirror saga ide
       children: [],
       paths: [],
     };
-  `);
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      BULK_OPERATION_SAGAS_PATH: bulkPath,
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  `,
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+  const journalPath = path.join(dir, 'operation-journal.json');
+  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
+  const marker = path.join(dir, 'effects.log');
 
-  await waitForServer(base, child, logs);
   const key = 'bulk-splitwise-mirror-journal';
   const response = await fetch(`${base}/api/v1/splitwise/sync-shares`, {
     method: 'POST',

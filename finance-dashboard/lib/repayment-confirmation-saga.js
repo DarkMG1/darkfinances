@@ -2,7 +2,12 @@
 
 const crypto = require('crypto');
 const { KnownPreApplyError } = require('./errors');
-const { readJsonFile, writeJsonFile } = require('./json-store');
+const {
+  assertJournalBinding,
+  idempotencyKeyReuseError,
+  journalBindingsMatch,
+  normalizeJournalBinding,
+} = require('./operation-journal-proof');
 
 function runtimeStateStore() {
   return require('./runtime-state-store');
@@ -144,6 +149,42 @@ function sameError(left, right) {
   return JSON.stringify(left || null) === JSON.stringify(right || null);
 }
 
+function sagasForOperationKey(state, operationKey) {
+  if (!operationKey) return [];
+  return Object.values(state.sagas || {}).filter(
+    (saga) => saga.operationIdentity === operationKey || saga.id === operationKey,
+  );
+}
+
+function terminalSagaCorrupted(saga) {
+  if (!isTerminalSaga(saga)) return true;
+  if (!saga.terminalAt) return true;
+  if (!saga.inflow?.id) return true;
+  if (!saga.auditOutcome || saga.auditOutcome.outcome !== 'confirmed') return true;
+  return false;
+}
+
+function bindJournalFields(saga, journalBinding) {
+  const normalized = normalizeJournalBinding(journalBinding);
+  if (!normalized) return saga;
+  return {
+    ...saga,
+    operationJournalFingerprint: normalized.fingerprint,
+    operationJournalFingerprintVersion: normalized.fingerprintVersion,
+    operationJournalMethod: normalized.method,
+    operationJournalRoute: normalized.route,
+  };
+}
+
+function terminalReplay(saga) {
+  return {
+    ok: true,
+    categorized: true,
+    linked: saga.allocations.length,
+    inflowId: saga.inflow.id,
+  };
+}
+
 function createRepaymentConfirmationSaga({
   sagaPath,
   readLinks,
@@ -201,6 +242,37 @@ function createRepaymentConfirmationSaga({
       return [...candidates].some((id) => owned.has(id));
     });
     if (conflict) throw new RepaymentConfirmationInProgressError();
+  }
+
+  function assertJournalAdmission({ operationKey, journalBinding }) {
+    if (!operationKey || !journalBinding?.fingerprint) return;
+    const normalized = normalizeJournalBinding(journalBinding);
+    if (!normalized) return;
+    const matches = sagasForOperationKey(loadState(), operationKey);
+    if (matches.length > 1) throw idempotencyKeyReuseError();
+    const existing = matches[0];
+    if (!existing) return;
+    assertJournalBinding(existing, normalized, { expectedMethod: 'POST' });
+  }
+
+  function proveTerminalJournalCompletion(operationKey, journalOperation) {
+    if (!operationKey || !journalOperation?.fingerprint) return null;
+    if (journalOperation.fingerprintVersion == null) return null;
+    let state;
+    try {
+      state = loadState();
+    } catch (_) {
+      return null;
+    }
+    const matches = sagasForOperationKey(state, operationKey);
+    if (matches.length !== 1) return null;
+    const saga = matches[0];
+    if (!isTerminalSaga(saga) || terminalSagaCorrupted(saga)) return null;
+    const binding = normalizeJournalBinding(journalOperation);
+    if (!journalBindingsMatch(saga, binding, { expectedMethod: 'POST' })) return null;
+    const result = terminalReplay(saga);
+    if (!result?.ok) return null;
+    return result;
   }
 
   async function invokeFault(faultInjector, point, saga) {
@@ -663,6 +735,7 @@ function inflowMatches(transaction, saga, { afterCategoryUpdate = false } = {}) 
     accountId,
     suggestionId,
     operationIdentity,
+    journalBinding,
     reimbCategoryId,
     person,
     inflowTransaction,
@@ -680,6 +753,29 @@ function inflowMatches(transaction, saga, { afterCategoryUpdate = false } = {}) 
         accountId,
         ids: [inflowTransaction.id, ...allocations.map((a) => a.expenseId)],
       });
+    }
+
+    if (operationIdentity) {
+      assertJournalAdmission({ operationKey: operationIdentity, journalBinding });
+      const existingTerminal = Object.values(loadState().sagas).find(
+        (saga) => isTerminalSaga(saga)
+          && saga.operationIdentity === operationIdentity
+          && String(saga.suggestionId) === String(suggestionId),
+      );
+      if (existingTerminal) {
+        return { ...terminalReplay(existingTerminal), idempotent: true };
+      }
+      const existingActive = sagasForOperationKey(loadState(), operationIdentity)[0];
+      if (existingActive && !isTerminalSaga(existingActive)) {
+        const result = await drive(api, existingActive, { faultInjector });
+        if (!result.needsSync) return result;
+        return {
+          ok: true,
+          categorized: true,
+          linked: existingActive.allocations.length,
+          inflowId: existingActive.inflow.id,
+        };
+      }
     }
 
     const inflowSnapshot = canonicalInflowSnapshot(inflowTransaction);
@@ -719,7 +815,7 @@ function inflowMatches(transaction, saga, { afterCategoryUpdate = false } = {}) 
     });
 
     const now = new Date().toISOString();
-    const saga = {
+    const saga = bindJournalFields({
       id: operationIdentity || `repay_${crypto.randomUUID()}`,
       recordVersion: RECORD_VERSION,
       status: 'started',
@@ -744,7 +840,7 @@ function inflowMatches(transaction, saga, { afterCategoryUpdate = false } = {}) 
       },
       startedAt: now,
       updatedAt: now,
-    };
+    }, journalBinding);
 
     await invokeFault(faultInjector, 'before:initial-saga-write', saga);
     writeSaga(saga);
@@ -812,9 +908,11 @@ function inflowMatches(transaction, saga, { afterCategoryUpdate = false } = {}) 
 
   return {
     assertAvailable,
+    assertJournalAdmission,
     confirm,
     inspectState,
     markSynced,
+    proveTerminalJournalCompletion,
     recover,
   };
 }

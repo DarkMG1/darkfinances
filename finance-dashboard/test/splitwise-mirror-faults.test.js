@@ -321,7 +321,7 @@ test('snapshot change before destructive stage fails closed unresolved', async (
     (error) => error.name === 'SagaInterruption',
   );
   writeJson(harness.paths.owesTruth, completeSnapshot([{ id: '888', myShare: 3, date: today }]));
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(readJson(harness.paths.owesTruth).othersPaidItems[0].id, '888');
   await assert.rejects(
     harness.data.syncSplitwiseShareExpenses({ sync: false }),
     (error) => error.code === 'BULK_OPERATION_OUTCOME_UNKNOWN',

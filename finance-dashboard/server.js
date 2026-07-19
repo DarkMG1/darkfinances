@@ -35,6 +35,7 @@ const {
 const { OperationJournal } = require('./lib/operation-journal');
 const { executeJournaledOperation } = require('./lib/operation-executor');
 const { reconcileOperationJournalFromProof } = require('./lib/operation-reconciliation');
+const { composeTerminalProofResolver } = require('./lib/operation-journal-proof');
 const {
   MUTATION_ROUTES,
   getMutationRoute,
@@ -146,13 +147,17 @@ process.on('unhandledRejection', (err) => {
   }
 });
 
-const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || `http://localhost:${process.env.PORT || 5007}`;
+const configuredPublicOrigin = process.env.PUBLIC_ORIGIN || `http://localhost:${process.env.PORT || 5007}`;
+const PUBLIC_ORIGIN = configuredPublicOrigin;
 const RP_NAME = process.env.WEBAUTHN_RP_NAME || 'DarkFinances';
 const RP_ID = process.env.WEBAUTHN_RP_ID || (() => {
   try { return new URL(PUBLIC_ORIGIN).hostname; }
   catch (_) { return 'localhost'; }
 })();
-const ORIGIN = process.env.WEBAUTHN_ORIGIN || PUBLIC_ORIGIN;
+let allowedOrigin = process.env.WEBAUTHN_ORIGIN || configuredPublicOrigin;
+function webAuthnExpectedOrigin() {
+  return allowedOrigin;
+}
 const PASSKEY_USER_NAME = process.env.PASSKEY_USER_NAME || 'owner';
 const PASSKEY_USER_DISPLAY_NAME = process.env.PASSKEY_USER_DISPLAY_NAME || PASSKEY_USER_NAME;
 const CREDS_FILE = process.env.PASSKEY_CREDENTIALS_FILE || path.join(__dirname, 'passkey-credentials.json');
@@ -188,6 +193,12 @@ function saveCreds(creds) {
 }
 function requestClaimsDemo(req) {
   return req.get('X-Demo-Mode') === '1' || req.query.demo === '1' || req.query.demo === 'true';
+}
+
+function exposeTestServerInstanceId() {
+  return process.env.NODE_ENV === 'test' && process.env.TEST_SERVER_INSTANCE_ID
+    ? process.env.TEST_SERVER_INSTANCE_ID
+    : null;
 }
 function safeEqualHex(actual, expected) {
   if (!/^[a-f0-9]{64}$/.test(actual) || !/^[a-f0-9]{64}$/.test(expected)) return false;
@@ -279,7 +290,7 @@ app.use(session({
 
 app.use((req, res, next) => {
   const origin = req.get('Origin');
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && origin !== ORIGIN) {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && origin !== allowedOrigin) {
     if (req.path.startsWith('/api/')) return sendApiErrorCode(req, res, 'CORS_ORIGIN_REJECTED');
     return res.status(403).json({ error: 'Origin not allowed' });
   }
@@ -358,7 +369,7 @@ app.post('/auth/register/finish', enrollmentLimiter, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: req.session.regChallenge,
-      expectedOrigin: ORIGIN,
+      expectedOrigin: webAuthnExpectedOrigin(),
       expectedRPID: RP_ID,
     });
     if (!verification.verified) return res.status(400).json({ error: 'Verification failed' });
@@ -413,7 +424,7 @@ app.post('/auth/login/finish', loginLimiter, async (req, res) => {
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: req.session.authChallenge,
-      expectedOrigin: ORIGIN,
+      expectedOrigin: webAuthnExpectedOrigin(),
       expectedRPID: RP_ID,
       credential: {
         id: cred.credentialID,
@@ -1271,8 +1282,19 @@ const reimbLinks = (req) => data.getReimbLinks({ id: req.query.id });
 async function addLink(req, operation) {
   const link = parse(schemas.reimbLink, req.body, 'reimbursement link');
   data.assertTransactionMutationAvailable({ ids: [link.inflow?.id, link.expense?.id] });
+  if (operation?.key && operation?.journalBinding?.fingerprint) {
+    data.assertReimbursementLinkJournalAdmission({
+      operationKey: operation.key,
+      journalBinding: operation.journalBinding,
+      action: 'link',
+    });
+  }
   return runActualProjectionMutation(
-    () => applyLocal(operation, () => data.addReimbLink({ ...link, operationIdentity: operation?.key })),
+    () => applyLocal(operation, () => data.addReimbLink({
+      ...link,
+      operationIdentity: operation?.key,
+      journalBinding: operation?.journalBinding,
+    })),
   );
 }
 async function confirmRepaymentH(req, operation) {
@@ -1280,6 +1302,12 @@ async function confirmRepaymentH(req, operation) {
   const from = req.query.from;
   const to = req.query.to;
   data.assertTransactionMutationAvailable({ ids: [id.startsWith('sg_') ? id.slice(3) : null] });
+  if (operation?.key && operation?.journalBinding?.fingerprint) {
+    data.assertRepaymentConfirmationJournalAdmission({
+      operationKey: operation.key,
+      journalBinding: operation.journalBinding,
+    });
+  }
   const admission = await data.validateRepaymentConfirmationAdmission({ id, from, to });
   const r = await applyLocal(operation, () =>
     data.confirmRepayment({
@@ -1287,6 +1315,7 @@ async function confirmRepaymentH(req, operation) {
       from,
       to,
       operationIdentity: operation?.key,
+      journalBinding: operation?.journalBinding,
       admission,
     }));
   await syncAfterLocal(operation); // persist the inflow's new category to the Actual server
@@ -1317,10 +1346,18 @@ async function delLink(req, operation) {
       : {}),
   }, 'reimbursement unlink');
   data.assertTransactionMutationAvailable({ ids: [parsed.inflowId, parsed.expenseId] });
+  if (operation?.key && operation?.journalBinding?.fingerprint) {
+    data.assertReimbursementLinkJournalAdmission({
+      operationKey: operation.key,
+      journalBinding: operation.journalBinding,
+      action: 'unlink',
+    });
+  }
   return runActualProjectionMutation(
     () => applyLocal(operation, () => data.deleteReimbLink({
       ...parsed,
       operationIdentity: operation?.key,
+      journalBinding: operation?.journalBinding,
     })),
   );
 }
@@ -1427,6 +1464,12 @@ async function reportCsv(req, res) {
   }
 }
 
+function isTestIdentityPing(req) {
+  return exposeTestServerInstanceId() != null
+    && req.method === 'GET'
+    && req.path === '/ping';
+}
+
 // Raw responders for the legacy web API; enveloped {data}/{error} responders for v1.
 const runHandler = (req, res, fn, operation, { signal } = {}) => {
   if (operation) return fn(req, operation);
@@ -1435,6 +1478,9 @@ const runHandler = (req, res, fn, operation, { signal } = {}) => {
       isDemo,
       admission: requestAdmission,
     });
+  }
+  if (isTestIdentityPing(req)) {
+    return fn(req);
   }
   return withReadAdmission(req, res, actualCoordinator, () => fn(req), { admission: requestAdmission, signal });
 };
@@ -1465,31 +1511,15 @@ function operationJournalError(error, phase) {
   console.error(`[operation-journal:${phase}]`, error);
 }
 
-function bulkJournalProofFromOperation(operation) {
-  if (!operation?.fingerprint || operation.fingerprintVersion == null) return null;
-  return {
-    fingerprint: operation.fingerprint,
-    fingerprintVersion: operation.fingerprintVersion,
-    method: operation.method || null,
-    route: operation.route || null,
-  };
-}
-
-async function bulkTerminalProofResolver({ key, operation }) {
-  const journalOperation = bulkJournalProofFromOperation(operation);
-  if (!journalOperation) return null;
-  const result = data.proveBulkOperationJournalCompletion(key, journalOperation);
-  if (!result?.ok || result.status !== 'completed' || result.needsSync) return null;
-  return {
-    result,
-    fingerprint: journalOperation.fingerprint,
-    fingerprintVersion: journalOperation.fingerprintVersion,
-  };
-}
+const terminalProofResolver = composeTerminalProofResolver([
+  (key, journalOperation) => data.proveBulkOperationJournalCompletion(key, journalOperation),
+  (key, journalOperation) => data.proveReimbursementLinkJournalCompletion(key, journalOperation),
+  (key, journalOperation) => data.proveRepaymentConfirmationJournalCompletion(key, journalOperation),
+]);
 
 async function readOperationStatus(req, res, key) {
   return withOperationStatusAdmission(req, res, mutationQueue, () => reconcileOperationJournalFromProof(operationJournal, key, {
-    proofResolver: bulkTerminalProofResolver,
+    proofResolver: terminalProofResolver,
     onJournalError: operationJournalError,
   }), { admission: requestAdmission });
 }
@@ -1509,7 +1539,7 @@ async function executeVersionedMutation(req, fn, mutationRoute) {
     handler: (operation) => fn(req, operation),
     requiresCheckpoint: mutationRoute.requiresCheckpoint,
     onJournalError: operationJournalError,
-    terminalProofResolver: bulkTerminalProofResolver,
+    terminalProofResolver,
   });
 }
 const env = (fn, mutationRoute = null) => async (req, res) => {
@@ -1635,8 +1665,8 @@ function v1Auth(req, res, next) {
 const v1 = express.Router();
 v1.use((req, res, next) => {
   const origin = req.get('Origin');
-  if (origin && origin !== ORIGIN) return sendApiErrorCode(req, res, 'CORS_ORIGIN_REJECTED');
-  if (origin === ORIGIN) res.header('Access-Control-Allow-Origin', ORIGIN);
+  if (origin && origin !== allowedOrigin) return sendApiErrorCode(req, res, 'CORS_ORIGIN_REJECTED');
+  if (origin === allowedOrigin) res.header('Access-Control-Allow-Origin', allowedOrigin);
   res.header('Vary', 'Origin');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Finance-Token, X-Demo-Mode, Idempotency-Key');
   res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -1676,12 +1706,15 @@ v1.get('/operations/:key', env(async (req, res) => {
 }));
 v1.get('/ping', env(async () => {
   const actual = data.getHealth();
+  const testInstanceId = exposeTestServerInstanceId();
   if (runtimeHealth.fatalErrorAt || !actual.ready) {
-    throw new AppError('Finance data is not ready', {
+    const notReady = new AppError('Finance data is not ready', {
       code: 'NOT_READY',
       status: 503,
       expose: true,
     });
+    if (testInstanceId) notReady.testInstanceId = testInstanceId;
+    throw notReady;
   }
   return {
     ok: true,
@@ -1693,6 +1726,7 @@ v1.get('/ping', env(async () => {
     requestAdmission: requestAdmission.getHealth(),
     queuedMutations: mutationQueue.size,
     release: releaseIdentity(),
+    ...(testInstanceId ? { testInstanceId } : {}),
   };
 }));
 v1.get('/reconnect-freshness', env(async (req) => {
@@ -1859,11 +1893,20 @@ async function periodicSync() {
   }
 }
 
-const PORT = parseInt(process.env.PORT, 10) || 5007;
+const configuredPort = Number.parseInt(process.env.PORT ?? '', 10);
+const PORT = Number.isInteger(configuredPort) ? configuredPort : 5007;
 const DEMO_ONLY = process.env.DEMO_ONLY === '1';
 let periodicSyncTimer;
 const httpServer = app.listen(PORT, '127.0.0.1', () => {
-  console.log(`Finance dashboard running on http://127.0.0.1:${PORT}`);
+  const boundPort = httpServer.address().port;
+  if (String(allowedOrigin).endsWith(':0')) {
+    allowedOrigin = `http://127.0.0.1:${boundPort}`;
+  }
+  console.log(`Finance dashboard running on http://127.0.0.1:${boundPort}`);
+  const testInstanceId = exposeTestServerInstanceId();
+  if (testInstanceId) {
+    console.log(`FINANCE_TEST_SERVER_READY ${boundPort} ${testInstanceId}`);
+  }
   if (DEMO_ONLY) {
     console.log('Demo-only mode enabled; skipping Actual startup sync');
     setInterval(() => {}, 60 * 60 * 1000);

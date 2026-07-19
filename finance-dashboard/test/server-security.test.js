@@ -1,35 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
-const fs = require('fs');
-const net = require('net');
-const os = require('os');
-const path = require('path');
-const { spawn } = require('child_process');
-
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/auth/status`);
-      if (response.ok) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`server startup timeout: ${logs.value}`);
-}
+const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
 
 async function request(base, pathname, options = {}) {
   const response = await fetch(`${base}${pathname}`, options);
@@ -40,38 +12,14 @@ async function request(base, pathname, options = {}) {
 }
 
 test('server security boundaries fail closed', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-server-'));
   const code = 'test-enrollment-code';
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: path.resolve(__dirname, '..'),
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      PORT: String(port),
-      DEMO_ONLY: '1',
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
+  const { base } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-server-',
+    extraEnvForDir: () => ({
       PASSKEY_ENROLLMENT_TOKEN_HASH: crypto.createHash('sha256').update(code).digest('hex'),
       PASSKEY_ENROLLMENT_EXPIRES_AT: String(Date.now() + 60_000),
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    }),
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   let result = await request(base, '/api/v1/accounts');
   assert.equal(result.response.status, 401);

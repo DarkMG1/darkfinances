@@ -3,10 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const net = require('net');
-const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
 const {
   collectDeployedFiles,
   sha256Canonical,
@@ -18,30 +15,15 @@ const {
 const { DASHBOARD_RUNTIME_FILES } = require('../lib/release-files');
 const { ActualCoordinator } = require('../lib/actual-coordinator');
 const NodeCache = require('node-cache');
-
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => (error ? reject(error) : resolve(port)));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/auth/status`);
-      if (response.ok) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`server startup timeout: ${logs.value}`);
-}
+const { startEphemeralDashboardServer, waitForChildExit } = require('./helpers/ephemeral-dashboard-server');
+const {
+  childWatchContext,
+  gateWaitPrelude,
+  markPrelude,
+  pollBackoff,
+  sidecarReleasePrelude,
+  waitForMarkerFile,
+} = require('./helpers/test-sync-barriers');
 
 async function apiRequest(base, pathname, { method = 'GET', key, body, demo = false, token = 'test-api-token', headers = {} } = {}) {
   const response = await fetch(`${base}${pathname}`, {
@@ -106,9 +88,18 @@ function manifestFor(runtimeDir, contractFingerprint = 'a1b2c3d4e5f67890') {
   };
 }
 
-function accountsMockBody({ markLine = '', useSourceFile = false } = {}) {
+function accountsMockBody({ markLine = '', useSourceFile = false, holdAccountsUntilRelease = false, slowAccountsMs = 0 } = {}) {
+  const holdLogic = holdAccountsUntilRelease ? `
+    if (typeof mark === 'function') mark('accounts:inflight');
+    await waitSidecarRelease();
+  ` : '';
+  const slowLogic = slowAccountsMs > 0 ? `
+    if (typeof mark === 'function') mark('accounts:inflight');
+    await new Promise((resolve) => setTimeout(resolve, ${slowAccountsMs}));
+  ` : '';
   const sourceFileLogic = useSourceFile ? `
     getAccounts: async () => {
+      ${holdLogic}${slowLogic}
       const variant = fs.readFileSync(process.env.TEST_ACCOUNTS_SOURCE_FILE, 'utf8').trim();
       const entry = variant === 'B'
         ? { id: 'a1', name: 'Source-B', balance: 200 }
@@ -118,6 +109,7 @@ function accountsMockBody({ markLine = '', useSourceFile = false } = {}) {
     },
   ` : `
       getAccounts: async () => {
+        ${holdLogic}${slowLogic}
         if (typeof mark === 'function') mark('probe:' + accountsSource[0].name);
         return accountsSource.map((entry) => ({ ...entry }));
       },
@@ -126,6 +118,7 @@ function accountsMockBody({ markLine = '', useSourceFile = false } = {}) {
     ${markLine}
     const fs = require('fs');
     const path = require('path');
+    ${sidecarReleasePrelude()}
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
     let accountsSource = [{ id: 'a1', name: 'Source-A', balance: 100 }];
     const mock = {
@@ -146,39 +139,27 @@ function accountsMockBody({ markLine = '', useSourceFile = false } = {}) {
   `;
 }
 
-function spawnServer(dir, port, preloadBody, extraEnv = {}) {
+async function startReconnectServer(t, preloadBody, {
+  extraEnv = {},
+  extraEnvForDir: extraEnvForDirFn = null,
+  prepareDir = null,
+  tempPrefix = 'df-reconnect-',
+} = {}) {
   const dashboardRoot = path.resolve(__dirname, '..');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, preloadBody);
-  const manifestPath = path.join(dir, 'release-manifest.json');
-  fs.writeFileSync(manifestPath, JSON.stringify(manifestFor(dashboardRoot)));
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_MARKER: path.join(dir, 'marker.log'),
-      RELEASE_MANIFEST_PATH: manifestPath,
-      ...extraEnv,
+  return startEphemeralDashboardServer(t, {
+    tempPrefix,
+    preloadBody,
+    prepareDir,
+    extraEnvForDir: (dir) => {
+      const manifestPath = path.join(dir, 'release-manifest.json');
+      fs.writeFileSync(manifestPath, JSON.stringify(manifestFor(dashboardRoot)));
+      return {
+        RELEASE_MANIFEST_PATH: manifestPath,
+        ...extraEnv,
+        ...(extraEnvForDirFn ? extraEnvForDirFn(dir) : {}),
+      };
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  return { child, logs, base: `http://127.0.0.1:${port}`, marker: path.join(dir, 'marker.log'), dir };
 }
 
 function barrierMockBody({ markLine = '' } = {}) {
@@ -186,14 +167,9 @@ function barrierMockBody({ markLine = '' } = {}) {
     ${markLine}
     const fs = require('fs');
     const path = require('path');
+    ${gateWaitPrelude()}
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
     let accountsSource = [{ id: 'a1', name: 'Source-A', balance: 100 }];
-    const gatePath = (name) => path.join(path.dirname(process.env.TEST_MARKER), name + '.gate');
-    const waitGate = async (name) => {
-      while (!fs.existsSync(gatePath(name))) {
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    };
     const mock = {
       initApi: async () => ({ ok: true }),
       shutdownApi: async () => ({ ok: true }),
@@ -224,16 +200,8 @@ function releaseGate(dir, name) {
   fs.writeFileSync(path.join(dir, `${name}.gate`), '1');
 }
 
-async function waitForMarkerLine(marker, line, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(marker)) {
-      const content = fs.readFileSync(marker, 'utf8');
-      if (content.split('\n').includes(line)) return;
-    }
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  throw new Error(`marker line not seen: ${line}`);
+async function waitForMarkerLine(marker, line, watch = {}) {
+  return waitForMarkerFile(marker, line, { ...watch, context: `marker ${line}` });
 }
 
 test('deriveSourceObservedRevision changes when probe source changes', () => {
@@ -274,7 +242,7 @@ test('concurrent probe requests coalesce to one direct read', async () => {
     coordinator,
     readAccountsProbe: async () => {
       reads += 1;
-      await new Promise((resolve) => setImmediate(resolve));
+      await pollBackoff();
       return [{ id: 'a1', name: 'X', balance: 1 }];
     },
     financeTimeZone: 'America/Los_Angeles',
@@ -293,7 +261,7 @@ test('probe coalescing is scoped per principal and never crosses auth', async ()
     coordinator,
     readAccountsProbe: async () => {
       reads += 1;
-      await new Promise((resolve) => setImmediate(resolve));
+      await pollBackoff();
       return [{ id: 'a1', name: `Read-${reads}`, balance: reads }];
     },
     financeTimeZone: 'America/Los_Angeles',
@@ -311,21 +279,15 @@ test('probe coalescing is scoped per principal and never crosses auth', async ()
 });
 
 test('warm cached accounts=A, source B without invalidation, reconnect GET then accounts returns B', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-ab-'));
   const markLine = `
     const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');
   `;
+  const { base, dir, markerPath: marker } = await startReconnectServer(t, accountsMockBody({ markLine, useSourceFile: true }), {
+    tempPrefix: 'df-reconnect-ab-',
+    prepareDir: (serverDir) => fs.writeFileSync(path.join(serverDir, 'accounts-source.txt'), 'A'),
+    extraEnvForDir: (serverDir) => ({ TEST_ACCOUNTS_SOURCE_FILE: path.join(serverDir, 'accounts-source.txt') }),
+  });
   const sourceFile = path.join(dir, 'accounts-source.txt');
-  fs.writeFileSync(sourceFile, 'A');
-  const { child, logs, base, marker } = spawnServer(dir, port, accountsMockBody({ markLine, useSourceFile: true }), {
-    TEST_ACCOUNTS_SOURCE_FILE: sourceFile,
-  });
-  t.after(() => {
-    try { child.kill('SIGKILL'); } catch (_) {}
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   const warm = await apiRequest(base, '/api/v1/accounts');
   assert.equal(warm.response.status, 200);
@@ -348,14 +310,10 @@ test('warm cached accounts=A, source B without invalidation, reconnect GET then 
 });
 
 test('ping no longer claims source freshness metadata', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-ping-clean-'));
-  const { child, logs, base } = spawnServer(dir, port, accountsMockBody());
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
+  const { base, markerPath: marker } = await startReconnectServer(t, accountsMockBody(), {
+    tempPrefix: 'df-reconnect-ping-clean-',
   });
-  await waitForServer(base, child, logs);
+
   const { body, response } = await apiRequest(base, '/api/v1/ping');
   assert.equal(response.status, 200);
   assert.equal(body.data.sourceFreshness, undefined);
@@ -363,17 +321,12 @@ test('ping no longer claims source freshness metadata', async (t) => {
 });
 
 test('reconnect probe serializes with queued mutation write without corrupting cache', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-write-race-'));
   const markLine = `
     const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');
   `;
-  const { child, logs, base, marker } = spawnServer(dir, port, accountsMockBody({ markLine }));
-  t.after(() => {
-    try { child.kill('SIGKILL'); } catch (_) {}
-    fs.rmSync(dir, { recursive: true, force: true });
+  const { base, markerPath: marker } = await startReconnectServer(t, accountsMockBody({ markLine }), {
+    tempPrefix: 'df-reconnect-write-race-',
   });
-  await waitForServer(base, child, logs);
 
   const probe = await apiRequest(base, '/api/v1/reconnect-freshness');
   const mutation = await apiRequest(base, '/api/v1/recurring/r1/override', {
@@ -389,16 +342,11 @@ test('reconnect probe serializes with queued mutation write without corrupting c
 });
 
 test('reconnect probe rejects after coordinator shutdown finalizes', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-shutdown-'));
-  const { child, logs, base } = spawnServer(dir, port, accountsMockBody());
-  t.after(() => {
-    try { child.kill('SIGKILL'); } catch (_) {}
-    fs.rmSync(dir, { recursive: true, force: true });
+  const { base, child } = await startReconnectServer(t, accountsMockBody(), {
+    tempPrefix: 'df-reconnect-shutdown-',
   });
-  await waitForServer(base, child, logs);
   child.kill('SIGTERM');
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await waitForChildExit(child, 10_000);
   let probeStatus = 0;
   try {
     const probe = await apiRequest(base, '/api/v1/reconnect-freshness');
@@ -410,42 +358,37 @@ test('reconnect probe rejects after coordinator shutdown finalizes', async (t) =
 });
 
 test('control-lane flood keeps reconnect freshness and ping responsive', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-control-flood-'));
-  const { child, logs, base } = spawnServer(dir, port, accountsMockBody(), {
-    FINANCE_ADMISSION_READ_GLOBAL_PENDING: '12',
-    FINANCE_ADMISSION_READ_GLOBAL_RUNNING: '2',
-    FINANCE_ADMISSION_READ_PRINCIPAL_PENDING: '4',
-    FINANCE_ADMISSION_READ_PRINCIPAL_RUNNING: '2',
-    FINANCE_ADMISSION_CONTROL_RESERVE: '2',
-    FINANCE_ADMISSION_CHEAP_RESERVE: '2',
-    FINANCE_ADMISSION_MAX_PENDING_DEPTH: '8',
-    FINANCE_ADMISSION_MAX_WAIT_MS: '25',
+  const markLine = `const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');`;
+  const { base, child, logs, childState, markerPath } = await startReconnectServer(t, accountsMockBody({
+    markLine,
+    slowAccountsMs: 40,
+  }), {
+    tempPrefix: 'df-reconnect-control-flood-',
+    extraEnv: {
+      FINANCE_ADMISSION_READ_GLOBAL_PENDING: '12',
+      FINANCE_ADMISSION_READ_GLOBAL_RUNNING: '2',
+      FINANCE_ADMISSION_READ_PRINCIPAL_PENDING: '4',
+      FINANCE_ADMISSION_READ_PRINCIPAL_RUNNING: '2',
+      FINANCE_ADMISSION_CONTROL_RESERVE: '2',
+      FINANCE_ADMISSION_CHEAP_RESERVE: '2',
+      FINANCE_ADMISSION_MAX_PENDING_DEPTH: '8',
+      FINANCE_ADMISSION_MAX_WAIT_MS: '25',
+    },
   });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   const blocked = apiRequest(base, '/api/v1/accounts?month=2026-07');
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForMarkerLine(markerPath, 'accounts:inflight', childWatchContext({ child, logs, childState }));
   const ping = await apiRequest(base, '/api/v1/ping');
   const probe = await apiRequest(base, '/api/v1/reconnect-freshness');
   assert.equal(ping.response.status, 200);
   assert.equal(probe.response.status, 200);
-  await blocked.catch(() => {});
+  await blocked;
 });
 
 test('repeated reconnect probes bump cache generation monotonically', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-repeat-'));
-  const { child, logs, base } = spawnServer(dir, port, accountsMockBody());
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
+  const { base } = await startReconnectServer(t, accountsMockBody(), {
+    tempPrefix: 'df-reconnect-repeat-',
   });
-  await waitForServer(base, child, logs);
   const first = await apiRequest(base, '/api/v1/reconnect-freshness');
   const second = await apiRequest(base, '/api/v1/reconnect-freshness');
   assert.ok(second.body.data.cacheGenerationAfter > first.body.data.cacheGenerationAfter);
@@ -454,19 +397,14 @@ test('repeated reconnect probes bump cache generation monotonically', async (t) 
 });
 
 test('Promise.all probe then write serializes with barriers and write wins cache', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-probe-first-'));
   const markLine = `const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');`;
-  const { child, logs, base, marker } = spawnServer(dir, port, barrierMockBody({ markLine }));
-  t.after(() => {
-    try { child.kill('SIGKILL'); } catch (_) {}
-    fs.rmSync(dir, { recursive: true, force: true });
+  const { base, dir, markerPath: marker, child, logs, childState } = await startReconnectServer(t, barrierMockBody({ markLine }), {
+    tempPrefix: 'df-reconnect-probe-first-',
   });
-  await waitForServer(base, child, logs);
   await apiRequest(base, '/api/v1/accounts');
 
   const probePromise = apiRequest(base, '/api/v1/reconnect-freshness');
-  await waitForMarkerLine(marker, 'probe:enter');
+  await waitForMarkerLine(marker, 'probe:enter', childWatchContext({ child, logs, childState }));
   const mutationPromise = apiRequest(base, '/api/v1/recurring/r1/override', {
     method: 'POST',
     key: 'probe-first-barrier',
@@ -478,8 +416,8 @@ test('Promise.all probe then write serializes with barriers and write wins cache
     'mutation must wait behind in-flight probe read',
   );
   releaseGate(dir, 'probe');
-  await waitForMarkerLine(marker, 'probe:read:Source-A');
-  await waitForMarkerLine(marker, 'mutation:enter');
+  await waitForMarkerLine(marker, 'probe:read:Source-A', childWatchContext({ child, logs, childState }));
+  await waitForMarkerLine(marker, 'mutation:enter', childWatchContext({ child, logs, childState }));
   releaseGate(dir, 'mutation');
   const [probe, mutation] = await Promise.all([probePromise, mutationPromise]);
   assert.equal(probe.response.status, 200);
@@ -495,15 +433,10 @@ test('Promise.all probe then write serializes with barriers and write wins cache
 });
 
 test('Promise.all write then probe serializes with barriers and write wins cache', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-write-first-'));
   const markLine = `const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');`;
-  const { child, logs, base, marker } = spawnServer(dir, port, barrierMockBody({ markLine }));
-  t.after(() => {
-    try { child.kill('SIGKILL'); } catch (_) {}
-    fs.rmSync(dir, { recursive: true, force: true });
+  const { base, dir, markerPath: marker, child, logs, childState } = await startReconnectServer(t, barrierMockBody({ markLine }), {
+    tempPrefix: 'df-reconnect-write-first-',
   });
-  await waitForServer(base, child, logs);
   await apiRequest(base, '/api/v1/accounts');
 
   const mutationPromise = apiRequest(base, '/api/v1/recurring/r1/override', {
@@ -511,7 +444,7 @@ test('Promise.all write then probe serializes with barriers and write wins cache
     key: 'write-first-barrier',
     body: { status: 'active', hidden: false },
   });
-  await waitForMarkerLine(marker, 'mutation:enter');
+  await waitForMarkerLine(marker, 'mutation:enter', childWatchContext({ child, logs, childState }));
   const probePromise = apiRequest(base, '/api/v1/reconnect-freshness');
   assert.equal(
     fs.existsSync(marker) && fs.readFileSync(marker, 'utf8').includes('probe:enter'),
@@ -519,10 +452,10 @@ test('Promise.all write then probe serializes with barriers and write wins cache
     'probe must wait behind in-flight mutation write',
   );
   releaseGate(dir, 'mutation');
-  await waitForMarkerLine(marker, 'mutation:end');
-  await waitForMarkerLine(marker, 'probe:enter');
+  await waitForMarkerLine(marker, 'mutation:end', childWatchContext({ child, logs, childState }));
+  await waitForMarkerLine(marker, 'probe:enter', childWatchContext({ child, logs, childState }));
   releaseGate(dir, 'probe');
-  await waitForMarkerLine(marker, 'probe:read:Source-Write');
+  await waitForMarkerLine(marker, 'probe:read:Source-Write', childWatchContext({ child, logs, childState }));
   const [mutation, probe] = await Promise.all([mutationPromise, probePromise]);
   assert.equal(mutation.response.status, 200);
   assert.equal(probe.response.status, 200);
@@ -535,15 +468,10 @@ test('Promise.all write then probe serializes with barriers and write wins cache
 });
 
 test('demo and token principals do not coalesce reconnect probe responses', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-reconnect-principal-'));
   const markLine = `const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');`;
-  const { child, logs, base, marker } = spawnServer(dir, port, accountsMockBody({ markLine }));
-  t.after(() => {
-    try { child.kill('SIGKILL'); } catch (_) {}
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+  const { base, markerPath: marker } = await startReconnectServer(t, accountsMockBody({ markLine }), {
+    tempPrefix: 'df-reconnect-principal-',
   });
-  await waitForServer(base, child, logs);
   const [tokenProbe, demoProbe] = await Promise.all([
     apiRequest(base, '/api/v1/reconnect-freshness'),
     apiRequest(base, '/api/v1/reconnect-freshness', { demo: true, token: null }),

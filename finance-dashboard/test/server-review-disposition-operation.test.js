@@ -3,35 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const net = require('net');
-const { spawn } = require('child_process');
-
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/api/v1/ping`, {
-        headers: { 'X-Finance-Token': 'test-api-token' },
-      });
-      if (response.status === 200) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`server did not start: ${logs.value}`);
-}
+const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
 
 async function request(base, route, { method = 'POST', key, body } = {}) {
   const response = await fetch(`${base}${route}`, {
@@ -50,55 +23,29 @@ function readJournal(path) {
   return JSON.parse(fs.readFileSync(path, 'utf8'));
 }
 
-function spawnReviewServer(t, { preloadBody, reviewStatePath, journalPath, markerPath }) {
-  const portPromise = unusedPort();
-  return portPromise.then((port) => {
-    const base = `http://127.0.0.1:${port}`;
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-review-operation-'));
-    const dashboardRoot = path.resolve(__dirname, '..');
-    const journal = journalPath || path.join(dir, 'operation-journal.json');
-    const marker = markerPath || path.join(dir, 'effects.log');
-    const reviewState = reviewStatePath || path.join(dir, 'review-state.json');
-    const preload = path.join(dir, 'mock-data-module.js');
-    fs.writeFileSync(preload, preloadBody);
-    fs.writeFileSync(reviewState, JSON.stringify({
-      schemaVersion: 2,
-      contentVersion: 1,
-      dispositions: {},
-      legacyDispositions: {},
-    }, null, 2));
-
-    const logs = { value: '' };
-    const child = spawn(process.execPath, ['server.js'], {
-      cwd: dashboardRoot,
-      env: {
-        ...process.env,
-        NODE_ENV: 'test',
-        DEMO_ONLY: '1',
-        NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-        PORT: String(port),
-        PUBLIC_ORIGIN: `http://localhost:${port}`,
-        WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-        WEBAUTHN_RP_ID: 'localhost',
-        FINANCE_API_TOKEN: 'test-api-token',
-        SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-        SESSION_DIR: path.join(dir, 'sessions'),
-        OPERATION_JOURNAL_PATH: journal,
-        REVIEW_STATE_PATH: reviewState,
-        PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-        TEST_DASHBOARD_ROOT: dashboardRoot,
-        TEST_EFFECT_MARKER: marker,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    child.stdout.on('data', (chunk) => { logs.value += chunk; });
-    child.stderr.on('data', (chunk) => { logs.value += chunk; });
-    t.after(() => {
-      child.kill('SIGTERM');
-      fs.rmSync(dir, { recursive: true, force: true });
-    });
-    return { base, child, logs, journal, marker, reviewState, port, dir };
+async function spawnReviewServer(t, { preloadBody } = {}) {
+  let journal;
+  let marker;
+  let reviewState;
+  const started = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-review-operation-',
+    preloadBody,
+    prepareDir: (dir) => {
+      journal = path.join(dir, 'operation-journal.json');
+      marker = path.join(dir, 'effects.log');
+      reviewState = path.join(dir, 'review-state.json');
+      fs.writeFileSync(reviewState, JSON.stringify({
+        schemaVersion: 2,
+        contentVersion: 1,
+        dispositions: {},
+        legacyDispositions: {},
+      }, null, 2));
+    },
+    extraEnvForDir: (dir) => ({
+      REVIEW_STATE_PATH: path.join(dir, 'review-state.json'),
+    }),
   });
+  return { ...started, journal, marker, reviewState };
 }
 
 function mockPreload({ extraMethods = '', extraRequires = '' } = {}) {
@@ -157,10 +104,9 @@ function mockPreload({ extraMethods = '', extraRequires = '' } = {}) {
 }
 
 test('review disposition prepares before commit and completes journal on success', async (t) => {
-  const { base, child, logs, journal, marker } = await spawnReviewServer(t, {
+  const { base, journal, marker } = await spawnReviewServer(t, {
     preloadBody: mockPreload(),
   });
-  await waitForServer(base, child, logs);
 
   const key = 'review-ack-key';
   const hash = 'a'.repeat(64);
@@ -229,7 +175,6 @@ test('semantic admission failures are terminal journal failures, not outcome unk
       `,
     }),
   });
-  await waitForServer(base, child, logs);
 
   const cases = [
     ['review-legacy-refetch', { id: 'legacy:missing-hash', disposition: 'acknowledge' }, 409, 'REVIEW_DISPOSITION_LEGACY_REFETCH'],
@@ -258,7 +203,6 @@ test('post-apply commit failure stays outcome unknown while pre-apply failures s
       `,
     }),
   });
-  await waitForServer(base, child, logs);
 
   const key = 'review-commit-throw';
   const hash = 'c'.repeat(64);

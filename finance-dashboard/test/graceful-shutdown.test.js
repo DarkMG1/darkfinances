@@ -4,10 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const http = require('http');
-const net = require('net');
-const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
 const { SerialQueue } = require('../lib/serial-queue');
 const {
   closeHttpServer,
@@ -17,6 +14,15 @@ const {
 } = require('../lib/http-server-drain');
 const { bindGracefulShutdownSignals, runGracefulShutdown } = require('../lib/graceful-shutdown');
 const { registerProcessShutdownTestIsolation } = require('./helpers/process-shutdown-test-isolation');
+const { waitForChildExit } = require('./helpers/ephemeral-dashboard-server');
+const {
+  childWatchContext,
+  markPrelude,
+  pollBackoff,
+  sidecarReleasePrelude,
+  waitForMarkerFile,
+} = require('./helpers/test-sync-barriers');
+const { startShutdownDashboard } = require('./helpers/graceful-shutdown-ephemeral-server');
 
 registerProcessShutdownTestIsolation(test);
 
@@ -48,17 +54,6 @@ async function createHungHttpServer() {
   return { server, clientReq };
 }
 
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => (error ? reject(error) : resolve(port)));
-    });
-  });
-}
-
 function phaseIndex(logs, phase) {
   return logs.indexOf(`phase=${phase}`);
 }
@@ -67,84 +62,17 @@ function phaseCount(logs, phase) {
   return (logs.match(new RegExp(`phase=${phase}`, 'g')) || []).length;
 }
 
-function spawnDashboard(dir, port, preloadBody, extraEnv = {}) {
-  const dashboardRoot = path.resolve(__dirname, '..');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, preloadBody);
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_MARKER: path.join(dir, 'marker.log'),
-      ...extraEnv,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  return { child, logs, base: `http://127.0.0.1:${port}`, markerPath: path.join(dir, 'marker.log') };
-}
-
 function markLine() {
   return `
     const fs = require('fs');
-    const mark = (value) => fs.appendFileSync(process.env.TEST_MARKER, value + '\\n');
-    const waitForRelease = async () => {
-      while (!fs.existsSync(process.env.TEST_RELEASE_PATH)) {
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    };
+    ${markPrelude()}
+    ${sidecarReleasePrelude()}
+    const waitForRelease = waitSidecarRelease;
   `;
 }
 
-async function waitForServer(base, child, logs) {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/auth/status`);
-      if (response.ok) return;
-    } catch (_) {}
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  throw new Error(`server startup timeout: ${logs.value}`);
-}
-
-async function waitForMarker(markerPath, line, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(markerPath)) {
-      const content = fs.readFileSync(markerPath, 'utf8');
-      if (content.includes(`${line}\n`) || content.trimEnd().endsWith(line)) return;
-    }
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  throw new Error(`marker line not seen: ${line}`);
-}
-
-async function waitForChildExit(child, timeoutMs = 15_000) {
-  if (child.exitCode != null) return child.exitCode;
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('child exit timeout')), timeoutMs);
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      resolve(code);
-    });
-  });
+async function waitForMarker(markerPath, line, watch = {}, timeoutMs = 10_000) {
+  return waitForMarkerFile(markerPath, line, { ...watch, timeoutMs, context: `marker ${line}` });
 }
 
 function mockDataModuleBlock(preloadExtras = '') {
@@ -289,22 +217,18 @@ test('runGracefulShutdown skips Actual shutdown after HTTP drain timeout', async
 });
 
 test('blocked Actual-backed GET completes before Actual shutdown marker', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-shutdown-get-'));
-  const releasePath = path.join(dir, 'release.fill');
-  const { child, logs, base, markerPath } = spawnDashboard(dir, port, mockDataModuleBlock(), {
-    TEST_RELEASE_PATH: releasePath,
+  const { child, logs, base, markerPath, releasePath } = await startShutdownDashboard(t, {
+    tempPrefix: 'df-shutdown-get-',
+    preloadBody: mockDataModuleBlock(),
   });
   t.after(() => {
     try { child.kill('SIGKILL'); } catch (_) {}
-    fs.rmSync(dir, { recursive: true, force: true });
   });
-  await waitForServer(base, child, logs);
 
   const readPromise = fetch(`${base}/api/v1/accounts`, {
     headers: { 'X-Finance-Token': 'test-api-token' },
   });
-  await waitForMarker(markerPath, 'getAccounts:start');
+  await waitForMarker(markerPath, 'getAccounts:start', childWatchContext({ child, logs }));
   child.kill('SIGTERM');
   fs.writeFileSync(releasePath, '1');
 
@@ -321,17 +245,13 @@ test('blocked Actual-backed GET completes before Actual shutdown marker', async 
 });
 
 test('active mutation finishes before Actual shutdown', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-shutdown-mutation-'));
-  const releasePath = path.join(dir, 'release.fill');
-  const { child, logs, base, markerPath } = spawnDashboard(dir, port, mockDataModuleBlock(), {
-    TEST_RELEASE_PATH: releasePath,
+  const { child, logs, base, markerPath, releasePath } = await startShutdownDashboard(t, {
+    tempPrefix: 'df-shutdown-mutation-',
+    preloadBody: mockDataModuleBlock(),
   });
   t.after(() => {
     try { child.kill('SIGKILL'); } catch (_) {}
-    fs.rmSync(dir, { recursive: true, force: true });
   });
-  await waitForServer(base, child, logs);
 
   const mutationPromise = fetch(`${base}/api/v1/budgets`, {
     method: 'POST',
@@ -342,7 +262,7 @@ test('active mutation finishes before Actual shutdown', async (t) => {
     },
     body: JSON.stringify({ month: '2026-07', categoryId: 'food', amount: 5 }),
   });
-  await waitForMarker(markerPath, 'mutation:start');
+  await waitForMarker(markerPath, 'mutation:start', childWatchContext({ child, logs }));
   child.kill('SIGTERM');
   fs.writeFileSync(releasePath, '1');
 
@@ -360,14 +280,13 @@ test('active mutation finishes before Actual shutdown', async (t) => {
 });
 
 test('idle keep-alive connection does not block shutdown', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-shutdown-keepalive-'));
-  const { child, logs, base } = spawnDashboard(dir, port, mockDataModuleBlock());
+  const { child, logs, base } = await startShutdownDashboard(t, {
+    tempPrefix: 'df-shutdown-keepalive-',
+    preloadBody: mockDataModuleBlock(),
+  });
   t.after(() => {
     try { child.kill('SIGKILL'); } catch (_) {}
-    fs.rmSync(dir, { recursive: true, force: true });
   });
-  await waitForServer(base, child, logs);
 
   const agent = new http.Agent({ keepAlive: true });
   await new Promise((resolve, reject) => {
@@ -388,8 +307,6 @@ test('idle keep-alive connection does not block shutdown', async (t) => {
 });
 
 test('hung request hits bounded timeout with nonzero exit and no Actual shutdown', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-shutdown-timeout-'));
   const hungBody = mockDataModuleBlock(`
       getAccounts: async () => {
         mark('getAccounts:hung');
@@ -397,19 +314,19 @@ test('hung request hits bounded timeout with nonzero exit and no Actual shutdown
         return [];
       },
   `);
-  const { child, logs, base, markerPath } = spawnDashboard(dir, port, hungBody, {
-    FINANCE_SHUTDOWN_TIMEOUT_MS: '800',
+  const { child, logs, base, markerPath } = await startShutdownDashboard(t, {
+    tempPrefix: 'df-shutdown-timeout-',
+    preloadBody: hungBody,
+    extraEnvForDir: () => ({ FINANCE_SHUTDOWN_TIMEOUT_MS: '800' }),
   });
   t.after(() => {
     try { child.kill('SIGKILL'); } catch (_) {}
-    fs.rmSync(dir, { recursive: true, force: true });
   });
-  await waitForServer(base, child, logs);
 
   void fetch(`${base}/api/v1/accounts`, {
     headers: { 'X-Finance-Token': 'test-api-token' },
   }).catch(() => {});
-  await waitForMarker(markerPath, 'getAccounts:hung');
+  await waitForMarker(markerPath, 'getAccounts:hung', childWatchContext({ child, logs }));
 
   const started = Date.now();
   child.kill('SIGTERM');
@@ -422,14 +339,13 @@ test('hung request hits bounded timeout with nonzero exit and no Actual shutdown
 });
 
 test('duplicate signals invoke shutdown once', async (t) => {
-  const port = await unusedPort();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-shutdown-dup-signal-'));
-  const { child, logs, base } = spawnDashboard(dir, port, mockDataModuleBlock());
+  const { child, logs, base } = await startShutdownDashboard(t, {
+    tempPrefix: 'df-shutdown-dup-signal-',
+    preloadBody: mockDataModuleBlock(),
+  });
   t.after(() => {
     try { child.kill('SIGKILL'); } catch (_) {}
-    fs.rmSync(dir, { recursive: true, force: true });
   });
-  await waitForServer(base, child, logs);
 
   child.kill('SIGTERM');
   child.kill('SIGINT');
@@ -525,7 +441,7 @@ test('in-flight non-HTTP mutation queue task completes before Actual shutdown', 
     await release.promise;
     markers.push('periodic-sync:end');
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await pollBackoff();
   assert.equal(mutationQueue.size, 1);
 
   const shutdownPromise = runGracefulShutdown({
@@ -542,7 +458,7 @@ test('in-flight non-HTTP mutation queue task completes before Actual shutdown', 
     log: (phase) => { phases.push(phase); },
   });
 
-  await new Promise((resolve) => setImmediate(resolve));
+  await pollBackoff();
   assert.ok(phases.includes('mutation-admission-stopped'));
   assert.ok(phases.includes('http-admission-stopped'));
   assert.ok(markers.includes('periodic-sync:start'));
@@ -575,6 +491,7 @@ test('hard cap exits once when shutdown phase never settles', async (t) => {
     for (const listener of sigintListeners) process.on('SIGINT', listener);
   });
 
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const timeoutLogs = [];
   const exitCodes = [];
   let shutdownCalls = 0;
@@ -592,11 +509,10 @@ test('hard cap exits once when shutdown phase never settles', async (t) => {
     },
   });
 
-  const started = Date.now();
   void startShutdown('SIGTERM');
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  t.mock.timers.tick(80);
+  await Promise.resolve();
 
-  assert.ok(Date.now() - started < 500, 'hard cap must fire promptly');
   assert.deepEqual(exitCodes, [1]);
   assert.equal(shutdownCalls, 0);
   assert.equal(timeoutLogs.length, 1);
@@ -607,4 +523,5 @@ test('hard cap exits once when shutdown phase never settles', async (t) => {
     'listening',
     'step',
   ]);
+  t.mock.timers.reset();
 });

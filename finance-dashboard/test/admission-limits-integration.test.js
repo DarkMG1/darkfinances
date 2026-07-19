@@ -3,164 +3,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const net = require('net');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
 const { OperationJournal } = require('../lib/operation-journal');
 const { loadAdmissionLimitsConfig } = require('../lib/admission-limits-config');
-
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => (error ? reject(error) : resolve(port)));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/auth/status`);
-      if (response.ok) return;
-    } catch (_) {}
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  throw new Error(`server startup timeout: ${logs.value}`);
-}
-
-function spawnServer(dir, port, extraEnv = {}) {
-  const logs = { value: '' };
-  const marker = path.join(dir, 'effects.log');
-  const releasePath = path.join(dir, 'release.barrier');
-  const preload = path.join(dir, 'mock-data-module.js');
-  const dashboardRoot = path.resolve(__dirname, '..');
-  fs.writeFileSync(preload, `
-    const fs = require('fs');
-    const path = require('path');
-    const root = process.env.TEST_DASHBOARD_ROOT;
-    const dataPath = require.resolve(path.join(root, 'dataModule.js'));
-    const mark = (value) => fs.appendFileSync(process.env.TEST_EFFECT_MARKER, value + '\\n');
-    const waitForRelease = async () => {
-      while (!fs.existsSync(process.env.TEST_RELEASE_PATH)) {
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    };
-    const mock = new Proxy({
-      initApi: async () => ({ ok: true }),
-      shutdownApi: async () => ({ ok: true }),
-      getHealth: () => ({ ready: true }),
-      getAccounts: async () => {
-        mark('accounts:start');
-        await waitForRelease();
-        mark('accounts:end');
-        return [{ id: 'a1', name: 'Checking' }];
-      },
-      getBudgets: async ({ month }) => {
-        mark('budget-read:' + (month || 'current'));
-        return { month: month || '2026-07', categories: [] };
-      },
-      setBudgetAmount: async ({ month, categoryId, amount }) => {
-        mark('budget:start');
-        await waitForRelease();
-        mark('budget:end:' + (month || 'unknown'));
-        return { ok: true, month, categoryId, amount };
-      },
-      setOwesConfig: async (config) => {
-        mark('setOwes:' + Object.keys(config || {}).sort().join(','));
-        return { ok: true };
-      },
-      getReceiptFile: async ({ id }) => {
-        mark('receipt-image:start:' + id);
-        await waitForRelease();
-        mark('receipt-image:end:' + id);
-        const receiptPath = process.env.TEST_RECEIPT_PATH;
-        if (!receiptPath) return null;
-        return { path: receiptPath, mime: 'image/png' };
-      },
-    }, {
-      get(target, property) {
-        if (property in target) return target[property];
-        return async () => [];
-      },
-    });
-    require.cache[dataPath] = {
-      id: dataPath,
-      filename: dataPath,
-      loaded: true,
-      exports: mock,
-      children: [],
-      paths: [],
-    };
-  `);
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      SELFTEST: '1',
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-      TEST_RELEASE_PATH: releasePath,
-      FINANCE_ADMISSION_READ_GLOBAL_PENDING: '4',
-      FINANCE_ADMISSION_READ_GLOBAL_RUNNING: '1',
-      FINANCE_ADMISSION_READ_PRINCIPAL_PENDING: '2',
-      FINANCE_ADMISSION_READ_PRINCIPAL_RUNNING: '1',
-      FINANCE_ADMISSION_MUTATION_GLOBAL_PENDING: '4',
-      FINANCE_ADMISSION_MUTATION_GLOBAL_RUNNING: '1',
-      FINANCE_ADMISSION_MUTATION_PRINCIPAL_PENDING: '2',
-      FINANCE_ADMISSION_MUTATION_PRINCIPAL_RUNNING: '1',
-      FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_PENDING: '2',
-      FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_RUNNING: '1',
-      FINANCE_ADMISSION_MAX_PENDING_DEPTH: '3',
-      FINANCE_ADMISSION_CONTROL_RESERVE: '1',
-      FINANCE_ADMISSION_RECOVERY_RESERVE: '1',
-      FINANCE_ADMISSION_CHEAP_RESERVE: '1',
-      FINANCE_ADMISSION_MAX_WAIT_MS: '25',
-      ...extraEnv,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  return { child, logs, marker, releasePath };
-}
-
-function tightAdmissionEnv(overrides = {}) {
-  return {
-    FINANCE_ADMISSION_MUTATION_GLOBAL_PENDING: '2',
-    FINANCE_ADMISSION_MUTATION_GLOBAL_RUNNING: '1',
-    FINANCE_ADMISSION_MUTATION_PRINCIPAL_PENDING: '1',
-    FINANCE_ADMISSION_MUTATION_PRINCIPAL_RUNNING: '1',
-    FINANCE_ADMISSION_READ_GLOBAL_PENDING: '1',
-    FINANCE_ADMISSION_READ_GLOBAL_RUNNING: '1',
-    FINANCE_ADMISSION_READ_PRINCIPAL_PENDING: '1',
-    FINANCE_ADMISSION_READ_PRINCIPAL_RUNNING: '1',
-    FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_PENDING: '1',
-    FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_RUNNING: '1',
-    FINANCE_ADMISSION_MAX_PENDING_DEPTH: '1',
-    FINANCE_ADMISSION_CONTROL_RESERVE: '0',
-    FINANCE_ADMISSION_RECOVERY_RESERVE: '1',
-    FINANCE_ADMISSION_CHEAP_RESERVE: '0',
-    ...overrides,
-  };
-}
+const {
+  startAdmissionLimitsServer,
+  tightAdmissionEnv,
+} = require('./helpers/admission-limits-ephemeral-server');
 
 async function v1Fetch(base, pathname, options = {}) {
   const response = await fetch(`${base}/api/v1${pathname}`, {
@@ -177,15 +27,9 @@ async function v1Fetch(base, pathname, options = {}) {
 }
 
 test('expensive GET flood returns 429 while ping and operation status stay responsive', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-admission-flood-'));
-  const { child, logs, marker, releasePath } = spawnServer(dir, port);
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
+  const { base, marker, releasePath } = await startAdmissionLimitsServer(t, {
+    tempPrefix: 'darkfinances-admission-flood-',
   });
-  await waitForServer(base, child, logs);
 
   const blocked = v1Fetch(base, '/accounts');
   await new Promise((resolve) => setImmediate(resolve));
@@ -212,16 +56,10 @@ test('expensive GET flood returns 429 while ping and operation status stay respo
 });
 
 test('overload before journal start returns stable envelope and same-key replay stays admissible', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-admission-idem-'));
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const { child, logs, marker, releasePath } = spawnServer(dir, port, tightAdmissionEnv());
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
+  const { base, marker, releasePath, journalPath } = await startAdmissionLimitsServer(t, {
+    tempPrefix: 'darkfinances-admission-idem-',
+    admissionEnv: tightAdmissionEnv(),
   });
-  await waitForServer(base, child, logs);
 
   const key = 'budget-key-12345678';
   const body = { month: '2026-07', categoryId: 'cat-groceries', amount: 100 };
@@ -279,15 +117,10 @@ test('overload before journal start returns stable envelope and same-key replay 
 });
 
 test('missing Idempotency-Key returns 400 before queue saturation', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-admission-no-key-'));
-  const { child, logs } = spawnServer(dir, port, tightAdmissionEnv());
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
+  const { base } = await startAdmissionLimitsServer(t, {
+    tempPrefix: 'darkfinances-admission-no-key-',
+    admissionEnv: tightAdmissionEnv(),
   });
-  await waitForServer(base, child, logs);
 
   const rejected = await v1Fetch(base, '/budgets', {
     method: 'POST',
@@ -308,23 +141,17 @@ test('malformed admission env fails startup validation', () => {
 const ADMISSION_STORM_STATUSES = new Set([200, 409, 429, 503]);
 
 test('concurrent same-key replay storm above mutation queue capacity stays bounded', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-admission-storm-'));
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const { child, logs, marker, releasePath } = spawnServer(dir, port, tightAdmissionEnv({
-    FINANCE_ADMISSION_MUTATION_GLOBAL_PENDING: '2',
-    FINANCE_ADMISSION_MUTATION_GLOBAL_RUNNING: '1',
-    FINANCE_ADMISSION_MUTATION_PRINCIPAL_PENDING: '1',
-    FINANCE_ADMISSION_MUTATION_PRINCIPAL_RUNNING: '1',
-    FINANCE_ADMISSION_RECOVERY_RESERVE: '1',
-    FINANCE_ADMISSION_MAX_WAIT_MS: '50',
-  }));
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
+  const { base, marker, releasePath, journalPath } = await startAdmissionLimitsServer(t, {
+    tempPrefix: 'darkfinances-admission-storm-',
+    admissionEnv: tightAdmissionEnv({
+      FINANCE_ADMISSION_MUTATION_GLOBAL_PENDING: '2',
+      FINANCE_ADMISSION_MUTATION_GLOBAL_RUNNING: '1',
+      FINANCE_ADMISSION_MUTATION_PRINCIPAL_PENDING: '1',
+      FINANCE_ADMISSION_MUTATION_PRINCIPAL_RUNNING: '1',
+      FINANCE_ADMISSION_RECOVERY_RESERVE: '1',
+      FINANCE_ADMISSION_MAX_WAIT_MS: '50',
+    }),
   });
-  await waitForServer(base, child, logs);
 
   const key = 'storm-key-123456789';
   const body = { month: '2026-07', categoryId: 'cat-groceries', amount: 100 };
@@ -393,25 +220,23 @@ test('concurrent same-key replay storm above mutation queue capacity stays bound
 });
 
 test('receipt image flood returns read overload without idempotency key reuse hint', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-admission-receipt-'));
-  const receiptPath = path.join(dir, 'receipt.png');
+  const receiptPath = path.join(os.tmpdir(), `darkfinances-admission-receipt-${process.pid}.png`);
   fs.writeFileSync(receiptPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-  const { child, logs, marker, releasePath } = spawnServer(dir, port, {
-    TEST_RECEIPT_PATH: receiptPath,
-    FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_PENDING: '1',
-    FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_RUNNING: '1',
-    FINANCE_ADMISSION_LIGHTWEIGHT_PRINCIPAL_PENDING: '1',
-    FINANCE_ADMISSION_LIGHTWEIGHT_PRINCIPAL_RUNNING: '1',
-    FINANCE_ADMISSION_MAX_PENDING_DEPTH: '1',
-    FINANCE_ADMISSION_MAX_WAIT_MS: '25',
-  });
   t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
+    try { fs.unlinkSync(receiptPath); } catch (_) {}
   });
-  await waitForServer(base, child, logs);
+  const { base, marker, releasePath } = await startAdmissionLimitsServer(t, {
+    tempPrefix: 'darkfinances-admission-receipt-',
+    admissionEnv: {
+      TEST_RECEIPT_PATH: receiptPath,
+      FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_PENDING: '1',
+      FINANCE_ADMISSION_LIGHTWEIGHT_GLOBAL_RUNNING: '1',
+      FINANCE_ADMISSION_LIGHTWEIGHT_PRINCIPAL_PENDING: '1',
+      FINANCE_ADMISSION_LIGHTWEIGHT_PRINCIPAL_RUNNING: '1',
+      FINANCE_ADMISSION_MAX_PENDING_DEPTH: '1',
+      FINANCE_ADMISSION_MAX_WAIT_MS: '25',
+    },
+  });
 
   const blocked = v1Fetch(base, '/receipts/r1/image');
   const waitDeadline = Date.now() + 5_000;

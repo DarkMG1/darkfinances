@@ -360,7 +360,9 @@ function assertOwnershipNotWeakened(name, previous, next) {
         throw new Error(`${name} cannot weaken ownership for saga ${id} id ${ownedId}`);
       }
     }
-    if (name === 'bulkOperationSagas') {
+    if (name === 'bulkOperationSagas'
+      || name === 'reimbursementLinkSagas'
+      || name === 'repaymentConfirmationSagas') {
       if (prevSaga.operationJournalFingerprint != null
         && nextSaga.operationJournalFingerprint !== prevSaga.operationJournalFingerprint) {
         throw new Error(`${name} cannot weaken journal delegation evidence for saga ${id}`);

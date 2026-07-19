@@ -40,7 +40,10 @@ every eligible saga before surfacing a collected drive or terminalization error,
 saga cannot strand healthy work. Sync failure leaves repayment confirmation at `sync_pending`.
 The operation journal remains authoritative for HTTP replay: a request that may have crossed the
 first-effect boundary returns `OUTCOME_UNKNOWN`, and the same idempotency key is status-only
-rather than automatically executed again.
+rather than automatically executed again. When the saga reaches `completed` with bound journal
+fingerprint evidence before the journal records `local_applied`, `GET /api/v1/operations/:key`
+and same-key replay reconcile from independently proven terminal saga state without re-executing
+the handler.
 
 ## Deployment and downgrade safety
 

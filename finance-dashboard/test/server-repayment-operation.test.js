@@ -3,35 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const net = require('net');
-const { spawn } = require('child_process');
-
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/api/v1/ping`, {
-        headers: { 'X-Finance-Token': 'test-api-token' },
-      });
-      if (response.status === 200) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`server did not start: ${logs.value}`);
-}
+const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
 
 async function request(base, route, { method = 'POST', key, body } = {}) {
   const response = await fetch(`${base}${route}`, {
@@ -46,20 +19,35 @@ async function request(base, route, { method = 'POST', key, body } = {}) {
   return { response, body: await response.json() };
 }
 
-function readJournal(path) {
-  return JSON.parse(fs.readFileSync(path, 'utf8'));
+function readJournal(journalPath) {
+  return JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+}
+
+async function startRepaymentServer(t, { tempPrefix, preloadBody, withSagaPath = false }) {
+  let journalPath;
+  let sagaPath;
+  const started = await startEphemeralDashboardServer(t, {
+    tempPrefix,
+    preloadBody,
+    extraEnvForDir: (dir) => {
+      journalPath = path.join(dir, 'operation-journal.json');
+      sagaPath = withSagaPath ? path.join(dir, 'repayment-confirmation-sagas.json') : undefined;
+      return withSagaPath ? { REPAYMENT_CONFIRMATION_SAGAS_PATH: sagaPath } : {};
+    },
+  });
+  return {
+    ...started,
+    journalPath,
+    sagaPath,
+    marker: started.effectMarkerPath,
+  };
 }
 
 test('repayment confirm validates before applyLocal and correlates saga identity to the journal key', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-repay-operation-'));
-  const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const sagaPath = path.join(dir, 'repayment-confirmation-sagas.json');
-  const marker = path.join(dir, 'effects.log');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, `
+  const { base, journalPath, sagaPath, marker } = await startRepaymentServer(t, {
+    tempPrefix: 'darkfinances-repay-operation-',
+    withSagaPath: true,
+    preloadBody: `
     const fs = require('fs');
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -115,38 +103,8 @@ test('repayment confirm validates before applyLocal and correlates saga identity
       children: [],
       paths: [],
     };
-  `);
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      REPAYMENT_CONFIRMATION_SAGAS_PATH: sagaPath,
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  `,
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   const key = 'repay-confirm-op-key';
   const result = await request(base, '/api/v1/repayments/sg_repay-inflow/confirm', { key });
@@ -167,14 +125,9 @@ test('repayment confirm validates before applyLocal and correlates saga identity
 });
 
 test('stale repayment admission is a terminal known pre-apply failure; post-apply failures stay unknown', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-repay-operation-failures-'));
-  const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const marker = path.join(dir, 'effects.log');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, `
+  const { base, journalPath, marker } = await startRepaymentServer(t, {
+    tempPrefix: 'darkfinances-repay-operation-failures-',
+    preloadBody: `
     const fs = require('fs');
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -220,37 +173,8 @@ test('stale repayment admission is a terminal known pre-apply failure; post-appl
       children: [],
       paths: [],
     };
-  `);
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  `,
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   const staleKey = 'repay-stale-key';
   const stale = await request(base, '/api/v1/repayments/sg_missing/confirm', { key: staleKey });
@@ -268,15 +192,10 @@ test('stale repayment admission is a terminal known pre-apply failure; post-appl
 });
 
 test('invalid allocation plan is a terminal known pre-apply failure with no saga or effects', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-repay-operation-plan-'));
-  const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const sagaPath = path.join(dir, 'repayment-confirmation-sagas.json');
-  const marker = path.join(dir, 'effects.log');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, `
+  const { base, journalPath, sagaPath, marker } = await startRepaymentServer(t, {
+    tempPrefix: 'darkfinances-repay-operation-plan-',
+    withSagaPath: true,
+    preloadBody: `
     const fs = require('fs');
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -311,38 +230,8 @@ test('invalid allocation plan is a terminal known pre-apply failure with no saga
       children: [],
       paths: [],
     };
-  `);
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      REPAYMENT_CONFIRMATION_SAGAS_PATH: sagaPath,
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  `,
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   const key = 'repay-plan-invalid-key';
   const result = await request(base, '/api/v1/repayments/sg_repay-inflow/confirm', { key });
@@ -350,5 +239,5 @@ test('invalid allocation plan is a terminal known pre-apply failure with no saga
   assert.equal(result.body.code, 'REPAYMENT_ALLOCATION_PLAN_INVALID');
   assert.equal(readJournal(journalPath).operations[key].phase, 'failed');
   assert.equal(fs.existsSync(sagaPath), false);
-  assert.deepEqual(fs.readFileSync(marker, 'utf8').trim().split('\\n'), ['validate:sg_repay-inflow']);
+  assert.deepEqual(fs.readFileSync(marker, 'utf8').trim().split('\n'), ['validate:sg_repay-inflow']);
 });

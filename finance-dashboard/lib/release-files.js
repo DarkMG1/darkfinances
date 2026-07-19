@@ -27,6 +27,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/mutation-route-registry.js',
   'lib/operation-executor.js',
   'lib/operation-journal.js',
+  'lib/operation-journal-proof.js',
   'lib/obligation-graph-bridge.js',
   'lib/passkey-credentials-schema.js',
   'lib/passkey-credentials-store.js',

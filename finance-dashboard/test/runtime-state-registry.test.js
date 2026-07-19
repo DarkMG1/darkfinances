@@ -199,7 +199,23 @@ const FIXTURES = {
     future: { schemaVersion: 9, links: [] },
   },
   reimbursementLinkSagas: {
-    current: { schemaVersion: 1, sagas: {} },
+    current: {
+      schemaVersion: 1,
+      sagas: {
+        link1: {
+          id: 'link1',
+          recordVersion: 1,
+          action: 'link',
+          phase: 'completed',
+          status: 'completed',
+          updatedAt: '2026-07-13T00:00:00.000Z',
+          terminalAt: '2026-07-13T00:00:00.000Z',
+          inflowId: 'i1',
+          expenseId: 'e1',
+          resultVersion: 1,
+        },
+      },
+    },
     legacy: { schemaVersion: 1, sagas: {} },
     malformed: 42,
     future: { schemaVersion: 9, sagas: {} },
@@ -736,6 +752,78 @@ const OWNERSHIP_ADVERSARIAL = [
     pattern: /cannot drop a nonterminal/,
   },
   {
+    name: 'reimbursementLinkSagas',
+    buildOriginal: (stamp) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          id: 'active',
+          recordVersion: 1,
+          action: 'link',
+          phase: 'prepared',
+          updatedAt: stamp,
+          inflowId: 'in-owned',
+          expenseId: 'ex-owned',
+        },
+        done: {
+          id: 'done',
+          recordVersion: 1,
+          action: 'link',
+          phase: 'completed',
+          updatedAt: stamp,
+          terminalAt: stamp,
+          inflowId: 'in-done',
+          expenseId: 'ex-done',
+          resultVersion: 1,
+        },
+      },
+    }),
+    buildAttack: (original) => ({
+      schemaVersion: 1,
+      sagas: {
+        done: { ...original.sagas.done, phase: 'prepared', terminalAt: undefined, resultVersion: undefined },
+      },
+    }),
+    pattern: /cannot reopen terminal|cannot remove terminal|cannot weaken ownership|cannot drop a nonterminal/,
+  },
+  {
+    name: 'repaymentConfirmationSagas',
+    buildOriginal: (stamp) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          id: 'active',
+          recordVersion: 1,
+          phase: 'prepared',
+          updatedAt: stamp,
+          inflow: { id: 'in-owned' },
+        },
+        done: {
+          id: 'done',
+          recordVersion: 1,
+          phase: 'completed',
+          updatedAt: stamp,
+          terminalAt: stamp,
+          inflow: { id: 'in-done' },
+          allocations: [{ expenseId: 'ex-done' }],
+          auditOutcome: { outcome: 'confirmed' },
+        },
+      },
+    }),
+    buildAttack: (original) => ({
+      schemaVersion: 1,
+      sagas: {
+        done: {
+          ...original.sagas.done,
+          phase: 'prepared',
+          terminalAt: undefined,
+          auditOutcome: undefined,
+        },
+      },
+    }),
+    pattern: /cannot reopen terminal|cannot remove terminal|cannot weaken ownership|cannot drop a nonterminal/,
+  },
+  {
     name: 'operationJournal',
     buildOriginal: (stamp) => ({
       schemaVersion: 1,
@@ -912,6 +1000,20 @@ const COMPLETE_SAGA_FIXTURES = {
       },
     },
   },
+  reimbursementLinkSagas: {
+    schemaVersion: 1,
+    sagas: {
+      link1: {
+        id: 'link1',
+        recordVersion: 1,
+        action: 'link',
+        phase: 'prepared',
+        updatedAt: STAMP,
+        inflowId: 'in-1',
+        expenseId: 'ex-1',
+      },
+    },
+  },
   bulkOperationSagas: {
     schemaVersion: 1,
     sagas: {
@@ -996,6 +1098,22 @@ const FAMILY_IDENTITY_WRITE_REJECTIONS = [
       },
     },
     pattern: /requires inflow\.id on write/,
+  },
+  {
+    name: 'reimbursementLinkSagas',
+    payload: {
+      schemaVersion: 1,
+      sagas: {
+        link1: {
+          id: 'link1',
+          recordVersion: 1,
+          action: 'link',
+          phase: 'prepared',
+          updatedAt: STAMP,
+        },
+      },
+    },
+    pattern: /requires inflowId on write/,
   },
   {
     name: 'transactionSagas',
@@ -1323,6 +1441,7 @@ const PRESENT_WRONG_TYPE = {
   transactionDeletionSagas: { schemaVersion: 1, sagas: null },
   bulkOperationSagas: { schemaVersion: 1, sagas: 'bad' },
   repaymentConfirmationSagas: { schemaVersion: 1, sagas: ['x'] },
+  reimbursementLinkSagas: { schemaVersion: 1, sagas: false },
 };
 
 for (const [name, payload] of Object.entries(PRESENT_WRONG_TYPE)) {
@@ -1391,6 +1510,28 @@ test('bulkOperationSagas adversarial empty sagas cannot erase active ownership o
   writeRuntimeState('bulkOperationSagas', original, { env, enforceOwnership: false });
   assert.throws(
     () => writeRuntimeState('bulkOperationSagas', { schemaVersion: 1, sagas: {} }, { env }),
+    /cannot drop a nonterminal/,
+  );
+});
+
+test('reimbursementLinkSagas adversarial empty sagas cannot erase active ownership on write', (t) => {
+  resetWriteGuards();
+  const { env } = tempEnv(t);
+  const original = COMPLETE_SAGA_FIXTURES.reimbursementLinkSagas;
+  writeRuntimeState('reimbursementLinkSagas', original, { env, enforceOwnership: false });
+  assert.throws(
+    () => writeRuntimeState('reimbursementLinkSagas', { schemaVersion: 1, sagas: {} }, { env }),
+    /cannot drop a nonterminal/,
+  );
+});
+
+test('repaymentConfirmationSagas adversarial empty sagas cannot erase active ownership on write', (t) => {
+  resetWriteGuards();
+  const { env } = tempEnv(t);
+  const original = COMPLETE_SAGA_FIXTURES.repaymentConfirmationSagas;
+  writeRuntimeState('repaymentConfirmationSagas', original, { env, enforceOwnership: false });
+  assert.throws(
+    () => writeRuntimeState('repaymentConfirmationSagas', { schemaVersion: 1, sagas: {} }, { env }),
     /cannot drop a nonterminal/,
   );
 });
