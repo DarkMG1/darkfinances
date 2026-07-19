@@ -8,6 +8,10 @@ class HttpDrainTimeoutError extends Error {
   }
 }
 
+const IDLE_KEEP_ALIVE_SWEEP_MS = 50;
+
+const inFlightClosePromises = new WeakMap();
+
 function canDrainImmediately(server) {
   return !server || typeof server.close !== 'function' || !server.listening;
 }
@@ -34,30 +38,77 @@ function forceCloseHttpConnections(server) {
   }
 }
 
-function closeHttpServer(server) {
-  return new Promise((resolve, reject) => {
-    if (!server || typeof server.close !== 'function') {
-      resolve({ wasListening: false, alreadyClosed: true });
-      return;
-    }
-    if (!server.listening) {
-      resolve({ wasListening: false, alreadyClosed: true });
-      return;
-    }
+function isWeakMapServer(server) {
+  return server != null && typeof server === 'object';
+}
 
-    let settled = false;
+function closeHttpServer(server) {
+  if (!server || typeof server.close !== 'function') {
+    return Promise.resolve({ wasListening: false, alreadyClosed: true });
+  }
+
+  if (isWeakMapServer(server) && inFlightClosePromises.has(server)) {
+    return inFlightClosePromises.get(server);
+  }
+
+  if (!server.listening) {
+    return Promise.resolve({ wasListening: false, alreadyClosed: true });
+  }
+
+  const drainState = { settled: false, cacheRegistered: false };
+  const promise = new Promise((resolve, reject) => {
+    let idleSweepTimer = null;
+
+    const cleanup = () => {
+      if (idleSweepTimer != null) {
+        clearInterval(idleSweepTimer);
+        idleSweepTimer = null;
+      }
+      if (drainState.cacheRegistered && isWeakMapServer(server)) {
+        inFlightClosePromises.delete(server);
+        drainState.cacheRegistered = false;
+      }
+    };
+
     const finish = (error, result) => {
-      if (settled) return;
-      settled = true;
+      if (drainState.settled) return;
+      drainState.settled = true;
+      cleanup();
       if (error) reject(error);
       else resolve(result);
     };
 
-    server.close((error) => {
-      finish(error, { wasListening: true, drained: true });
-    });
-    closeIdleKeepAlive(server);
+    const sweepIdleKeepAlive = () => {
+      if (drainState.settled) return;
+      try {
+        closeIdleKeepAlive(server);
+      } catch (error) {
+        finish(error);
+      }
+    };
+
+    try {
+      server.close((error) => {
+        finish(error, { wasListening: true, drained: true });
+      });
+    } catch (error) {
+      finish(error);
+      return;
+    }
+
+    sweepIdleKeepAlive();
+    if (!drainState.settled && typeof server.closeIdleConnections === 'function') {
+      idleSweepTimer = setInterval(sweepIdleKeepAlive, IDLE_KEEP_ALIVE_SWEEP_MS);
+      idleSweepTimer.unref?.();
+    }
   });
+
+  if (!drainState.settled && isWeakMapServer(server)) {
+    inFlightClosePromises.set(server, promise);
+    drainState.cacheRegistered = true;
+  }
+
+  return promise;
 }
 
 function rejectHttpDrainTimeout(server, error, onDiagnostic) {
