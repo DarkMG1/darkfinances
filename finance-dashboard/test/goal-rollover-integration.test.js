@@ -146,6 +146,10 @@ test('unresolved rollover skips graph reservation and quarantines forecast gener
   assert.ok(today.liquidity.safeToSpend.incompleteReasons.includes('rollover_treatment_unknown'));
   const forecast = await getForecast({ days: 30 });
   assert.ok(forecast.assumptions.genericBudget.incompleteReasons.includes('rollover_treatment_unknown'));
+  assert.equal(forecast.assumptions.stsContainment.complete, false);
+  assert.ok(forecast.assumptions.stsContainment.incompleteReasons.includes('rollover_treatment_unknown'));
+  assert.equal(forecast.assumptions.projectionContainment.stsContainmentIncomplete, true);
+  assert.ok(forecast.warnings.some((warning) => /Safe-to-Spend containment incomplete/.test(warning)));
 });
 
 test('goal invariance: STS unchanged when goals added to complete fixture', async () => {

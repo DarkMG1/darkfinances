@@ -16,6 +16,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/domain/obligation-graph.js',
   'lib/domain/liability-cycle-partition.js',
   'lib/domain/projection-completeness.js',
+  'lib/domain/forecast-containment.js',
   'lib/domain/forecast-money.js',
   'lib/domain/goal-feasibility.js',
   'lib/domain/money.js',

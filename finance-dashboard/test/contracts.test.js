@@ -188,6 +188,16 @@ test('budgets screen fails closed on unresolved reserve and nullable envelope de
 test('generated contract exposes report trend completeness and nullable monthly review totals', () => {
   assert.match(generatedTypes, /categoryTrendsComplete\?: boolean/);
   assert.match(generatedTypes, /merchantTrendsComplete\?: boolean/);
+  assert.match(generatedTypes, /merchantTrendsTruncated\?: boolean/);
   assert.match(generatedTypes, /monthlyReview:[\s\S]*income: number \| null/);
   assert.match(generatedTypes, /monthlyReview:[\s\S]*knownSpendSubtotal\?: number/);
+});
+
+test('forecast screen labels partial ending balance and renders all warnings when projection containment is incomplete', () => {
+  const forecast = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'forecast.tsx'), 'utf8');
+  assert.match(forecast, /projectionContainment\?\.complete === false/);
+  assert.match(forecast, /Partial projection/);
+  assert.match(forecast, /data\.warnings\.map/);
+  assert.doesNotMatch(forecast, /data\.warnings\[0\]/);
+  assert.match(forecast, /Projection containment is incomplete/);
 });

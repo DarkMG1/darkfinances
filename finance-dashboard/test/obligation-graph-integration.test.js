@@ -180,6 +180,8 @@ test('getToday and getForecast share legacy recurrence reasons and withhold fore
 
   const forecast = await getForecast({ days: 45 });
   assert.equal(forecast.assumptions.obligationGraph.complete, false);
+  assert.equal(forecast.assumptions.projectionContainment.graphEventsWithheld, true);
+  assert.equal(forecast.assumptions.projectionContainment.complete, false);
   assert.ok(forecast.warnings.some((warning) => warning.includes('withheld')));
   assert.equal(forecast.events.filter((event) => event.kind === 'bill').length, 0);
 });

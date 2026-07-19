@@ -6,6 +6,11 @@
 const { metricValue } = require('./lib/metric-provenance');
 const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
 const {
+  buildForecastProjectionContainment,
+  buildForecastStsContainment,
+  forecastContainmentWarnings,
+} = require('./lib/domain/forecast-containment');
+const {
   buildObligationGraph,
   forecastCashEventsFromGraph,
   graphSummary,
@@ -860,45 +865,23 @@ function forecast(days = 90) {
   }
   const lowest = points.reduce((a, p) => (p.balance < a.balance ? p : a), points[0]);
   const stsMetric = todaySnapshot.liquidity?.safeToSpend || {};
-  const stsContainment = {
+  const stsContainment = buildForecastStsContainment({
     complete: stsMetric.complete === true,
     incompleteReasons: stsMetric.incompleteReasons || [],
-  };
+  });
   const budgetGoalReasons = stsContainment.incompleteReasons.filter((reason) =>
     reason === 'budget_data_unavailable' || reason === 'rollover_treatment_unknown');
-  const knownEventsIncludedDespiteStsIncomplete = !withholdGraphEvents
-    && !stsContainment.complete
-    && events.length > 0;
-  const projectionIncompleteReasons = [
-    ...(withholdGraphEvents ? ['obligation_graph_incomplete'] : []),
-    ...(!stsContainment.complete ? stsContainment.incompleteReasons : []),
-  ];
-  const projectionContainment = {
-    complete: stsContainment.complete && !withholdGraphEvents,
-    stsContainmentIncomplete: !stsContainment.complete,
-    graphEventsWithheld: withholdGraphEvents,
-    ...(knownEventsIncludedDespiteStsIncomplete ? { knownEventsIncludedDespiteStsIncomplete: true } : {}),
-    incompleteReasons: projectionIncompleteReasons,
-  };
-  const warnings = [];
-  if (withholdGraphEvents) {
-    warnings.push('Obligation graph incomplete; scheduled cash events withheld.');
-    for (const reason of [
-      ...(todaySnapshot.obligationGraph?.completeness?.incompleteReasons || []),
-      ...(todaySnapshot.incompleteReasons || []).filter((reason) => String(reason).startsWith('obligation_')),
-    ]) {
-      warnings.push(`Obligation graph: ${reason}`);
-    }
-  }
-  if (!stsContainment.complete) {
-    warnings.push('Safe-to-Spend containment incomplete; budget and goal commitments may be omitted from this projection.');
-    for (const reason of stsContainment.incompleteReasons) {
-      warnings.push(`Safe-to-Spend: ${reason}`);
-    }
-  }
-  if (knownEventsIncludedDespiteStsIncomplete) {
-    warnings.push('Known obligation graph cash events are included while Safe-to-Spend containment remains incomplete.');
-  }
+  const projectionContainment = buildForecastProjectionContainment({
+    stsContainment,
+    withholdGraphEvents,
+    knownEventCount: events.length,
+  });
+  const warnings = forecastContainmentWarnings({
+    stsContainment,
+    projectionContainment,
+    obligationGraphIncompleteReasons: todaySnapshot.obligationGraph?.completeness?.incompleteReasons || [],
+    obligationSnapshotIncompleteReasons: todaySnapshot.incompleteReasons || [],
+  });
   if (lowest.balance < 1000) warnings.push('Projected cash gets low this period.');
   return {
     generatedAt: new Date().toISOString(),
