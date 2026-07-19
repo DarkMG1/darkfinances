@@ -717,6 +717,88 @@ test('duplicate terminal reimbursement link records fail closed without choosing
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 });
 
+test('duplicate terminal repayment confirmation records fail closed without choosing a winner', async (t) => {
+  const dir = tempDir('darkfinances-repay-dup-terminal-');
+  const journalFile = path.join(dir, 'journal.json');
+  const sagaPath = path.join(dir, 'repayment-confirmation-sagas.json');
+  const key = 'repay-dup-terminal-key';
+  const req = journalRequest({
+    method: 'POST',
+    path: '/api/v1/repayments/sg_inflow/confirm',
+    url: '/api/v1/repayments/sg_inflow/confirm',
+    body: {},
+  });
+  const journal = new OperationJournal(journalFile);
+  journal.start(key, req);
+  const record = journal.get(key);
+  const binding = journalProofFromOperation(record);
+  writeJson(sagaPath, {
+    schemaVersion: 1,
+    sagas: {
+      first: {
+        id: 'first',
+        recordVersion: 1,
+        operationIdentity: key,
+        operationJournalFingerprint: binding.fingerprint,
+        operationJournalFingerprintVersion: binding.fingerprintVersion,
+        operationJournalMethod: binding.method,
+        operationJournalRoute: binding.route,
+        phase: 'completed',
+        status: 'completed',
+        terminalAt: '2026-07-10T00:00:00.000Z',
+        updatedAt: '2026-07-10T00:00:00.000Z',
+        suggestionId: 'sg_inflow',
+        inflow: { id: 'inflow-a' },
+        allocations: [{ expenseId: 'exp-a' }],
+        auditOutcome: { outcome: 'confirmed' },
+      },
+      second: {
+        id: 'second',
+        recordVersion: 1,
+        operationIdentity: key,
+        operationJournalFingerprint: binding.fingerprint,
+        operationJournalFingerprintVersion: binding.fingerprintVersion,
+        operationJournalMethod: binding.method,
+        operationJournalRoute: binding.route,
+        phase: 'completed',
+        status: 'completed',
+        terminalAt: '2026-07-10T00:00:01.000Z',
+        updatedAt: '2026-07-10T00:00:01.000Z',
+        suggestionId: 'sg_inflow',
+        inflow: { id: 'inflow-b' },
+        allocations: [{ expenseId: 'exp-b' }],
+        auditOutcome: { outcome: 'confirmed' },
+      },
+    },
+  });
+  const manager = createTestRepaySaga({ sagaPath });
+  assert.throws(
+    () => manager.assertJournalAdmission({
+      operationKey: key,
+      journalBinding: binding,
+    }),
+    (error) => error.code === 'IDEMPOTENCY_KEY_REUSED',
+  );
+  assert.equal(manager.proveTerminalJournalCompletion(key, binding), null);
+  const resolver = composeTerminalProofResolver([
+    (operationKey, journalOperation) => manager.proveTerminalJournalCompletion(operationKey, journalOperation),
+  ]);
+  let calls = 0;
+  await assert.rejects(
+    () => executeJournaledOperation({
+      journal,
+      key,
+      request: req,
+      terminalProofResolver: resolver,
+      handler: async () => { calls += 1; return { shouldNotRun: true }; },
+    }),
+    (error) => error.code === 'OUTCOME_UNKNOWN',
+  );
+  assert.equal(calls, 0);
+  assert.equal(journal.get(key).phase, 'started');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+});
+
 test('bulk proof still wins in composed resolver when both bulk and reimbursement sagas exist', async () => {
   const dir = tempDir('darkfinances-compose-bulk-');
   const bulkSagaPath = path.join(dir, 'bulk-sagas.json');

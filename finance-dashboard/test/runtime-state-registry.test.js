@@ -787,6 +787,43 @@ const OWNERSHIP_ADVERSARIAL = [
     pattern: /cannot reopen terminal|cannot remove terminal|cannot weaken ownership|cannot drop a nonterminal/,
   },
   {
+    name: 'repaymentConfirmationSagas',
+    buildOriginal: (stamp) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          id: 'active',
+          recordVersion: 1,
+          phase: 'prepared',
+          updatedAt: stamp,
+          inflow: { id: 'in-owned' },
+        },
+        done: {
+          id: 'done',
+          recordVersion: 1,
+          phase: 'completed',
+          updatedAt: stamp,
+          terminalAt: stamp,
+          inflow: { id: 'in-done' },
+          allocations: [{ expenseId: 'ex-done' }],
+          auditOutcome: { outcome: 'confirmed' },
+        },
+      },
+    }),
+    buildAttack: (original) => ({
+      schemaVersion: 1,
+      sagas: {
+        done: {
+          ...original.sagas.done,
+          phase: 'prepared',
+          terminalAt: undefined,
+          auditOutcome: undefined,
+        },
+      },
+    }),
+    pattern: /cannot reopen terminal|cannot remove terminal|cannot weaken ownership|cannot drop a nonterminal/,
+  },
+  {
     name: 'operationJournal',
     buildOriginal: (stamp) => ({
       schemaVersion: 1,
@@ -1484,6 +1521,17 @@ test('reimbursementLinkSagas adversarial empty sagas cannot erase active ownersh
   writeRuntimeState('reimbursementLinkSagas', original, { env, enforceOwnership: false });
   assert.throws(
     () => writeRuntimeState('reimbursementLinkSagas', { schemaVersion: 1, sagas: {} }, { env }),
+    /cannot drop a nonterminal/,
+  );
+});
+
+test('repaymentConfirmationSagas adversarial empty sagas cannot erase active ownership on write', (t) => {
+  resetWriteGuards();
+  const { env } = tempEnv(t);
+  const original = COMPLETE_SAGA_FIXTURES.repaymentConfirmationSagas;
+  writeRuntimeState('repaymentConfirmationSagas', original, { env, enforceOwnership: false });
+  assert.throws(
+    () => writeRuntimeState('repaymentConfirmationSagas', { schemaVersion: 1, sagas: {} }, { env }),
     /cannot drop a nonterminal/,
   );
 });
