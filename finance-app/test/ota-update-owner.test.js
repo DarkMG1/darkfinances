@@ -387,6 +387,98 @@ test('deferred auto checks respect throttle and avoid polling storms', async () 
   assert.equal(harness.metrics().checkCalls, 2);
 });
 
+test('whenIdle resolves after dispose cancels a held check', async () => {
+  const harness = createHarness();
+  harness.holdCheck();
+  harness.startup();
+  const idlePromise = harness.awaitIdle();
+  await new Promise((resolve) => queueMicrotask(resolve));
+  assert.equal(harness.metrics().checkCalls, 1);
+  harness.owner.dispose();
+  await idlePromise;
+});
+
+test('whenIdle resolves after dispose cancels a held fetch', async () => {
+  const harness = createHarness({ promptGateOpen: true });
+  harness.holdFetch();
+  harness.startup();
+  while (harness.owner.getSnapshot().phase !== OTA_UPDATE_PHASES.DOWNLOADING) {
+    await new Promise((resolve) => queueMicrotask(resolve));
+  }
+  const idlePromise = harness.awaitIdle();
+  harness.owner.dispose();
+  await idlePromise;
+});
+
+test('whenIdle after auto pipeline sets throttle before duplicate auto checks run', async () => {
+  const harness = createHarness({
+    deferCooldownMs: 60_000,
+    checkThrottleMs: DEFAULT_CHECK_THROTTLE_MS,
+    promptGateOpen: true,
+  });
+  harness.holdFetch();
+  harness.startup();
+  while (harness.owner.getSnapshot().phase !== OTA_UPDATE_PHASES.DOWNLOADING) {
+    await new Promise((resolve) => queueMicrotask(resolve));
+  }
+  const idlePromise = harness.awaitIdle();
+  harness.releaseFetch();
+  await idlePromise;
+  harness.owner.maybeAutoCheck();
+  harness.owner.maybeAutoCheck();
+  harness.owner.setAppActive(true);
+  assert.equal(harness.metrics().checkCalls, 1);
+});
+
+test('manual and auto requests during download do not start a second network check', async () => {
+  const harness = createHarness({ promptGateOpen: true });
+  harness.holdFetch();
+  harness.startup();
+  while (harness.owner.getSnapshot().phase !== OTA_UPDATE_PHASES.DOWNLOADING) {
+    await new Promise((resolve) => queueMicrotask(resolve));
+  }
+  assert.equal(harness.metrics().checkCalls, 1);
+  assert.equal(harness.metrics().fetchCalls, 1);
+  harness.owner.maybeAutoCheck();
+  harness.owner.setAppActive(true);
+  const manual = await harness.owner.requestManualCheck();
+  assert.match(manual.manualStatus, /in progress/);
+  assert.equal(harness.metrics().checkCalls, 1);
+  assert.equal(harness.metrics().fetchCalls, 1);
+  harness.releaseFetch();
+  await harness.awaitIdle();
+  assert.equal(harness.owner.getSnapshot().phase, OTA_UPDATE_PHASES.DOWNLOADED);
+});
+
+test('exported runCheck stays no-op while check pipeline download is in flight', async () => {
+  const harness = createHarness({ promptGateOpen: true });
+  harness.holdFetch();
+  harness.startup();
+  while (harness.owner.getSnapshot().phase !== OTA_UPDATE_PHASES.DOWNLOADING) {
+    await new Promise((resolve) => queueMicrotask(resolve));
+  }
+  void harness.owner.runCheck(harness.owner.CHECK_SOURCES.MANUAL);
+  await new Promise((resolve) => queueMicrotask(resolve));
+  assert.equal(harness.metrics().checkCalls, 1);
+  harness.releaseFetch();
+  await harness.awaitIdle();
+  assert.equal(harness.owner.getSnapshot().phase, OTA_UPDATE_PHASES.DOWNLOADED);
+});
+
+test('standalone runDownload is rejected while check pipeline download is in flight', async () => {
+  const harness = createHarness({ promptGateOpen: true });
+  harness.holdFetch();
+  harness.startup();
+  while (harness.owner.getSnapshot().phase !== OTA_UPDATE_PHASES.DOWNLOADING) {
+    await new Promise((resolve) => queueMicrotask(resolve));
+  }
+  await harness.owner.runDownload();
+  assert.equal(harness.metrics().fetchCalls, 1);
+  harness.releaseFetch();
+  await harness.awaitIdle();
+  assert.equal(harness.owner.getSnapshot().phase, OTA_UPDATE_PHASES.DOWNLOADED);
+});
+
 test('stale download completion does not clear a newer in-flight check', async () => {
   const harness = createHarness({ promptGateOpen: true });
   harness.holdFetch();
