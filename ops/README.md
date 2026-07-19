@@ -133,6 +133,11 @@ curl -fsS -H "X-Finance-Token: $FINANCE_API_TOKEN" \
   http://127.0.0.1:5007/api/v1/ping
 ```
 
+The unit sets `TimeoutStopSec=25`, aligned with the dashboard's 15s graceful-shutdown hard cap
+(`FINANCE_SHUTDOWN_TIMEOUT_MS`) plus margin for journal flush and systemd SIGKILL escalation. PR-18
+coordinated backup polls dashboard quiescence within its own stop deadline; do not raise
+`TimeoutStopSec` above the coordinator's writer stop budget without updating both contracts.
+
 An HTTP `503` from ping means the process is reachable but Actual data is not ready. Investigate the
 journal before restarting repeatedly.
 
@@ -325,6 +330,12 @@ bundle verification as evidence of a successful production restore.
 - Restarts only originally active/enabled components in safe order (Actual → dashboard health → jobs/timers), then runs source-fresh health checks.
 - On failure/interrupt, cleans run-owned staging only, preserves prior backups, and leaves `recovery_required` journal state when restart or health checks fail.
 
+Verify each coordinated bundle before off-host storage or restore drills:
+
+```bash
+ops/bin/verify-backup-bundle.sh /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
+```
+
 Dry run (`BACKUP_DRY_RUN=1` or `--dry-run`) performs discovery/preflight/stop-order planning only and exits `2` without mutating services or destination bytes.
 
 ```bash
@@ -354,8 +365,8 @@ install -m 700 ops/bin/restore-dashboard-runtime.sh \
   "$HOME/.local/bin/restore-dashboard-runtime.sh"
 ```
 
-Preview first (performs every PR-16 archive check, generation-binding validation, and preflight
-without writing destination bytes):
+Preview first (PR-16 archive trust chain, generation-binding validation, preflight space, and
+read-only writer discovery — **not** live all-writer quiescence proof):
 
 ```bash
 RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
@@ -363,7 +374,9 @@ RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
   /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
 ```
 
-Dry run exits `2` on success. Live swap requires PR-18 writer quiescence evidence plus `CONFIRM=1`:
+Dry run exits `2` on success. Active writers may appear as warnings only; do not treat a successful
+preview as evidence that production is safe to mutate. Live swap requires PR-18 writer quiescence
+evidence plus `CONFIRM=1`:
 
 ```bash
 RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
@@ -394,9 +407,28 @@ The helper:
   the platform supports it.
 - Refuses restore without a PR-18 quiescence admission token (this script does not stop/start services).
 - Dry-run uses temporary staging only and must not create the destination tree or persistent control paths.
+- Dry-run writer preview is read-only discovery; live restore re-verifies all inventoried writers
+  immediately before the first destination mutation (`assertAllWritersQuiescentForAdmission`).
 
 Afterward, verify `/api/v1/ping`, browser passkey login, the app, receipts, reimbursements, and
 reconciliation state.
+
+## Graceful shutdown verification
+
+PR-14 graceful shutdown is covered on every PR by dashboard integration tests (including in-flight
+read abort during `SIGTERM`). Full bounded stress is opt-in or scheduled so routine CI stays fast:
+
+```bash
+# Deterministic gate (runs via npm run check / check:dashboard):
+npm --prefix finance-dashboard test -- --test-name-pattern 'graceful shutdown during in-flight read'
+
+# Bounded scheduled/manual stress (100 serial + 100 parallel by default):
+FINANCE_QUERY_SHUTDOWN_STRESS=1 npm --prefix finance-dashboard test \
+  -- --test-name-pattern 'graceful shutdown in-flight read stress'
+```
+
+Tune stress volume with `FINANCE_QUERY_SHUTDOWN_STRESS_SERIAL`, `_PARALLEL`, and `_WORKERS`. The
+scheduled GitHub workflow runs a reduced bounded profile nightly.
 
 ## Log rotation
 

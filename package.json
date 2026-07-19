@@ -27,6 +27,7 @@
     "check:release": "node scripts/release-manifest.js --stdout >/dev/null",
     "check:shell": "command -v shellcheck >/dev/null 2>&1 && shellcheck -x ops/bin/*.sh actual-tools/run.sh actual-tools/splitwise-run.sh || echo 'shellcheck: skipped (not installed)'",
     "check:systemd": "for unit in ops/systemd/*.service ops/systemd/*.timer; do systemd-analyze --user verify \"$unit\"; done",
+    "check:shutdown-stress": "npm --prefix finance-dashboard test -- --test-name-pattern 'graceful shutdown in-flight read stress'",
     "check:compose": "docker compose -f ops/actual-compose.yml config >/dev/null",
     "check:expo": "npm --prefix finance-app exec expo-doctor",
     "check:browser": "npm --prefix finance-dashboard test -- --test-name-pattern 'browser dashboard'",

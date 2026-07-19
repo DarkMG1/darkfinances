@@ -8,6 +8,8 @@ WorkingDirectory=%h/finance-dashboard
 ExecStart=/usr/bin/node %h/finance-dashboard/server.js
 Restart=on-failure
 RestartSec=5
+# FINANCE_SHUTDOWN_TIMEOUT_MS defaults to 15s; allow graceful drain plus SIGKILL margin.
+TimeoutStopSec=25
 UMask=0077
 EnvironmentFile=%h/.openclaw/finance-dashboard.env
 

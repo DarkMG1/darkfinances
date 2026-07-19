@@ -134,16 +134,30 @@ before that install, so CI can execute it directly from a dependency-empty check
 
 ## Coordinated backup provenance
 
-`ops/bin/backup-coordinated.sh` quiesces timers/services when available, archives dashboard sidecars
-with embedded `.backup-manifest.json`, writes an external manifest + SHA-256 checksum, and records a
-release manifest beside the archive. When Actual data is included, its archive is also bound as
-additional backup evidence. Verify before restore:
+`ops/bin/backup-coordinated.sh` quiesces timers/services when available, builds a PR-16 relocatable
+bundle (not a legacy runtime archive), optional Actual data archive, release manifest, coordinated
+generation manifest, and short-TTL restore admission token. Verify coordinated bundles before restore:
 
 ```bash
-ops/bin/verify-backup.sh /path/to/dashboard-runtime-<timestamp>.tgz
+ops/bin/verify-backup-bundle.sh /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
 ```
 
-Restore remains `CONFIRM=1` gated and refuses to run while `finance-dashboard.service` is active.
+Legacy dashboard runtime archives from `backup-dashboard-runtime.sh` use `ops/bin/verify-backup.sh`
+instead.
+
+### Restore dry-run vs live all-writer re-verification
+
+- **Dry-run / preview** (`restore-dashboard-runtime.sh` without `CONFIRM=1`, or
+  `RESTORE_DRY_RUN=1`): validates archive trust chain, generation bindings, preflight space, and
+  read-only writer discovery. A passing dry-run does **not** prove current live quiescence; active
+  writers produce warnings (hard failure only when `RESTORE_DRY_RUN_STRICT=1`).
+- **Live restore** (`CONFIRM=1` with a PR-18 quiescence admission token): immediately before the
+  first destination mutation, re-verifies **all** inventoried writers with live state checks
+  (`assertAllWritersQuiescentForAdmission`). Stale tokens or writers that become active after backup
+  fail closed.
+
+Restore remains `CONFIRM=1` gated. The restore helper does not stop or start services; live swap
+requires writers to already be quiescent or a coordinated restore session that stops them first.
 
 ## Dashboard trust-proxy migration
 

@@ -9,7 +9,7 @@ restore_cli="$ops_root/lib/staged-restore-cli.js"
 
 if [ -z "$archive" ] || [ ! -f "$archive" ]; then
   echo "Usage: RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/token.json $0 <dashboard-runtime-backup-bundle.tgz>" >&2
-  echo "Dry run (default): performs every restore check without writing destination bytes." >&2
+  echo "Dry run (default): archive/preflight checks only; does not prove live writer quiescence." >&2
   echo "Live swap: CONFIRM=1 plus a PR-18 quiescence admission token." >&2
   exit 2
 fi
