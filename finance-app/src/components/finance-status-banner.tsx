@@ -1,7 +1,10 @@
 import React, { useEffect, useRef } from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { AccessibilityLiveRegion } from '@/components/accessibility-live-region';
+import {
+  AccessibilityAnnouncementEffect,
+  visibleStatusLiveRegionProps,
+} from '@/components/accessibility-live-region';
 import { usePing } from '@/api/hooks/finance.hooks';
 import { applyPingAvailabilityTransition } from '@/lib/finance-status-ping-recovery';
 import {
@@ -36,10 +39,11 @@ export function FinanceStatusBanner({ top }: { top?: number }) {
     : 'Finance sync needs attention \u00b7 tap to retry';
   return (
     <>
-      <AccessibilityLiveRegion message={text} />
+      <AccessibilityAnnouncementEffect message={text} />
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={text}
+        {...visibleStatusLiveRegionProps()}
         onPress={() => {
           ping.refetch();
           if (getReconnectConnectivityPhase() === 'online') {

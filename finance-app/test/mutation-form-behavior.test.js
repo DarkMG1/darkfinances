@@ -7,7 +7,7 @@ const root = path.resolve(__dirname, '..');
 
 test('mutation form components expose accessibility live region and 44pt targets', () => {
   const source = fs.readFileSync(path.join(root, 'src/components/mutation-form.tsx'), 'utf8');
-  assert.match(source, /AccessibilityLiveRegion/);
+  assert.match(source, /MutationStatusLiveRegion/);
   assert.match(source, /minHeight: 44/);
   assert.match(source, /accessibilityRole="alert"/);
 });

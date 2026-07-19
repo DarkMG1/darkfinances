@@ -10,14 +10,14 @@ import {
   View,
   ViewStyle,
 } from 'react-native';
-import { AccessibilityLiveRegion } from '@/components/accessibility-live-region';
+import { MutationStatusLiveRegion } from '@/components/accessibility-live-region';
 import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
 import { colors } from '@/theme/colors';
 
 const ERROR_TEXT = '#ff6b6b';
 
 export function MutationLiveRegion({ message }: { message: string }) {
-  return <AccessibilityLiveRegion message={message} />;
+  return <MutationStatusLiveRegion message={message} />;
 }
 
 export function MutationFormBanner({
