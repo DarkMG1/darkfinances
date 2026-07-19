@@ -147,13 +147,15 @@ process.on('unhandledRejection', (err) => {
   }
 });
 
-const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || `http://localhost:${process.env.PORT || 5007}`;
+const configuredPublicOrigin = process.env.PUBLIC_ORIGIN || `http://localhost:${process.env.PORT || 5007}`;
+const PUBLIC_ORIGIN = configuredPublicOrigin;
 const RP_NAME = process.env.WEBAUTHN_RP_NAME || 'DarkFinances';
 const RP_ID = process.env.WEBAUTHN_RP_ID || (() => {
   try { return new URL(PUBLIC_ORIGIN).hostname; }
   catch (_) { return 'localhost'; }
 })();
-const ORIGIN = process.env.WEBAUTHN_ORIGIN || PUBLIC_ORIGIN;
+let allowedOrigin = process.env.WEBAUTHN_ORIGIN || configuredPublicOrigin;
+const ORIGIN = allowedOrigin;
 const PASSKEY_USER_NAME = process.env.PASSKEY_USER_NAME || 'owner';
 const PASSKEY_USER_DISPLAY_NAME = process.env.PASSKEY_USER_DISPLAY_NAME || PASSKEY_USER_NAME;
 const CREDS_FILE = process.env.PASSKEY_CREDENTIALS_FILE || path.join(__dirname, 'passkey-credentials.json');
@@ -189,6 +191,12 @@ function saveCreds(creds) {
 }
 function requestClaimsDemo(req) {
   return req.get('X-Demo-Mode') === '1' || req.query.demo === '1' || req.query.demo === 'true';
+}
+
+function exposeTestServerInstanceId() {
+  return process.env.NODE_ENV === 'test' && process.env.TEST_SERVER_INSTANCE_ID
+    ? process.env.TEST_SERVER_INSTANCE_ID
+    : null;
 }
 function safeEqualHex(actual, expected) {
   if (!/^[a-f0-9]{64}$/.test(actual) || !/^[a-f0-9]{64}$/.test(expected)) return false;
@@ -280,7 +288,7 @@ app.use(session({
 
 app.use((req, res, next) => {
   const origin = req.get('Origin');
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && origin !== ORIGIN) {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && origin !== allowedOrigin) {
     if (req.path.startsWith('/api/')) return sendApiErrorCode(req, res, 'CORS_ORIGIN_REJECTED');
     return res.status(403).json({ error: 'Origin not allowed' });
   }
@@ -1646,8 +1654,8 @@ function v1Auth(req, res, next) {
 const v1 = express.Router();
 v1.use((req, res, next) => {
   const origin = req.get('Origin');
-  if (origin && origin !== ORIGIN) return sendApiErrorCode(req, res, 'CORS_ORIGIN_REJECTED');
-  if (origin === ORIGIN) res.header('Access-Control-Allow-Origin', ORIGIN);
+  if (origin && origin !== allowedOrigin) return sendApiErrorCode(req, res, 'CORS_ORIGIN_REJECTED');
+  if (origin === allowedOrigin) res.header('Access-Control-Allow-Origin', allowedOrigin);
   res.header('Vary', 'Origin');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Finance-Token, X-Demo-Mode, Idempotency-Key');
   res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -1704,8 +1712,8 @@ v1.get('/ping', env(async () => {
     requestAdmission: requestAdmission.getHealth(),
     queuedMutations: mutationQueue.size,
     release: releaseIdentity(),
-    ...(process.env.TEST_SERVER_INSTANCE_ID
-      ? { testInstanceId: process.env.TEST_SERVER_INSTANCE_ID }
+    ...(exposeTestServerInstanceId()
+      ? { testInstanceId: exposeTestServerInstanceId() }
       : {}),
   };
 }));
@@ -1879,8 +1887,11 @@ const DEMO_ONLY = process.env.DEMO_ONLY === '1';
 let periodicSyncTimer;
 const httpServer = app.listen(PORT, '127.0.0.1', () => {
   const boundPort = httpServer.address().port;
+  if (String(allowedOrigin).endsWith(':0')) {
+    allowedOrigin = `http://127.0.0.1:${boundPort}`;
+  }
   console.log(`Finance dashboard running on http://127.0.0.1:${boundPort}`);
-  const testInstanceId = process.env.TEST_SERVER_INSTANCE_ID;
+  const testInstanceId = exposeTestServerInstanceId();
   if (testInstanceId) {
     console.log(`FINANCE_TEST_SERVER_READY ${boundPort} ${testInstanceId}`);
   }

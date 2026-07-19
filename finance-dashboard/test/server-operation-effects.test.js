@@ -1,34 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const net = require('net');
-const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
-
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/auth/status`);
-      if (response.ok) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`server startup timeout: ${logs.value}`);
-}
+const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
 
 async function apiRequest(base, pathname, { method = 'GET', key, body } = {}) {
   const response = await fetch(`${base}${pathname}`, {
@@ -44,13 +18,9 @@ async function apiRequest(base, pathname, { method = 'GET', key, body } = {}) {
 }
 
 test('server composes structural sync and strict bank uncertainty', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-operation-effects-'));
-  const dashboardRoot = path.resolve(__dirname, '..');
-  const marker = path.join(dir, 'effects.log');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, `
+  const { base, dir } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-operation-effects-',
+    preloadBody: `
     const fs = require('fs');
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -90,37 +60,9 @@ test('server composes structural sync and strict bank uncertainty', async (t) =>
       children: [],
       paths: [],
     };
-  `);
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  `,
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
+  const marker = path.join(dir, 'effects.log');
 
   const splitwiseKey = 'splitwise-structural';
   let result = await apiRequest(base, '/api/v1/splitwise/sync-shares', {

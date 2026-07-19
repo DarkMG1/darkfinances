@@ -1,35 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const net = require('net');
-const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
 const { legacyRequestFingerprint } = require('../lib/operation-journal');
-
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/auth/status`);
-      if (response.ok) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`server startup timeout: ${logs.value}`);
-}
+const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
 
 async function request(base, pathname, options = {}) {
   const response = await fetch(`${base}${pathname}`, options);
@@ -52,57 +26,37 @@ function mutationOptions(key, body) {
 }
 
 test('server exposes phase-aware replay and legacy-safe operation status', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-operation-server-'));
-  const operationFile = path.join(dir, 'operation-journal.json');
-  const reconciliationFile = path.join(dir, 'reconciliation.json');
   const legacyBody = { enabled: false };
   const legacyRoute = '/api/v1/reconciliation/enabled';
   const legacyKey = 'legacy-failed-01';
-  fs.writeFileSync(operationFile, JSON.stringify({
-    schemaVersion: 1,
-    operations: {
-      [legacyKey]: {
-        key: legacyKey,
-        fingerprint: legacyRequestFingerprint('POST', legacyRoute, legacyBody),
-        method: 'POST',
-        route: legacyRoute,
-        status: 'failed',
-        startedAt: '2025-01-01T00:00:00.000Z',
-        completedAt: '2025-01-01T00:01:00.000Z',
-        error: { code: 'INTERNAL_ERROR', message: 'ambiguous old failure' },
-      },
+  let operationFile;
+  let reconciliationFile;
+  const { base } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-operation-server-',
+    prepareDir: (dir) => {
+      operationFile = path.join(dir, 'operation-journal.json');
+      reconciliationFile = path.join(dir, 'reconciliation.json');
+      fs.writeFileSync(operationFile, JSON.stringify({
+        schemaVersion: 1,
+        operations: {
+          [legacyKey]: {
+            key: legacyKey,
+            fingerprint: legacyRequestFingerprint('POST', legacyRoute, legacyBody),
+            method: 'POST',
+            route: legacyRoute,
+            status: 'failed',
+            startedAt: '2025-01-01T00:00:00.000Z',
+            completedAt: '2025-01-01T00:01:00.000Z',
+            error: { code: 'INTERNAL_ERROR', message: 'ambiguous old failure' },
+          },
+        },
+      }));
     },
-  }));
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: path.resolve(__dirname, '..'),
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      PORT: String(port),
-      DEMO_ONLY: '1',
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: operationFile,
-      RECON_PATH: reconciliationFile,
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    extraEnvForDir: (dir) => ({
+      OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
+      RECON_PATH: path.join(dir, 'reconciliation.json'),
+    }),
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   const key = 'server-completed-1';
   let result = await request(

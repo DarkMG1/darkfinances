@@ -1,10 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const net = require('net');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
 const { validateSidecar } = require('../../ops/lib/backup-verify');
 const { validatePasskeyCredentials } = require('../lib/passkey-credentials-schema');
 const {
@@ -14,6 +12,7 @@ const {
   savePasskeyCredentials,
 } = require('../lib/passkey-credentials-store');
 const { RuntimeStateError } = require('../lib/runtime-state-store');
+const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
 
 function passkeyReadError(error, pattern) {
   return error instanceof RuntimeStateError
@@ -29,59 +28,17 @@ const SAMPLE_CRED = Object.freeze({
   lastUsedAt: null,
 });
 
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => (error ? reject(error) : resolve(port)));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/login`);
-      if (response.status === 200) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`server startup timeout: ${logs.value}`);
-}
-
 async function startServer(t, credsFile) {
   const dir = path.dirname(credsFile);
   fs.mkdirSync(path.join(dir, 'sessions'), { recursive: true, mode: 0o700 });
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: path.resolve(__dirname, '..'),
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      PORT: String(port),
-      DEMO_ONLY: '1',
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
+  const started = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-passkey-server-',
+    dir,
+    extraEnvForDir: () => ({
       PASSKEY_CREDENTIALS_FILE: credsFile,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    }),
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => child.kill('SIGTERM'));
-  await waitForServer(base, child, logs);
-  return { base, child, logs };
+  return started;
 }
 
 test('loadPasskeyCredentials treats missing file as empty enrollment', (t) => {

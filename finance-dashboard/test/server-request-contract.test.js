@@ -2,55 +2,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const fs = require('fs');
-const net = require('net');
-const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
 const {
   RECEIPT_MAX_BASE64_CHARS,
   RECEIPT_MAX_DECODED_BYTES,
   RECEIPT_MAX_JSON_BYTES,
   DEFAULT_MAX_JSON_BYTES,
 } = require('../lib/receipt-limits');
+const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
 
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/auth/status`);
-      if (response.ok) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`server startup timeout: ${logs.value}`);
-}
-
-async function request(base, pathname, options = {}) {
-  const response = await fetch(`${base}${pathname}`, options);
-  const text = await response.text();
-  let body;
-  try { body = JSON.parse(text); } catch (_) { body = text; }
-  return { response, body, text };
-}
-
-function spawnServer(dir, port) {
-  const logs = { value: '' };
-  const marker = path.join(dir, 'effects.log');
-  const preload = path.join(dir, 'mock-data-module.js');
-  const dashboardRoot = path.resolve(__dirname, '..');
-  fs.writeFileSync(preload, `
+const REQUEST_CONTRACT_PRELOAD = `
     const fs = require('fs');
     const path = require('path');
     const root = process.env.TEST_DASHBOARD_ROOT;
@@ -86,32 +47,14 @@ function spawnServer(dir, port) {
       children: [],
       paths: [],
     };
-  `);
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      SELFTEST: '1',
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  return { child, logs, marker };
+  `;
+
+async function request(base, pathname, options = {}) {
+  const response = await fetch(`${base}${pathname}`, options);
+  const text = await response.text();
+  let body;
+  try { body = JSON.parse(text); } catch (_) { body = text; }
+  return { response, body, text };
 }
 
 function mutationOptions(key, body, headers = {}) {
@@ -141,15 +84,11 @@ function pngBase64(payloadSize) {
 }
 
 test('uniform request contract matrix for v1 and legacy surfaces', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-request-contract-'));
-  const { child, logs, marker } = spawnServer(dir, port);
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
+  const { base, port, effectMarkerPath: marker } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-request-contract-',
+    preloadBody: REQUEST_CONTRACT_PRELOAD,
+    extraEnvForDir: () => ({ SELFTEST: '1' }),
   });
-  await waitForServer(base, child, logs);
 
   const matrix = [];
 
@@ -182,7 +121,7 @@ test('uniform request contract matrix for v1 and legacy surfaces', async (t) => 
 
   result = await request(base, '/api/v1/transactions', {
     method: 'OPTIONS',
-    headers: { Origin: `http://localhost:${port}`, 'Access-Control-Request-Method': 'POST' },
+    headers: { Origin: `${base.replace(/\/$/, '')}`, 'Access-Control-Request-Method': 'POST' },
   });
   record('cors preflight', result, { expectStatus: 204 });
   assert.equal(result.response.status, 204);

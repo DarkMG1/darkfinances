@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { startSplitwiseHttpServer } = require('./helpers/splitwise-http-ephemeral-server');
 const { categoryIdentityFingerprint } = require('../lib/bulk-operation-fingerprint');
 const {
   verifyCreateMirrorIdentity,
@@ -1301,92 +1301,25 @@ function buildRealDataPreload(dashboardRoot, fixtureConfigureBody, { nullKeyWarm
   `;
 }
 
-async function unusedPort() {
-  const net = require('net');
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    if (child.exitCode != null) {
-      throw new Error(`server exited early:\n${logs.value}`);
-    }
-    try {
-      const response = await fetch(`${base}/api/v1/ping`, {
-        headers: { 'X-Finance-Token': 'test-api-token' },
-      });
-      if (response.status === 200) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`server did not become ready:\n${logs.value}`);
-}
-
 test('HTTP sync-shares stale snapshot journals terminal STALE_UPSTREAM_DATA without bulk effects', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-splitwise-http-stale-'));
   const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
-  const owesPath = path.join(dir, 'owes-truth.json');
-  const resolutionsPath = path.join(dir, 'splitwise-mirror-resolutions.json');
-  const deletionPath = path.join(dir, 'transaction-deletion-sagas.json');
-  writeJson(journalPath, { schemaVersion: 1, operations: {} });
-  writeJson(bulkPath, { schemaVersion: 1, sagas: {} });
-  writeJson(resolutionsPath, { schemaVersion: 1, resolutions: [] });
-  writeJson(deletionPath, { schemaVersion: 1, sagas: {} });
-  writeJson(owesPath, completeSnapshot([], '2020-01-01T00:00:00.000Z'));
-
-  const preload = path.join(dir, 'preload-fixture-actual.js');
-  fs.writeFileSync(preload, buildRealDataPreload(dashboardRoot, `
+  const { base, journalPath, bulkPath } = await startSplitwiseHttpServer(t, {
+    tempPrefix: 'darkfinances-splitwise-http-stale-',
+    preloadBody: buildRealDataPreload(dashboardRoot, `
     fixture.configure({
       rows: [],
       accounts: [{ id: 'splitwise-account', name: 'Splitwise', closed: false, offbudget: false }],
       categoryGroups: [{ id: 'spending', name: 'Spending', is_income: false, categories: [{ id: 'splitwise-category', name: 'Splitwise' }] }],
     });
-  `));
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      BULK_OPERATION_SAGAS_PATH: bulkPath,
-      OWES_TRUTH_PATH: owesPath,
-      SPLITWISE_MIRROR_RESOLUTIONS_PATH: resolutionsPath,
-      TRANSACTION_DELETION_SAGAS_PATH: deletionPath,
-      PERSONAL_CONFIG_PATH: path.join(dir, 'personal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
+  `),
+    prepareState: (_dir, paths) => {
+      writeJson(paths.journalPath, { schemaVersion: 1, operations: {} });
+      writeJson(paths.bulkPath, { schemaVersion: 1, sagas: {} });
+      writeJson(paths.resolutionsPath, { schemaVersion: 1, resolutions: [] });
+      writeJson(paths.deletionPath, { schemaVersion: 1, sagas: {} });
+      writeJson(paths.owesPath, completeSnapshot([], '2020-01-01T00:00:00.000Z'));
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   const key = 'mirror-preflight-stale';
   const headers = { 'X-Finance-Token': 'test-api-token', 'Idempotency-Key': key };
@@ -1410,64 +1343,25 @@ test('HTTP sync-shares stale snapshot journals terminal STALE_UPSTREAM_DATA with
 });
 
 test('HTTP sync-shares keyed run succeeds after null-key completed snapshot without duplicate ledger effects', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-splitwise-http-mixed-'));
   const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
-  const owesPath = path.join(dir, 'owes-truth.json');
-  const resolutionsPath = path.join(dir, 'splitwise-mirror-resolutions.json');
-  const deletionPath = path.join(dir, 'transaction-deletion-sagas.json');
-  const rowsPath = path.join(dir, 'mirror-rows.json');
-  writeJson(journalPath, { schemaVersion: 1, operations: {} });
-  writeJson(bulkPath, { schemaVersion: 1, sagas: {} });
-  writeJson(resolutionsPath, { schemaVersion: 1, resolutions: [] });
-  writeJson(deletionPath, { schemaVersion: 1, sagas: {} });
-  writeJson(owesPath, completeSnapshot([{ id: '200', myShare: 6, date: today, desc: 'mixed mode' }]));
-
-  const preload = path.join(dir, 'preload-fixture-actual.js');
-  fs.writeFileSync(preload, buildRealDataPreload(dashboardRoot, `
+  const { base, journalPath, bulkPath, rowsPath } = await startSplitwiseHttpServer(t, {
+    tempPrefix: 'darkfinances-splitwise-http-mixed-',
+    preloadBody: buildRealDataPreload(dashboardRoot, `
     fixture.configure({
       rows: [],
       accounts: [{ id: 'splitwise-account', name: 'Splitwise', closed: false, offbudget: false }],
       categoryGroups: [{ id: 'spending', name: 'Spending', is_income: false, categories: [{ id: 'splitwise-category', name: 'Splitwise' }] }],
     });
-  `, { nullKeyWarmup: true }));
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      BULK_OPERATION_SAGAS_PATH: bulkPath,
-      OWES_TRUTH_PATH: owesPath,
-      SPLITWISE_MIRROR_RESOLUTIONS_PATH: resolutionsPath,
-      TRANSACTION_DELETION_SAGAS_PATH: deletionPath,
-      TEST_MIRROR_ROWS: rowsPath,
-      PERSONAL_CONFIG_PATH: path.join(dir, 'personal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
+  `, { nullKeyWarmup: true }),
+    prepareState: (_dir, paths) => {
+      writeJson(paths.journalPath, { schemaVersion: 1, operations: {} });
+      writeJson(paths.bulkPath, { schemaVersion: 1, sagas: {} });
+      writeJson(paths.resolutionsPath, { schemaVersion: 1, resolutions: [] });
+      writeJson(paths.deletionPath, { schemaVersion: 1, sagas: {} });
+      writeJson(paths.owesPath, completeSnapshot([{ id: '200', myShare: 6, date: today, desc: 'mixed mode' }]));
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    extraEnvForDir: (dir) => ({ TEST_MIRROR_ROWS: path.join(dir, 'mirror-rows.json') }),
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   const rowsAfterNullKey = readJson(rowsPath);
   assert.equal(rowsAfterNullKey.filter((entry) => entry.imported_id === durableImportedId('200')).length, 1);
@@ -1498,62 +1392,24 @@ test('HTTP sync-shares keyed run succeeds after null-key completed snapshot with
 });
 
 test('HTTP sync-shares rejects cross-kind idempotency key reuse', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-splitwise-http-cross-kind-'));
   const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
-  const owesPath = path.join(dir, 'owes-truth.json');
-  const resolutionsPath = path.join(dir, 'splitwise-mirror-resolutions.json');
-  const deletionPath = path.join(dir, 'transaction-deletion-sagas.json');
-  writeJson(journalPath, { schemaVersion: 1, operations: {} });
-  writeJson(bulkPath, { schemaVersion: 1, sagas: {} });
-  writeJson(resolutionsPath, { schemaVersion: 1, resolutions: [] });
-  writeJson(deletionPath, { schemaVersion: 1, sagas: {} });
-  writeJson(owesPath, completeSnapshot([]));
-
-  const preload = path.join(dir, 'preload-fixture-actual.js');
-  fs.writeFileSync(preload, buildRealDataPreload(dashboardRoot, `
+  const { base, journalPath } = await startSplitwiseHttpServer(t, {
+    tempPrefix: 'darkfinances-splitwise-http-cross-kind-',
+    preloadBody: buildRealDataPreload(dashboardRoot, `
     fixture.configure({
       rows: [],
       accounts: [{ id: 'splitwise-account', name: 'Splitwise', closed: false, offbudget: false }],
       categoryGroups: [{ id: 'spending', name: 'Spending', is_income: false, categories: [{ id: 'splitwise-category', name: 'Splitwise' }] }],
     });
-  `));
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      BULK_OPERATION_SAGAS_PATH: bulkPath,
-      OWES_TRUTH_PATH: owesPath,
-      SPLITWISE_MIRROR_RESOLUTIONS_PATH: resolutionsPath,
-      TRANSACTION_DELETION_SAGAS_PATH: deletionPath,
-      PERSONAL_CONFIG_PATH: path.join(dir, 'personal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
+  `),
+    prepareState: (_dir, paths) => {
+      writeJson(paths.journalPath, { schemaVersion: 1, operations: {} });
+      writeJson(paths.bulkPath, { schemaVersion: 1, sagas: {} });
+      writeJson(paths.resolutionsPath, { schemaVersion: 1, resolutions: [] });
+      writeJson(paths.deletionPath, { schemaVersion: 1, sagas: {} });
+      writeJson(paths.owesPath, completeSnapshot([]));
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   const key = 'cross-kind-http-key';
   const headers = { 'X-Finance-Token': 'test-api-token', 'Idempotency-Key': key };
@@ -1568,23 +1424,10 @@ test('HTTP sync-shares rejects cross-kind idempotency key reuse', async (t) => {
 });
 
 test('HTTP sync-shares preflight failure journals terminal SPLITWISE_MIRROR_AMBIGUOUS without bulk effects', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-splitwise-http-preflight-'));
   const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
-  const owesPath = path.join(dir, 'owes-truth.json');
-  const resolutionsPath = path.join(dir, 'splitwise-mirror-resolutions.json');
-  const deletionPath = path.join(dir, 'transaction-deletion-sagas.json');
-  writeJson(journalPath, { schemaVersion: 1, operations: {} });
-  writeJson(bulkPath, { schemaVersion: 1, sagas: {} });
-  writeJson(resolutionsPath, { schemaVersion: 1, resolutions: [] });
-  writeJson(deletionPath, { schemaVersion: 1, sagas: {} });
-  writeJson(owesPath, completeSnapshot([{ id: '100', myShare: 5, date: today, desc: 'dup' }]));
-
-  const preload = path.join(dir, 'preload-fixture-actual.js');
-  fs.writeFileSync(preload, buildRealDataPreload(dashboardRoot, `
+  const { base, journalPath, bulkPath } = await startSplitwiseHttpServer(t, {
+    tempPrefix: 'darkfinances-splitwise-http-preflight-',
+    preloadBody: buildRealDataPreload(dashboardRoot, `
     fixture.configure({
       rows: [
         { id: 'dup-a', account: 'splitwise-account', date: ${JSON.stringify(today)}, amount: -500, notes: 'first #sw-100', cleared: true, category: 'splitwise-category', is_parent: false, subtransactions: [] },
@@ -1593,40 +1436,15 @@ test('HTTP sync-shares preflight failure journals terminal SPLITWISE_MIRROR_AMBI
       accounts: [{ id: 'splitwise-account', name: 'Splitwise', closed: false, offbudget: false }],
       categoryGroups: [{ id: 'spending', name: 'Spending', is_income: false, categories: [{ id: 'splitwise-category', name: 'Splitwise' }] }],
     });
-  `));
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      BULK_OPERATION_SAGAS_PATH: bulkPath,
-      OWES_TRUTH_PATH: owesPath,
-      SPLITWISE_MIRROR_RESOLUTIONS_PATH: resolutionsPath,
-      TRANSACTION_DELETION_SAGAS_PATH: deletionPath,
-      PERSONAL_CONFIG_PATH: path.join(dir, 'personal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
+  `),
+    prepareState: (_dir, paths) => {
+      writeJson(paths.journalPath, { schemaVersion: 1, operations: {} });
+      writeJson(paths.bulkPath, { schemaVersion: 1, sagas: {} });
+      writeJson(paths.resolutionsPath, { schemaVersion: 1, resolutions: [] });
+      writeJson(paths.deletionPath, { schemaVersion: 1, sagas: {} });
+      writeJson(paths.owesPath, completeSnapshot([{ id: '100', myShare: 5, date: today, desc: 'dup' }]));
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   const key = 'mirror-preflight-dup';
   const headers = { 'X-Finance-Token': 'test-api-token', 'Idempotency-Key': key };
@@ -1649,64 +1467,25 @@ test('HTTP sync-shares preflight failure journals terminal SPLITWISE_MIRROR_AMBI
 });
 
 test('HTTP sync-shares success writes imported_id through fixture Actual', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-splitwise-http-success-'));
   const dashboardRoot = path.resolve(__dirname, '..');
-  const journalPath = path.join(dir, 'operation-journal.json');
-  const bulkPath = path.join(dir, 'bulk-operation-sagas.json');
-  const owesPath = path.join(dir, 'owes-truth.json');
-  const resolutionsPath = path.join(dir, 'splitwise-mirror-resolutions.json');
-  const deletionPath = path.join(dir, 'transaction-deletion-sagas.json');
-  const rowsPath = path.join(dir, 'mirror-rows.json');
-  writeJson(journalPath, { schemaVersion: 1, operations: {} });
-  writeJson(bulkPath, { schemaVersion: 1, sagas: {} });
-  writeJson(resolutionsPath, { schemaVersion: 1, resolutions: [] });
-  writeJson(deletionPath, { schemaVersion: 1, sagas: {} });
-  writeJson(owesPath, completeSnapshot([{ id: '200', myShare: 6, date: today, desc: 'http create' }]));
-
-  const preload = path.join(dir, 'preload-fixture-actual.js');
-  fs.writeFileSync(preload, buildRealDataPreload(dashboardRoot, `
+  const { base, rowsPath } = await startSplitwiseHttpServer(t, {
+    tempPrefix: 'darkfinances-splitwise-http-success-',
+    preloadBody: buildRealDataPreload(dashboardRoot, `
     fixture.configure({
       rows: [],
       accounts: [{ id: 'splitwise-account', name: 'Splitwise', closed: false, offbudget: false }],
       categoryGroups: [{ id: 'spending', name: 'Spending', is_income: false, categories: [{ id: 'splitwise-category', name: 'Splitwise' }] }],
     });
-  `));
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: journalPath,
-      BULK_OPERATION_SAGAS_PATH: bulkPath,
-      OWES_TRUTH_PATH: owesPath,
-      SPLITWISE_MIRROR_RESOLUTIONS_PATH: resolutionsPath,
-      TRANSACTION_DELETION_SAGAS_PATH: deletionPath,
-      TEST_MIRROR_ROWS: rowsPath,
-      PERSONAL_CONFIG_PATH: path.join(dir, 'personal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
+  `),
+    prepareState: (_dir, paths) => {
+      writeJson(paths.journalPath, { schemaVersion: 1, operations: {} });
+      writeJson(paths.bulkPath, { schemaVersion: 1, sagas: {} });
+      writeJson(paths.resolutionsPath, { schemaVersion: 1, resolutions: [] });
+      writeJson(paths.deletionPath, { schemaVersion: 1, sagas: {} });
+      writeJson(paths.owesPath, completeSnapshot([{ id: '200', myShare: 6, date: today, desc: 'http create' }]));
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    extraEnvForDir: (dir) => ({ TEST_MIRROR_ROWS: path.join(dir, 'mirror-rows.json') }),
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
 
   const key = 'mirror-http-success';
   const headers = { 'X-Finance-Token': 'test-api-token', 'Idempotency-Key': key };

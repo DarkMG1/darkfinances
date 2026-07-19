@@ -3,35 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const net = require('net');
-const { spawn } = require('child_process');
-
-async function unusedPort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
-async function waitForServer(base, child, logs) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
-    try {
-      const response = await fetch(`${base}/api/v1/ping`, {
-        headers: { 'X-Finance-Token': 'test-api-token' },
-      });
-      if (response.status === 200) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`server did not start: ${logs.value}`);
-}
+const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
 
 async function request(base, route, { method = 'GET', key } = {}) {
   const response = await fetch(`${base}${route}`, {
@@ -45,13 +18,9 @@ async function request(base, route, { method = 'GET', key } = {}) {
 }
 
 test('DELETE journals local apply, sync uncertainty, and status-only recovery', async (t) => {
-  const port = await unusedPort();
-  const base = `http://127.0.0.1:${port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-deletion-operation-'));
-  const dashboardRoot = path.resolve(__dirname, '..');
-  const marker = path.join(dir, 'effects.log');
-  const preload = path.join(dir, 'mock-data-module.js');
-  fs.writeFileSync(preload, `
+  const { base, dir } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-deletion-operation-',
+    preloadBody: `
     const fs = require('fs');
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
@@ -104,37 +73,9 @@ test('DELETE journals local apply, sync uncertainty, and status-only recovery', 
       children: [],
       paths: [],
     };
-  `);
-
-  const logs = { value: '' };
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: dashboardRoot,
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      DEMO_ONLY: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${preload}`.trim(),
-      PORT: String(port),
-      PUBLIC_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_ORIGIN: `http://localhost:${port}`,
-      WEBAUTHN_RP_ID: 'localhost',
-      FINANCE_API_TOKEN: 'test-api-token',
-      SESSION_SECRET: 'test-session-secret-with-sufficient-length',
-      SESSION_DIR: path.join(dir, 'sessions'),
-      OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
-      PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
-      TEST_DASHBOARD_ROOT: dashboardRoot,
-      TEST_EFFECT_MARKER: marker,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  `,
   });
-  child.stdout.on('data', (chunk) => { logs.value += chunk; });
-  child.stderr.on('data', (chunk) => { logs.value += chunk; });
-  t.after(() => {
-    child.kill('SIGTERM');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  await waitForServer(base, child, logs);
+  const marker = path.join(dir, 'effects.log');
 
   const successKey = 'delete-success';
   let result = await request(
