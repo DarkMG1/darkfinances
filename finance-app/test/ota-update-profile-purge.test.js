@@ -47,7 +47,7 @@ test('profile purge clears persisted Later cooldown and disposes OTA owner timer
   owner.initialize();
   owner.setPromptGateOpen(true);
   owner.maybeAutoCheck();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await runner.whenIdle();
   runner.flushSchedules(DEFAULT_PROMPT_SETTLE_MS);
   runner.lastPrompt().onLater();
 

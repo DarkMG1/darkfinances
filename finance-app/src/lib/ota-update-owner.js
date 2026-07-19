@@ -40,6 +40,18 @@ function createOtaUpdateOwner(deps) {
   let checkGeneration = 0;
   let activeCheckGeneration = 0;
   let queuedNativePending = null;
+  const idleWaiters = [];
+
+  function notifyIdleIfReady() {
+    if (inFlight != null) return;
+    const waiters = idleWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+  }
+
+  function whenIdle() {
+    if (inFlight == null) return Promise.resolve();
+    return new Promise((resolve) => idleWaiters.push(resolve));
+  }
 
   function emit() {
     for (const listener of listeners) listener();
@@ -213,6 +225,7 @@ function createOtaUpdateOwner(deps) {
         activeCheckGeneration = 0;
         if (source === CHECK_SOURCES.AUTO) lastAutoCheckAt = now();
         flushQueuedNativePending();
+        notifyIdleIfReady();
       }
     }
   }
@@ -243,7 +256,9 @@ function createOtaUpdateOwner(deps) {
         message: error?.message || 'Update download failed',
       });
     } finally {
-      inFlight = null;
+      if (inFlight === 'download') {
+        inFlight = null;
+      }
     }
   }
 
@@ -378,6 +393,7 @@ function createOtaUpdateOwner(deps) {
     setPromptGateOpen,
     subscribe,
     syncNativePending,
+    whenIdle,
   };
 }
 
