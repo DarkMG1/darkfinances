@@ -21,6 +21,9 @@ During process shutdown (`SIGTERM`/`SIGINT`), `lib/process-shutdown-abort.js` ab
 
 Integration tests use atomic filesystem markers under `FINANCE_QUERY_TEST_BARRIER_DIR` (test-only) so shutdown abort is observed without racing HTTP polling during admission drain.
 
+Every PR runs the deterministic in-flight read shutdown gate via `npm run check`. Full bounded
+stress is opt-in or scheduled; see [`../../ops/README.md`](../../ops/README.md#graceful-shutdown-verification).
+
 ## Reproduction
 
 ```bash
