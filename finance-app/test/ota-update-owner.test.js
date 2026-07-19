@@ -297,7 +297,7 @@ test('cooldown expiry reopens automatic checking for the same update id', async 
   assert.equal(harness.runner.promptCount(), 2);
 });
 
-test('initialize clears prior prompt and cooldown timers across remount', async () => {
+test('repeat initialize during defer keeps cooldown timers without restarting network work', async () => {
   const harness = createHarness({ deferCooldownMs: 60_000 });
   harness.startup();
   await harness.awaitIdle();
@@ -305,9 +305,79 @@ test('initialize clears prior prompt and cooldown timers across remount', async 
   harness.runner.lastPrompt().onLater();
   assert.ok(harness.runner.scheduledCount() > 0);
   harness.owner.initialize();
-  assert.equal(harness.runner.scheduledCount(), 0);
-  harness.runner.flushSchedules(DEFAULT_PROMPT_SETTLE_MS);
-  assert.equal(harness.runner.promptCount(), 1);
+  assert.ok(harness.runner.scheduledCount() > 0);
+  assert.equal(harness.metrics().checkCalls, 1);
+  assert.equal(harness.owner.getSnapshot().phase, OTA_UPDATE_PHASES.DEFERRED);
+});
+
+test('Strict Mode style double initialize and maybeAutoCheck yields one check and fetch', async () => {
+  const harness = createHarness({ promptGateOpen: true });
+  harness.owner.initialize();
+  harness.owner.setAppActive(true);
+  harness.owner.setPromptGateOpen(true);
+  harness.owner.maybeAutoCheck();
+  harness.owner.initialize();
+  harness.owner.maybeAutoCheck();
+  await harness.awaitIdle();
+  assert.equal(harness.metrics().checkCalls, 1);
+  assert.equal(harness.metrics().fetchCalls, 1);
+  assert.equal(harness.owner.getSnapshot().phase, OTA_UPDATE_PHASES.DOWNLOADED);
+});
+
+test('repeat initialize during held check does not duplicate or cancel pipeline', async () => {
+  const harness = createHarness({ promptGateOpen: true });
+  harness.holdCheck();
+  harness.owner.initialize();
+  harness.owner.setAppActive(true);
+  harness.owner.setPromptGateOpen(true);
+  harness.owner.maybeAutoCheck();
+  await new Promise((resolve) => queueMicrotask(resolve));
+  assert.equal(harness.metrics().checkCalls, 1);
+  harness.owner.initialize();
+  harness.owner.initialize();
+  assert.equal(harness.metrics().checkCalls, 1);
+  harness.releaseCheck();
+  await harness.awaitIdle();
+  assert.equal(harness.metrics().checkCalls, 1);
+  assert.equal(harness.metrics().fetchCalls, 1);
+});
+
+test('repeat initialize during held download does not duplicate or cancel pipeline', async () => {
+  const harness = createHarness({ promptGateOpen: true });
+  harness.holdFetch();
+  harness.startup();
+  while (harness.owner.getSnapshot().phase !== OTA_UPDATE_PHASES.DOWNLOADING) {
+    await new Promise((resolve) => queueMicrotask(resolve));
+  }
+  harness.owner.initialize();
+  harness.owner.initialize();
+  assert.equal(harness.metrics().checkCalls, 1);
+  assert.equal(harness.metrics().fetchCalls, 1);
+  harness.releaseFetch();
+  await harness.awaitIdle();
+  assert.equal(harness.owner.getSnapshot().phase, OTA_UPDATE_PHASES.DOWNLOADED);
+});
+
+test('dispose then initialize after held fetch invalidates stale work and runs one new pipeline', async () => {
+  const harness = createHarness({ promptGateOpen: true });
+  harness.holdFetch();
+  harness.startup();
+  while (harness.owner.getSnapshot().phase !== OTA_UPDATE_PHASES.DOWNLOADING) {
+    await new Promise((resolve) => queueMicrotask(resolve));
+  }
+  harness.owner.dispose();
+  harness.owner.initialize();
+  harness.owner.setAppActive(true);
+  harness.owner.setPromptGateOpen(true);
+  harness.owner.maybeAutoCheck();
+  while (harness.owner.getSnapshot().phase !== OTA_UPDATE_PHASES.DOWNLOADING) {
+    await new Promise((resolve) => queueMicrotask(resolve));
+  }
+  assert.equal(harness.metrics().checkCalls, 2);
+  assert.equal(harness.metrics().fetchCalls, 2);
+  harness.releaseFetch();
+  await harness.awaitIdle();
+  assert.equal(harness.owner.getSnapshot().phase, OTA_UPDATE_PHASES.DOWNLOADED);
 });
 
 test('native pending hook update during active check waits for check completion', async () => {

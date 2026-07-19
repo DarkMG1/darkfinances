@@ -41,6 +41,7 @@ function createOtaUpdateOwner(deps) {
   let checkGeneration = 0;
   let activeCheckGeneration = 0;
   let queuedNativePending = null;
+  let initialized = false;
   const idleWaiters = [];
 
   function notifyIdleIfReady() {
@@ -333,6 +334,9 @@ function createOtaUpdateOwner(deps) {
   }
 
   function initialize() {
+    if (initialized) return;
+    initialized = true;
+
     clearScheduledWork();
     invalidateInFlightWork();
 
@@ -389,6 +393,7 @@ function createOtaUpdateOwner(deps) {
   }
 
   function dispose() {
+    initialized = false;
     clearScheduledWork();
     invalidateInFlightWork();
     listeners.clear();
