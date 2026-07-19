@@ -45,6 +45,11 @@ function buildVendoredBoundedLedgerAccess(source = fs.readFileSync(sourcePath, '
 
   body = body.replace(/\n {2}DEFAULT_CLASSIFICATION_PATTERNS,\n/, '\n');
 
+  body = body.replace(
+    "const { isProcessShutdownAborted } = require('./process-shutdown-abort');\n",
+    'function isProcessShutdownAborted() { return false; }\n',
+  );
+
   const header = `'use strict';
 /* VENDORED from finance-dashboard/lib/bounded-ledger-access.js
  * Regenerate: node finance-dashboard/scripts/sync-bounded-ledger-vendor.js

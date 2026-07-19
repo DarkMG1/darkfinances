@@ -4,6 +4,7 @@ const {
   recordClientAbortListenersAttached,
   recordClientAbortListenersDisposed,
 } = require('./query-abort-sentinel');
+const { getProcessShutdownAbortSignal } = require('./process-shutdown-abort');
 
 function responseEndedSuccessfully(res) {
   if (!res) return false;
@@ -39,8 +40,23 @@ function createClientAbortSignal(req, res, { externalSignal = null } = {}) {
     if (responseFinished || responseEndedSuccessfully(res)) return;
     abortIdempotent();
   };
+  const onShutdownAbort = () => {
+    if (disposed || controller.signal.aborted) return;
+    controller.abort();
+    try {
+      require('./query-abort-sentinel').recordQueryAbort('graceful shutdown');
+    } catch (_) { /* optional test sentinel */ }
+  };
 
   let attached = 0;
+
+  const shutdownSignal = getProcessShutdownAbortSignal();
+  if (shutdownSignal.aborted) {
+    onShutdownAbort();
+  } else if (typeof shutdownSignal.addEventListener === 'function') {
+    shutdownSignal.addEventListener('abort', onShutdownAbort, { once: true });
+    attached += 1;
+  }
 
   if (req) {
     if (req.aborted === true) {
@@ -74,6 +90,10 @@ function createClientAbortSignal(req, res, { externalSignal = null } = {}) {
         res.off('finish', onResFinish);
         res.off('close', onResClose);
         removed += 2;
+      }
+      if (typeof shutdownSignal.removeEventListener === 'function') {
+        shutdownSignal.removeEventListener('abort', onShutdownAbort);
+        removed += 1;
       }
       if (removed > 0) recordClientAbortListenersDisposed(removed);
     },

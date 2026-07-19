@@ -17,6 +17,10 @@ Lifetime semantics remain explicit: `ledgerScan.complete`, `totalOwed.complete`,
 
 `getTransactions` has no cancellation hook in `@actual-app/api`. Abort signals stop subsequent account/chunk calls after the in-flight request completes; `X-Finance-Query-Aborted` marks early termination.
 
+During process shutdown (`SIGTERM`/`SIGINT`), `lib/process-shutdown-abort.js` aborts accepted ledger reads at the next bounded fetch boundary before HTTP admission closes. See `lib/graceful-shutdown.js` step 0 and [`ACTUAL_COORDINATOR.md`](../ACTUAL_COORDINATOR.md).
+
+Integration tests use atomic filesystem markers under `FINANCE_QUERY_TEST_BARRIER_DIR` (test-only) so shutdown abort is observed without racing HTTP polling during admission drain.
+
 ## Reproduction
 
 ```bash

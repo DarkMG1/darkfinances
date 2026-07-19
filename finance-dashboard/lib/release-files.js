@@ -30,6 +30,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/obligation-graph-bridge.js',
   'lib/passkey-credentials-schema.js',
   'lib/passkey-credentials-store.js',
+  'lib/process-shutdown-abort.js',
   'lib/query-completeness.js',
   'lib/query-scaling-config.js',
   'lib/query-abort-sentinel.js',

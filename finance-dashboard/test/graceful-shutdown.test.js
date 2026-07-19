@@ -16,6 +16,9 @@ const {
   HttpDrainTimeoutError,
 } = require('../lib/http-server-drain');
 const { bindGracefulShutdownSignals, runGracefulShutdown } = require('../lib/graceful-shutdown');
+const { registerProcessShutdownTestIsolation } = require('./helpers/process-shutdown-test-isolation');
+
+registerProcessShutdownTestIsolation(test);
 
 function createDeferred() {
   let resolve;
@@ -459,6 +462,29 @@ test('shutdown proceeds when HTTP server is already closed', async () => {
   assert.deepEqual(exitCodes, [0]);
   assert.ok(phases.indexOf('http-drained') > phases.indexOf('mutation-admission-stopped'));
   assert.ok(phases.indexOf('actual-shutdown-complete') > phases.indexOf('http-drained'));
+});
+
+test('runGracefulShutdown emits in-flight-reads-aborted before admission stops', async () => {
+  const phases = [];
+  const server = http.createServer();
+  const mutationQueue = new SerialQueue('test-mutations');
+  const requestAdmission = { closeAdmission() {} };
+
+  const result = await runGracefulShutdown({
+    signal: 'SIGTERM',
+    httpServer: server,
+    mutationQueue,
+    requestAdmission,
+    shutdownApi: async () => {},
+    totalTimeoutMs: 2_000,
+    mutationDrainTimeoutMs: 500,
+    exit: () => {},
+    log: (phase) => { phases.push(phase); },
+  });
+
+  assert.equal(result.ok, true);
+  assert.ok(phases.includes('in-flight-reads-aborted'));
+  assert.ok(phases.indexOf('in-flight-reads-aborted') < phases.indexOf('request-admission-stopped'));
 });
 
 test('closeIdleKeepAlive allows close callback when only idle sockets remain', async () => {

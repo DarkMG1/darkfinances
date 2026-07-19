@@ -1,6 +1,6 @@
 'use strict';
 
-const { describe, it } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   buildQueryCacheFingerprint,
@@ -25,8 +25,12 @@ const {
   QueryRangeExceededError,
   QueryResultLimitExceededError,
 } = require('../lib/errors');
+const { resetProcessShutdownAbortForTests } = require('../lib/process-shutdown-abort');
+const { registerProcessShutdownTestIsolation } = require('./helpers/process-shutdown-test-isolation');
 
 process.env.FINANCE_QUERY_CURSOR_SECRET = 'test-cursor-secret';
+
+registerProcessShutdownTestIsolation({ beforeEach, afterEach });
 
 describe('bounded ledger access', () => {
   it('validates canonical date ranges and rejects oversized windows', () => {
@@ -317,6 +321,21 @@ describe('bounded ledger access', () => {
         ...range,
         signal: controller.signal,
       }));
+    });
+
+    it('throws when graceful shutdown abort fires during an in-flight fetch delay', async () => {
+      const {
+        abortInFlightHttpReads,
+        resetProcessShutdownAbortForTests,
+      } = require('../lib/process-shutdown-abort');
+      resetProcessShutdownAbortForTests();
+      const api = makeApi({ delayMs: 40 });
+      const query = fetchAccountTransactionsBounded(api, { accounts, ...range });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      abortInFlightHttpReads();
+      await expectAbort(async () => query);
+      assert.ok(api.calls() <= 1);
+      resetProcessShutdownAbortForTests();
     });
 
     it('throws after N account fetches without retaining partial batches', async () => {

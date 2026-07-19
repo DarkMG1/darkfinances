@@ -11,6 +11,12 @@ const {
   getQueryAbortSentinelSnapshot,
   resetQueryAbortSentinel,
 } = require('../lib/query-abort-sentinel');
+const {
+  abortInFlightHttpReads,
+} = require('../lib/process-shutdown-abort');
+const { registerProcessShutdownTestIsolation } = require('./helpers/process-shutdown-test-isolation');
+
+registerProcessShutdownTestIsolation(test);
 
 function mockReq(overrides = {}) {
   const req = new EventEmitter();
@@ -48,8 +54,8 @@ test('createClientAbortSignal aborts on req aborted and disposes listeners', () 
   req.emit('aborted');
   assert.equal(handle.signal.aborted, true);
   handle.dispose();
-  assert.equal(getQueryAbortSentinelSnapshot().listenersAttached, 3);
-  assert.equal(getQueryAbortSentinelSnapshot().listenersDisposed, 3);
+  assert.equal(getQueryAbortSentinelSnapshot().listenersAttached, 4);
+  assert.equal(getQueryAbortSentinelSnapshot().listenersDisposed, 4);
 });
 
 test('createClientAbortSignal aborts on res close before finish', () => {
@@ -92,7 +98,20 @@ test('createClientAbortSignal is idempotent on repeated abort and dispose', () =
   assert.equal(handle.signal.aborted, true);
   handle.dispose();
   handle.dispose();
-  assert.equal(getQueryAbortSentinelSnapshot().listenersDisposed, 3);
+  assert.equal(getQueryAbortSentinelSnapshot().listenersDisposed, 4);
+});
+
+test('createClientAbortSignal aborts when graceful shutdown signal fires', () => {
+  const req = mockReq();
+  const res = mockRes();
+  const handle = createClientAbortSignal(req, res);
+  assert.equal(handle.signal.aborted, false);
+  abortInFlightHttpReads();
+  assert.equal(handle.signal.aborted, true);
+  const snapshot = getQueryAbortSentinelSnapshot();
+  assert.equal(snapshot.abortCount, 1);
+  assert.equal(snapshot.lastPhase, 'graceful shutdown');
+  handle.dispose();
 });
 
 test('createClientAbortSignal external signal does not attach listeners', () => {

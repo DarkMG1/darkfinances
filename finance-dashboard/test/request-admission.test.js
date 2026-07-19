@@ -18,6 +18,9 @@ const {
 const { deriveRequestPrincipal } = require('../lib/request-principal');
 const { RequestAdmissionController, TRAFFIC } = require('../lib/request-admission');
 const { runGracefulShutdown } = require('../lib/graceful-shutdown');
+const { registerProcessShutdownTestIsolation } = require('./helpers/process-shutdown-test-isolation');
+
+registerProcessShutdownTestIsolation(test);
 const {
   assertIdempotencyKeyHeader,
   withMutationAdmission,
@@ -690,9 +693,52 @@ test('graceful shutdown closes admission before mutation queue close', async () 
   });
 
   assert.equal(result.ok, true);
+  assert.ok(phases.indexOf('in-flight-reads-aborted') < phases.indexOf('request-admission-stopped'));
   assert.ok(phases.indexOf('request-admission-stopped') < phases.indexOf('mutation-admission-stopped'));
   assert.equal(admission.getHealth().closed, true);
   assert.equal(mutationQueue.closed, true);
+});
+
+test('ordering regression: in-process shutdown abort resets before later client handlers', async () => {
+  const shutdownAdmission = new RequestAdmissionController(tinyConfig());
+  const mutationQueue = new SerialQueue('test-mutations-ordering');
+  const server = require('http').createServer();
+
+  await runGracefulShutdown({
+    signal: 'SIGTERM',
+    httpServer: server,
+    mutationQueue,
+    requestAdmission: shutdownAdmission,
+    shutdownApi: async () => {},
+    totalTimeoutMs: 2_000,
+    mutationDrainTimeoutMs: 500,
+    exit: () => {},
+    log: () => {},
+  });
+
+  const { resetProcessShutdownTestIsolation } = require('./helpers/process-shutdown-test-isolation');
+  resetProcessShutdownTestIsolation();
+
+  const admission = new RequestAdmissionController(tinyConfig());
+  const ticket = await admission.acquire({
+    lane: 'mutation',
+    principal: 'token:api',
+    endpoint: 'post /refresh',
+    weight: 1,
+  });
+  ticket.release();
+
+  const { createClientAbortSignal } = require('../lib/client-abort-signal');
+  const { EventEmitter } = require('events');
+  const req = new EventEmitter();
+  req.aborted = false;
+  const res = new EventEmitter();
+  res.writableFinished = false;
+  res.finished = false;
+  res.headersSent = false;
+  const handle = createClientAbortSignal(req, res);
+  assert.equal(handle.signal.aborted, false);
+  handle.dispose();
 });
 
 test('health diagnostics are aggregate-only without principal or key data', () => {

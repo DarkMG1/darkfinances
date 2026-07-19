@@ -85,15 +85,18 @@ the lane holder. Depth is capped at `MAX_NEST_DEPTH` (32).
 Process shutdown is orchestrated by `lib/graceful-shutdown.js` and must preserve this
 ordering so no accepted HTTP handler still uses Actual when `shutdownHandoff` begins:
 
+0. `abortInFlightHttpReads()` — signal accepted ledger reads to stop at the next bounded
+   fetch boundary (subsequent `getTransactions` calls are not started).
 1. Stop periodic sync timer — no new background sync tasks.
-2. `mutationQueue.close()` — reject new mutation admission (including on keep-alive
+2. `requestAdmission.closeAdmission()` — reject new HTTP admission waiters/slots.
+3. `mutationQueue.close()` — reject new mutation admission (including on keep-alive
    connections that remain open until HTTP drain completes).
-3. `httpServer.close()` and **await the close callback** — active GET responses and
+4. `httpServer.close()` and **await the close callback** — active GET responses and
    in-flight HTTP-bound mutations finish before proceeding. `closeIdleConnections()` runs
    when admission stops so idle keep-alive sockets do not block drain.
-4. `mutationQueue.drain()` — finish accepted non-HTTP queue work (e.g. in-flight periodic
+5. `mutationQueue.drain()` — finish accepted non-HTTP queue work (e.g. in-flight periodic
    sync that started before the timer was cleared).
-5. `data.shutdownApi()` → `shutdownHandoff`: coordinator stop admission → drain in-flight
+6. `data.shutdownApi()` → `shutdownHandoff`: coordinator stop admission → drain in-flight
    Actual lane work → saga sync + `api.shutdown` → `shutdownFinalized` (never reopened).
 
 **Timeout / force-termination:** a bounded budget (`FINANCE_SHUTDOWN_TIMEOUT_MS`, default
