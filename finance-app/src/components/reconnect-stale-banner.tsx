@@ -1,6 +1,7 @@
 import React, { useSyncExternalStore } from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { AccessibilityLiveRegion } from '@/components/accessibility-live-region';
 import { getReconnectStaleWarningStore } from '@/lib/reconnect-refresh';
 import { requestReconnectRefreshRetry } from '@/lib/reconnect-refresh-registry';
 import { useServerConfig } from '@/state/server';
@@ -35,24 +36,27 @@ export function ReconnectStaleBanner({ top }: { top?: number }) {
   if (!warning) return null;
 
   const text = staleMessage(warning.code);
+  const announcement = `${text}. Tap to retry refresh.`;
 
   return (
-    <Pressable
-      testID="reconnect-stale-banner"
-      accessibilityRole="button"
-      accessibilityLabel={`${text}. Tap to retry refresh.`}
-      accessibilityLiveRegion="polite"
-      onPress={() => {
-        requestReconnectRefreshRetry();
-      }}
-      style={({ pressed }) => [
-        styles.banner,
-        { top: bannerTop },
-        pressed && { opacity: 0.85 },
-      ]}
-    >
-      <Text style={styles.text}>{text}</Text>
-    </Pressable>
+    <>
+      <AccessibilityLiveRegion message={announcement} />
+      <Pressable
+        testID="reconnect-stale-banner"
+        accessibilityRole="button"
+        accessibilityLabel={announcement}
+        onPress={() => {
+          requestReconnectRefreshRetry();
+        }}
+        style={({ pressed }) => [
+          styles.banner,
+          { top: bannerTop },
+          pressed && { opacity: 0.85 },
+        ]}
+      >
+        <Text accessibilityElementsHidden importantForAccessibility="no" style={styles.text}>{text}</Text>
+      </Pressable>
+    </>
   );
 }
 

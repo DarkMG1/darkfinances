@@ -760,7 +760,7 @@ test('root layout mounts reconnect refresh owner exactly once', () => {
 test('reconnect stale banner exposes accessible status surface', () => {
   const banner = fs.readFileSync(path.join(__dirname, '../src/components/reconnect-stale-banner.tsx'), 'utf8');
   assert.match(banner, /accessibilityRole="button"/);
-  assert.match(banner, /accessibilityLiveRegion="polite"/);
+  assert.match(banner, /<AccessibilityLiveRegion message=\{announcement\} \/>/);
   assert.match(banner, /testID="reconnect-stale-banner"/);
 });
 

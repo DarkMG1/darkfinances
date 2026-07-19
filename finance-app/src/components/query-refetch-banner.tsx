@@ -1,5 +1,6 @@
 import React from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
+import { AccessibilityLiveRegion } from '@/components/accessibility-live-region';
 import { colors } from '@/theme/colors';
 
 export function QueryRefetchBanner({ message = 'Could not refresh · showing cached data · tap to retry', onRetry, testID = 'query-refetch-banner' }: {
@@ -8,15 +9,18 @@ export function QueryRefetchBanner({ message = 'Could not refresh · showing cac
   testID?: string;
 }) {
   return (
-    <Pressable
-      testID={testID}
-      accessibilityRole="button"
-      accessibilityLabel={message}
-      onPress={onRetry}
-      style={({ pressed }) => [styles.banner, pressed && { opacity: 0.8 }]}
-    >
-      <Text style={styles.text}>{message}</Text>
-    </Pressable>
+    <>
+      <AccessibilityLiveRegion message={message} />
+      <Pressable
+        testID={testID}
+        accessibilityRole="button"
+        accessibilityLabel={message}
+        onPress={onRetry}
+        style={({ pressed }) => [styles.banner, pressed && { opacity: 0.8 }]}
+      >
+        <Text accessibilityElementsHidden importantForAccessibility="no" style={styles.text}>{message}</Text>
+      </Pressable>
+    </>
   );
 }
 
