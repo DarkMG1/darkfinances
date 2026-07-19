@@ -168,6 +168,22 @@ test('closeHttpServer resolves on synchronous close callback', async () => {
   assert.deepEqual(await closeHttpServer(server), { wasListening: true, drained: true });
 });
 
+test('closeHttpServer after synchronous close callback success starts a fresh drain', async () => {
+  let closeCalls = 0;
+  const server = {
+    listening: true,
+    close(callback) {
+      closeCalls += 1;
+      callback();
+    },
+    closeIdleConnections() {},
+  };
+
+  assert.deepEqual(await closeHttpServer(server), { wasListening: true, drained: true });
+  assert.deepEqual(await closeHttpServer(server), { wasListening: true, drained: true });
+  assert.equal(closeCalls, 2);
+});
+
 test('closeHttpServer rejects synchronous throw from server.close', async () => {
   const closeError = new Error('close threw');
   const server = {
@@ -181,6 +197,23 @@ test('closeHttpServer rejects synchronous throw from server.close', async () => 
   await assert.rejects(() => closeHttpServer(server), closeError);
 });
 
+test('closeHttpServer after synchronous throw starts a fresh drain', async () => {
+  const closeError = new Error('close threw');
+  let closeCalls = 0;
+  const server = {
+    listening: true,
+    close() {
+      closeCalls += 1;
+      throw closeError;
+    },
+    closeIdleConnections() {},
+  };
+
+  await assert.rejects(() => closeHttpServer(server), closeError);
+  await assert.rejects(() => closeHttpServer(server), closeError);
+  assert.equal(closeCalls, 2);
+});
+
 test('closeHttpServer rejects close callback error without unhandled rejections', async (t) => {
   const closeError = new Error('close failed');
   const server = http.createServer();
@@ -192,6 +225,56 @@ test('closeHttpServer rejects close callback error without unhandled rejections'
   };
 
   await assert.rejects(() => closeHttpServer(server), closeError);
+});
+
+test('closeHttpServer after close callback error starts a fresh drain', async () => {
+  const closeError = new Error('close failed');
+  let closeCalls = 0;
+  const server = {
+    listening: true,
+    close(callback) {
+      closeCalls += 1;
+      callback(closeError);
+    },
+    closeIdleConnections() {},
+  };
+
+  await assert.rejects(() => closeHttpServer(server), closeError);
+  await assert.rejects(() => closeHttpServer(server), closeError);
+  assert.equal(closeCalls, 2);
+});
+
+test('first idle sweep throw rejects drain and releases cache', async () => {
+  const sweepError = new Error('first sweep failed');
+  const server = {
+    listening: true,
+    close() {},
+    closeIdleConnections() {
+      throw sweepError;
+    },
+  };
+
+  await assert.rejects(() => closeHttpServer(server), sweepError);
+  await assert.rejects(() => closeHttpServer(server), sweepError);
+});
+
+test('later idle sweep throw rejects drain and clears interval', async () => {
+  const sweepError = new Error('interval sweep failed');
+  let idleCalls = 0;
+  const server = {
+    listening: true,
+    close() {},
+    closeIdleConnections() {
+      idleCalls += 1;
+      if (idleCalls > 1) throw sweepError;
+    },
+  };
+
+  const closePromise = closeHttpServer(server);
+  await assert.rejects(() => waitForDrain(closePromise, 200), sweepError);
+  assert.ok(idleCalls >= 2);
+
+  await assert.rejects(() => closeHttpServer(server), sweepError);
 });
 
 test('repeated closeHttpServer calls share one in-flight drain', async (t) => {
