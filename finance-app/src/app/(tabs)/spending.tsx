@@ -9,7 +9,9 @@ import { Avatar, Card, CardTitle, EmptyState, ErrorState, PendingPill } from '@/
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
 import { addDateOnlyDays, monthEnd, useFinanceToday } from '@/lib/date-only';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
 import { buildBudgetMetrics, buildNonSpendingMetrics } from '@/lib/spending-metrics.js';
+import { shouldShowFatalError, shouldShowInitialLoad, shouldShowRefetchError } from '@/lib/query-display-state.js';
 import { useSelectedMonth } from '@/lib/selectedMonth';
 import { trendPeriodComplete } from '@/components/charts';
 import { categoryColors, colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
@@ -86,10 +88,13 @@ export default function Spending() {
   const reimb = useReimbursement({ from: selectedWindow.start, to: selectedWindow.end });
   const insights = useInsights(apiMonth);
   const tags = useTags();
+  const spendingQuery = useCurrentToday ? today : spending;
+  const spendingPayload = useCurrentToday ? today.data : spending.data;
   const cur = useCurrentToday ? today.data?.spending.current : spending.data?.current;
-  const spendingLoading = useCurrentToday ? today.isLoading : spending.isLoading;
-  const spendingError = useCurrentToday ? today.error : spending.error;
-  const spendingIsError = useCurrentToday ? today.isError : spending.isError;
+  const spendingLoading = shouldShowInitialLoad(spendingQuery.isLoading, spendingPayload);
+  const spendingError = spendingQuery.error;
+  const spendingFatal = shouldShowFatalError(spendingQuery.isError, spendingPayload);
+  const spendingRefetchError = shouldShowRefetchError(spendingQuery.isError, spendingPayload);
   const spendingComplete = cur?.completeness?.complete !== false;
   const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
   const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
@@ -202,9 +207,13 @@ export default function Spending() {
         <DualMonthBars months={chartMonths} selected={month} onSelect={setMonth} />
       </View>
 
+      {spendingRefetchError ? (
+        <QueryRefetchBanner onRetry={refresh} testID="spending-refetch-banner" />
+      ) : null}
+
       {spendingLoading ? (
         <SkeletonList rows={8} />
-      ) : spendingIsError ? (
+      ) : spendingFatal ? (
         <ErrorState error={spendingError?.error} onRetry={refresh} />
       ) : !spendEntries.length && !refundEntries.length ? (
         <EmptyState icon="creditcard">{month === curKey ? 'No spending this month' : `No spending in ${monthLabel(month)}`}</EmptyState>

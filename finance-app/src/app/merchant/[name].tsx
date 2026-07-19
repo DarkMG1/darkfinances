@@ -8,6 +8,7 @@ import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/
 import { MonthNavigator } from '@/components/charts';
 import { SkeletonList } from '@/components/skeleton';
 import { useFinanceToday } from '@/lib/date-only';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -46,10 +47,18 @@ export default function MerchantDetail() {
         <ErrorState error={hist.error?.error} onRetry={hist.refetch} />
       ) : (
         <>
-          <View style={styles.hero}>
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              name || 'Merchant',
+              fmtMoney(hist.data?.total ?? 0),
+              `${hist.data?.count ?? 0} transactions${hist.data?.avg ? `, ${fmtMoney(hist.data.avg)} net average` : ''}, last ${months} months`,
+            )}
+          >
             <Avatar label={name} size={52} style={{ marginBottom: 10 }} />
-            <Text style={styles.heroValue}>{fmtMoney(hist.data?.total ?? 0)}</Text>
-            <Text style={styles.heroSub}>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(hist.data?.total ?? 0)}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
               {hist.data?.count ?? 0} transaction{(hist.data?.count ?? 0) === 1 ? '' : 's'}
               {hist.data?.avg ? ` · ${fmtMoney(hist.data.avg)} net avg` : ''}
               {` · last ${months}mo`}

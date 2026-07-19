@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, Pressable, Share, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, Share, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
 import * as Updates from 'expo-updates';
@@ -14,6 +14,7 @@ import { authenticate, isBiometricAvailable } from '@/lib/biometric';
 import { checkForUpdatesManual, useOtaUpdateStatus } from '@/lib/auto-update';
 import { DASHBOARD_WIDGETS, useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { buildRedactedDiagnostics } from '@/lib/diagnostics';
+import { createSettingsConnectionSaveAdmission, runSettingsConnectionSave } from '@/lib/settings-connection-save.js';
 import { DEFAULT_LOW_BALANCE, DEFAULT_THRESHOLD, ensurePermission, getNotifSettings, NOTIF, notifyNotifSettingsChanged } from '@/lib/notifications';
 import { getFinanceCapabilities } from '@/lib/capabilities';
 import { isNotificationReconciliationActive } from '@/lib/notification-reconciliation-active';
@@ -31,6 +32,8 @@ export default function Settings() {
   const [editUrl, setEditUrl] = useState(serverUrl ?? '');
   const [newToken, setNewToken] = useState('');
   const [status, setStatus] = useState<string | null>(null);
+  const connectionAdmissionRef = useRef(createSettingsConnectionSaveAdmission());
+  const [connectionBusy, setConnectionBusy] = useState(false);
   const liveUpdateStatus = useOtaUpdateStatus();
   const [notif, setNotif] = useState(getNotifSettings());
   const [thresholdText, setThresholdText] = useState(String(getNotifSettings().threshold || DEFAULT_THRESHOLD));
@@ -107,21 +110,34 @@ export default function Settings() {
     await setConfig({ faceId: value });
   };
 
-  const test = async () => {
-    setStatus('Testing…');
-    try {
-      const candidateUrl = editUrl.trim() || serverUrl || '';
-      const candidateToken = newToken.trim() || token || '';
-      await verifyConnectionConfig({ serverUrl: candidateUrl, token: candidateToken, demo });
-      setStatus('Connected ✓');
-    } catch (e: any) {
-      setStatus(e?.error || e?.message || 'Failed');
+  const runConnectionSave = async (statusLabel: string, task: () => Promise<void>) => {
+    if (connectionAdmissionRef.current.isBusy()) return;
+    setConnectionBusy(true);
+    setStatus(statusLabel);
+    const outcome = await runSettingsConnectionSave(connectionAdmissionRef.current, task);
+    if (outcome.skipped) {
+      setConnectionBusy(false);
+      return;
     }
+    setConnectionBusy(false);
+  };
+
+  const test = async () => {
+    await runConnectionSave('Testing…', async () => {
+      try {
+        const candidateUrl = editUrl.trim() || serverUrl || '';
+        const candidateToken = newToken.trim() || token || '';
+        await verifyConnectionConfig({ serverUrl: candidateUrl, token: candidateToken, demo });
+        setStatus('Connected ✓');
+      } catch (e: any) {
+        setStatus(e?.error || e?.message || 'Failed');
+      }
+    });
   };
 
   const saveUrl = async () => {
-    if (editUrl.trim()) {
-      setStatus('Verifying server…');
+    if (!editUrl.trim()) return;
+    await runConnectionSave('Verifying server…', async () => {
       try {
         const verified = await verifyConnectionConfig({
           serverUrl: editUrl,
@@ -135,11 +151,11 @@ export default function Settings() {
       } catch (e: any) {
         setStatus(e?.error || e?.message || 'Could not verify server');
       }
-    }
+    });
   };
   const saveToken = async () => {
-    if (newToken.trim()) {
-      setStatus('Verifying token…');
+    if (!newToken.trim()) return;
+    await runConnectionSave('Verifying token…', async () => {
       try {
         const verified = await verifyConnectionConfig({
           serverUrl: editUrl.trim() || serverUrl || '',
@@ -153,21 +169,23 @@ export default function Settings() {
       } catch (e: any) {
         setStatus(e?.error || e?.message || 'Could not verify token');
       }
-    }
+    });
   };
   const setDemoMode = async (value: boolean) => {
-    try {
-      const verified = await verifyConnectionConfig({
-        serverUrl: editUrl.trim() || serverUrl || '',
-        token: newToken.trim() || token || '',
-        demo: value,
-      });
-      await setConfig(verified);
-      setEditUrl(verified.serverUrl);
-      if (newToken.trim()) setNewToken('');
-    } catch (e: any) {
-      Alert.alert('Could not change demo mode', e?.error || e?.message || 'Please try again.');
-    }
+    await runConnectionSave(value ? 'Enabling demo…' : 'Disabling demo…', async () => {
+      try {
+        const verified = await verifyConnectionConfig({
+          serverUrl: editUrl.trim() || serverUrl || '',
+          token: newToken.trim() || token || '',
+          demo: value,
+        });
+        await setConfig(verified);
+        setEditUrl(verified.serverUrl);
+        if (newToken.trim()) setNewToken('');
+      } catch (e: any) {
+        Alert.alert('Could not change demo mode', e?.error || e?.message || 'Please try again.');
+      }
+    });
   };
 
   const disconnect = () => {
@@ -197,16 +215,20 @@ export default function Settings() {
       <CardTitle>Connection</CardTitle>
       <Card style={{ marginBottom: 16 }}>
         <Text style={styles.label}>Server URL</Text>
-        <TextInput testID="settings-server-url-input" style={styles.input} value={editUrl} onChangeText={setEditUrl} autoCapitalize="none" autoCorrect={false} />
-        <Pressable testID="settings-save-url-button" style={({ pressed }) => [styles.smallBtn, pressed && { opacity: 0.85 }]} onPress={saveUrl}><Text style={styles.smallBtnText}>Save URL</Text></Pressable>
+        <TextInput testID="settings-server-url-input" style={styles.input} value={editUrl} onChangeText={setEditUrl} autoCapitalize="none" autoCorrect={false} editable={!connectionBusy} />
+        <Pressable testID="settings-save-url-button" accessibilityRole="button" accessibilityLabel={connectionBusy ? 'Saving server URL' : 'Save URL'} accessibilityState={{ disabled: connectionBusy, busy: connectionBusy }} style={({ pressed }) => [styles.smallBtn, (pressed && !connectionBusy) && { opacity: 0.85 }, connectionBusy && { opacity: 0.6 }]} disabled={connectionBusy} onPress={saveUrl}>
+          {connectionBusy ? <ActivityIndicator color="#fff" /> : <Text style={styles.smallBtnText}>Save URL</Text>}
+        </Pressable>
 
         <Text style={[styles.label, { marginTop: 16 }]}>API Token</Text>
         <Text style={styles.maskedToken}>{mask(token)}</Text>
-        <TextInput testID="settings-token-input" style={styles.input} value={newToken} onChangeText={setNewToken} autoCapitalize="none" autoCorrect={false} secureTextEntry placeholder="Replace token…" placeholderTextColor={colors.muted} />
-        <Pressable testID="settings-save-token-button" style={({ pressed }) => [styles.smallBtn, pressed && { opacity: 0.85 }]} onPress={saveToken}><Text style={styles.smallBtnText}>Update Token</Text></Pressable>
+        <TextInput testID="settings-token-input" style={styles.input} value={newToken} onChangeText={setNewToken} autoCapitalize="none" autoCorrect={false} secureTextEntry placeholder="Replace token…" placeholderTextColor={colors.muted} editable={!connectionBusy} />
+        <Pressable testID="settings-save-token-button" accessibilityRole="button" accessibilityLabel={connectionBusy ? 'Updating token' : 'Update Token'} accessibilityState={{ disabled: connectionBusy, busy: connectionBusy }} style={({ pressed }) => [styles.smallBtn, (pressed && !connectionBusy) && { opacity: 0.85 }, connectionBusy && { opacity: 0.6 }]} disabled={connectionBusy} onPress={saveToken}>
+          {connectionBusy ? <ActivityIndicator color="#fff" /> : <Text style={styles.smallBtnText}>Update Token</Text>}
+        </Pressable>
 
-        <Pressable testID="settings-test-connection-button" style={({ pressed }) => [styles.smallBtn, { marginTop: 16, backgroundColor: colors.surface2 }, pressed && { opacity: 0.7 }]} onPress={test}>
-          <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>Test Connection</Text>
+        <Pressable testID="settings-test-connection-button" accessibilityRole="button" accessibilityLabel={connectionBusy ? 'Testing connection' : 'Test Connection'} accessibilityState={{ disabled: connectionBusy, busy: connectionBusy }} style={({ pressed }) => [styles.smallBtn, { marginTop: 16, backgroundColor: colors.surface2 }, (pressed && !connectionBusy) && { opacity: 0.7 }, connectionBusy && { opacity: 0.6 }]} disabled={connectionBusy} onPress={test}>
+          {connectionBusy ? <ActivityIndicator color={colors.accentLight} /> : <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>Test Connection</Text>}
         </Pressable>
         {status ? <Text style={styles.status}>{status}</Text> : null}
       </Card>
@@ -229,7 +251,7 @@ export default function Settings() {
             <Text style={styles.switchLabel}>Show demo data</Text>
             <Text style={styles.switchSub}>Replace everything with sample finances — safe to show others. Your real data is never touched.</Text>
           </View>
-          <Switch testID="settings-demo-mode-switch" value={demo} onValueChange={setDemoMode} trackColor={{ true: colors.accent }} />
+          <Switch testID="settings-demo-mode-switch" value={demo} onValueChange={setDemoMode} disabled={connectionBusy} trackColor={{ true: colors.accent }} />
         </View>
       </Card>
 

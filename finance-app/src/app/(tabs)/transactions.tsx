@@ -13,8 +13,15 @@ import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-fo
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { SkeletonList } from '@/components/skeleton';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
 import { haptics } from '@/lib/haptics';
 import { startMonthsAgo, useFinanceToday } from '@/lib/date-only';
+import {
+  isSearchQuerySettled,
+  shouldShowFatalError,
+  shouldShowInitialLoad,
+  shouldShowRefetchError,
+} from '@/lib/query-display-state.js';
 import { colors, fmtMoney, fmtDay } from '@/theme/colors';
 
 type Filter = 'all' | 'expense' | 'income';
@@ -62,17 +69,33 @@ export default function Transactions() {
   const setCategory = useSetCategory();
 
   // 2+ chars switches from the recent (month-bound) list to an all-time server search.
-  const searching = search.trim().length >= 2;
-  const txns = useTransactions({ start: startMonthsAgoLocal(rangeM, financeToday), accountId: accountId ?? undefined, collapse: true });
+  const trimmedSearch = search.trim();
+  const searching = trimmedSearch.length >= 2;
+  const txnStart = startMonthsAgoLocal(rangeM, financeToday);
+  const txns = useTransactions({ start: txnStart, accountId: accountId ?? undefined, collapse: true });
   const searchRes = useSearch(search);
+  const searchSettled = isSearchQuerySettled(search, searchRes.activeQuery);
+
+  const listQuery = searching ? searchRes : txns;
+  const listPayload = searching
+    ? (searchSettled ? searchRes.data : undefined)
+    : txns.data;
+  const listPending = searching && !searchSettled;
+  const loading = shouldShowInitialLoad(listQuery.isLoading || listPending, listPayload);
+  const fatal = shouldShowFatalError(listQuery.isError, listPayload);
+  const refetchError = shouldShowRefetchError(listQuery.isError, listPayload);
+  const onRefresh = () => searching ? searchRes.refetch() : txns.refetch();
 
   const base = useMemo(
-    () => searching ? (searchRes.data?.transactions ?? []) : (txns.data ?? []),
-    [searching, searchRes.data, txns.data],
+    () => {
+      if (searching) {
+        if (!searchSettled) return [];
+        return searchRes.data?.transactions ?? [];
+      }
+      return txns.data ?? [];
+    },
+    [searching, searchSettled, searchRes.data, txns.data],
   );
-  const loading = searching ? searchRes.isLoading : txns.isLoading;
-  const errored = searching ? searchRes.isError : txns.isError;
-  const onRefresh = () => searching ? searchRes.refetch() : txns.refetch();
   const categorizeAction = useMutationAction({
     mutation: setCategory,
     mutationLabel: 'Change category',
@@ -159,6 +182,7 @@ export default function Transactions() {
   };
 
   const openDetail = (t: Transaction) => {
+    if (categorizeAction.isLocked) return;
     router.push({
       pathname: '/transaction/[id]',
       params: {
@@ -222,8 +246,14 @@ export default function Transactions() {
       );
     }
     const income = item.amount > 0;
+    const navLocked = categorizeAction.isLocked;
     const row = (
-      <Pressable testID={`activity-transaction-${item.id}`} style={({ pressed }) => [styles.row, pressed && styles.rowPressed]} onPress={() => openDetail(item)}>
+      <Pressable
+        testID={`activity-transaction-${item.id}`}
+        style={({ pressed }) => [styles.row, pressed && !navLocked && styles.rowPressed, navLocked && { opacity: 0.55 }]}
+        onPress={() => openDetail(item)}
+        disabled={navLocked}
+      >
         <Avatar label={item.payee} category={item.isSplit ? undefined : item.category ?? undefined} size={38} />
         <View style={styles.mid}>
           <View style={styles.payeeLine}>
@@ -242,12 +272,14 @@ export default function Transactions() {
       </Pressable>
     );
     // Splits carry per-leg categories, so the quick single-category swipe doesn't apply.
-    if (item.isSplit) return row;
+    if (item.isSplit || navLocked) return row;
     return (
       <Swipeable
+        enabled={!navLocked}
         renderRightActions={(_prog, _drag, swipeable) => (
           <Pressable
             style={styles.swipeCat}
+            disabled={navLocked}
             onPress={() => { swipeable?.close(); haptics.tap(); setCategorizing(item); }}
           >
             <Text style={styles.swipeCatText}>{item.category ? 'Recategorize' : 'Categorize'}</Text>
@@ -323,17 +355,23 @@ export default function Transactions() {
 
       {searching ? (
         <Text style={styles.searchHint}>
-          {searchRes.isLoading
+          {listPending
             ? 'Searching all time…'
-            : `${searchRes.data?.total ?? 0} match${(searchRes.data?.total ?? 0) === 1 ? '' : 'es'} all-time${searchRes.data?.truncated ? ' · showing first 200' : ''}`}
+            : searchRes.isLoading && !searchRes.data
+              ? 'Searching all time…'
+              : `${searchRes.data?.total ?? 0} match${(searchRes.data?.total ?? 0) === 1 ? '' : 'es'} all-time${searchRes.data?.truncated ? ' · showing first 200' : ''}`}
         </Text>
+      ) : null}
+
+      {refetchError ? (
+        <QueryRefetchBanner onRetry={onRefresh} testID="activity-refetch-banner" />
       ) : null}
 
       {loading ? (
         <View style={{ padding: 16 }}>
           <SkeletonList rows={8} />
         </View>
-      ) : errored ? (
+      ) : fatal ? (
         <ErrorState onRetry={onRefresh} />
       ) : (
         <SectionList

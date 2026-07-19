@@ -11,6 +11,9 @@ appId: ${MAESTRO_APP_ID}
     optional: true
 - assertVisible:
     id: activity-screen
+- assertNotVisible:
+    id: activity-refetch-banner
+    optional: true
 - assertVisible:
     id: activity-filter-all-selected
 - tapOn:

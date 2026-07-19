@@ -7,6 +7,7 @@ import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components
 import { SkeletonList } from '@/components/skeleton';
 import { Bill } from '@/api/generated/types';
 import { useFinanceToday } from '@/lib/date-only';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { haptics } from '@/lib/haptics';
 import { cadenceLabel, colors, daysUntil, dueLabel, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
@@ -138,10 +139,18 @@ export default function Bills() {
         <EmptyState icon="calendar">No upcoming bills detected</EmptyState>
       ) : (
         <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>UNPAID · NEXT {data.horizonDays} DAYS</Text>
-            <Text style={styles.heroValue}>{fmtMoney(data.total)}</Text>
-            <Text style={styles.heroSub}>{data.unpaidCount} of {data.count} bills unpaid</Text>
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              `Unpaid next ${data.horizonDays} days`,
+              fmtMoney(data.total),
+              `${data.unpaidCount} of ${data.count} bills unpaid`,
+            )}
+          >
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">UNPAID · NEXT {data.horizonDays} DAYS</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(data.total)}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{data.unpaidCount} of {data.count} bills unpaid</Text>
           </View>
 
           {months.map((m) => {

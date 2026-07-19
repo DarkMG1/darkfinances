@@ -198,12 +198,14 @@ export default function Reimbursement() {
             <View style={styles.rangeRow}>
               {RANGES.map((r) => {
                 const on = r.key === range;
+                const rangeLocked = banner.isLocked;
                 return (
                   <Pressable
                     testID={`reimbursement-range-${r.key}${on ? '-selected' : ''}`}
                     key={r.key}
-                    onPress={() => { haptics.tap(); setRange(r.key); }}
-                    style={({ pressed }) => [styles.rangeChip, on && styles.rangeChipOn, pressed && { opacity: 0.7 }]}
+                    disabled={rangeLocked}
+                    onPress={() => { if (rangeLocked) return; haptics.tap(); setRange(r.key); }}
+                    style={({ pressed }) => [styles.rangeChip, on && styles.rangeChipOn, pressed && !rangeLocked && { opacity: 0.7 }, rangeLocked && { opacity: 0.45 }]}
                   >
                     <Text style={[styles.rangeText, on && styles.rangeTextOn]}>{r.label}</Text>
                   </Pressable>
