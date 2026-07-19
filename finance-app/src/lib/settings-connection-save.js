@@ -14,6 +14,76 @@ const CONNECTION_SAVE_ACTIONS = Object.freeze({
   DISCONNECT: 'disconnect',
 });
 
+const CONNECTION_CONTROL_SPECS = Object.freeze({
+  [CONNECTION_SAVE_ACTIONS.TEST]: {
+    idleLabel: 'Test Connection',
+    inProgressLabel: 'Testing connection',
+    progressPhrase: 'testing connection',
+  },
+  [CONNECTION_SAVE_ACTIONS.SAVE_URL]: {
+    idleLabel: 'Save URL',
+    inProgressLabel: 'Saving server URL',
+    progressPhrase: 'saving server URL',
+  },
+  [CONNECTION_SAVE_ACTIONS.SAVE_TOKEN]: {
+    idleLabel: 'Update Token',
+    inProgressLabel: 'Updating token',
+    progressPhrase: 'updating token',
+  },
+  [CONNECTION_SAVE_ACTIONS.DEMO]: {
+    idleLabel: 'Demo mode',
+    inProgressLabel: 'Changing demo mode',
+    progressPhrase: 'changing demo mode',
+  },
+  [CONNECTION_SAVE_ACTIONS.FACE_ID]: {
+    idleLabel: 'Face ID lock',
+    inProgressLabel: 'Updating Face ID lock',
+    progressPhrase: 'updating Face ID lock',
+  },
+  [CONNECTION_SAVE_ACTIONS.DISCONNECT]: {
+    idleLabel: 'Disconnect',
+    inProgressLabel: 'Disconnecting',
+    progressPhrase: 'disconnecting',
+  },
+});
+
+function settingsConnectionProgressPhrase(action) {
+  return CONNECTION_CONTROL_SPECS[action]?.progressPhrase ?? 'a connection change';
+}
+
+function connectionControlAccessibilityLabel(controlAction, busyOwner, overrides = {}) {
+  const spec = CONNECTION_CONTROL_SPECS[controlAction];
+  const idle = overrides.idleLabel ?? spec?.idleLabel ?? 'Control';
+  const inProgress = overrides.inProgressLabel ?? spec?.inProgressLabel ?? idle;
+  if (!busyOwner) return idle;
+  if (busyOwner.action === controlAction) return inProgress;
+  return `${idle} unavailable while ${settingsConnectionProgressPhrase(busyOwner.action)}`;
+}
+
+function connectionButtonControlState(controlAction, busyOwner) {
+  const spec = CONNECTION_CONTROL_SPECS[controlAction];
+  const owns = busyOwner?.action === controlAction;
+  return {
+    disabled: busyOwner != null,
+    busy: owns,
+    showSpinner: owns,
+    visibleLabel: spec?.idleLabel ?? 'Control',
+    accessibilityLabel: connectionControlAccessibilityLabel(controlAction, busyOwner),
+  };
+}
+
+function connectionSwitchAccessibilityLabel(controlAction, busyOwner) {
+  return connectionControlAccessibilityLabel(controlAction, busyOwner);
+}
+
+function disconnectButtonAccessibilityLabel(busyOwner) {
+  return connectionControlAccessibilityLabel(CONNECTION_SAVE_ACTIONS.DISCONNECT, busyOwner);
+}
+
+function disconnectButtonVisibleLabel(busyOwner) {
+  return busyOwner?.action === CONNECTION_SAVE_ACTIONS.DISCONNECT ? 'Disconnecting…' : 'Disconnect';
+}
+
 function settingsConnectionSaveSkippedMessage(action) {
   switch (action) {
     case CONNECTION_SAVE_ACTIONS.DISCONNECT:
@@ -31,12 +101,6 @@ function settingsConnectionSaveSkippedMessage(action) {
     default:
       return 'Another connection change is in progress. Try again shortly.';
   }
-}
-
-function disconnectButtonAccessibilityLabel(busyOwner) {
-  if (!busyOwner) return 'Disconnect';
-  if (busyOwner.action === CONNECTION_SAVE_ACTIONS.DISCONNECT) return 'Disconnecting';
-  return 'Disconnect unavailable while a connection change is in progress';
 }
 
 function createSettingsConnectionSaveAdmission() {
@@ -82,12 +146,18 @@ function resetSettingsConnectionLeaseCounter() {
 
 module.exports = {
   CONNECTION_SAVE_ACTIONS,
+  CONNECTION_CONTROL_SPECS,
+  connectionButtonControlState,
+  connectionControlAccessibilityLabel,
+  connectionSwitchAccessibilityLabel,
   createSettingsConnectionSaveAdmission,
   disconnectButtonAccessibilityLabel,
+  disconnectButtonVisibleLabel,
   tryAcquireSettingsConnectionSave,
   releaseSettingsConnectionSave,
   isSettingsConnectionSaveBusy,
   runSettingsConnectionSave,
   resetSettingsConnectionLeaseCounter,
+  settingsConnectionProgressPhrase,
   settingsConnectionSaveSkippedMessage,
 };

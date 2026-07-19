@@ -220,16 +220,21 @@ export default function Transactions() {
     );
   };
 
+  const openEventGroup = (item: EventGroupRow) => {
+    if (categorizeAction.isLocked) return;
+    haptics.tap();
+    router.push({ pathname: '/tag/[tag]', params: { tag: `ev-${item.slug}` } });
+  };
+
   const renderItem = ({ item }: { item: ActivityRow }) => {
+    const navLocked = categorizeAction.isLocked;
     if ('isEventGroup' in item) {
       return (
         <Pressable
           testID={`activity-event-row-${item.slug}`}
-          style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
-          onPress={() => {
-            haptics.tap();
-            router.push({ pathname: '/tag/[tag]', params: { tag: `ev-${item.slug}` } });
-          }}
+          style={({ pressed }) => [styles.row, pressed && !navLocked && styles.rowPressed, navLocked && { opacity: 0.55 }]}
+          disabled={navLocked}
+          onPress={() => openEventGroup(item)}
         >
           <Avatar label={item.name} size={38} />
           <View style={styles.mid}>
@@ -246,7 +251,6 @@ export default function Transactions() {
       );
     }
     const income = item.amount > 0;
-    const navLocked = categorizeAction.isLocked;
     const row = (
       <Pressable
         testID={`activity-transaction-${item.id}`}

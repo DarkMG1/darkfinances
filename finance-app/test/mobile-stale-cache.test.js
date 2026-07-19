@@ -11,8 +11,11 @@ const {
 } = require('../src/lib/query-display-state.js');
 const {
   CONNECTION_SAVE_ACTIONS,
+  connectionButtonControlState,
+  connectionControlAccessibilityLabel,
   createSettingsConnectionSaveAdmission,
   disconnectButtonAccessibilityLabel,
+  disconnectButtonVisibleLabel,
   isSettingsConnectionSaveBusy,
   releaseSettingsConnectionSave,
   resetSettingsConnectionLeaseCounter,
@@ -193,6 +196,9 @@ test('activity tab preserves cached list and settled search results', () => {
   assert.match(source, /searchSettled/);
   assert.match(source, /QueryRefetchBanner/);
   assert.match(source, /categorizeAction\.isLocked/);
+  assert.match(source, /openEventGroup/);
+  assert.match(source, /if \(categorizeAction\.isLocked\) return;/);
+  assert.match(source, /activity-event-row/);
   assert.doesNotMatch(source, /transactionsWindowKey/);
 });
 
@@ -203,15 +209,47 @@ test('review navigation is gated while acknowledge mutation is locked', () => {
   assert.match(source, /if \(navLocked\) return/);
 });
 
-test('disconnect button a11y distinguishes disconnect-in-flight from unrelated busy', () => {
-  assert.equal(disconnectButtonAccessibilityLabel(null), 'Disconnect');
+test('connection button controls use action-scoped spinner and unavailable labels', () => {
+  const owner = { lease: 1, action: CONNECTION_SAVE_ACTIONS.TEST };
+  const idle = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.SAVE_URL, null);
+  assert.equal(idle.showSpinner, false);
+  assert.equal(idle.visibleLabel, 'Save URL');
+  assert.equal(idle.accessibilityLabel, 'Save URL');
+
+  const blocked = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.SAVE_URL, owner);
+  assert.equal(blocked.showSpinner, false);
+  assert.equal(blocked.visibleLabel, 'Save URL');
+  assert.equal(blocked.accessibilityLabel, 'Save URL unavailable while testing connection');
+
+  const owns = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.SAVE_URL, { lease: 2, action: CONNECTION_SAVE_ACTIONS.SAVE_URL });
+  assert.equal(owns.showSpinner, true);
+  assert.equal(owns.busy, true);
+  assert.equal(owns.accessibilityLabel, 'Saving server URL');
+});
+
+test('every connection save action exposes idle, in-progress, and blocked-unavailable labels', () => {
+  const actions = Object.values(CONNECTION_SAVE_ACTIONS);
+  const blocker = { lease: 99, action: CONNECTION_SAVE_ACTIONS.TEST };
+  for (const action of actions) {
+    const idle = connectionControlAccessibilityLabel(action, null);
+    const inProgress = connectionControlAccessibilityLabel(action, { lease: 1, action });
+    assert.ok(idle.length > 0, `${action} idle label`);
+    assert.ok(inProgress.length > 0, `${action} in-progress label`);
+    assert.notEqual(idle, inProgress, `${action} in-progress differs from idle`);
+    if (action !== CONNECTION_SAVE_ACTIONS.TEST) {
+      const blocked = connectionControlAccessibilityLabel(action, blocker);
+      assert.match(blocked, /unavailable while testing connection/);
+    }
+  }
+});
+
+test('disconnect visible label only changes while disconnect owns admission', () => {
+  assert.equal(disconnectButtonVisibleLabel(null), 'Disconnect');
+  assert.equal(disconnectButtonVisibleLabel({ lease: 1, action: CONNECTION_SAVE_ACTIONS.SAVE_URL }), 'Disconnect');
+  assert.equal(disconnectButtonVisibleLabel({ lease: 2, action: CONNECTION_SAVE_ACTIONS.DISCONNECT }), 'Disconnecting…');
   assert.equal(
     disconnectButtonAccessibilityLabel({ lease: 1, action: CONNECTION_SAVE_ACTIONS.SAVE_URL }),
-    'Disconnect unavailable while a connection change is in progress',
-  );
-  assert.equal(
-    disconnectButtonAccessibilityLabel({ lease: 2, action: CONNECTION_SAVE_ACTIONS.DISCONNECT }),
-    'Disconnecting',
+    'Disconnect unavailable while saving server URL',
   );
 });
 
@@ -283,19 +321,22 @@ test('settings profile-changing actions share lease-owned admission guard', () =
   assert.match(source, /onAcquired/);
   assert.match(source, /onReleased/);
   assert.match(source, /busyOwner/);
-  assert.match(source, /disconnectBusy/);
+  assert.match(source, /connectionButtonControlState/);
+  assert.match(source, /saveUrlControl\.showSpinner/);
+  assert.match(source, /saveUrlControl\.visibleLabel/);
+  assert.match(source, /testControl\.accessibilityLabel/);
   assert.match(source, /settingsConnectionSaveSkippedMessage/);
-  assert.match(source, /announceConnectionStatus/);
+  assert.match(source, /announceConnectionStatus\('Face ID lock not enabled'\)/);
+  assert.match(source, /announceConnectionStatus\(value \? 'Face ID lock enabled'/);
   assert.match(source, /CONNECTION_SAVE_ACTIONS\.DISCONNECT/);
   assert.match(source, /CONNECTION_SAVE_ACTIONS\.FACE_ID/);
   assert.match(source, /await authenticate\('Enable Face ID lock'\)/);
   assert.match(source, /await setConfig\(verified\)/);
   assert.match(source, /await clear\(\)/);
-  assert.match(source, /disconnectBusy \? 'Disconnecting/);
+  assert.match(source, /disconnectButtonVisibleLabel\(busyOwner\)/);
   assert.doesNotMatch(source, /connectionBusy \? 'Disconnecting/);
-  assert.match(source, /disconnectButtonAccessibilityLabel\(busyOwner\)/);
-  assert.match(source, /disabled={connectionBusy}/);
-  assert.match(source, /accessibilityState={{ disabled: connectionBusy, busy: disconnectBusy }}/);
+  assert.doesNotMatch(source, /connectionBusy \? <ActivityIndicator/);
+  assert.match(source, /connectionSwitchAccessibilityLabel/);
 });
 
 test('reimbursement range chips disable while confirm/dismiss in flight', () => {

@@ -16,8 +16,10 @@ import { DASHBOARD_WIDGETS, useDashboardWidgets } from '@/lib/dashboard-widgets'
 import { buildRedactedDiagnostics } from '@/lib/diagnostics';
 import {
   CONNECTION_SAVE_ACTIONS,
+  connectionButtonControlState,
+  connectionSwitchAccessibilityLabel,
   createSettingsConnectionSaveAdmission,
-  disconnectButtonAccessibilityLabel,
+  disconnectButtonVisibleLabel,
   runSettingsConnectionSave,
   settingsConnectionSaveSkippedMessage,
 } from '@/lib/settings-connection-save.js';
@@ -44,7 +46,10 @@ export default function Settings() {
   const [busyOwner, setBusyOwner] = useState<{ lease: number; action: ConnectionSaveAction } | null>(null);
   const [connectionAnnounce, setConnectionAnnounce] = useState('');
   const connectionBusy = busyOwner != null;
-  const disconnectBusy = busyOwner?.action === CONNECTION_SAVE_ACTIONS.DISCONNECT;
+  const saveUrlControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.SAVE_URL, busyOwner);
+  const saveTokenControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.SAVE_TOKEN, busyOwner);
+  const testControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.TEST, busyOwner);
+  const disconnectControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.DISCONNECT, busyOwner);
   const connectionSaveHooks = useMemo(() => ({
     onAcquired: (lease: number, action: ConnectionSaveAction) => setBusyOwner({ lease, action }),
     onReleased: (lease: number) => setBusyOwner((current) => (current?.lease === lease ? null : current)),
@@ -127,12 +132,12 @@ export default function Settings() {
       if (value) {
         const ok = await authenticate('Enable Face ID lock');
         if (!ok) {
-          setStatus('Face ID lock not enabled');
+          announceConnectionStatus('Face ID lock not enabled');
           return;
         }
       }
       await setConfig({ faceId: value });
-      setStatus(value ? 'Face ID lock enabled' : 'Face ID lock disabled');
+      announceConnectionStatus(value ? 'Face ID lock enabled' : 'Face ID lock disabled');
     });
   };
 
@@ -251,19 +256,43 @@ export default function Settings() {
       <Card style={{ marginBottom: 16 }}>
         <Text style={styles.label}>Server URL</Text>
         <TextInput testID="settings-server-url-input" style={styles.input} value={editUrl} onChangeText={setEditUrl} autoCapitalize="none" autoCorrect={false} editable={!connectionBusy} />
-        <Pressable testID="settings-save-url-button" accessibilityRole="button" accessibilityLabel={connectionBusy ? 'Saving server URL' : 'Save URL'} accessibilityState={{ disabled: connectionBusy, busy: connectionBusy }} style={({ pressed }) => [styles.smallBtn, (pressed && !connectionBusy) && { opacity: 0.85 }, connectionBusy && { opacity: 0.6 }]} disabled={connectionBusy} onPress={saveUrl}>
-          {connectionBusy ? <ActivityIndicator color="#fff" /> : <Text style={styles.smallBtnText}>Save URL</Text>}
+        <Pressable
+          testID="settings-save-url-button"
+          accessibilityRole="button"
+          accessibilityLabel={saveUrlControl.accessibilityLabel}
+          accessibilityState={{ disabled: saveUrlControl.disabled, busy: saveUrlControl.busy }}
+          style={({ pressed }) => [styles.smallBtn, (pressed && !saveUrlControl.disabled) && { opacity: 0.85 }, saveUrlControl.disabled && { opacity: 0.6 }]}
+          disabled={saveUrlControl.disabled}
+          onPress={saveUrl}
+        >
+          {saveUrlControl.showSpinner ? <ActivityIndicator color="#fff" /> : <Text style={styles.smallBtnText}>{saveUrlControl.visibleLabel}</Text>}
         </Pressable>
 
         <Text style={[styles.label, { marginTop: 16 }]}>API Token</Text>
         <Text style={styles.maskedToken}>{mask(token)}</Text>
         <TextInput testID="settings-token-input" style={styles.input} value={newToken} onChangeText={setNewToken} autoCapitalize="none" autoCorrect={false} secureTextEntry placeholder="Replace token…" placeholderTextColor={colors.muted} editable={!connectionBusy} />
-        <Pressable testID="settings-save-token-button" accessibilityRole="button" accessibilityLabel={connectionBusy ? 'Updating token' : 'Update Token'} accessibilityState={{ disabled: connectionBusy, busy: connectionBusy }} style={({ pressed }) => [styles.smallBtn, (pressed && !connectionBusy) && { opacity: 0.85 }, connectionBusy && { opacity: 0.6 }]} disabled={connectionBusy} onPress={saveToken}>
-          {connectionBusy ? <ActivityIndicator color="#fff" /> : <Text style={styles.smallBtnText}>Update Token</Text>}
+        <Pressable
+          testID="settings-save-token-button"
+          accessibilityRole="button"
+          accessibilityLabel={saveTokenControl.accessibilityLabel}
+          accessibilityState={{ disabled: saveTokenControl.disabled, busy: saveTokenControl.busy }}
+          style={({ pressed }) => [styles.smallBtn, (pressed && !saveTokenControl.disabled) && { opacity: 0.85 }, saveTokenControl.disabled && { opacity: 0.6 }]}
+          disabled={saveTokenControl.disabled}
+          onPress={saveToken}
+        >
+          {saveTokenControl.showSpinner ? <ActivityIndicator color="#fff" /> : <Text style={styles.smallBtnText}>{saveTokenControl.visibleLabel}</Text>}
         </Pressable>
 
-        <Pressable testID="settings-test-connection-button" accessibilityRole="button" accessibilityLabel={connectionBusy ? 'Testing connection' : 'Test Connection'} accessibilityState={{ disabled: connectionBusy, busy: connectionBusy }} style={({ pressed }) => [styles.smallBtn, { marginTop: 16, backgroundColor: colors.surface2 }, (pressed && !connectionBusy) && { opacity: 0.7 }, connectionBusy && { opacity: 0.6 }]} disabled={connectionBusy} onPress={test}>
-          {connectionBusy ? <ActivityIndicator color={colors.accentLight} /> : <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>Test Connection</Text>}
+        <Pressable
+          testID="settings-test-connection-button"
+          accessibilityRole="button"
+          accessibilityLabel={testControl.accessibilityLabel}
+          accessibilityState={{ disabled: testControl.disabled, busy: testControl.busy }}
+          style={({ pressed }) => [styles.smallBtn, { marginTop: 16, backgroundColor: colors.surface2 }, (pressed && !testControl.disabled) && { opacity: 0.7 }, testControl.disabled && { opacity: 0.6 }]}
+          disabled={testControl.disabled}
+          onPress={test}
+        >
+          {testControl.showSpinner ? <ActivityIndicator color={colors.accentLight} /> : <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>{testControl.visibleLabel}</Text>}
         </Pressable>
         {status ? (
           <Text testID="settings-connection-status" accessibilityRole="text" style={styles.status}>{status}</Text>
@@ -277,7 +306,15 @@ export default function Settings() {
             <Text style={styles.switchLabel}>Face ID Lock</Text>
             <Text style={styles.switchSub}>{bioAvailable ? 'Require Face ID on open' : 'Not available on this device'}</Text>
           </View>
-          <Switch testID="settings-face-id-switch" value={faceId} onValueChange={toggleFaceId} disabled={!bioAvailable || connectionBusy} trackColor={{ true: colors.accent }} />
+          <Switch
+            testID="settings-face-id-switch"
+            value={faceId}
+            onValueChange={toggleFaceId}
+            disabled={!bioAvailable || connectionBusy}
+            accessibilityLabel={connectionSwitchAccessibilityLabel(CONNECTION_SAVE_ACTIONS.FACE_ID, busyOwner)}
+            accessibilityState={{ disabled: !bioAvailable || connectionBusy, busy: busyOwner?.action === CONNECTION_SAVE_ACTIONS.FACE_ID }}
+            trackColor={{ true: colors.accent }}
+          />
         </View>
       </Card>
 
@@ -288,7 +325,15 @@ export default function Settings() {
             <Text style={styles.switchLabel}>Show demo data</Text>
             <Text style={styles.switchSub}>Replace everything with sample finances — safe to show others. Your real data is never touched.</Text>
           </View>
-          <Switch testID="settings-demo-mode-switch" value={demo} onValueChange={setDemoMode} disabled={connectionBusy} trackColor={{ true: colors.accent }} />
+          <Switch
+            testID="settings-demo-mode-switch"
+            value={demo}
+            onValueChange={setDemoMode}
+            disabled={connectionBusy}
+            accessibilityLabel={connectionSwitchAccessibilityLabel(CONNECTION_SAVE_ACTIONS.DEMO, busyOwner)}
+            accessibilityState={{ disabled: connectionBusy, busy: busyOwner?.action === CONNECTION_SAVE_ACTIONS.DEMO }}
+            trackColor={{ true: colors.accent }}
+          />
         </View>
       </Card>
 
@@ -410,13 +455,13 @@ export default function Settings() {
       <Pressable
         testID="settings-disconnect-button"
         accessibilityRole="button"
-        accessibilityLabel={disconnectButtonAccessibilityLabel(busyOwner)}
-        accessibilityState={{ disabled: connectionBusy, busy: disconnectBusy }}
-        style={({ pressed }) => [styles.disconnect, connectionBusy && { opacity: 0.45 }, pressed && !connectionBusy && { opacity: 0.7 }]}
-        disabled={connectionBusy}
+        accessibilityLabel={disconnectControl.accessibilityLabel}
+        accessibilityState={{ disabled: disconnectControl.disabled, busy: disconnectControl.busy }}
+        style={({ pressed }) => [styles.disconnect, disconnectControl.disabled && { opacity: 0.45 }, pressed && !disconnectControl.disabled && { opacity: 0.7 }]}
+        disabled={disconnectControl.disabled}
         onPress={disconnect}
       >
-        <Text style={styles.disconnectText}>{disconnectBusy ? 'Disconnecting…' : 'Disconnect'}</Text>
+        <Text style={styles.disconnectText}>{disconnectButtonVisibleLabel(busyOwner)}</Text>
       </Pressable>
     </Screen>
   );
