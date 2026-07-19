@@ -13,6 +13,7 @@ import { Card, CardTitle, ErrorState } from '@/components/ui';
 import { QueryRefetchBanners } from '@/components/query-display';
 import { SkeletonList } from '@/components/skeleton';
 import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
+import { buildAddTransactionRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { useMutationForm } from '@/hooks/useMutationForm';
 import { haptics } from '@/lib/haptics';
 import {
@@ -136,6 +137,11 @@ export default function AddTransaction() {
   const inputLocked = form.isLocked;
   const accountsLoading = shouldShowInitialLoad(accounts.isLoading, accounts.data);
   const accountsFatal = shouldShowFatalError(accounts.isError, accounts.data);
+  const categoriesFatal = shouldShowFatalError(categories.isError, categories.data);
+  const addTransactionRefetchQueries = useMemo(
+    () => buildAddTransactionRefetchQueries({ accounts, categories }),
+    [accounts, categories],
+  );
 
   return (
     <KeyboardAvoidingView testID="add-transaction-screen" style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -149,7 +155,7 @@ export default function AddTransaction() {
         <ErrorState error={accounts.error?.error} onRetry={() => accounts.refetch()} />
       ) : (
         <>
-      <QueryRefetchBanners queries={[accounts, categories]} testID="add-transaction-refetch-banner" />
+      <QueryRefetchBanners queries={addTransactionRefetchQueries} testID="add-transaction-refetch-banner" />
 
       <View style={styles.typeRow}>
         {(['expense', 'income'] as Kind[]).map((k) => (
@@ -214,12 +220,24 @@ export default function AddTransaction() {
       <MutationFieldError error={form.getFieldError('date')} testID="add-transaction-date-error" />
 
       <CardTitle>Category</CardTitle>
+      {categoriesFatal ? (
+        <Pressable
+          testID="add-transaction-categories-retry"
+          accessibilityRole="button"
+          accessibilityLabel="Categories unavailable, tap to retry"
+          onPress={() => categories.refetch()}
+          style={({ pressed }) => [styles.pickRow, styles.categoryRetry, pressed && { opacity: 0.7 }]}
+        >
+          <Text style={styles.categoryRetryText}>Categories unavailable · tap to retry</Text>
+        </Pressable>
+      ) : (
       <Pressable testID="add-transaction-category-picker" onPress={() => { if (inputLocked) return; haptics.tap(); setPickingCat(true); }} disabled={inputLocked} style={({ pressed }) => [pressed && !inputLocked && { opacity: 0.7 }, inputLocked && { opacity: 0.5 }]}>
         <Card style={styles.pickRow}>
           <Text style={[styles.pickValue, !categoryName && { color: colors.muted }]}>{categoryName || 'Optional — tap to set'}</Text>
           <Text style={styles.pickArrow}>›</Text>
         </Card>
       </Pressable>
+      )}
 
       <CardTitle>Notes</CardTitle>
       <Card>
@@ -284,6 +302,8 @@ const styles = StyleSheet.create({
   chipTextActive: { color: '#fff' },
   input: { color: colors.text, fontSize: 15 },
   pickRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  categoryRetry: { borderWidth: 1, borderColor: colors.red, borderRadius: 12, backgroundColor: colors.surface2, paddingHorizontal: 14, paddingVertical: 12, marginBottom: 4 },
+  categoryRetryText: { color: colors.red, fontSize: 13, fontWeight: '700', flex: 1 },
   pickValue: { color: colors.text, fontSize: 15, flex: 1 },
   pickArrow: { color: colors.muted, fontSize: 20, fontWeight: '700' },
   warn: { color: colors.muted, fontSize: 12, textAlign: 'center', marginTop: 10 },

@@ -5,7 +5,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCategories, useSplitTransaction, useTransaction, useUnsplitTransaction } from '@/api/hooks/finance.hooks';
 import { Avatar, ErrorState } from '@/components/ui';
 import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { QueryRefetchBanners } from '@/components/query-display';
 import { shouldShowFatalError, shouldShowRefetchError } from '@/lib/query-display-state.js';
+import { buildSplitEditorAuxiliaryRefetchQueries } from '@/lib/editor-refetch-queries.js';
 import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
@@ -214,6 +216,10 @@ export default function SplitEditor() {
   }, [isDirty, mutationLocked, navigation]);
 
   const amounts = useMemo(() => computeAmounts(legs, mode, total), [legs, mode, total]);
+  const auxiliaryRefetchQueries = useMemo(
+    () => buildSplitEditorAuxiliaryRefetchQueries({ categories }),
+    [categories],
+  );
   const master = amounts[0] ?? 0;
   const balanced = Math.abs(amounts.reduce((s, v) => s + v, 0) - total) < 0.005;
   const allPositive = amounts.every((v) => v > 0.0049);
@@ -337,6 +343,11 @@ export default function SplitEditor() {
             {shouldShowRefetchError(detail.isError, detail.data) ? (
               <QueryRefetchBanner onRetry={() => detail.refetch()} testID="split-refetch-banner" />
             ) : null}
+            <QueryRefetchBanners
+              queries={auxiliaryRefetchQueries}
+              testID="split-aux-refetch-banner"
+              message="Some sections could not refresh · showing cached data · tap to retry"
+            />
             <View style={styles.hero}>
               <Avatar label={d.payee} category={d.category || undefined} size={44} style={{ marginBottom: 8 }} />
               <Text style={styles.heroPayee} numberOfLines={1}>{d.payee || '(no payee)'}</Text>

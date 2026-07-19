@@ -3,6 +3,12 @@
  * Privacy lock and demo watermark must always win over GlobalFinanceBanners.
  */
 
+const {
+  hiddenHeaderBelowSafeArea,
+  NATIVE_STACK_HEADER_HEIGHT,
+  tabScreenHeaderBelowSafeArea,
+} = require('./route-header-metrics.js');
+
 /** Above normal Stack content; below demo watermark and privacy overlays. */
 const GLOBAL_FINANCE_BANNER_Z_INDEX = 100;
 
@@ -39,8 +45,6 @@ const HIDDEN_HEADER_ROUTE_NAMES = new Set(['split', 'transaction', 'category']);
 
 const TAB_SEGMENT = '(tabs)';
 
-const NATIVE_HEADER_HEIGHT = 44;
-const TAB_CUSTOM_HEADER_HEIGHT = 44;
 const FINANCE_STATUS_BELOW_HEADER = 4;
 const RECONNECT_STALE_BELOW_STATUS = 36;
 
@@ -62,24 +66,25 @@ function resolveGlobalFinanceBannerLayout(segments) {
   if (root === TAB_SEGMENT) {
     return {
       mode: 'tabs',
-      topInset: TAB_CUSTOM_HEADER_HEIGHT + FINANCE_STATUS_BELOW_HEADER,
-      staleTopInset: TAB_CUSTOM_HEADER_HEIGHT + FINANCE_STATUS_BELOW_HEADER + RECONNECT_STALE_BELOW_STATUS,
+      topInset: tabScreenHeaderBelowSafeArea() + FINANCE_STATUS_BELOW_HEADER,
+      staleTopInset: tabScreenHeaderBelowSafeArea() + FINANCE_STATUS_BELOW_HEADER + RECONNECT_STALE_BELOW_STATUS,
     };
   }
 
   if (HIDDEN_HEADER_ROUTE_NAMES.has(root)) {
     return {
       mode: 'hiddenHeader',
-      topInset: NATIVE_HEADER_HEIGHT + FINANCE_STATUS_BELOW_HEADER,
-      staleTopInset: NATIVE_HEADER_HEIGHT + FINANCE_STATUS_BELOW_HEADER + RECONNECT_STALE_BELOW_STATUS,
+      routeName: root,
+      topInset: null,
+      staleTopInset: null,
     };
   }
 
   if (PUSH_NATIVE_HEADER_ROUTE_NAMES.has(root)) {
     return {
       mode: 'pushNative',
-      topInset: NATIVE_HEADER_HEIGHT + FINANCE_STATUS_BELOW_HEADER,
-      staleTopInset: NATIVE_HEADER_HEIGHT + FINANCE_STATUS_BELOW_HEADER + RECONNECT_STALE_BELOW_STATUS,
+      topInset: NATIVE_STACK_HEADER_HEIGHT + FINANCE_STATUS_BELOW_HEADER,
+      staleTopInset: NATIVE_STACK_HEADER_HEIGHT + FINANCE_STATUS_BELOW_HEADER + RECONNECT_STALE_BELOW_STATUS,
     };
   }
 
@@ -92,12 +97,21 @@ function resolveGlobalFinanceBannerLayout(segments) {
 
 /**
  * @param {number} safeAreaTop
- * @param {{ topInset: number; staleTopInset: number }} layout
+ * @param {{ mode: string; routeName?: string; topInset?: number | null; staleTopInset?: number | null }} layout
  */
 function resolveGlobalFinanceBannerOffsets(safeAreaTop, layout) {
+  let topInset = layout.topInset;
+  let staleTopInset = layout.staleTopInset;
+
+  if (layout.mode === 'hiddenHeader' && layout.routeName) {
+    const belowSafe = hiddenHeaderBelowSafeArea(layout.routeName, safeAreaTop);
+    topInset = belowSafe + FINANCE_STATUS_BELOW_HEADER;
+    staleTopInset = belowSafe + FINANCE_STATUS_BELOW_HEADER + RECONNECT_STALE_BELOW_STATUS;
+  }
+
   return {
-    statusTop: safeAreaTop + layout.topInset,
-    staleTop: safeAreaTop + layout.staleTopInset,
+    statusTop: safeAreaTop + (topInset ?? FINANCE_STATUS_BELOW_HEADER),
+    staleTop: safeAreaTop + (staleTopInset ?? FINANCE_STATUS_BELOW_HEADER + RECONNECT_STALE_BELOW_STATUS),
   };
 }
 

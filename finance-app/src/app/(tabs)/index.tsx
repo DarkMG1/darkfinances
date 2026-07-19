@@ -17,6 +17,7 @@ import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisp
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { QueryRefetchBanners } from '@/components/query-display';
 import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
+import { buildHomeRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -137,11 +138,10 @@ export default function Overview() {
   const incompleteReasons = today.data?.liquidity.safeToSpend.incompleteReasons ?? [];
   const todayInitialLoad = shouldShowInitialLoad(today.isLoading, today.data);
   const todayFatal = shouldShowFatalError(today.isError, today.data);
-  const homeRefetchQueries = useMemo(() => [
-    today,
-    ...(widgets.netWorth ? [trends, manual] : []),
-    ...(widgets.subscriptions ? [recurring] : []),
-  ], [manual, recurring, today, trends, widgets.netWorth, widgets.subscriptions]);
+  const homeRefetchQueries = useMemo(
+    () => buildHomeRefetchQueries({ today, trends, manual, recurring, widgets }),
+    [manual, recurring, today, trends, widgets],
+  );
 
   return (
     <Screen title="dark" accent="finances" onRefresh={onRefresh} testID="home-screen">

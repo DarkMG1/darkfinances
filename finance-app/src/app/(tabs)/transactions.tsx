@@ -22,6 +22,7 @@ import {
   shouldShowFatalError,
   shouldShowInitialLoad,
 } from '@/lib/query-display-state.js';
+import { buildActivityRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { colors, fmtMoney, fmtDay } from '@/theme/colors';
 
 type Filter = 'all' | 'expense' | 'income';
@@ -83,12 +84,10 @@ export default function Transactions() {
   const listPending = searching && !searchSettled;
   const loading = shouldShowInitialLoad(listQuery.isLoading || listPending, listPayload);
   const fatal = shouldShowFatalError(listQuery.isError, listPayload);
-  const activityRefetchQueries = useMemo(() => [
-    listQuery,
-    accounts,
-    categories,
-    { query: events, enabled: groupEvents && !searching },
-  ], [accounts, categories, events, groupEvents, listQuery, searching]);
+  const activityRefetchQueries = useMemo(
+    () => buildActivityRefetchQueries({ listQuery, accounts, categories, events, groupEvents, searching }),
+    [accounts, categories, events, groupEvents, listQuery, searching],
+  );
   const onRefresh = () => searching ? searchRes.refetch() : txns.refetch();
 
   const base = useMemo(

@@ -12,6 +12,7 @@ import {
 } from '@/components/mutation-form';
 import { PushScreen } from '@/components/screen';
 import { QueryRefetchBanners, QueryScreenBody } from '@/components/query-display';
+import { buildGoalsRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { Card, EmptyState } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { ProgressBar } from '@/components/charts';
@@ -152,11 +153,16 @@ export default function Goals() {
     ]);
   };
 
+  const goalsRefetchQueries = useMemo(
+    () => buildGoalsRefetchQueries({ goals, accounts }),
+    [accounts, goals],
+  );
+
   return (
     <PushScreen testID="goals-screen" onRefresh={goals.refetch}>
       <MutationLiveRegion message={banner.announce} />
       <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => goals.refetch()} />
-      <QueryRefetchBanners queries={[goals, accounts]} testID="goals-refetch-banner" />
+      <QueryRefetchBanners queries={goalsRefetchQueries} testID="goals-refetch-banner" />
       <QueryScreenBody
         query={goals}
         loading={<SkeletonList rows={4} />}

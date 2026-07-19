@@ -14,8 +14,8 @@ import {
 import { useMutationForm } from '@/hooks/useMutationForm';
 import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/components/ui';
-import { QueryRefetchBanner } from '@/components/query-refetch-banner';
-import { resolveQueryDisplay } from '@/components/query-display';
+import { QueryRefetchBanners, resolveQueryDisplay } from '@/components/query-display';
+import { buildAccountDetailRefetchQueries } from '@/lib/editor-refetch-queries.js';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { SkeletonList } from '@/components/skeleton';
 import { AccountRole, Transaction } from '@/api/generated/types';
@@ -102,6 +102,11 @@ export default function AccountDetail() {
 
   const inputLocked = form.isLocked;
   const txDisplay = resolveQueryDisplay(txns);
+  const accountRefetchQueries = useMemo(
+    () => buildAccountDetailRefetchQueries({ accounts, txns }),
+    [accounts, txns],
+  );
+  const refetchAccountDetail = () => Promise.all([accounts.refetch(), txns.refetch()]);
 
   const sections = useMemo(() => {
     const list = (txns.data ?? []).slice().sort((a, b) => b.date.localeCompare(a.date));
@@ -171,12 +176,10 @@ export default function AccountDetail() {
           renderSectionHeader={({ section }) => <Text style={styles.sectionHeader}>{section.title}</Text>}
           stickySectionHeadersEnabled={false}
           contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}
-          refreshControl={<GestureRefreshControl onRefresh={txns.refetch} />}
+          refreshControl={<GestureRefreshControl onRefresh={refetchAccountDetail} />}
           ListHeaderComponent={
             <>
-              {txDisplay.refetchError ? (
-                <QueryRefetchBanner onRetry={txns.refetch} testID="account-refetch-banner" />
-              ) : null}
+              <QueryRefetchBanners queries={accountRefetchQueries} testID="account-refetch-banner" />
               {balance != null ? (
                 <View
                   style={styles.hero}

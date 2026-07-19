@@ -7,7 +7,9 @@ import { Screen } from '@/components/screen';
 import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { Card, CardTitle } from '@/components/ui';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
 import { useReconcilePending, useSetReconcileEnabled } from '@/api/hooks/finance.hooks';
+import { resolveReconcileEnabledSetting } from '@/lib/settings-query-display.js';
 import { useServerConfig } from '@/state/server';
 import { verifyConnectionConfig } from '@/api/client/requests';
 import { authenticate, isBiometricAvailable } from '@/lib/biometric';
@@ -60,12 +62,13 @@ export default function Settings() {
   const [lowText, setLowText] = useState(String(getNotifSettings().lowBalanceThreshold || DEFAULT_LOW_BALANCE));
   const reconPending = useReconcilePending();
   const setReconcileEnabled = useSetReconcileEnabled();
+  const [reconEnabled, setReconEnabled] = useState<boolean | null>(null);
+  const reconcileSetting = resolveReconcileEnabledSetting(reconPending, reconEnabled);
   const reconcileToggleAction = useMutationAction({
     mutation: setReconcileEnabled,
     mutationLabel: 'Update reconciliation setting',
     onRefetch: () => reconPending.refetch(),
   });
-  const [reconEnabled, setReconEnabled] = useState<boolean | null>(null);
   const dashboard = useDashboardWidgets();
   const capabilities = getFinanceCapabilities();
   const notificationsAvailable = isNotificationReconciliationActive({
@@ -78,7 +81,7 @@ export default function Settings() {
     isBiometricAvailable().then(setBioAvailable);
   }, []);
 
-  const reconEnabledValue = reconEnabled ?? !!reconPending.data?.enabled;
+  const reconEnabledValue = reconcileSetting.enabled;
 
   const toggleNotif = async (key: NotifKey, value: boolean) => {
     if (!notificationsAvailable) return;
@@ -372,19 +375,38 @@ export default function Settings() {
           <View style={{ flex: 1, paddingRight: 12 }}>
             <Text style={styles.switchLabel}>Monthly reconciliation</Text>
             <Text style={styles.switchSub}>At month-end, review every expense and close out the month. You will be reminded until it is done.</Text>
+            {reconcileSetting.fatalError ? (
+              <Pressable
+                testID="settings-reconciliation-retry"
+                accessibilityRole="button"
+                accessibilityLabel="Reconciliation setting unavailable, tap to retry"
+                onPress={() => reconPending.refetch()}
+                style={({ pressed }) => [pressed && { opacity: 0.7 }]}
+              >
+                <Text style={styles.reconcileError}>Setting unavailable · tap to retry</Text>
+              </Pressable>
+            ) : null}
           </View>
           <Switch
             testID="settings-reconciliation-switch"
             value={reconEnabledValue}
             onValueChange={(v) => {
+              if (reconcileSetting.switchDisabled) return;
               const prev = reconEnabledValue;
               setReconEnabled(v);
               reconcileToggleAction.run({ enabled: v }, { rollback: () => setReconEnabled(prev) });
             }}
-            disabled={reconcileToggleAction.isLocked}
+            disabled={reconcileToggleAction.isLocked || reconcileSetting.switchDisabled}
             trackColor={{ true: colors.accent }}
           />
         </View>
+        {reconcileSetting.refetchError ? (
+          <QueryRefetchBanner
+            testID="settings-reconciliation-refetch-banner"
+            message="Could not refresh reconciliation setting · showing cached value · tap to retry"
+            onRetry={() => reconPending.refetch()}
+          />
+        ) : null}
 
         <Pressable testID="settings-reconcile-row" style={({ pressed }) => [styles.navRow, pressed && { opacity: 0.6 }]} onPress={() => router.push('/reconcile')}>
           <View style={{ flex: 1, paddingRight: 12 }}>
@@ -496,6 +518,7 @@ const styles = StyleSheet.create({
   navArrow: { color: colors.muted, fontSize: 22, fontWeight: '700' },
   switchLabel: { color: colors.text, fontSize: 15, fontWeight: '600' },
   switchSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  reconcileError: { color: colors.red, fontSize: 12, fontWeight: '700', marginTop: 8 },
   aboutRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 4 },
   aboutKey: { color: colors.muted, fontSize: 14 },
   aboutVal: { color: colors.text, fontSize: 14, fontWeight: '600' },

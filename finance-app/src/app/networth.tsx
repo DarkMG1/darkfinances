@@ -5,6 +5,7 @@ import { useAccounts, useDeleteManualAsset, useManualAssets, useSaveManualAsset,
 import { Account, ManualAsset } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
 import { QueryRefetchBanners, resolveQueryDisplay } from '@/components/query-display';
+import { buildNetworthRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { Avatar, Card, ErrorState, SectionLabel } from '@/components/ui';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { SkeletonList } from '@/components/skeleton';
@@ -164,6 +165,10 @@ export default function NetWorthScreen() {
 
   const onRefresh = () => Promise.all([accounts.refetch(), today.refetch(), trends.refetch(), manual.refetch()]);
   const accountsDisplay = resolveQueryDisplay(accounts);
+  const networthRefetchQueries = useMemo(
+    () => buildNetworthRefetchQueries({ accounts, today, trends, manual }),
+    [accounts, manual, today, trends],
+  );
 
   const openNew = (kind: EditKind) => {
     if (inputLocked) return;
@@ -240,7 +245,7 @@ export default function NetWorthScreen() {
         <ErrorState error={accountsDisplay.errorMessage} onRetry={onRefresh} />
       ) : (
         <>
-          <QueryRefetchBanners queries={[accounts, today, trends, manual]} testID="networth-refetch-banner" />
+          <QueryRefetchBanners queries={networthRefetchQueries} testID="networth-refetch-banner" />
           <View
             style={styles.hero}
             accessible

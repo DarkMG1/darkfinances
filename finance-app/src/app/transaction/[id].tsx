@@ -30,8 +30,10 @@ import {
 import { ReimbLinkEndpoint, ReimbTxnRef, Transaction } from '@/api/generated/types';
 import { Card, CardTitle, TagChips, ErrorState } from '@/components/ui';
 import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { QueryRefetchBanners } from '@/components/query-display';
 import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
 import { shouldShowFatalError, shouldShowRefetchError } from '@/lib/query-display-state.js';
+import { buildTransactionEditorAuxiliaryRefetchQueries } from '@/lib/editor-refetch-queries.js';
 import { useMutationScreen } from '@/hooks/useMutationScreen';
 import { useMutationScreenFieldInvalidation } from '@/hooks/useMutationScreenFieldInvalidation';
 import { resolveTransactionDateAttempt } from '@/lib/mutation-transaction-date-attempt';
@@ -678,6 +680,40 @@ export default function TransactionDetail() {
   };
   const catMeta = categoryIcon(category || payeeName);
   const amountColor = income ? colors.green : colors.text;
+  const auxiliaryRefetchQueries = useMemo(
+    () => buildTransactionEditorAuxiliaryRefetchQueries({
+      categories,
+      recurring,
+      links,
+      receipts,
+      allTags,
+      events,
+      mhist,
+      search,
+      counterpartyLinks,
+      canHistory,
+      showTags,
+      linking,
+      linkQuery,
+      linkTarget,
+    }),
+    [
+      allTags,
+      canHistory,
+      categories,
+      counterpartyLinks,
+      events,
+      linkQuery,
+      linkTarget,
+      linking,
+      links,
+      mhist,
+      receipts,
+      recurring,
+      search,
+      showTags,
+    ],
+  );
 
   if (!canonical) {
     const detailFatal = shouldShowFatalError(detail.isError, detail.data);
@@ -725,6 +761,11 @@ export default function TransactionDetail() {
       {shouldShowRefetchError(detail.isError, detail.data) ? (
         <QueryRefetchBanner onRetry={() => detail.refetch()} testID="transaction-refetch-banner" />
       ) : null}
+      <QueryRefetchBanners
+        queries={auxiliaryRefetchQueries}
+        testID="transaction-aux-refetch-banner"
+        message="Some sections could not refresh · showing cached data · tap to retry"
+      />
 
       <View style={[styles.menuHero, { paddingTop: insets.top + 14 }]}>
         <View style={styles.menuTopBar}>

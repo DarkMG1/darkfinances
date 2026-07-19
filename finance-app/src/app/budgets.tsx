@@ -12,6 +12,7 @@ import {
 } from '@/components/mutation-form';
 import { PushScreen } from '@/components/screen';
 import { QueryRefetchBanners, resolveQueryDisplay } from '@/components/query-display';
+import { buildBudgetsRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { Card, CardTitle, EmptyState, ErrorState } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { GroupedBars, MonthNavigator, ProgressBar, trendPeriodComplete } from '@/components/charts';
@@ -73,6 +74,10 @@ export default function Budgets() {
   const b = budgets.data;
   const hasTargets = (b?.totalTarget ?? b?.totalBudgeted ?? 0) > 0;
   const budgetsDisplay = resolveQueryDisplay(budgets);
+  const budgetsRefetchQueries = useMemo(
+    () => buildBudgetsRefetchQueries({ budgets, trends }),
+    [budgets, trends],
+  );
 
   const fields = useMemo(() => ({
     targetText,
@@ -138,7 +143,7 @@ export default function Budgets() {
       ) : null}
 
       <CardTitle>By Category{b ? ` · ${b.month}` : ''}</CardTitle>
-      <QueryRefetchBanners queries={[budgets, trends]} testID="budgets-refetch-banner" />
+      <QueryRefetchBanners queries={budgetsRefetchQueries} testID="budgets-refetch-banner" />
       {budgetsDisplay.initialLoad ? (
         <SkeletonList rows={6} />
       ) : budgetsDisplay.fatalError ? (

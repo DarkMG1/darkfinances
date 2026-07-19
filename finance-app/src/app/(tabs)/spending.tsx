@@ -11,6 +11,7 @@ import { haptics } from '@/lib/haptics';
 import { addDateOnlyDays, monthEnd, useFinanceToday } from '@/lib/date-only';
 import { QueryRefetchBanners } from '@/components/query-display';
 import { buildBudgetMetrics, buildNonSpendingMetrics } from '@/lib/spending-metrics.js';
+import { buildSpendingRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
 import { useSelectedMonth } from '@/lib/selectedMonth';
 import { trendPeriodComplete } from '@/components/charts';
@@ -94,13 +95,10 @@ export default function Spending() {
   const spendingLoading = shouldShowInitialLoad(spendingQuery.isLoading, spendingPayload);
   const spendingError = spendingQuery.error;
   const spendingFatal = shouldShowFatalError(spendingQuery.isError, spendingPayload);
-  const spendingRefetchQueries = useMemo(() => [
-    spendingQuery,
-    trends,
-    budgets,
-    reimb,
-    insights,
-  ], [budgets, insights, reimb, spendingQuery, trends]);
+  const spendingRefetchQueries = useMemo(
+    () => buildSpendingRefetchQueries({ spendingQuery, trends, budgets, reimb, insights, tags }),
+    [budgets, insights, reimb, spendingQuery, tags, trends],
+  );
   const spendingComplete = cur?.completeness?.complete !== false;
   const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
   const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
@@ -188,6 +186,7 @@ export default function Spending() {
     trends.refetch(),
     budgets.refetch(),
     reimb.refetch(),
+    tags.refetch(),
   ]);
   const categoryParams = (name: string, bucket?: string) => ({
     name,

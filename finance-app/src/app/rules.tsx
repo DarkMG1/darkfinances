@@ -11,6 +11,7 @@ import {
 } from '@/components/mutation-form';
 import { Card, CardTitle, ErrorState } from '@/components/ui';
 import { QueryRefetchBanners, resolveQueryDisplay } from '@/components/query-display';
+import { buildRulesRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { SkeletonList } from '@/components/skeleton';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
@@ -95,6 +96,10 @@ export default function Rules() {
   const list = rules.data?.rules ?? [];
   const catalog = rules.data?.catalog ?? [];
   const rulesDisplay = resolveQueryDisplay(rules);
+  const rulesRefetchQueries = useMemo(
+    () => buildRulesRefetchQueries({ rules, categories }),
+    [categories, rules],
+  );
 
   return (
     <ScrollView testID="rules-screen" style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
@@ -106,7 +111,7 @@ export default function Rules() {
         onRefetch={() => rules.refetch()}
       />
 
-      <QueryRefetchBanners queries={[rules, categories]} testID="rules-refetch-banner" />
+      <QueryRefetchBanners queries={rulesRefetchQueries} testID="rules-refetch-banner" />
 
       <Text style={styles.intro}>Automatically categorize transactions whose payee contains your text. Rules apply to matching uncategorized transactions now and to new ones as they sync.</Text>
 

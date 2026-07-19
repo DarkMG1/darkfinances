@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 const layer = require('../src/lib/global-finance-banner-layer.js');
+const metrics = require('../src/lib/route-header-metrics.js');
 
 const root = path.resolve(__dirname, '..');
 
@@ -33,28 +34,41 @@ test('global finance banners unmount while privacy gate is active', () => {
   assert.doesNotMatch(bannerSource, /zIndex:\s*10_?000/);
 });
 
-test('route-aware banner layout avoids tab and push native headers', () => {
+test('route-aware banner layout derives header metrics from screen styles', () => {
+  const safeTop = 59;
   const tabs = layer.resolveGlobalFinanceBannerLayout(['(tabs)', 'index']);
   assert.equal(tabs.mode, 'tabs');
-  assert.ok(tabs.topInset > 40, 'tab banners sit below custom Screen header');
+  assert.equal(tabs.topInset, metrics.tabScreenHeaderBelowSafeArea() + 4);
 
   const push = layer.resolveGlobalFinanceBannerLayout(['networth']);
   assert.equal(push.mode, 'pushNative');
-  assert.ok(push.topInset >= 44, 'push banners sit below native navigation header');
+  assert.equal(push.topInset, metrics.NATIVE_STACK_HEADER_HEIGHT + 4);
 
-  const hidden = layer.resolveGlobalFinanceBannerLayout(['split', '[id]']);
-  assert.equal(hidden.mode, 'hiddenHeader');
-  assert.ok(hidden.topInset >= 44, 'modal custom header routes offset banners');
+  const splitLayout = layer.resolveGlobalFinanceBannerLayout(['split', '[id]']);
+  assert.equal(splitLayout.mode, 'hiddenHeader');
+  assert.equal(splitLayout.routeName, 'split');
+  const splitOffsets = layer.resolveGlobalFinanceBannerOffsets(safeTop, splitLayout);
+  assert.equal(
+    splitOffsets.statusTop,
+    safeTop + metrics.splitEditorHeaderBelowSafeArea() + 4,
+  );
 
-  const txn = layer.resolveGlobalFinanceBannerLayout(['transaction', '[id]']);
-  assert.equal(txn.mode, 'hiddenHeader', 'transaction detail hides native header');
+  const txnLayout = layer.resolveGlobalFinanceBannerLayout(['transaction', '[id]']);
+  assert.equal(txnLayout.mode, 'hiddenHeader');
+  const txnOffsets = layer.resolveGlobalFinanceBannerOffsets(safeTop, txnLayout);
+  assert.equal(
+    txnOffsets.statusTop,
+    safeTop + metrics.transactionEditorHeaderBelowSafeArea() + 4,
+  );
+  assert.ok(txnOffsets.statusTop > safeTop + 50, 'transaction custom header clears menu top bar');
 
-  const category = layer.resolveGlobalFinanceBannerLayout(['category', '[name]']);
-  assert.equal(category.mode, 'hiddenHeader', 'category detail hides native header');
-
-  const offsets = layer.resolveGlobalFinanceBannerOffsets(59, push);
-  assert.equal(offsets.statusTop, 59 + push.topInset);
-  assert.ok(offsets.staleTop > offsets.statusTop);
+  const categoryLayout = layer.resolveGlobalFinanceBannerLayout(['category', '[name]']);
+  const categoryOffsets = layer.resolveGlobalFinanceBannerOffsets(safeTop, categoryLayout);
+  assert.equal(
+    categoryOffsets.statusTop,
+    safeTop + metrics.categoryDetailHeaderBelowSafeArea(safeTop) + 4,
+  );
+  assert.ok(categoryOffsets.staleTop > categoryOffsets.statusTop);
 });
 
 test('root layout keeps privacy overlay after demo watermark and finance banners', () => {
