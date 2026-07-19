@@ -4,7 +4,8 @@ import Animated, { FadeInDown } from 'react-native-reanimated';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useMerchantHistory } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
-import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Avatar, Card, EmptyState, PendingPill, SplitPill } from '@/components/ui';
 import { MonthNavigator } from '@/components/charts';
 import { SkeletonList } from '@/components/skeleton';
 import { useFinanceToday } from '@/lib/date-only';
@@ -41,12 +42,13 @@ export default function MerchantDetail() {
   return (
     <PushScreen testID="merchant-detail-screen" onRefresh={hist.refetch}>
       <Stack.Screen options={{ title: name || 'Merchant' }} />
-      {hist.isLoading && !hist.data ? (
-        <SkeletonList hero rows={7} />
-      ) : hist.isError && !hist.data ? (
-        <ErrorState error={hist.error?.error} onRetry={hist.refetch} />
-      ) : (
-        <>
+      <QueryScreenBody
+        query={hist}
+        loading={<SkeletonList hero rows={7} />}
+        empty={null}
+        hasContent={hist.data != null}
+        refetchBannerTestID="merchant-refetch-banner"
+      >
           <View
             style={styles.hero}
             accessible
@@ -118,8 +120,7 @@ export default function MerchantDetail() {
               ))}
             </Card>
           )}
-        </>
-      )}
+      </QueryScreenBody>
     </PushScreen>
   );
 }

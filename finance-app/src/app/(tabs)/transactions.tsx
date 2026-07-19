@@ -13,15 +13,16 @@ import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-fo
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { SkeletonList } from '@/components/skeleton';
-import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { QueryRefetchBanners, refetchEnabledQueries } from '@/components/query-display';
 import { haptics } from '@/lib/haptics';
 import { startMonthsAgo, useFinanceToday } from '@/lib/date-only';
 import {
   isSearchQuerySettled,
+  queryErrorMessage,
   shouldShowFatalError,
   shouldShowInitialLoad,
-  shouldShowRefetchError,
 } from '@/lib/query-display-state.js';
+import { buildActivityRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { colors, fmtMoney, fmtDay } from '@/theme/colors';
 
 type Filter = 'all' | 'expense' | 'income';
@@ -83,8 +84,12 @@ export default function Transactions() {
   const listPending = searching && !searchSettled;
   const loading = shouldShowInitialLoad(listQuery.isLoading || listPending, listPayload);
   const fatal = shouldShowFatalError(listQuery.isError, listPayload);
-  const refetchError = shouldShowRefetchError(listQuery.isError, listPayload);
-  const onRefresh = () => searching ? searchRes.refetch() : txns.refetch();
+  const activityRefetchQueries = useMemo(
+    () => buildActivityRefetchQueries({ listQuery, accounts, categories, events, groupEvents, searching }),
+    [accounts, categories, events, groupEvents, listQuery, searching],
+  );
+  const refreshActivity = () => refetchEnabledQueries(activityRefetchQueries);
+  const onRefreshList = () => searching ? searchRes.refetch() : txns.refetch();
 
   const base = useMemo(
     () => {
@@ -99,7 +104,7 @@ export default function Transactions() {
   const categorizeAction = useMutationAction({
     mutation: setCategory,
     mutationLabel: 'Change category',
-    onRefetch: onRefresh,
+    onRefetch: onRefreshList,
   });
 
   const sections = useMemo(() => {
@@ -301,7 +306,7 @@ export default function Transactions() {
   return (
     <View style={styles.root} testID="activity-screen">
       <MutationLiveRegion message={categorizeAction.announce} />
-      <MutationFormBanner outcome={categorizeAction.outcome} onRetry={categorizeAction.retry} onRefetch={onRefresh} />
+      <MutationFormBanner outcome={categorizeAction.outcome} onRetry={categorizeAction.retry} onRefetch={onRefreshList} />
       <View style={[styles.header, { paddingTop: insets.top + 6 }]}>
         <Text style={styles.title}>Activity</Text>
         <Pressable testID="activity-export-button" onPress={exportCsv} disabled={exporting} style={({ pressed }) => [styles.exportBtn, pressed && { opacity: 0.7 }]}>
@@ -367,8 +372,8 @@ export default function Transactions() {
         </Text>
       ) : null}
 
-      {refetchError ? (
-        <QueryRefetchBanner onRetry={onRefresh} testID="activity-refetch-banner" />
+      {!loading && !fatal ? (
+        <QueryRefetchBanners queries={activityRefetchQueries} testID="activity-refetch-banner" />
       ) : null}
 
       {loading ? (
@@ -376,7 +381,7 @@ export default function Transactions() {
           <SkeletonList rows={8} />
         </View>
       ) : fatal ? (
-        <ErrorState onRetry={onRefresh} />
+        <ErrorState error={queryErrorMessage(listQuery.error)} onRetry={refreshActivity} />
       ) : (
         <SectionList
           style={styles.list}
@@ -387,7 +392,7 @@ export default function Transactions() {
           stickySectionHeadersEnabled={false}
           contentContainerStyle={{ paddingBottom: 96 }}
           ListEmptyComponent={<Text style={styles.empty}>{searching ? 'No matches' : 'No transactions in range'}</Text>}
-          refreshControl={<GestureRefreshControl onRefresh={onRefresh} />}
+          refreshControl={<GestureRefreshControl onRefresh={refreshActivity} />}
         />
       )}
 

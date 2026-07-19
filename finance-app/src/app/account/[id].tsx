@@ -14,6 +14,9 @@ import {
 import { useMutationForm } from '@/hooks/useMutationForm';
 import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/components/ui';
+import { QueryRefetchBanners, resolveQueryDisplay } from '@/components/query-display';
+import { buildAccountDetailRefetchQueries } from '@/lib/editor-refetch-queries.js';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { SkeletonList } from '@/components/skeleton';
 import { AccountRole, Transaction } from '@/api/generated/types';
 import { previousMonth, useFinanceToday } from '@/lib/date-only';
@@ -98,6 +101,12 @@ export default function AccountDetail() {
   };
 
   const inputLocked = form.isLocked;
+  const txDisplay = resolveQueryDisplay(txns);
+  const accountRefetchQueries = useMemo(
+    () => buildAccountDetailRefetchQueries({ accounts, txns }),
+    [accounts, txns],
+  );
+  const refetchAccountDetail = () => Promise.all([accounts.refetch(), txns.refetch()]);
 
   const sections = useMemo(() => {
     const list = (txns.data ?? []).slice().sort((a, b) => b.date.localeCompare(a.date));
@@ -153,12 +162,12 @@ export default function AccountDetail() {
       />
       <DemoRibbon />
       <MutationLiveRegion message={form.announce} />
-      {txns.isLoading && !txns.data ? (
+      {txDisplay.initialLoad ? (
         <View style={{ padding: 16 }}>
           <SkeletonList hero rows={7} />
         </View>
-      ) : txns.isError && !txns.data ? (
-        <ErrorState error={txns.error?.error} onRetry={txns.refetch} />
+      ) : txDisplay.fatalError ? (
+        <ErrorState error={txDisplay.errorMessage} onRetry={txns.refetch} />
       ) : (
         <SectionList
           sections={sections}
@@ -167,15 +176,22 @@ export default function AccountDetail() {
           renderSectionHeader={({ section }) => <Text style={styles.sectionHeader}>{section.title}</Text>}
           stickySectionHeadersEnabled={false}
           contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}
-          refreshControl={<GestureRefreshControl onRefresh={txns.refetch} />}
+          refreshControl={<GestureRefreshControl onRefresh={refetchAccountDetail} />}
           ListHeaderComponent={
-            balance != null ? (
-              <View style={styles.hero}>
-                <Text style={styles.heroLabel}>BALANCE</Text>
-                <Text style={[styles.heroValue, { color: balance < 0 ? colors.red : colors.text }]}>{fmtMoney(balance)}</Text>
-                <Text style={styles.heroSub}>Last 3 months</Text>
-              </View>
-            ) : null
+            <>
+              <QueryRefetchBanners queries={accountRefetchQueries} testID="account-refetch-banner" />
+              {balance != null ? (
+                <View
+                  style={styles.hero}
+                  accessible
+                  accessibilityLabel={heroMetricAccessibilityLabel('Balance', fmtMoney(balance), 'Last 3 months')}
+                >
+                  <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">BALANCE</Text>
+                  <Text style={[styles.heroValue, { color: balance < 0 ? colors.red : colors.text }]} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(balance)}</Text>
+                  <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">Last 3 months</Text>
+                </View>
+              ) : null}
+            </>
           }
           ListEmptyComponent={<Card><EmptyState icon="tray">No recent transactions</EmptyState></Card>}
         />

@@ -3,7 +3,8 @@ import { StyleSheet, Text, View } from 'react-native';
 import { useIncome } from '@/api/hooks/finance.hooks';
 import { IncomeStream } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
-import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Avatar, Card, EmptyState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { useFinanceToday } from '@/lib/date-only';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
@@ -39,31 +40,30 @@ export default function Income() {
 
   return (
     <PushScreen testID="income-screen" onRefresh={income.refetch}>
-      {income.isLoading ? (
-        <SkeletonList hero rows={4} />
-      ) : income.isError && !data ? (
-        <ErrorState error={income.error?.error} onRetry={income.refetch} />
-      ) : !data || data.count === 0 ? (
-        <EmptyState icon="dollarsign.circle">No recurring income detected yet</EmptyState>
-      ) : (
-        <>
+      <QueryScreenBody
+        query={income}
+        loading={<SkeletonList hero rows={4} />}
+        empty={<EmptyState icon="dollarsign.circle">No recurring income detected yet</EmptyState>}
+        hasContent={!!data && data.count > 0}
+        refetchBannerTestID="income-refetch-banner"
+      >
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               'Monthly income',
-              fmtMoney(data.monthlyTotal),
-              data.nextPayday
-                ? `Next: ${cap(data.nextPaydayPayee ?? 'paycheck')}, ${dueLabel(data.nextPayday, financeToday)}, ${fmtPos(data.nextPaydayAmount ?? 0)}`
-                : `${data.activeCount} active stream${data.activeCount === 1 ? '' : 's'}`,
+              fmtMoney(data!.monthlyTotal),
+              data!.nextPayday
+                ? `Next: ${cap(data!.nextPaydayPayee ?? 'paycheck')}, ${dueLabel(data!.nextPayday, financeToday)}, ${fmtPos(data!.nextPaydayAmount ?? 0)}`
+                : `${data!.activeCount} active stream${data!.activeCount === 1 ? '' : 's'}`,
             )}
           >
             <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">MONTHLY INCOME</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(data.monthlyTotal)}</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(data!.monthlyTotal)}</Text>
             <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
-              {data.nextPayday
-                ? `Next: ${cap(data.nextPaydayPayee ?? 'paycheck')} · ${dueLabel(data.nextPayday, financeToday)} · ${fmtPos(data.nextPaydayAmount ?? 0)}`
-                : `${data.activeCount} active stream${data.activeCount === 1 ? '' : 's'}`}
+              {data!.nextPayday
+                ? `Next: ${cap(data!.nextPaydayPayee ?? 'paycheck')} · ${dueLabel(data!.nextPayday, financeToday)} · ${fmtPos(data!.nextPaydayAmount ?? 0)}`
+                : `${data!.activeCount} active stream${data!.activeCount === 1 ? '' : 's'}`}
             </Text>
           </View>
 
@@ -80,8 +80,7 @@ export default function Income() {
               <Card style={styles.list}>{inactive.map((s) => <Row key={s.key} s={s} muted />)}</Card>
             </View>
           ) : null}
-        </>
-      )}
+      </QueryScreenBody>
     </PushScreen>
   );
 }

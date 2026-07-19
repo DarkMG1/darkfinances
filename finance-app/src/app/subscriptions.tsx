@@ -4,8 +4,10 @@ import { useRouter } from 'expo-router';
 import { useRecurring, useSetRecurringOverride } from '@/api/hooks/finance.hooks';
 import { RecurringItem } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
+import { QueryScreenBody } from '@/components/query-display';
 import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
-import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
+import { Avatar, Card, EmptyState, SectionLabel } from '@/components/ui';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { SkeletonList } from '@/components/skeleton';
 import { useFinanceToday } from '@/lib/date-only';
@@ -71,18 +73,25 @@ export default function Subscriptions() {
     <PushScreen testID="subscriptions-screen" onRefresh={recurring.refetch}>
       <MutationLiveRegion message={restoreAction.announce} />
       <MutationFormBanner outcome={restoreAction.outcome} onRetry={restoreAction.retry} onRefetch={() => recurring.refetch()} />
-      {recurring.isLoading && !data ? (
-        <SkeletonList hero rows={6} />
-      ) : recurring.isError && !data ? (
-        <ErrorState error={recurring.error?.error} onRetry={recurring.refetch} />
-      ) : !active.length && !inactive.length && !hidden.length ? (
-        <EmptyState icon="repeat">No subscriptions detected yet</EmptyState>
-      ) : (
-        <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>MONTHLY SUBSCRIPTIONS</Text>
-            <Text style={styles.heroValue}>{fmtMoney(monthly)}</Text>
-            <Text style={styles.heroSub}>
+      <QueryScreenBody
+        query={recurring}
+        loading={<SkeletonList hero rows={6} />}
+        empty={<EmptyState icon="repeat">No subscriptions detected yet</EmptyState>}
+        hasContent={!!(active.length || inactive.length || hidden.length)}
+        refetchBannerTestID="subscriptions-refetch-banner"
+      >
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              'Monthly subscriptions',
+              fmtMoney(monthly),
+              `${active.length} active · ${fmtPos(annual)} per year`,
+            )}
+          >
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">MONTHLY SUBSCRIPTIONS</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(monthly)}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
               {active.length} active · {fmtPos(annual)}/yr
             </Text>
           </View>
@@ -138,8 +147,7 @@ export default function Subscriptions() {
               Recurring memberships & apps only. Utilities, rent & internet are tracked as Bills ›
             </Text>
           </Pressable>
-        </>
-      )}
+      </QueryScreenBody>
     </PushScreen>
   );
 }

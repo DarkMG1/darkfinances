@@ -4,7 +4,8 @@ import { useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useTrends } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
-import { Card, CardTitle, EmptyState, ErrorState, Loading, StatCard } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Card, CardTitle, EmptyState, Loading, StatCard } from '@/components/ui';
 import { GroupedBars, trendPeriodComplete } from '@/components/charts';
 import { colors, fmtMoney, fmtPos, monthLabel } from '@/theme/colors';
 import { haptics } from '@/lib/haptics';
@@ -24,14 +25,13 @@ export default function CashFlow() {
 
   return (
     <PushScreen testID="cashflow-screen" onRefresh={trends.refetch}>
-      {trends.isLoading ? (
-        <Loading />
-      ) : trends.isError && months.length === 0 ? (
-        <ErrorState error={trends.error?.error} onRetry={trends.refetch} />
-      ) : months.length === 0 ? (
-        <EmptyState icon="chart.bar">No cash flow data</EmptyState>
-      ) : (
-        <>
+      <QueryScreenBody
+        query={trends}
+        loading={<Loading />}
+        empty={<EmptyState icon="chart.bar">No cash flow data</EmptyState>}
+        hasContent={months.length > 0}
+        refetchBannerTestID="cashflow-refetch-banner"
+      >
           <View style={styles.statsRow}>
             <StatCard testID="cashflow-money-in" label="Money In" value={cur && monthComplete(cur) ? fmtPos(cur.income!) : 'Unavailable'} valueColor={colors.green} />
             <StatCard testID="cashflow-money-out" label="Money Out" value={cur && monthComplete(cur) ? fmtPos(cur.spend!) : 'Unavailable'} valueColor={colors.red} />
@@ -72,8 +72,7 @@ export default function CashFlow() {
               </View>
             ))}
           </Card>
-        </>
-      )}
+      </QueryScreenBody>
     </PushScreen>
   );
 }

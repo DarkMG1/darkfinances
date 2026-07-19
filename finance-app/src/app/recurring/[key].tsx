@@ -7,6 +7,8 @@ import { useRecurring, useSetRecurringOverride } from '@/api/hooks/finance.hooks
 import { AreaChart } from '@/components/charts';
 import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { Card, CardTitle, ErrorState, Loading } from '@/components/ui';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { resolveQueryDisplay } from '@/components/query-display';
 import { useMutationScreen } from '@/hooks/useMutationScreen';
 import { useFinanceToday } from '@/lib/date-only';
 import { cancelInfoFor } from '@/theme/cancelDirectory';
@@ -33,8 +35,9 @@ export default function RecurringDetail() {
   };
 
   const item = recurring.data?.items.find((i) => i.key === key);
+  const recurringDisplay = resolveQueryDisplay(recurring);
 
-  if (recurring.isLoading && !recurring.data) {
+  if (recurringDisplay.initialLoad) {
     return (
       <View testID="recurring-detail-screen" style={styles.root}>
         <Stack.Screen options={{ title: 'Subscription' }} />
@@ -42,11 +45,11 @@ export default function RecurringDetail() {
       </View>
     );
   }
-  if (recurring.isError && !recurring.data) {
+  if (recurringDisplay.fatalError) {
     return (
       <View testID="recurring-detail-screen" style={styles.root}>
         <Stack.Screen options={{ title: 'Subscription' }} />
-        <ErrorState error={recurring.error?.error} onRetry={recurring.refetch} />
+        <ErrorState error={recurringDisplay.errorMessage} onRetry={recurring.refetch} />
       </View>
     );
   }
@@ -74,6 +77,9 @@ export default function RecurringDetail() {
       <Stack.Screen options={{ title: item.payee }} />
       <MutationLiveRegion message={screen.announce} />
       <MutationFormBanner outcome={screen.outcome} onRetry={screen.retry} onRefetch={() => { void screen.refetchStale(); recurring.refetch(); }} />
+      {recurringDisplay.refetchError ? (
+        <QueryRefetchBanner onRetry={recurring.refetch} testID="recurring-refetch-banner" />
+      ) : null}
 
       <View style={styles.hero}>
         <Text style={styles.amount}>{fmtPos(item.amount)}</Text>

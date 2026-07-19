@@ -9,8 +9,10 @@ import {
   MutationLiveRegion,
   MutationSubmitButton,
 } from '@/components/mutation-form';
-import { Card, CardTitle } from '@/components/ui';
+import { Card, CardTitle, ErrorState } from '@/components/ui';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
 import { SkeletonList } from '@/components/skeleton';
+import { resolveQueryDisplay } from '@/components/query-display';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { useMutationForm } from '@/hooks/useMutationForm';
@@ -108,12 +110,17 @@ export default function Events() {
   };
 
   const list = events.data?.events ?? [];
+  const eventsDisplay = resolveQueryDisplay(events);
 
   return (
     <ScrollView testID="events-screen" style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
       <Stack.Screen options={{ title: 'Trips & Events' }} />
       <MutationLiveRegion message={banner.announce} />
       <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => events.refetch()} />
+
+      {eventsDisplay.refetchError ? (
+        <QueryRefetchBanner onRetry={() => events.refetch()} testID="events-refetch-banner" />
+      ) : null}
 
       <Text style={styles.intro}>
         Create a trip or event, then tag its charges with <Text style={styles.mono}>#ev-slug</Text> from any transaction’s notes. If you link a Splitwise
@@ -196,8 +203,10 @@ export default function Events() {
       </Card>
 
       <CardTitle style={{ marginTop: 24 }}>Your trips{list.length ? ` (${list.length})` : ''}</CardTitle>
-      {events.isLoading && !events.data ? (
+      {eventsDisplay.initialLoad ? (
         <SkeletonList rows={3} />
+      ) : eventsDisplay.fatalError ? (
+        <ErrorState error={eventsDisplay.errorMessage} onRetry={() => events.refetch()} />
       ) : list.length ? (
         <Card style={styles.list}>
           {list.map((e, i) => (

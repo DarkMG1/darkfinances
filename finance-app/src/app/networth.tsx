@@ -4,7 +4,10 @@ import { Stack, useRouter } from 'expo-router';
 import { useAccounts, useDeleteManualAsset, useManualAssets, useSaveManualAsset, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { Account, ManualAsset } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
+import { QueryRefetchBanners, resolveQueryDisplay } from '@/components/query-display';
+import { buildNetworthRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { Avatar, Card, ErrorState, SectionLabel } from '@/components/ui';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { SkeletonList } from '@/components/skeleton';
 import {
   MutationFieldError,
@@ -161,6 +164,11 @@ export default function NetWorthScreen() {
   const assetPct = totalAbs > 0 ? (assets / totalAbs) * 100 : 100;
 
   const onRefresh = () => Promise.all([accounts.refetch(), today.refetch(), trends.refetch(), manual.refetch()]);
+  const accountsDisplay = resolveQueryDisplay(accounts);
+  const networthRefetchQueries = useMemo(
+    () => buildNetworthRefetchQueries({ accounts, today, trends, manual }),
+    [accounts, manual, today, trends],
+  );
 
   const openNew = (kind: EditKind) => {
     if (inputLocked) return;
@@ -231,15 +239,24 @@ export default function NetWorthScreen() {
       <Stack.Screen options={{ title: 'Net Worth' }} />
       <MutationLiveRegion message={banner.announce} />
       <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => { void manual.refetch(); }} />
-      {accounts.isLoading && !accounts.data ? (
+      {accountsDisplay.initialLoad ? (
         <SkeletonList hero rows={6} />
-      ) : accounts.isError && !accounts.data ? (
-        <ErrorState error={accounts.error?.error} onRetry={onRefresh} />
+      ) : accountsDisplay.fatalError ? (
+        <ErrorState error={accountsDisplay.errorMessage} onRetry={onRefresh} />
       ) : (
         <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>NET WORTH</Text>
-            <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>
+          <QueryRefetchBanners queries={networthRefetchQueries} testID="networth-refetch-banner" />
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              'Net worth',
+              netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth)),
+              nwDelta != null ? `${nwDelta >= 0 ? 'up' : 'down'} ${fmtPos(Math.abs(nwDelta))} this month` : undefined,
+            )}
+          >
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">NET WORTH</Text>
+            <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">
               {netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth))}
             </Text>
             {!netWorthAuthoritative && netWorthIncompleteReasons.length ? (

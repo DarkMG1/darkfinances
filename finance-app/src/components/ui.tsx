@@ -240,14 +240,14 @@ export function EmptyState({ children, icon }: { children: React.ReactNode; icon
   );
 }
 
-export function ErrorState({ error, onRetry }: { error?: string; onRetry?: () => void }) {
+export function ErrorState({ error, onRetry, retryLabel = 'Tap to retry' }: { error?: string; onRetry?: () => void; retryLabel?: string }) {
   return (
     <Animated.View entering={FadeIn.duration(260)} style={styles.center}>
       <SymbolView name="exclamationmark.triangle" tintColor={colors.red} size={32} resizeMode="scaleAspectFit" style={{ opacity: 0.85 }} />
       <Text style={[styles.muted, { color: colors.red, textAlign: 'center' }]}>{error || 'Something went wrong'}</Text>
       {onRetry ? (
-        <Pressable accessibilityRole="button" onPress={onRetry} style={({ pressed }) => [styles.retry, pressed && { opacity: 0.6 }]}>
-          <Text style={[styles.muted, { color: colors.accentLight, marginTop: 4, fontWeight: '600' }]}>Tap to retry</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel={retryLabel} onPress={onRetry} style={({ pressed }) => [styles.retry, pressed && { opacity: 0.6 }]}>
+          <Text style={[styles.muted, { color: colors.accentLight, marginTop: 4, fontWeight: '600' }]}>{retryLabel}</Text>
         </Pressable>
       ) : null}
     </Animated.View>

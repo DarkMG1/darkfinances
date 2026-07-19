@@ -4,7 +4,9 @@ import Animated, { FadeInDown } from 'react-native-reanimated';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSearch } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
-import { Avatar, Card, EmptyState, ErrorState, PendingPill } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Avatar, Card, EmptyState, PendingPill } from '@/components/ui';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { SkeletonList } from '@/components/skeleton';
 import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
 
@@ -35,16 +37,25 @@ export default function TagDetail() {
   return (
     <PushScreen testID="tag-detail-screen" onRefresh={search.refetch}>
       <Stack.Screen options={{ title: `#${display}` }} />
-      {search.isLoading && !search.data ? (
-        <SkeletonList hero rows={7} />
-      ) : search.isError && !search.data ? (
-        <ErrorState error={search.error?.error} onRetry={search.refetch} />
-      ) : (
-        <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>NET SPEND · #{display.toUpperCase()}</Text>
-            <Text style={styles.heroValue}>{fmtMoney(totals.netSpend)}</Text>
-            <Text style={styles.heroSub}>
+      <QueryScreenBody
+        query={search}
+        loading={<SkeletonList hero rows={7} />}
+        empty={null}
+        hasContent={search.data != null}
+        refetchBannerTestID="tag-refetch-banner"
+      >
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              `Net spend for tag ${display}`,
+              fmtMoney(totals.netSpend),
+              `${fmtPos(totals.charges)} charges minus ${fmtPos(totals.refunds)} refunds · ${rows.length} transaction${rows.length === 1 ? '' : 's'}`,
+            )}
+          >
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">NET SPEND · #{display.toUpperCase()}</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(totals.netSpend)}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
               {fmtPos(totals.charges)} charges − {fmtPos(totals.refunds)} refunds · {rows.length} transaction{rows.length === 1 ? '' : 's'}
               {search.data?.truncated ? ' · first 200 shown' : ''}
             </Text>
@@ -82,8 +93,7 @@ export default function TagDetail() {
               ))}
             </Card>
           )}
-        </>
-      )}
+      </QueryScreenBody>
     </PushScreen>
   );
 }

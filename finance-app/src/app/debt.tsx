@@ -2,27 +2,38 @@ import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { useInvestments } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
-import { Avatar, Card, CardTitle, EmptyState, ErrorState, Loading } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Avatar, Card, CardTitle, EmptyState, Loading } from '@/components/ui';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
 
 export default function DebtScreen() {
   const investments = useInvestments();
   const data = investments.data;
 
+  const hasDebts = !!data && data.debts.length > 0;
+
   return (
     <PushScreen testID="debt-screen" onRefresh={investments.refetch}>
-      {investments.isLoading && !data ? (
-        <Loading />
-      ) : investments.isError && !data ? (
-        <ErrorState error={investments.error?.error} onRetry={investments.refetch} />
-      ) : !data || data.debts.length === 0 ? (
-        <EmptyState icon="creditcard">No debt plan configured</EmptyState>
-      ) : (
-        <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>DEBT PAYOFF</Text>
-            <Text style={styles.heroValue}>{fmtMoney(-data.debtTotals.balance)}</Text>
-            <Text style={styles.heroSub}>{fmtPos(data.debtTotals.minPayment)}/mo minimum · {data.debtTotals.weightedApr}% weighted APR</Text>
+      <QueryScreenBody
+        query={investments}
+        loading={<Loading />}
+        empty={<EmptyState icon="creditcard">No debt plan configured</EmptyState>}
+        hasContent={hasDebts}
+        refetchBannerTestID="debt-refetch-banner"
+      >
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              'Debt payoff',
+              fmtMoney(-data!.debtTotals.balance),
+              `${fmtPos(data!.debtTotals.minPayment)} per month minimum · ${data!.debtTotals.weightedApr}% weighted APR`,
+            )}
+          >
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">DEBT PAYOFF</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(-data!.debtTotals.balance)}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{fmtPos(data!.debtTotals.minPayment)}/mo minimum · {data!.debtTotals.weightedApr}% weighted APR</Text>
           </View>
 
           <Card style={{ marginBottom: 16 }}>
@@ -31,7 +42,7 @@ export default function DebtScreen() {
           </Card>
 
           <Card>
-            {data.debts.map((d) => (
+            {data!.debts.map((d) => (
               <View key={d.id} testID={`debt-row-${d.id}`} style={styles.row}>
                 <Avatar label={d.name} size={36} />
                 <View style={{ flex: 1, minWidth: 0 }}>
@@ -43,8 +54,7 @@ export default function DebtScreen() {
               </View>
             ))}
           </Card>
-        </>
-      )}
+      </QueryScreenBody>
     </PushScreen>
   );
 }

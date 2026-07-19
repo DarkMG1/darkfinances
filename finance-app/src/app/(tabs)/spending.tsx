@@ -9,9 +9,10 @@ import { Avatar, Card, CardTitle, EmptyState, ErrorState, PendingPill } from '@/
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
 import { addDateOnlyDays, monthEnd, useFinanceToday } from '@/lib/date-only';
-import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { QueryRefetchBanners } from '@/components/query-display';
 import { buildBudgetMetrics, buildNonSpendingMetrics } from '@/lib/spending-metrics.js';
-import { shouldShowFatalError, shouldShowInitialLoad, shouldShowRefetchError } from '@/lib/query-display-state.js';
+import { buildSpendingRefetchQueries } from '@/lib/screen-query-display-config.js';
+import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
 import { useSelectedMonth } from '@/lib/selectedMonth';
 import { trendPeriodComplete } from '@/components/charts';
 import { categoryColors, colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
@@ -94,7 +95,10 @@ export default function Spending() {
   const spendingLoading = shouldShowInitialLoad(spendingQuery.isLoading, spendingPayload);
   const spendingError = spendingQuery.error;
   const spendingFatal = shouldShowFatalError(spendingQuery.isError, spendingPayload);
-  const spendingRefetchError = shouldShowRefetchError(spendingQuery.isError, spendingPayload);
+  const spendingRefetchQueries = useMemo(
+    () => buildSpendingRefetchQueries({ spendingQuery, trends, budgets, reimb, insights, tags }),
+    [budgets, insights, reimb, spendingQuery, tags, trends],
+  );
   const spendingComplete = cur?.completeness?.complete !== false;
   const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
   const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
@@ -182,6 +186,7 @@ export default function Spending() {
     trends.refetch(),
     budgets.refetch(),
     reimb.refetch(),
+    tags.refetch(),
   ]);
   const categoryParams = (name: string, bucket?: string) => ({
     name,
@@ -207,9 +212,7 @@ export default function Spending() {
         <DualMonthBars months={chartMonths} selected={month} onSelect={setMonth} />
       </View>
 
-      {spendingRefetchError ? (
-        <QueryRefetchBanner onRetry={refresh} testID="spending-refetch-banner" />
-      ) : null}
+      <QueryRefetchBanners queries={spendingRefetchQueries} testID="spending-refetch-banner" />
 
       {spendingLoading ? (
         <SkeletonList rows={8} />

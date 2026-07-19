@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
@@ -15,6 +15,9 @@ import { useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { useFinanceToday } from '@/lib/date-only';
 import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { QueryRefetchBanners, refetchEnabledQueries } from '@/components/query-display';
+import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
+import { buildHomeRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -65,12 +68,11 @@ export default function Overview() {
     });
   };
 
-  const onRefresh = () => Promise.all([
-    today.refetch(),
-    trends.refetch(),
-    recurring.refetch(),
-    manual.refetch(),
-  ]);
+  const homeRefetchQueries = useMemo(
+    () => buildHomeRefetchQueries({ today, trends, manual, recurring, widgets }),
+    [manual, recurring, today, trends, widgets],
+  );
+  const onRefresh = () => refetchEnabledQueries(homeRefetchQueries);
 
   const accts = (today.data?.accounts ?? []).filter((a) => !a.hidden);
   const hasInclusion = accountsHaveInclusion(accts);
@@ -133,17 +135,20 @@ export default function Overview() {
   const safeToSpend = today.data?.liquidity.safeToSpend;
   const goalAdvisory = today.data?.liquidity.goalAdvisory;
   const incompleteReasons = today.data?.liquidity.safeToSpend.incompleteReasons ?? [];
+  const todayInitialLoad = shouldShowInitialLoad(today.isLoading, today.data);
+  const todayFatal = shouldShowFatalError(today.isError, today.data);
 
   return (
     <Screen title="dark" accent="finances" onRefresh={onRefresh} testID="home-screen">
       <MutationLiveRegion message={bankSyncAction.announce} />
       <MutationFormBanner outcome={bankSyncAction.outcome} onRetry={bankSyncAction.retry} onRefetch={onRefresh} />
-      {!today.data && today.isLoading ? (
+      {todayInitialLoad ? (
         <SkeletonList hero rows={4} />
-      ) : !today.data && today.isError ? (
+      ) : todayFatal ? (
         <ErrorState error={today.error?.error} onRetry={onRefresh} />
       ) : (
         <>
+          <QueryRefetchBanners queries={homeRefetchQueries} testID="home-refetch-banner" />
           <View testID="today-health-strip" style={styles.healthStrip}>
             <View style={[styles.healthDot, { backgroundColor: ping.isError ? colors.red : today.data?.health.ready ? colors.green : colors.yellow }]} />
             <Text style={styles.healthText}>

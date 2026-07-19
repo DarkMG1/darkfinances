@@ -29,6 +29,7 @@ import {
 import { queryClient } from '@/lib/query-client';
 import { purgeLegacyReceiptCopies } from '@/lib/receipts';
 import { Loading } from '@/components/ui';
+import { GlobalFinanceBanners } from '@/components/global-finance-banners';
 import { NotificationReconciliationOwner } from '@/components/notification-reconciliation-owner';
 import { NotificationRouter } from '@/components/notification-router';
 import { ReconnectRefreshOwner } from '@/components/reconnect-refresh-owner';
@@ -351,6 +352,11 @@ function RootNav() {
   return (
     <View style={styles.appShell}>
       {content}
+      {configured ? (
+        <GlobalFinanceBanners
+          privacyGateActive={!!faceId && (privacyVisible || !unlocked || lockFading)}
+        />
+      ) : null}
       {configured ? <NotificationReconciliationOwner /> : null}
       {configured ? <ReconnectRefreshOwner /> : null}
       {configured ? <NotificationRouter /> : null}

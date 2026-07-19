@@ -21,9 +21,10 @@ function staleMessage(code: string): string {
   }
 }
 
-export function ReconnectStaleBanner() {
+export function ReconnectStaleBanner({ top }: { top?: number }) {
   const insets = useSafeAreaInsets();
   const { scope } = useServerConfig();
+  const bannerTop = top ?? insets.top + 44;
   const store = getReconnectStaleWarningStore();
   const warning = useSyncExternalStore(
     (listener) => store.subscribe(listener),
@@ -46,7 +47,7 @@ export function ReconnectStaleBanner() {
       }}
       style={({ pressed }) => [
         styles.banner,
-        { top: insets.top + 44 },
+        { top: bannerTop },
         pressed && { opacity: 0.85 },
       ]}
     >
@@ -58,7 +59,6 @@ export function ReconnectStaleBanner() {
 const styles = StyleSheet.create({
   banner: {
     position: 'absolute',
-    zIndex: 9999,
     alignSelf: 'center',
     maxWidth: '92%',
     borderRadius: 999,

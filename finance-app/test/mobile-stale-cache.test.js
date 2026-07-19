@@ -184,8 +184,7 @@ test('metric a11y helpers consolidate label/value/sub without duplication', () =
 test('spending tab uses fatal error gate only when payload missing', () => {
   const source = fs.readFileSync(path.join(root, 'src/app/(tabs)/spending.tsx'), 'utf8');
   assert.match(source, /shouldShowFatalError/);
-  assert.match(source, /shouldShowRefetchError/);
-  assert.match(source, /QueryRefetchBanner/);
+  assert.match(source, /QueryRefetchBanners queries=\{spendingRefetchQueries\}/);
   assert.doesNotMatch(source, /spendingIsError\s*\?\s*\(/);
 });
 
@@ -194,7 +193,7 @@ test('activity tab preserves cached list and settled search results', () => {
   assert.match(source, /isSearchQuerySettled/);
   assert.match(source, /shouldShowFatalError/);
   assert.match(source, /searchSettled/);
-  assert.match(source, /QueryRefetchBanner/);
+  assert.match(source, /QueryRefetchBanners queries=\{activityRefetchQueries\}/);
   assert.match(source, /categorizeAction\.isLocked/);
   assert.match(source, /openEventGroup/);
   assert.match(source, /if \(categorizeAction\.isLocked\) return;/);

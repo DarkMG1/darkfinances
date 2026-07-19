@@ -4,6 +4,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useReconciliation, useSetReconcileItem, useSetReconcileMonth } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
+import { QueryScreenBody } from '@/components/query-display';
 import { Card, EmptyState, ErrorState } from '@/components/ui';
 import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { SkeletonList } from '@/components/skeleton';
@@ -106,10 +107,14 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
         <SkeletonList rows={8} />
       ) : recon.isError && !data ? (
         <ErrorState error={recon.error?.error} onRetry={recon.refetch} />
-      ) : total === 0 ? (
-        <EmptyState icon="checkmark.circle">No transactions to reconcile in {monthLabel(month)}</EmptyState>
       ) : (
-        <>
+        <QueryScreenBody
+          query={recon}
+          loading={null}
+          empty={<EmptyState icon="checkmark.circle">No transactions to reconcile in {monthLabel(month)}</EmptyState>}
+          hasContent={total > 0}
+          refetchBannerTestID="reconcile-refetch-banner"
+        >
           <Card style={styles.head}>
             {monthClosed ? (
               <View style={styles.closedRow}>
@@ -151,7 +156,7 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
               )}
             </Pressable>
           ) : null}
-        </>
+        </QueryScreenBody>
       )}
     </PushScreen>
   );

@@ -3,7 +3,8 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useBills } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
-import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Avatar, Card, EmptyState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { Bill } from '@/api/generated/types';
 import { useFinanceToday } from '@/lib/date-only';
@@ -131,26 +132,25 @@ export default function Bills() {
 
   return (
     <PushScreen testID="bills-screen" onRefresh={bills.refetch}>
-      {bills.isLoading ? (
-        <SkeletonList hero rows={5} />
-      ) : bills.isError && !data ? (
-        <ErrorState error={bills.error?.error} onRetry={bills.refetch} />
-      ) : !data || data.count === 0 ? (
-        <EmptyState icon="calendar">No upcoming bills detected</EmptyState>
-      ) : (
-        <>
+      <QueryScreenBody
+        query={bills}
+        loading={<SkeletonList hero rows={5} />}
+        empty={<EmptyState icon="calendar">No upcoming bills detected</EmptyState>}
+        hasContent={!!data && data.count > 0}
+        refetchBannerTestID="bills-refetch-banner"
+      >
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
-              `Unpaid next ${data.horizonDays} days`,
-              fmtMoney(data.total),
-              `${data.unpaidCount} of ${data.count} bills unpaid`,
+              `Unpaid next ${data!.horizonDays} days`,
+              fmtMoney(data!.total),
+              `${data!.unpaidCount} of ${data!.count} bills unpaid`,
             )}
           >
-            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">UNPAID · NEXT {data.horizonDays} DAYS</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(data.total)}</Text>
-            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{data.unpaidCount} of {data.count} bills unpaid</Text>
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">UNPAID · NEXT {data!.horizonDays} DAYS</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(data!.total)}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{data!.unpaidCount} of {data!.count} bills unpaid</Text>
           </View>
 
           {months.map((m) => {
@@ -190,8 +190,7 @@ export default function Bills() {
                 </View>
               ))
             : null}
-        </>
-      )}
+      </QueryScreenBody>
     </PushScreen>
   );
 }
