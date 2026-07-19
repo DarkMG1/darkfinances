@@ -1,6 +1,5 @@
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import {
-  AccessibilityInfo,
   Modal,
   Platform,
   Pressable,
@@ -11,27 +10,14 @@ import {
   View,
   ViewStyle,
 } from 'react-native';
+import { MutationStatusLiveRegion } from '@/components/accessibility-live-region';
 import type { MappedMutationOutcome } from '@/lib/mutation-form-errors';
 import { colors } from '@/theme/colors';
 
 const ERROR_TEXT = '#ff6b6b';
 
 export function MutationLiveRegion({ message }: { message: string }) {
-  const prev = useRef('');
-  useEffect(() => {
-    if (!message || message === prev.current) return;
-    prev.current = message;
-    AccessibilityInfo.announceForAccessibility(message);
-  }, [message]);
-  return (
-    <View
-      accessibilityLiveRegion="polite"
-      importantForAccessibility="yes"
-      accessible
-      accessibilityLabel={message || undefined}
-      style={styles.srOnly}
-    />
-  );
+  return <MutationStatusLiveRegion message={message} />;
 }
 
 export function MutationFormBanner({
@@ -204,13 +190,6 @@ export function MutationSheet({
 }
 
 const styles = StyleSheet.create({
-  srOnly: {
-    position: 'absolute',
-    width: 1,
-    height: 1,
-    opacity: 0,
-    overflow: 'hidden',
-  },
   banner: {
     borderRadius: 10,
     padding: 12,

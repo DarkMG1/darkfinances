@@ -1,6 +1,10 @@
 import React, { useEffect, useRef } from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  AccessibilityAnnouncementEffect,
+  visibleStatusLiveRegionProps,
+} from '@/components/accessibility-live-region';
 import { usePing } from '@/api/hooks/finance.hooks';
 import { applyPingAvailabilityTransition } from '@/lib/finance-status-ping-recovery';
 import {
@@ -31,26 +35,30 @@ export function FinanceStatusBanner({ top }: { top?: number }) {
   if (!ping.isError && !syncError) return null;
 
   const text = ping.isError
-    ? 'Server unavailable · tap to retry'
-    : 'Finance sync needs attention · tap to retry';
+    ? 'Server unavailable \u00b7 tap to retry'
+    : 'Finance sync needs attention \u00b7 tap to retry';
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={text}
-      onPress={() => {
-        ping.refetch();
-        if (getReconnectConnectivityPhase() === 'online') {
-          requestReconnectServerRecovery();
-        }
-      }}
-      style={({ pressed }) => [
-        styles.banner,
-        { top: bannerTop },
-        pressed && { opacity: 0.8 },
-      ]}
-    >
-      <Text style={styles.text}>{text}</Text>
-    </Pressable>
+    <>
+      <AccessibilityAnnouncementEffect message={text} />
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={text}
+        {...visibleStatusLiveRegionProps()}
+        onPress={() => {
+          ping.refetch();
+          if (getReconnectConnectivityPhase() === 'online') {
+            requestReconnectServerRecovery();
+          }
+        }}
+        style={({ pressed }) => [
+          styles.banner,
+          { top: bannerTop },
+          pressed && { opacity: 0.8 },
+        ]}
+      >
+        <Text accessibilityElementsHidden importantForAccessibility="no" style={styles.text}>{text}</Text>
+      </Pressable>
+    </>
   );
 }
 

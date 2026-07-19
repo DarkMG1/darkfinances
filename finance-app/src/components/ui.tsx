@@ -2,6 +2,10 @@ import React from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextStyle, View, ViewStyle } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
+import {
+  AccessibilityAnnouncementEffect,
+  visibleStatusLiveRegionProps,
+} from '@/components/accessibility-live-region';
 import { colors } from '@/theme/colors';
 import { categoryIcon, monogramColor } from '@/theme/categoryIcons';
 
@@ -241,10 +245,18 @@ export function EmptyState({ children, icon }: { children: React.ReactNode; icon
 }
 
 export function ErrorState({ error, onRetry, retryLabel = 'Tap to retry' }: { error?: string; onRetry?: () => void; retryLabel?: string }) {
+  const message = error || 'Something went wrong';
   return (
     <Animated.View entering={FadeIn.duration(260)} style={styles.center}>
-      <SymbolView name="exclamationmark.triangle" tintColor={colors.red} size={32} resizeMode="scaleAspectFit" style={{ opacity: 0.85 }} />
-      <Text style={[styles.muted, { color: colors.red, textAlign: 'center' }]}>{error || 'Something went wrong'}</Text>
+      <AccessibilityAnnouncementEffect message={message} />
+      <SymbolView name="exclamationmark.triangle" tintColor={colors.red} size={32} resizeMode="scaleAspectFit" style={{ opacity: 0.85 }} accessibilityElementsHidden importantForAccessibility="no" />
+      <Text
+        accessibilityRole="text"
+        {...visibleStatusLiveRegionProps()}
+        style={[styles.muted, { color: colors.red, textAlign: 'center' }]}
+      >
+        {message}
+      </Text>
       {onRetry ? (
         <Pressable accessibilityRole="button" accessibilityLabel={retryLabel} onPress={onRetry} style={({ pressed }) => [styles.retry, pressed && { opacity: 0.6 }]}>
           <Text style={[styles.muted, { color: colors.accentLight, marginTop: 4, fontWeight: '600' }]}>{retryLabel}</Text>
