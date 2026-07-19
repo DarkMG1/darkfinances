@@ -251,18 +251,57 @@ test('trusted proxy hop honors forwarded client IP for login and demo rate limit
   assert.notEqual(demoOtherClient.status, 429);
 });
 
+function nonLoopbackOrigin() {
+  return {
+    PUBLIC_ORIGIN: 'https://finances.example.test',
+    WEBAUTHN_ORIGIN: 'https://finances.example.test',
+    WEBAUTHN_RP_ID: 'finances.example.test',
+  };
+}
+
 test('absent FINANCE_TRUST_PROXY_HOPS starts on non-loopback with a proxy-bucket warning', async (t) => {
   const port = await unusedPort();
   const base = `http://127.0.0.1:${port}`;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-default-prod-'));
-  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, {
-    PUBLIC_ORIGIN: 'https://finances.example.test',
-    WEBAUTHN_ORIGIN: 'https://finances.example.test',
-    WEBAUTHN_RP_ID: 'finances.example.test',
-  }));
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, nonLoopbackOrigin()));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   await waitForServer(base, child, logs);
   assert.match(logs.value, /\[trust-proxy\].*defaulting to 0.*FINANCE_TRUST_PROXY_HOPS=1/s);
+});
+
+test('explicit FINANCE_TRUST_PROXY_HOPS=0 warns on non-loopback startup', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-explicit-zero-'));
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, {
+    ...nonLoopbackOrigin(),
+    FINANCE_TRUST_PROXY_HOPS: '0',
+  }));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+  assert.match(logs.value, /\[trust-proxy\].*FINANCE_TRUST_PROXY_HOPS=0.*FINANCE_TRUST_PROXY_HOPS=1/s);
+});
+
+test('non-loopback default hops share one bucket and resist X-Forwarded-For rotation', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-shared-bucket-'));
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, nonLoopbackOrigin()));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+
+  for (let i = 0; i < 10; i += 1) {
+    const result = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+      'X-Forwarded-For': `203.0.113.${i + 1}`,
+    });
+    assert.equal(result.response.status, 403, `attempt ${i + 1} should count toward the shared bucket`);
+  }
+
+  const limited = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+    'X-Forwarded-For': '203.0.113.99',
+  });
+  assert.equal(limited.response.status, 429);
+  assert.equal(limited.body.error, 'Too many requests');
 });
 
 test('malformed trust proxy config fails startup', async (t) => {

@@ -92,7 +92,8 @@ described in [`../finance-dashboard/README.md`](../finance-dashboard/README.md).
 
 ### Trust-proxy migration checklist (pre-restart)
 
-When upgrading to dashboard code that enforces explicit trust-proxy configuration, edit
+When upgrading to dashboard code with fail-safe trust-proxy defaults (absent
+`FINANCE_TRUST_PROXY_HOPS` defaults to `0`), edit
 `~/.openclaw/finance-dashboard.env` **before** restarting `finance-dashboard.service`:
 
 1. If the dashboard sits behind the normal trusted HTTPS reverse proxy on loopback, add

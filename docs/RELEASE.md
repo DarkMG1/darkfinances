@@ -147,8 +147,8 @@ Restore remains `CONFIRM=1` gated and refuses to run while `finance-dashboard.se
 
 ## Dashboard trust-proxy migration
 
-Upgrades that include explicit trust-proxy configuration remain available without a configuration
-outage: when `FINANCE_TRUST_PROXY_HOPS` is absent the dashboard defaults fail-safe to `0`, ignores
+Upgrades that add fail-safe trust-proxy defaults remain available without a configuration outage:
+when `FINANCE_TRUST_PROXY_HOPS` is absent the dashboard defaults to `0`, ignores
 client-supplied `X-Forwarded-For` for rate limiting, and logs a `[trust-proxy]` startup warning on
 non-loopback deployments.
 
