@@ -31,5 +31,6 @@ print(p)
 PY
 )"
 rm -rf "$SAFE_DATA_DIR"
-mkdir -p -m 700 "$SAFE_DATA_DIR"
+mkdir -p "$SAFE_DATA_DIR"
+chmod 700 "$SAFE_DATA_DIR"
 node "$DIR/$SCRIPT" 2>&1 | awk '!/Breadcrumb|Syncing|Got messages|Loading|message:|^}/'

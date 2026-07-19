@@ -69,7 +69,7 @@ See [`actual-tools/README.md`](./actual-tools/README.md) for setup and operation
 
 ## Requirements
 
-- Node.js 24+ and npm 10+ (`engines` enforced by `npm run check:toolchain`).
+- Node.js 24+ and the npm version declared in `packageManager` (`npm run check:toolchain`; CI runs `node scripts/ensure-declared-npm.js` before installs).
 - npm with workspace support (`finance-dashboard`, `finance-app`, `actual-tools`).
 - A self-hosted Actual Budget server aligned with the dashboard's `@actual-app/api` version.
 - Optional Splitwise API credentials and Venmo statement exports.

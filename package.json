@@ -5,7 +5,7 @@
   "packageManager": "npm@10.9.2",
   "engines": {
     "node": ">=24",
-    "npm": ">=10"
+    "npm": ">=10.9.2"
   },
   "workspaces": [
     "finance-dashboard",
@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "check": "npm run check:toolchain && npm run check:alignment && npm run check:contract && npm run check:fixtures && npm run check:dashboard && npm run check:app && npm run check:tools && npm run check:ops && npm run check:parity && npm run check:release",
-    "check:toolchain": "node -e \"const v=process.versions.node.split('.').map(Number); if (v[0]<24) { console.error('Node 24+ required, got '+process.versions.node); process.exit(1); }\"",
+    "check:toolchain": "node scripts/check-toolchain.js",
     "check:alignment": "node scripts/check-version-alignment.js",
     "check:contract": "node scripts/check-contract-freshness.js",
     "update:contract-stamp": "node scripts/update-contract-fingerprint.js",
@@ -25,7 +25,7 @@
     "check:ops": "for file in ops/bin/*.sh; do bash -n \"$file\"; done && node --test ops/test/*.test.js",
     "check:parity": "node --test test/finance-date-parity.test.js",
     "check:release": "node scripts/release-manifest.js --stdout >/dev/null",
-    "check:shell": "command -v shellcheck >/dev/null 2>&1 && shellcheck -x ops/bin/*.sh actual-tools/run.sh actual-tools/splitwise-run.sh || echo 'shellcheck: skipped (not installed)'",
+    "check:shell": "bash scripts/check-shell.sh",
     "check:systemd": "for unit in ops/systemd/*.service ops/systemd/*.timer; do systemd-analyze --user verify \"$unit\"; done",
     "check:shutdown-stress": "FINANCE_QUERY_SHUTDOWN_STRESS=1 ALLOW_RAW_ACTUAL_API=1 node --test finance-dashboard/test/query-scaling-shutdown-stress.test.js",
     "check:compose": "docker compose -f ops/actual-compose.yml config >/dev/null",
