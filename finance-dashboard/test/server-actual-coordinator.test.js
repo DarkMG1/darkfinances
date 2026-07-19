@@ -804,6 +804,9 @@ function sidecarMockShell(extraMock) {
       getHealth: () => ({ ready: true }),
       syncNow: async () => ({ ok: true }),
       assertTransactionMutationAvailable: () => {},
+      assertReimbursementLinkJournalAdmission: () => {},
+      assertRepaymentConfirmationJournalAdmission: () => {},
+      assertBulkOperationJournalAdmission: () => {},
       ${extraMock}
     };
     require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };

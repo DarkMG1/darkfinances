@@ -11,6 +11,8 @@ Actual transaction ids, signs, and capacities; client snapshots are hints only.
   from trusted totals/completeness.
 - Updates require `expectedVersion` when changing an existing explicit allocation.
 - Link/unlink mutations run through `reimbursement-link-sagas.json` for crash convergence and
+journal terminal proof keyed by the same idempotency key. The saga store uses authoritative
+runtime-state semantics with bounded terminal pruning (100 records).
   operation-journal idempotency.
 
 ## Reads

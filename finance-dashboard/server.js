@@ -35,6 +35,7 @@ const {
 const { OperationJournal } = require('./lib/operation-journal');
 const { executeJournaledOperation } = require('./lib/operation-executor');
 const { reconcileOperationJournalFromProof } = require('./lib/operation-reconciliation');
+const { composeTerminalProofResolver } = require('./lib/operation-journal-proof');
 const {
   MUTATION_ROUTES,
   getMutationRoute,
@@ -1271,8 +1272,19 @@ const reimbLinks = (req) => data.getReimbLinks({ id: req.query.id });
 async function addLink(req, operation) {
   const link = parse(schemas.reimbLink, req.body, 'reimbursement link');
   data.assertTransactionMutationAvailable({ ids: [link.inflow?.id, link.expense?.id] });
+  if (operation?.key && operation?.journalBinding?.fingerprint) {
+    data.assertReimbursementLinkJournalAdmission({
+      operationKey: operation.key,
+      journalBinding: operation.journalBinding,
+      action: 'link',
+    });
+  }
   return runActualProjectionMutation(
-    () => applyLocal(operation, () => data.addReimbLink({ ...link, operationIdentity: operation?.key })),
+    () => applyLocal(operation, () => data.addReimbLink({
+      ...link,
+      operationIdentity: operation?.key,
+      journalBinding: operation?.journalBinding,
+    })),
   );
 }
 async function confirmRepaymentH(req, operation) {
@@ -1280,6 +1292,12 @@ async function confirmRepaymentH(req, operation) {
   const from = req.query.from;
   const to = req.query.to;
   data.assertTransactionMutationAvailable({ ids: [id.startsWith('sg_') ? id.slice(3) : null] });
+  if (operation?.key && operation?.journalBinding?.fingerprint) {
+    data.assertRepaymentConfirmationJournalAdmission({
+      operationKey: operation.key,
+      journalBinding: operation.journalBinding,
+    });
+  }
   const admission = await data.validateRepaymentConfirmationAdmission({ id, from, to });
   const r = await applyLocal(operation, () =>
     data.confirmRepayment({
@@ -1287,6 +1305,7 @@ async function confirmRepaymentH(req, operation) {
       from,
       to,
       operationIdentity: operation?.key,
+      journalBinding: operation?.journalBinding,
       admission,
     }));
   await syncAfterLocal(operation); // persist the inflow's new category to the Actual server
@@ -1317,10 +1336,18 @@ async function delLink(req, operation) {
       : {}),
   }, 'reimbursement unlink');
   data.assertTransactionMutationAvailable({ ids: [parsed.inflowId, parsed.expenseId] });
+  if (operation?.key && operation?.journalBinding?.fingerprint) {
+    data.assertReimbursementLinkJournalAdmission({
+      operationKey: operation.key,
+      journalBinding: operation.journalBinding,
+      action: 'unlink',
+    });
+  }
   return runActualProjectionMutation(
     () => applyLocal(operation, () => data.deleteReimbLink({
       ...parsed,
       operationIdentity: operation?.key,
+      journalBinding: operation?.journalBinding,
     })),
   );
 }
@@ -1465,31 +1492,15 @@ function operationJournalError(error, phase) {
   console.error(`[operation-journal:${phase}]`, error);
 }
 
-function bulkJournalProofFromOperation(operation) {
-  if (!operation?.fingerprint || operation.fingerprintVersion == null) return null;
-  return {
-    fingerprint: operation.fingerprint,
-    fingerprintVersion: operation.fingerprintVersion,
-    method: operation.method || null,
-    route: operation.route || null,
-  };
-}
-
-async function bulkTerminalProofResolver({ key, operation }) {
-  const journalOperation = bulkJournalProofFromOperation(operation);
-  if (!journalOperation) return null;
-  const result = data.proveBulkOperationJournalCompletion(key, journalOperation);
-  if (!result?.ok || result.status !== 'completed' || result.needsSync) return null;
-  return {
-    result,
-    fingerprint: journalOperation.fingerprint,
-    fingerprintVersion: journalOperation.fingerprintVersion,
-  };
-}
+const terminalProofResolver = composeTerminalProofResolver([
+  (key, journalOperation) => data.proveBulkOperationJournalCompletion(key, journalOperation),
+  (key, journalOperation) => data.proveReimbursementLinkJournalCompletion(key, journalOperation),
+  (key, journalOperation) => data.proveRepaymentConfirmationJournalCompletion(key, journalOperation),
+]);
 
 async function readOperationStatus(req, res, key) {
   return withOperationStatusAdmission(req, res, mutationQueue, () => reconcileOperationJournalFromProof(operationJournal, key, {
-    proofResolver: bulkTerminalProofResolver,
+    proofResolver: terminalProofResolver,
     onJournalError: operationJournalError,
   }), { admission: requestAdmission });
 }
@@ -1509,7 +1520,7 @@ async function executeVersionedMutation(req, fn, mutationRoute) {
     handler: (operation) => fn(req, operation),
     requiresCheckpoint: mutationRoute.requiresCheckpoint,
     onJournalError: operationJournalError,
-    terminalProofResolver: bulkTerminalProofResolver,
+    terminalProofResolver,
   });
 }
 const env = (fn, mutationRoute = null) => async (req, res) => {

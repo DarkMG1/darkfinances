@@ -2066,7 +2066,15 @@ async function getReimbLinks({ id } = {}) {
   });
 }
 async function addReimbLink(request = {}) {
-  const { inflow, expense, person, operationIdentity, faultInjector, admission: preAdmission } = request;
+  const {
+    inflow,
+    expense,
+    person,
+    operationIdentity,
+    journalBinding,
+    faultInjector,
+    admission: preAdmission,
+  } = request;
   if (!inflow?.id || !expense?.id) throw new Error('inflow and expense ids required');
   assertTransactionMutationAvailable({ ids: [inflow.id, expense.id] });
   return withApi(async (api) => {
@@ -2074,11 +2082,19 @@ async function addReimbLink(request = {}) {
     const prepared = preAdmission || await prepareReimbLinkAdmission({ ...request, person }, api);
     return getReimbursementLinkSagaManager().link(api, prepared, {
       operationIdentity,
+      journalBinding,
       faultInjector,
     });
   }, { mode: 'write' });
 }
-async function deleteReimbLink({ inflowId, expenseId, expectedVersion, operationIdentity, faultInjector } = {}) {
+async function deleteReimbLink({
+  inflowId,
+  expenseId,
+  expectedVersion,
+  operationIdentity,
+  journalBinding,
+  faultInjector,
+} = {}) {
   if (!inflowId || !expenseId) throw new Error('inflowId and expenseId required');
   assertTransactionMutationAvailable({ ids: [inflowId, expenseId] });
   return withApi(async (api) => {
@@ -2093,6 +2109,7 @@ async function deleteReimbLink({ inflowId, expenseId, expectedVersion, operation
       accountId: existing?.inflow?.accountId || null,
       expectedVersion,
       operationIdentity,
+      journalBinding,
       faultInjector,
     });
   }, { mode: 'write' });
@@ -2470,6 +2487,7 @@ async function confirmRepayment({
   from,
   to,
   operationIdentity,
+  journalBinding,
   faultInjector,
   admission,
 } = {}) {
@@ -2477,6 +2495,7 @@ async function confirmRepayment({
   return withApi(async (api) => getRepaymentConfirmationSagaManager().confirm(api, {
     ...prepared,
     operationIdentity,
+    journalBinding,
     faultInjector,
   }), { mode: 'write' });
 }
@@ -4893,9 +4912,29 @@ function proveBulkOperationJournalCompletion(operationKey, journalOperation) {
   return getBulkOperationSagaManager().proveTerminalJournalCompletion(operationKey, journalOperation);
 }
 
+function proveReimbursementLinkJournalCompletion(operationKey, journalOperation) {
+  if (!operationKey || !journalOperation) return null;
+  return getReimbursementLinkSagaManager().proveTerminalJournalCompletion(operationKey, journalOperation);
+}
+
+function proveRepaymentConfirmationJournalCompletion(operationKey, journalOperation) {
+  if (!operationKey || !journalOperation) return null;
+  return getRepaymentConfirmationSagaManager().proveTerminalJournalCompletion(operationKey, journalOperation);
+}
+
 function assertBulkOperationJournalAdmission({ operationKey, journalBinding, kind }) {
   if (!operationKey || !journalBinding?.fingerprint) return;
   getBulkOperationSagaManager().assertJournalAdmission({ operationKey, journalBinding, kind });
+}
+
+function assertReimbursementLinkJournalAdmission({ operationKey, journalBinding, action }) {
+  if (!operationKey || !journalBinding?.fingerprint) return;
+  getReimbursementLinkSagaManager().assertJournalAdmission({ operationKey, journalBinding, action });
+}
+
+function assertRepaymentConfirmationJournalAdmission({ operationKey, journalBinding }) {
+  if (!operationKey || !journalBinding?.fingerprint) return;
+  getRepaymentConfirmationSagaManager().assertJournalAdmission({ operationKey, journalBinding });
 }
 
 async function recoverTransactionSagas(actualApi, options) {
@@ -6648,7 +6687,11 @@ module.exports = {
   cleanupPhantoms,
   getBulkOperationResult,
   proveBulkOperationJournalCompletion,
+  proveReimbursementLinkJournalCompletion,
+  proveRepaymentConfirmationJournalCompletion,
   assertBulkOperationJournalAdmission,
+  assertReimbursementLinkJournalAdmission,
+  assertRepaymentConfirmationJournalAdmission,
   getPhantomLog,
   addReceipt,
   getReceipts,
