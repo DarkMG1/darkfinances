@@ -6,9 +6,10 @@ import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { useReview, useSetReviewDisposition } from '@/api/hooks/finance.hooks';
 import { ReviewTask, ReviewTransactionRef } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
+import { QueryScreenBody } from '@/components/query-display';
 import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { useMutationAction } from '@/hooks/useMutationAction';
-import { Avatar, Card, CardTitle, EmptyState, ErrorState, Pill } from '@/components/ui';
+import { Avatar, Card, CardTitle, EmptyState, Pill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
@@ -148,20 +149,17 @@ export default function ReviewScreen() {
     );
   };
 
-  const loading = review.isLoading && !review.data;
-
   return (
     <PushScreen testID="review-screen" onRefresh={review.refetch}>
       <MutationLiveRegion message={acknowledgeAction.announce} />
       <MutationFormBanner outcome={acknowledgeAction.outcome} onRetry={acknowledgeAction.retry} onRefetch={() => review.refetch()} />
-      {loading ? (
-        <SkeletonList rows={6} />
-      ) : review.isError && !review.data ? (
-        <ErrorState error={review.error?.error} onRetry={review.refetch} />
-      ) : tasks.length === 0 ? (
-        <EmptyState icon="checkmark.circle">Nothing needs review right now</EmptyState>
-      ) : (
-        <>
+      <QueryScreenBody
+        query={review}
+        loading={<SkeletonList rows={6} />}
+        empty={<EmptyState icon="checkmark.circle">Nothing needs review right now</EmptyState>}
+        hasContent={tasks.length > 0}
+        refetchBannerTestID="review-refetch-banner"
+      >
           <Card
             style={styles.hero}
             accessible
@@ -187,8 +185,7 @@ export default function ReviewScreen() {
           ) : null}
 
           <Text style={styles.hint}>Swipe a row to open it or acknowledge it across devices. Editing the underlying transaction resolves matching tasks after refresh.</Text>
-        </>
-      )}
+      </QueryScreenBody>
     </PushScreen>
   );
 }

@@ -2,7 +2,9 @@ import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { useInvestments } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
-import { Avatar, Card, CardTitle, EmptyState, ErrorState, Loading } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Avatar, Card, CardTitle, EmptyState, Loading } from '@/components/ui';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { colors, fmtMoney, fmtPos, fmtSignedMoney } from '@/theme/colors';
 
 export default function InvestmentsScreen() {
@@ -10,26 +12,35 @@ export default function InvestmentsScreen() {
   const data = investments.data;
   const allocation = Object.entries(data?.allocation.byAssetClass ?? {}).sort((a, b) => b[1] - a[1]);
 
+  const hasHoldings = !!data && data.holdings.length > 0;
+
   return (
     <PushScreen testID="investments-screen" onRefresh={investments.refetch}>
-      {investments.isLoading && !data ? (
-        <Loading />
-      ) : investments.isError && !data ? (
-        <ErrorState error={investments.error?.error} onRetry={investments.refetch} />
-      ) : !data || data.holdings.length === 0 ? (
-        <EmptyState icon="chart.pie">No investment holdings configured</EmptyState>
-      ) : (
-        <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>INVESTMENTS</Text>
-            <Text style={styles.heroValue}>{fmtMoney(data.totals.value)}</Text>
-            <Text style={[styles.heroSub, { color: data.totals.gainLoss >= 0 ? colors.green : colors.red }]}>{fmtSignedMoney(data.totals.gainLoss)} tracked gain/loss</Text>
+      <QueryScreenBody
+        query={investments}
+        loading={<Loading />}
+        empty={<EmptyState icon="chart.pie">No investment holdings configured</EmptyState>}
+        hasContent={hasHoldings}
+        refetchBannerTestID="investments-refetch-banner"
+      >
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              'Investments',
+              fmtMoney(data!.totals.value),
+              `${fmtSignedMoney(data!.totals.gainLoss)} tracked gain or loss`,
+            )}
+          >
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">INVESTMENTS</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(data!.totals.value)}</Text>
+            <Text style={[styles.heroSub, { color: data!.totals.gainLoss >= 0 ? colors.green : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">{fmtSignedMoney(data!.totals.gainLoss)} tracked gain/loss</Text>
           </View>
 
           <Card style={{ marginBottom: 16 }}>
             <CardTitle>Allocation</CardTitle>
             {allocation.map(([name, value]) => {
-              const pct = data.totals.value > 0 ? (value / data.totals.value) * 100 : 0;
+              const pct = data!.totals.value > 0 ? (value / data!.totals.value) * 100 : 0;
               return (
                 <View key={name} testID={`investments-allocation-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`} style={styles.allocRow}>
                   <Text style={styles.allocName}>{name}</Text>
@@ -42,7 +53,7 @@ export default function InvestmentsScreen() {
 
           <Card>
             <CardTitle>Holdings</CardTitle>
-            {data.holdings.map((h) => (
+            {data!.holdings.map((h) => (
               <View key={`${h.account}-${h.symbol}-${h.name}`} testID={`investments-holding-${h.symbol || h.name}`} style={styles.row}>
                 <Avatar label={h.symbol || h.name} size={36} />
                 <View style={{ flex: 1, minWidth: 0 }}>
@@ -56,8 +67,7 @@ export default function InvestmentsScreen() {
               </View>
             ))}
           </Card>
-        </>
-      )}
+      </QueryScreenBody>
     </PushScreen>
   );
 }

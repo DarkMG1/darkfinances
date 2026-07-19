@@ -3,7 +3,7 @@ import { Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, Scro
 import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCategories, useSplitTransaction, useTransaction, useUnsplitTransaction } from '@/api/hooks/finance.hooks';
-import { Avatar } from '@/components/ui';
+import { Avatar, ErrorState } from '@/components/ui';
 import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
@@ -325,7 +325,11 @@ export default function SplitEditor() {
           onRefetch={() => detail.refetch()}
         />
         {!d ? (
-          <Text style={styles.loading}>{detail.isError ? 'Could not load transaction.' : 'Loading…'}</Text>
+          detail.isError ? (
+            <ErrorState error={detail.error?.error} onRetry={() => detail.refetch()} retryLabel="Try again" />
+          ) : (
+            <Text style={styles.loading}>Loading…</Text>
+          )
         ) : (
           <>
             <View style={styles.hero}>

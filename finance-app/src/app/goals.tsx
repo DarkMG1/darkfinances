@@ -11,7 +11,8 @@ import {
   MutationSubmitButton,
 } from '@/components/mutation-form';
 import { PushScreen } from '@/components/screen';
-import { Card, EmptyState, ErrorState } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Card, EmptyState } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { ProgressBar } from '@/components/charts';
 import { useMutationAction } from '@/hooks/useMutationAction';
@@ -154,16 +155,18 @@ export default function Goals() {
   return (
     <PushScreen testID="goals-screen" onRefresh={goals.refetch}>
       <MutationLiveRegion message={banner.announce} />
-      {goals.isLoading ? (
-        <SkeletonList rows={4} />
-      ) : goals.isError && !goals.data ? (
-        <ErrorState error={goals.error?.error} onRetry={goals.refetch} />
-      ) : (
-        <>
-          {(goals.data ?? []).length === 0 ? (
-            <EmptyState icon="target">No goals yet — add one below</EmptyState>
-          ) : (
-            (goals.data ?? []).map((g) => (
+      <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => goals.refetch()} />
+      <QueryScreenBody
+        query={goals}
+        loading={<SkeletonList rows={4} />}
+        empty={null}
+        hasContent
+        refetchBannerTestID="goals-refetch-banner"
+      >
+        {(goals.data ?? []).length === 0 ? (
+          <EmptyState icon="target">No goals yet — add one below</EmptyState>
+        ) : (
+          (goals.data ?? []).map((g) => (
               <Pressable testID={`goals-row-${g.id}`} key={g.id} onPress={() => openEdit(g)} disabled={inputLocked} style={({ pressed }) => [pressed && !inputLocked && { opacity: 0.7 }, inputLocked && { opacity: 0.5 }]}>
                 <Card style={{ marginBottom: 12 }}>
                   <View style={styles.head}>
@@ -187,8 +190,7 @@ export default function Goals() {
           <Pressable testID="goals-add-button" style={({ pressed }) => [styles.addBtn, pressed && !inputLocked && { opacity: 0.7 }, inputLocked && { opacity: 0.5 }]} onPress={openNew} disabled={inputLocked}>
             <Text style={styles.addText}>+ Add goal</Text>
           </Pressable>
-        </>
-      )}
+      </QueryScreenBody>
 
       <MutationSheet
         visible={!!editing}

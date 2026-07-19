@@ -11,6 +11,7 @@ import {
   MutationSubmitButton,
 } from '@/components/mutation-form';
 import { PushScreen } from '@/components/screen';
+import { QueryRefetchBanners, resolveQueryDisplay } from '@/components/query-display';
 import { Card, CardTitle, EmptyState, ErrorState } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { GroupedBars, MonthNavigator, ProgressBar, trendPeriodComplete } from '@/components/charts';
@@ -71,6 +72,7 @@ export default function Budgets() {
 
   const b = budgets.data;
   const hasTargets = (b?.totalTarget ?? b?.totalBudgeted ?? 0) > 0;
+  const budgetsDisplay = resolveQueryDisplay(budgets);
 
   const fields = useMemo(() => ({
     targetText,
@@ -136,10 +138,11 @@ export default function Budgets() {
       ) : null}
 
       <CardTitle>By Category{b ? ` · ${b.month}` : ''}</CardTitle>
-      {budgets.isLoading ? (
+      <QueryRefetchBanners queries={[budgets, trends]} testID="budgets-refetch-banner" />
+      {budgetsDisplay.initialLoad ? (
         <SkeletonList rows={6} />
-      ) : budgets.isError && !b ? (
-        <ErrorState error={budgets.error?.error} onRetry={onRefresh} />
+      ) : budgetsDisplay.fatalError ? (
+        <ErrorState error={budgetsDisplay.errorMessage} onRetry={onRefresh} />
       ) : !b || !b.groups.length ? (
         <EmptyState icon="chart.pie">No budget data</EmptyState>
       ) : (

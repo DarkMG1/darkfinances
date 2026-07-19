@@ -24,10 +24,24 @@ function isSearchQuerySettled(inputQuery, activeQuery) {
   return activeQuery === trimmed;
 }
 
+function queryErrorMessage(error) {
+  if (error == null || typeof error !== 'object') return undefined;
+  return /** @type {{ error?: string }} */ (error).error;
+}
+
+/**
+ * @param {Array<{ isError?: boolean; data?: unknown; refetch?: () => unknown }>} queries
+ */
+function collectRefetchErrorQueries(queries) {
+  return queries.filter((query) => shouldShowRefetchError(!!query.isError, query.data));
+}
+
 module.exports = {
   hasQueryData,
   shouldShowInitialLoad,
   shouldShowFatalError,
   shouldShowRefetchError,
   isSearchQuerySettled,
+  queryErrorMessage,
+  collectRefetchErrorQueries,
 };

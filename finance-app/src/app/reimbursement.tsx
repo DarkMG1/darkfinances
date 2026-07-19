@@ -3,6 +3,8 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-nati
 import { useRouter } from 'expo-router';
 import { useConfirmRepayment, useDismissRepayment, useReimbursement, useRepaymentSuggestions } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { resolveQueryDisplay } from '@/components/query-display';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, Pill } from '@/components/ui';
 import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { SkeletonList } from '@/components/skeleton';
@@ -151,6 +153,7 @@ export default function Reimbursement() {
     });
   };
   const loading = reimb.isLoading && !reimb.data;
+  const reimbDisplay = resolveQueryDisplay(reimb);
 
   const personStatus = (p: OwesPerson): Status => (p.owed <= 0.5 ? 'settled' : 'outstanding');
   const subLabel = (p: OwesPerson): string => {
@@ -170,10 +173,13 @@ export default function Reimbursement() {
       />
       {loading ? (
         <SkeletonList rows={5} />
-      ) : reimb.isError && !reimb.data ? (
-        <ErrorState error={reimb.error?.error} onRetry={reimb.refetch} />
+      ) : reimbDisplay.fatalError ? (
+        <ErrorState error={reimbDisplay.errorMessage} onRetry={reimb.refetch} />
       ) : (
         <>
+          {reimbDisplay.refetchError ? (
+            <QueryRefetchBanner onRetry={reimb.refetch} testID="reimbursement-refetch-banner" />
+          ) : null}
           <Card style={{ marginBottom: 16 }}>
             <Text style={styles.total}>
               {grandTotal != null ? fmtPos(grandTotal) : grandLowerBound != null ? `${totalOwedMetric?.lowerBoundLabel || 'at least'} ${fmtPos(grandLowerBound)}` : '—'}

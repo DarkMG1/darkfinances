@@ -9,8 +9,10 @@ import {
   MutationLiveRegion,
   MutationSubmitButton,
 } from '@/components/mutation-form';
-import { Card, CardTitle } from '@/components/ui';
+import { Card, CardTitle, ErrorState } from '@/components/ui';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
 import { SkeletonList } from '@/components/skeleton';
+import { resolveQueryDisplay } from '@/components/query-display';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
 import { useMutationForm } from '@/hooks/useMutationForm';
@@ -93,6 +95,7 @@ export default function Rules() {
 
   const list = rules.data?.rules ?? [];
   const catalog = rules.data?.catalog ?? [];
+  const rulesDisplay = resolveQueryDisplay(rules);
 
   return (
     <ScrollView testID="rules-screen" style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
@@ -103,6 +106,10 @@ export default function Rules() {
         onRetry={banner.retry}
         onRefetch={() => rules.refetch()}
       />
+
+      {rulesDisplay.refetchError ? (
+        <QueryRefetchBanner onRetry={() => rules.refetch()} testID="rules-refetch-banner" />
+      ) : null}
 
       <Text style={styles.intro}>Automatically categorize transactions whose payee contains your text. Rules apply to matching uncategorized transactions now and to new ones as they sync.</Text>
 
@@ -147,8 +154,10 @@ export default function Rules() {
         ) : null}
       </View>
 
-      {rules.isLoading && !rules.data ? (
+      {rulesDisplay.initialLoad ? (
         <SkeletonList rows={4} />
+      ) : rulesDisplay.fatalError ? (
+        <ErrorState error={rulesDisplay.errorMessage} onRetry={() => rules.refetch()} />
       ) : list.length ? (
         <Card style={styles.list}>
           {list.map((r, i) => (

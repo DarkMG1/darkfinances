@@ -8,6 +8,8 @@ import { useTransactions } from '@/api/hooks/finance.hooks';
 import { DemoRibbon } from '@/components/screen';
 import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { Avatar, EmptyState, ErrorState, PendingPill } from '@/components/ui';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { resolveQueryDisplay } from '@/components/query-display';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
 import {
@@ -129,7 +131,7 @@ export default function CategoryDetail() {
   }, [allTxns.data, chartAnchorMonth, isAllSpending, isIncome, isUncat]);
   const displayName = isAllSpending ? 'Spending' : isIncome ? 'Earnings' : name;
   const icon = categoryIcon(displayName);
-  const loading = allTxns.isLoading && !allTxns.data;
+  const txDisplay = resolveQueryDisplay(allTxns);
   const refresh = () => allTxns.refetch();
 
   return (
@@ -163,12 +165,17 @@ export default function CategoryDetail() {
         contentContainerStyle={{ paddingBottom: insets.bottom + 86 }}
         refreshControl={<GestureRefreshControl onRefresh={refresh} />}
       >
-        {loading ? (
+        {txDisplay.initialLoad ? (
           <View style={{ padding: 18 }}><SkeletonList hero rows={7} /></View>
-        ) : allTxns.isError && !allTxns.data ? (
-          <View style={{ padding: 18 }}><ErrorState error={allTxns.error?.error} onRetry={refresh} /></View>
+        ) : txDisplay.fatalError ? (
+          <View style={{ padding: 18 }}><ErrorState error={txDisplay.errorMessage} onRetry={refresh} /></View>
         ) : (
           <>
+            {txDisplay.refetchError ? (
+              <View style={{ paddingHorizontal: 18, paddingTop: 12 }}>
+                <QueryRefetchBanner onRetry={refresh} testID="category-refetch-banner" />
+              </View>
+            ) : null}
             <View style={styles.chartPanel}>
               <Text style={styles.chartTitle}>{label}</Text>
               <MiniCategoryBars

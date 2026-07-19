@@ -15,6 +15,8 @@ import { useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { useFinanceToday } from '@/lib/date-only';
 import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { shouldShowFatalError, shouldShowInitialLoad, shouldShowRefetchError } from '@/lib/query-display-state.js';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -133,17 +135,23 @@ export default function Overview() {
   const safeToSpend = today.data?.liquidity.safeToSpend;
   const goalAdvisory = today.data?.liquidity.goalAdvisory;
   const incompleteReasons = today.data?.liquidity.safeToSpend.incompleteReasons ?? [];
+  const todayInitialLoad = shouldShowInitialLoad(today.isLoading, today.data);
+  const todayFatal = shouldShowFatalError(today.isError, today.data);
+  const todayRefetchError = shouldShowRefetchError(today.isError, today.data);
 
   return (
     <Screen title="dark" accent="finances" onRefresh={onRefresh} testID="home-screen">
       <MutationLiveRegion message={bankSyncAction.announce} />
       <MutationFormBanner outcome={bankSyncAction.outcome} onRetry={bankSyncAction.retry} onRefetch={onRefresh} />
-      {!today.data && today.isLoading ? (
+      {todayInitialLoad ? (
         <SkeletonList hero rows={4} />
-      ) : !today.data && today.isError ? (
+      ) : todayFatal ? (
         <ErrorState error={today.error?.error} onRetry={onRefresh} />
       ) : (
         <>
+          {todayRefetchError ? (
+            <QueryRefetchBanner onRetry={onRefresh} testID="home-refetch-banner" />
+          ) : null}
           <View testID="today-health-strip" style={styles.healthStrip}>
             <View style={[styles.healthDot, { backgroundColor: ping.isError ? colors.red : today.data?.health.ready ? colors.green : colors.yellow }]} />
             <Text style={styles.healthText}>
