@@ -147,14 +147,17 @@ instead.
 
 ### Restore dry-run vs live all-writer re-verification
 
-- **Dry-run / preview** (`restore-dashboard-runtime.sh` without `CONFIRM=1`, or
-  `RESTORE_DRY_RUN=1`): validates archive trust chain, generation bindings, preflight space, and
-  read-only writer discovery. A passing dry-run does **not** prove current live quiescence; active
-  writers produce warnings (hard failure only when `RESTORE_DRY_RUN_STRICT=1`).
-- **Live restore** (`CONFIRM=1` with a PR-18 quiescence admission token): immediately before the
-  first destination mutation, re-verifies **all** inventoried writers with live state checks
-  (`assertAllWritersQuiescentForAdmission`). Stale tokens or writers that become active after backup
-  fail closed.
+- **Standalone preview** (`restore-dashboard-runtime.sh` without `CONFIRM=1`, default
+  `--dry-run`): validates archive trust chain, generation bindings, preflight space, and read-only
+  writer discovery. A passing preview does **not** prove current live quiescence; active writers
+  produce warnings (hard failure only when `RESTORE_DRY_RUN_STRICT=1`).
+- **Coordinated restore preview** (`restore-coordinated.sh --dry-run` or `RESTORE_DRY_RUN=1`): same
+  read-only writer boundary checks inside the coordinated session; does not stop services or mutate
+  destination bytes. `RESTORE_DRY_RUN` applies only to coordinated restore, not the standalone helper.
+- **Live restore** — standalone: `CONFIRM=1` with a PR-18 quiescence admission token; coordinated:
+  live session without `--dry-run`/`RESTORE_DRY_RUN`. Both paths re-verify **all** inventoried writers
+  with live state checks (`assertAllWritersQuiescentForAdmission`) immediately before the first
+  destination mutation. Stale tokens or post-token writer activity fail closed.
 
 Restore remains `CONFIRM=1` gated. The restore helper does not stop or start services; live swap
 requires writers to already be quiescent or a coordinated restore session that stops them first.

@@ -366,7 +366,9 @@ install -m 700 ops/bin/restore-dashboard-runtime.sh \
 ```
 
 Preview first (PR-16 archive trust chain, generation-binding validation, preflight space, and
-read-only writer discovery — **not** live all-writer quiescence proof):
+read-only writer discovery — **not** live all-writer quiescence proof). Default invocation is
+dry-run (`--dry-run`); live swap requires `CONFIRM=1`. `RESTORE_DRY_RUN=1` applies only to
+`restore-coordinated.sh`, not this standalone helper.
 
 ```bash
 RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
@@ -422,13 +424,19 @@ read abort during `SIGTERM`). Full bounded stress is opt-in or scheduled so rout
 # Deterministic gate (runs via npm run check / check:dashboard):
 npm --prefix finance-dashboard test -- --test-name-pattern 'graceful shutdown during in-flight read'
 
-# Bounded scheduled/manual stress (100 serial + 100 parallel by default):
-FINANCE_QUERY_SHUTDOWN_STRESS=1 npm --prefix finance-dashboard test \
-  -- --test-name-pattern 'graceful shutdown in-flight read stress'
+# Bounded scheduled/manual stress (dedicated file only; 100 serial + 100 parallel by default):
+npm run check:shutdown-stress
+
+# Reduced local/CI profile example:
+FINANCE_QUERY_SHUTDOWN_STRESS_SERIAL=5 FINANCE_QUERY_SHUTDOWN_STRESS_PARALLEL=5 \
+  FINANCE_QUERY_SHUTDOWN_STRESS_WORKERS=2 npm run check:shutdown-stress
 ```
 
-Tune stress volume with `FINANCE_QUERY_SHUTDOWN_STRESS_SERIAL`, `_PARALLEL`, and `_WORKERS`. The
-scheduled GitHub workflow runs a reduced bounded profile nightly.
+`check:shutdown-stress` sets `FINANCE_QUERY_SHUTDOWN_STRESS=1` and `ALLOW_RAW_ACTUAL_API=1`, then
+runs `node --test finance-dashboard/test/query-scaling-shutdown-stress.test.js` (Node flags precede
+the file path; it does not invoke the full dashboard `npm test` harness). Tune volume with
+`FINANCE_QUERY_SHUTDOWN_STRESS_SERIAL`, `_PARALLEL`, and `_WORKERS`. The scheduled GitHub workflow
+runs a reduced bounded profile nightly via the same script.
 
 ## Log rotation
 
