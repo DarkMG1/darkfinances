@@ -1704,6 +1704,9 @@ v1.get('/ping', env(async () => {
     requestAdmission: requestAdmission.getHealth(),
     queuedMutations: mutationQueue.size,
     release: releaseIdentity(),
+    ...(process.env.TEST_SERVER_INSTANCE_ID
+      ? { testInstanceId: process.env.TEST_SERVER_INSTANCE_ID }
+      : {}),
   };
 }));
 v1.get('/reconnect-freshness', env(async (req) => {
@@ -1870,11 +1873,17 @@ async function periodicSync() {
   }
 }
 
-const PORT = parseInt(process.env.PORT, 10) || 5007;
+const configuredPort = Number.parseInt(process.env.PORT ?? '', 10);
+const PORT = Number.isInteger(configuredPort) ? configuredPort : 5007;
 const DEMO_ONLY = process.env.DEMO_ONLY === '1';
 let periodicSyncTimer;
 const httpServer = app.listen(PORT, '127.0.0.1', () => {
-  console.log(`Finance dashboard running on http://127.0.0.1:${PORT}`);
+  const boundPort = httpServer.address().port;
+  console.log(`Finance dashboard running on http://127.0.0.1:${boundPort}`);
+  const testInstanceId = process.env.TEST_SERVER_INSTANCE_ID;
+  if (testInstanceId) {
+    console.log(`FINANCE_TEST_SERVER_READY ${boundPort} ${testInstanceId}`);
+  }
   if (DEMO_ONLY) {
     console.log('Demo-only mode enabled; skipping Actual startup sync');
     setInterval(() => {}, 60 * 60 * 1000);
