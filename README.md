@@ -78,7 +78,20 @@ See [`actual-tools/README.md`](./actual-tools/README.md) for setup and operation
 
 ## Quick start
 
-Install workspace dependencies:
+Install workspace dependencies. When your global npm differs from the repo's declared
+`packageManager` version (for example npm 11 on Node 26), bootstrap the pinned npm before
+installing or running verification locally:
+
+```bash
+node scripts/ensure-declared-npm.js
+npm install
+```
+
+`npm run check:toolchain` rejects npm drift from `packageManager`; CI runs the same bootstrap
+step before every `npm ci`. This is a local development convenience, not part of production
+deployment.
+
+If npm already matches, `ensure-declared-npm` is a no-op:
 
 ```bash
 npm install
@@ -122,9 +135,10 @@ The package READMEs describe optional integrations separately.
 
 ## Verification
 
-Run the complete repository suite:
+Run the complete repository suite (after matching the declared npm when needed):
 
 ```bash
+node scripts/ensure-declared-npm.js
 npm run check
 ```
 

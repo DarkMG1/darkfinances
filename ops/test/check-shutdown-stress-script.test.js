@@ -60,7 +60,7 @@ test('shutdown stress docs and workflow invoke npm run check:shutdown-stress', (
   assert.match(opsReadme, /npm run check:shutdown-stress/);
   assert.match(opsReadme, /node --test finance-dashboard\/test\/query-scaling-shutdown-stress\.test\.js/);
   assert.match(queryScalingDoc, /\[`\.\.\/\.\.\/ops\/README\.md`\]\(\.\.\/\.\.\/ops\/README\.md#graceful-shutdown-verification\)/);
-  assert.match(workflow, /npm run check:shutdown-stress/);
+  assert.match(workflow, /node scripts\/ensure-declared-npm\.js[\s\S]*npm ci[\s\S]*npm run check:shutdown-stress/);
   assert.doesNotMatch(workflow, /test-name-pattern/);
 });
 
