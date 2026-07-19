@@ -12,6 +12,30 @@ import { colors, fmtDate, fmtMoney, fmtPos, fmtSignedMoney } from '@/theme/color
 const WINDOWS = [30, 60, 90] as const;
 const kindColor = (k: ForecastEvent['kind']) => k === 'income' || k === 'reimbursement' ? colors.green : k === 'bill' ? colors.red : colors.yellow;
 
+function projectionIncomplete(data: NonNullable<ReturnType<typeof useForecast>['data']>) {
+  return data.assumptions?.projectionContainment?.complete === false;
+}
+
+function endingBalanceDisplay(data: NonNullable<ReturnType<typeof useForecast>['data']>) {
+  if (data.endingBalance == null || !Number.isFinite(data.endingBalance)) {
+    return { label: 'Ending', value: 'Unavailable', valueColor: colors.muted, sub: undefined as string | undefined };
+  }
+  if (projectionIncomplete(data)) {
+    return {
+      label: 'Ending',
+      value: fmtMoney(data.endingBalance),
+      valueColor: data.endingBalance >= 0 ? colors.green : colors.red,
+      sub: 'Partial projection',
+    };
+  }
+  return {
+    label: 'Ending',
+    value: fmtMoney(data.endingBalance),
+    valueColor: data.endingBalance >= 0 ? colors.green : colors.red,
+    sub: undefined as string | undefined,
+  };
+}
+
 export default function ForecastScreen() {
   const { width } = useWindowDimensions();
   const [days, setDays] = useState<(typeof WINDOWS)[number]>(90);
@@ -19,6 +43,7 @@ export default function ForecastScreen() {
   const data = forecast.data;
   const values = data?.points.map((p) => p.balance) ?? [];
   const events = data?.events.slice(0, 20) ?? [];
+  const ending = data ? endingBalanceDisplay(data) : null;
 
   return (
     <PushScreen testID="forecast-screen" onRefresh={forecast.refetch}>
@@ -39,15 +64,26 @@ export default function ForecastScreen() {
           </View>
 
           <View style={styles.statsRow}>
-            <StatCard testID="forecast-ending" label="Ending" value={fmtMoney(data.endingBalance)} valueColor={data.endingBalance >= 0 ? colors.green : colors.red} />
+            <StatCard
+              testID="forecast-ending"
+              label={ending?.label ?? 'Ending'}
+              value={ending?.value ?? 'Unavailable'}
+              valueColor={ending?.valueColor ?? colors.muted}
+              sub={ending?.sub}
+              subColor={colors.yellow}
+            />
             <StatCard testID="forecast-lowest" label="Lowest" value={fmtMoney(data.lowest.balance)} valueColor={data.lowest.balance >= 0 ? colors.text : colors.red} sub={fmtDate(data.lowest.date)} />
             <StatCard testID="forecast-net" label="Net" value={fmtSignedMoney(data.totals.inflow - data.totals.outflow)} valueColor={data.totals.inflow >= data.totals.outflow ? colors.green : colors.red} />
           </View>
 
           {data.warnings.length ? (
-            <Card style={styles.warning}>
+            <Card testID="forecast-warnings" style={styles.warning}>
               <SymbolView name="exclamationmark.triangle.fill" tintColor={colors.red} size={20} resizeMode="scaleAspectFit" />
-              <Text style={styles.warningText}>{data.warnings[0]}</Text>
+              <View style={styles.warningList}>
+                {data.warnings.map((warning, index) => (
+                  <Text key={`${index}-${warning}`} style={styles.warningText}>{warning}</Text>
+                ))}
+              </View>
             </Card>
           ) : null}
 
@@ -55,6 +91,9 @@ export default function ForecastScreen() {
             <CardTitle>Illustrative Cash Plan</CardTitle>
             <LineChart width={width - 64} values={values} color={data.lowest.balance < 0 ? colors.red : colors.accentLight} />
             <Text style={styles.hint}>Starts at {fmtPos(data.startBalance)} estimated cash and models inferred income, inferred bills, and planned budget spending. It is not a prediction.</Text>
+            {projectionIncomplete(data) ? (
+              <Text style={styles.hint}>Projection containment is incomplete; balances may omit budget, goal, or scheduled cash commitments.</Text>
+            ) : null}
             {data.possibleReimbursement ? (
               <Text style={styles.hint}>A possible {fmtPos(data.possibleReimbursement.amount)} reimbursement is excluded from every balance shown.</Text>
             ) : null}
@@ -86,8 +125,9 @@ const styles = StyleSheet.create({
   rangeText: { color: colors.muted, fontSize: 12, fontWeight: '800' },
   rangeTextActive: { color: '#fff' },
   statsRow: { flexDirection: 'row', gap: 10 },
-  warning: { marginTop: 12, flexDirection: 'row', alignItems: 'center', gap: 10, borderColor: colors.red + '55', borderWidth: 1 },
-  warningText: { color: colors.red, fontSize: 13, fontWeight: '700', flex: 1 },
+  warning: { marginTop: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderColor: colors.red + '55', borderWidth: 1 },
+  warningList: { flex: 1, gap: 6 },
+  warningText: { color: colors.red, fontSize: 13, fontWeight: '700' },
   hint: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 4 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 9, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   dot: { width: 9, height: 9, borderRadius: 5 },

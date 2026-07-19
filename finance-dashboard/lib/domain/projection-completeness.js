@@ -1,6 +1,6 @@
 'use strict';
 
-const { leafCountsAsRealSpend, PROVENANCE } = require('./classification');
+const { PROVENANCE } = require('./classification');
 const { fromCents, sumCents, toCents } = require('./money');
 
 const PROJECTION_INCOMPLETE_REASON = 'transfer_identity_unresolved';
@@ -70,10 +70,10 @@ function spendSummaryFromClassifiedLeaves(classifiedLeaves) {
   };
 }
 
-function merchantTrendsFromClassifiedLeaves(classifiedLeaves, { limit = 12 } = {}) {
+function merchantTrendAggregateFromClassifiedLeaves(classifiedLeaves) {
   const merchants = new Map();
   for (const leaf of classifiedLeaves || []) {
-    if (!leafCountsAsRealSpend(leaf) || !Number.isSafeInteger(leaf.amount) || leaf.amount >= 0) continue;
+    if (!leaf.countsAsSpending || !Number.isSafeInteger(leaf.amount)) continue;
     const payee = leaf.payee || '(no payee)';
     const cur = merchants.get(payee) || { payee, spendCents: 0, count: 0 };
     cur.spendCents = sumCents([cur.spendCents, -leaf.amount]);
@@ -82,19 +82,29 @@ function merchantTrendsFromClassifiedLeaves(classifiedLeaves, { limit = 12 } = {
   }
   return [...merchants.values()]
     .map((row) => ({ payee: row.payee, spend: fromCents(row.spendCents), count: row.count }))
-    .sort((a, b) => b.spend - a.spend || a.payee.localeCompare(b.payee))
-    .slice(0, limit);
+    .sort((a, b) => Math.abs(b.spend) - Math.abs(a.spend) || b.spend - a.spend || a.payee.localeCompare(b.payee));
 }
 
-function merchantTrendsConservationOk(merchantTrends, totalSpend) {
+function merchantTrendsFromClassifiedLeaves(classifiedLeaves, { limit = 12 } = {}) {
+  const all = merchantTrendAggregateFromClassifiedLeaves(classifiedLeaves);
+  return {
+    all,
+    top: all.slice(0, limit),
+    truncated: all.length > limit,
+    aggregateSpendCents: sumCents(all.map((row) => toCents(row.spend))),
+  };
+}
+
+function merchantTrendsConservationOk(aggregateSpendCents, totalSpend) {
   if (totalSpend == null || !Number.isFinite(totalSpend)) return false;
-  const trendCents = sumCents((merchantTrends || []).map((row) => toCents(row.spend)));
-  return trendCents === toCents(totalSpend);
+  if (!Number.isSafeInteger(aggregateSpendCents)) return false;
+  return aggregateSpendCents === toCents(totalSpend);
 }
 
 module.exports = {
   PROJECTION_INCOMPLETE_REASON,
   mergeProjectionCompleteness,
+  merchantTrendAggregateFromClassifiedLeaves,
   merchantTrendsConservationOk,
   merchantTrendsFromClassifiedLeaves,
   projectionCompletenessFromLeaves,

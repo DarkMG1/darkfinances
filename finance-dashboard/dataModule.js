@@ -803,20 +803,47 @@ function classifyLeavesInDateRange(rows, catInfo, start, end, transferIndex) {
   return out;
 }
 
-function enrichClassifiedLeavesWithPayee(rows, catInfo, start, end, transferIndex, payeeMap) {
-  const out = [];
-  for (const row of rows) {
+function enrichCurrentLeavesWithPayee(leaves, rows, payeeMap) {
+  const payeeByTxnId = new Map();
+  for (const row of rows || []) {
     const t = row.transaction;
-    if (t.date < start || t.date > end) continue;
-    const payee = displayPayeeName(payeeMap[t.payee] || t.imported_payee, t.notes, '(no payee)');
-    for (const leaf of classifyTransactionLeaves(t, catInfo, {
-      accountId: row.accountId,
-      transferIndex,
-    })) {
-      out.push({ ...leaf, payee });
-    }
+    payeeByTxnId.set(
+      String(t.id),
+      displayPayeeName(payeeMap[t.payee] || t.imported_payee, t.notes, '(no payee)'),
+    );
   }
-  return out;
+  return (leaves || []).map((leaf) => ({
+    ...leaf,
+    payee: payeeByTxnId.get(String(leaf.parentId || leaf.id)) || '(no payee)',
+  }));
+}
+
+function mergeStsSpendingCompletenessFromRows({
+  rows,
+  catInfo,
+  transferIndex,
+  curStart,
+  curEnd,
+  prevStart,
+  prevEnd,
+  spendingProjection,
+}) {
+  const currentLeaves = classifyLeavesInDateRange(rows, catInfo, curStart, curEnd, transferIndex);
+  const previousLeaves = classifyLeavesInDateRange(rows, catInfo, prevStart, prevEnd, transferIndex);
+  let spendingCompleteness = mergeProjectionCompleteness([
+    summarize(currentLeaves).completeness,
+    summarize(previousLeaves).completeness,
+  ]);
+  if (spendingProjection.incompleteReasons.length) {
+    spendingCompleteness = {
+      ...spendingCompleteness,
+      complete: false,
+      incompleteReasons: [
+        ...new Set([...(spendingCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+      ],
+    };
+  }
+  return spendingCompleteness;
 }
 
 async function fetchOnBudgetRows(api, start, end, { accountFilter, config } = {}) {
@@ -4352,10 +4379,24 @@ async function getForecast({ days = 90 } = {}) {
     const projectionInputs = await loadAccountProjectionInputs(api);
     const forecastProjection = await buildAccountProjection(api, ACCOUNT_METRIC.forecastCash, { inputs: projectionInputs });
     const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution, { inputs: projectionInputs });
-    const rows = await fetchOnBudgetRows(api, today, horizon, {
+    const [financeYear, financeMonth] = today.slice(0, 7).split('-').map(Number);
+    const cur = monthRange(financeYear, financeMonth - 1);
+    const prev = monthRange(financeYear, financeMonth - 2);
+    const rows = await fetchOnBudgetRows(api, prev.start, horizon, {
       accountFilter: spendingProjection.accountFilter,
     });
-    return { catInfo, rows, forecastProjection, spendingProjection };
+    const transferIndex = buildTransferIndex(rows);
+    const spendingCompleteness = mergeStsSpendingCompletenessFromRows({
+      rows,
+      catInfo,
+      transferIndex,
+      curStart: cur.start,
+      curEnd: today,
+      prevStart: prev.start,
+      prevEnd: prev.end,
+      spendingProjection,
+    });
+    return { catInfo, rows, forecastProjection, spendingProjection, spendingCompleteness, transferIndex };
   });
   const [accounts, income, recurring, budgets, reimb] = await Promise.all([
     getAccounts(),
@@ -4364,24 +4405,10 @@ async function getForecast({ days = 90 } = {}) {
     getBudgets({}),
     getReimbursement({}),
   ]);
-  const { catInfo, rows, forecastProjection, spendingProjection } = forecastBundle;
+  const { catInfo, rows, forecastProjection, spendingProjection, spendingCompleteness } = forecastBundle;
   const bills = await getBills({ days: horizonDays, recurring });
   const liquidAccounts = accounts.filter((account) => account.inclusion?.forecast);
   const operatingProjectionComplete = forecastProjection.incompleteReasons.length === 0;
-  const month = today.slice(0, 7);
-  const monthWindow = monthRange(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1);
-  const transferIndex = buildTransferIndex(rows);
-  const currentMonthLeaves = classifyLeavesInDateRange(rows, catInfo, monthWindow.start, today, transferIndex);
-  let spendingCompleteness = summarize(currentMonthLeaves).completeness;
-  if (spendingProjection.incompleteReasons.length) {
-    spendingCompleteness = {
-      ...spendingCompleteness,
-      complete: false,
-      incompleteReasons: [
-        ...new Set([...(spendingCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
-      ],
-    };
-  }
   let startBalanceCents = null;
   if (operatingProjectionComplete) {
     startBalanceCents = sumOperatingCashBalanceCents(liquidAccounts);
@@ -6628,29 +6655,12 @@ async function loadMonthlyReportSpendingBundle(api, month) {
     accountFilter: spendingProjection.accountFilter,
     includeClosed: false,
   });
-  const { current: currentLeaves } = await onBudgetLeavesPartitioned(api, {
-    scanStart: prev.start,
-    scanEnd: curEnd,
-    curStart: cur.start,
-    curEnd,
-    prevStart: prev.start,
-    prevEnd: prev.end,
-    catInfo,
-    ctx,
-    accountFilter: spendingProjection.accountFilter,
-  });
-  const rows = await fetchOnBudgetRows(api, cur.start, curEnd, {
+  const rows = await fetchOnBudgetRows(api, prev.start, curEnd, {
     accountFilter: spendingProjection.accountFilter,
   });
   const transferIndex = buildTransferIndex(rows);
-  const classifiedLeaves = enrichClassifiedLeavesWithPayee(
-    rows,
-    catInfo,
-    cur.start,
-    curEnd,
-    transferIndex,
-    ctx.payeeMap,
-  );
+  const currentLeaves = classifyLeavesInDateRange(rows, catInfo, cur.start, curEnd, transferIndex);
+  const classifiedLeaves = enrichCurrentLeavesWithPayee(currentLeaves, rows, ctx.payeeMap);
   const summary = summarize(currentLeaves);
   if (spendingProjection.incompleteReasons.length) {
     summary.completeness = {
@@ -6684,10 +6694,12 @@ function buildReportsPayload({ month, monthly, trends, insights, tags, generated
   const totalSpend = summaryComplete ? (monthly.summary?.totalSpend ?? 0) : null;
   let topMerchants = [];
   let merchantTrendsComplete = false;
+  let merchantTrendsTruncated = false;
   if (summaryComplete) {
-    topMerchants = merchantTrendsFromClassifiedLeaves(monthly.classifiedLeaves || []);
-    merchantTrendsComplete = merchantTrendsConservationOk(topMerchants, totalSpend);
-    if (!merchantTrendsComplete) topMerchants = [];
+    const merchantAggregate = merchantTrendsFromClassifiedLeaves(monthly.classifiedLeaves || []);
+    merchantTrendsComplete = merchantTrendsConservationOk(merchantAggregate.aggregateSpendCents, totalSpend);
+    topMerchants = merchantTrendsComplete ? merchantAggregate.top : [];
+    merchantTrendsTruncated = merchantTrendsComplete && merchantAggregate.truncated;
   }
   const categories = summaryComplete
     ? Object.entries(monthly.summary?.spending || {})
@@ -6728,6 +6740,7 @@ function buildReportsPayload({ month, monthly, trends, insights, tags, generated
     merchantTrends: topMerchants,
     categoryTrendsComplete: summaryComplete,
     merchantTrendsComplete,
+    merchantTrendsTruncated,
     tagSummary: tags.tags || [],
     cashFlow: trends.months || [],
   };

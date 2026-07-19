@@ -141,6 +141,8 @@ export interface Reports {
   };
   categoryTrends: { name: string; spend: number; pct: number | null }[];
   merchantTrends: { payee: string; spend: number; count: number }[];
+  /** True when merchantTrends is a top-N slice of a conserving full aggregate. */
+  merchantTrendsTruncated?: boolean;
   categoryTrendsComplete?: boolean;
   merchantTrendsComplete?: boolean;
   tagSummary: Tag[];

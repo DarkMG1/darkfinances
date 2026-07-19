@@ -283,3 +283,94 @@ test('report merchant trends aggregate split legs under parent payee', () => {
   assert.equal(report.merchantTrends[0].count, 2);
   assert.equal(report.merchantTrendsComplete, true);
 });
+
+test('report merchant trends net same-payee refunds and conserve total spend', () => {
+  const report = buildReportsPayload({
+    month: '2026-07',
+    generatedAt: '2026-07-10T00:00:00.000Z',
+    monthly: {
+      transactions: [],
+      classifiedLeaves: [
+        spendLeaf({ payee: 'Store', amountCents: -10000 }),
+        spendLeaf({ payee: 'Store', amountCents: 3000 }),
+      ],
+      summary: completeSummary({ totalSpend: 70, spending: { Shopping: 70 } }),
+    },
+    trends: { months: [] },
+    insights: { largestCharges: [], uncategorized: [] },
+    tags: { tags: [] },
+  });
+  assert.equal(report.merchantTrends.length, 1);
+  assert.equal(report.merchantTrends[0].spend, 70);
+  assert.equal(report.merchantTrends[0].count, 2);
+  assert.equal(report.merchantTrendsComplete, true);
+});
+
+test('report merchant trends net cross-payee refunds into authoritative total spend', () => {
+  const report = buildReportsPayload({
+    month: '2026-07',
+    generatedAt: '2026-07-10T00:00:00.000Z',
+    monthly: {
+      transactions: [],
+      classifiedLeaves: [
+        spendLeaf({ payee: 'Alpha', amountCents: -10000 }),
+        spendLeaf({ payee: 'Beta', amountCents: -5000 }),
+        spendLeaf({ payee: 'Beta', amountCents: 2000, reason: 'category:Groceries' }),
+      ],
+      summary: completeSummary({ totalSpend: 130, spending: { Shopping: 100, Groceries: 30 } }),
+    },
+    trends: { months: [] },
+    insights: { largestCharges: [], uncategorized: [] },
+    tags: { tags: [] },
+  });
+  assert.equal(report.merchantTrends.length, 2);
+  assert.equal(report.merchantTrends.find((row) => row.payee === 'Beta').spend, 30);
+  assert.equal(report.merchantTrendsComplete, true);
+});
+
+test('report merchant trends stay complete when top list is truncated but full aggregate conserves', () => {
+  const classifiedLeaves = Array.from({ length: 13 }, (_, index) => spendLeaf({
+    payee: `Merchant ${String(index).padStart(2, '0')}`,
+    amountCents: -(10000 + index * 100),
+  }));
+  const { sumCents } = require('../lib/domain/money');
+  const totalSpend = sumCents(classifiedLeaves.map((leaf) => -leaf.amount)) / 100;
+  const report = buildReportsPayload({
+    month: '2026-07',
+    generatedAt: '2026-07-10T00:00:00.000Z',
+    monthly: {
+      transactions: [],
+      classifiedLeaves,
+      summary: completeSummary({ totalSpend, spending: { Shopping: totalSpend } }),
+    },
+    trends: { months: [] },
+    insights: { largestCharges: [], uncategorized: [] },
+    tags: { tags: [] },
+  });
+  assert.equal(report.merchantTrends.length, 12);
+  assert.equal(report.merchantTrendsComplete, true);
+  assert.equal(report.merchantTrendsTruncated, true);
+});
+
+test('report merchant trends group empty payee under (no payee)', () => {
+  const report = buildReportsPayload({
+    month: '2026-07',
+    generatedAt: '2026-07-10T00:00:00.000Z',
+    monthly: {
+      transactions: [],
+      classifiedLeaves: [
+        spendLeaf({ payee: undefined, amountCents: -5000 }),
+        spendLeaf({ payee: undefined, amountCents: -2500 }),
+      ],
+      summary: completeSummary({ totalSpend: 75, spending: { Shopping: 75 } }),
+    },
+    trends: { months: [] },
+    insights: { largestCharges: [], uncategorized: [] },
+    tags: { tags: [] },
+  });
+  assert.equal(report.merchantTrends.length, 1);
+  assert.equal(report.merchantTrends[0].payee, '(no payee)');
+  assert.equal(report.merchantTrends[0].spend, 75);
+  assert.equal(report.merchantTrends[0].count, 2);
+  assert.equal(report.merchantTrendsComplete, true);
+});
