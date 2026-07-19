@@ -18,6 +18,7 @@ process.env.ACTUAL_DATA_DIR = path.join(dir, 'actual-cache');
 process.env.ACTUAL_SERVER_URL = 'http://actual.invalid';
 process.env.ACTUAL_PASSWORD = 'test-password';
 process.env.ACTUAL_SYNC_ID = 'test-sync-id';
+process.env.ALLOW_RAW_ACTUAL_API = '1';
 
 const data = require('../dataModule');
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));

@@ -39,6 +39,7 @@ function buildDashboardServerEnv({
   extraEnv = {},
   demoOnly = true,
   nodeEnv = 'test',
+  port = '0',
 } = {}) {
   validateExtraEnv(extraEnv);
   const root = dashboardRoot();
@@ -65,7 +66,7 @@ function buildDashboardServerEnv({
     ...(nodeOptions ? { NODE_OPTIONS: nodeOptions } : {}),
     NODE_ENV: nodeEnv,
     DEMO_ONLY: demoOnly ? '1' : '0',
-    PORT: '0',
+    PORT: String(port),
     TEST_SERVER_INSTANCE_ID: instanceId,
     FINANCE_API_TOKEN,
   };
@@ -111,6 +112,10 @@ function parseReadyLine(logs, instanceId) {
   return null;
 }
 
+function pingTestInstanceId(body) {
+  return body?.data?.testInstanceId ?? body?.testInstanceId ?? null;
+}
+
 function readinessTimeoutError(logs, instanceId, child, spawnError, timeoutMs) {
   return new Error([
     `server did not become ready within ${timeoutMs}ms`,
@@ -123,7 +128,7 @@ function readinessTimeoutError(logs, instanceId, child, spawnError, timeoutMs) {
 }
 
 async function waitForEphemeralServer(child, logs, instanceId, {
-  timeoutMs = 15_000,
+  timeoutMs = 30_000,
   spawnError = null,
 } = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -138,29 +143,16 @@ async function waitForEphemeralServer(child, logs, instanceId, {
     if (ready) {
       const base = `http://127.0.0.1:${ready.port}`;
       try {
-        const authStatus = await fetch(`${base}/auth/status`, {
-          signal: AbortSignal.timeout(2_000),
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        const response = await fetch(`${base}/api/v1/ping`, {
+          headers: { 'X-Finance-Token': FINANCE_API_TOKEN },
+          signal: AbortSignal.timeout(Math.min(10_000, remainingMs)),
         });
-        if (authStatus.status >= 600) continue;
-
-        try {
-          const response = await fetch(`${base}/api/v1/ping`, {
-            headers: { 'X-Finance-Token': FINANCE_API_TOKEN },
-            signal: AbortSignal.timeout(2_000),
-          });
-          if (response.status === 200) {
-            const body = await response.json();
-            if (body?.data?.testInstanceId === instanceId) {
-              return { base, port: ready.port };
-            }
-            continue;
-          }
-          if (response.status === 503) {
-            return { base, port: ready.port };
-          }
-        } catch (_) {}
-        // Ready marker + auth/status proves PORT=0 child ownership; ping may block on admission during startup.
-        return { base, port: ready.port };
+        const body = await response.json();
+        if (pingTestInstanceId(body) === instanceId) {
+          return { base, port: ready.port };
+        }
       } catch (_) {}
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -261,6 +253,7 @@ module.exports = {
   buildDashboardServerEnv,
   dashboardRoot,
   parseReadyLine,
+  pingTestInstanceId,
   registerEphemeralServerCleanup,
   spawnEphemeralDashboardServer,
   startEphemeralDashboardServer,

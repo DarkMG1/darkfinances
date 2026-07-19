@@ -32,6 +32,7 @@ const stateFiles = {
 };
 for (const [key, name] of Object.entries(stateFiles)) process.env[key] = path.join(dir, name);
 process.env.ACTUAL_API_PATH = path.join(__dirname, 'fixtures', 'deletion-actual.js');
+process.env.ALLOW_RAW_ACTUAL_API = '1';
 
 const fakeActual = require('./fixtures/deletion-actual');
 const data = require('../dataModule');

@@ -155,7 +155,9 @@ const RP_ID = process.env.WEBAUTHN_RP_ID || (() => {
   catch (_) { return 'localhost'; }
 })();
 let allowedOrigin = process.env.WEBAUTHN_ORIGIN || configuredPublicOrigin;
-const ORIGIN = allowedOrigin;
+function webAuthnExpectedOrigin() {
+  return allowedOrigin;
+}
 const PASSKEY_USER_NAME = process.env.PASSKEY_USER_NAME || 'owner';
 const PASSKEY_USER_DISPLAY_NAME = process.env.PASSKEY_USER_DISPLAY_NAME || PASSKEY_USER_NAME;
 const CREDS_FILE = process.env.PASSKEY_CREDENTIALS_FILE || path.join(__dirname, 'passkey-credentials.json');
@@ -367,7 +369,7 @@ app.post('/auth/register/finish', enrollmentLimiter, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: req.session.regChallenge,
-      expectedOrigin: ORIGIN,
+      expectedOrigin: webAuthnExpectedOrigin(),
       expectedRPID: RP_ID,
     });
     if (!verification.verified) return res.status(400).json({ error: 'Verification failed' });
@@ -422,7 +424,7 @@ app.post('/auth/login/finish', loginLimiter, async (req, res) => {
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: req.session.authChallenge,
-      expectedOrigin: ORIGIN,
+      expectedOrigin: webAuthnExpectedOrigin(),
       expectedRPID: RP_ID,
       credential: {
         id: cred.credentialID,
@@ -1462,6 +1464,12 @@ async function reportCsv(req, res) {
   }
 }
 
+function isTestIdentityPing(req) {
+  return exposeTestServerInstanceId() != null
+    && req.method === 'GET'
+    && req.path === '/ping';
+}
+
 // Raw responders for the legacy web API; enveloped {data}/{error} responders for v1.
 const runHandler = (req, res, fn, operation, { signal } = {}) => {
   if (operation) return fn(req, operation);
@@ -1470,6 +1478,9 @@ const runHandler = (req, res, fn, operation, { signal } = {}) => {
       isDemo,
       admission: requestAdmission,
     });
+  }
+  if (isTestIdentityPing(req)) {
+    return fn(req);
   }
   return withReadAdmission(req, res, actualCoordinator, () => fn(req), { admission: requestAdmission, signal });
 };
@@ -1695,12 +1706,15 @@ v1.get('/operations/:key', env(async (req, res) => {
 }));
 v1.get('/ping', env(async () => {
   const actual = data.getHealth();
+  const testInstanceId = exposeTestServerInstanceId();
   if (runtimeHealth.fatalErrorAt || !actual.ready) {
-    throw new AppError('Finance data is not ready', {
+    const notReady = new AppError('Finance data is not ready', {
       code: 'NOT_READY',
       status: 503,
       expose: true,
     });
+    if (testInstanceId) notReady.testInstanceId = testInstanceId;
+    throw notReady;
   }
   return {
     ok: true,
@@ -1712,9 +1726,7 @@ v1.get('/ping', env(async () => {
     requestAdmission: requestAdmission.getHealth(),
     queuedMutations: mutationQueue.size,
     release: releaseIdentity(),
-    ...(exposeTestServerInstanceId()
-      ? { testInstanceId: exposeTestServerInstanceId() }
-      : {}),
+    ...(testInstanceId ? { testInstanceId } : {}),
   };
 }));
 v1.get('/reconnect-freshness', env(async (req) => {

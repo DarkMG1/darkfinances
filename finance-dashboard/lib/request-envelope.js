@@ -45,6 +45,9 @@ function apiErrorBody(error, req) {
   } else if (error?.requiresIdempotencyKeyReuse === true) {
     body.requiresIdempotencyKeyReuse = true;
   }
+  if (typeof error?.testInstanceId === 'string' && error.testInstanceId.length > 0) {
+    body.testInstanceId = error.testInstanceId;
+  }
   return { status: classified.status, body };
 }
 

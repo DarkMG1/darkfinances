@@ -8,7 +8,6 @@ const {
   journalBindingsMatch,
   normalizeJournalBinding,
 } = require('./operation-journal-proof');
-const { readJsonFile, writeJsonFile } = require('./json-store');
 
 function runtimeStateStore() {
   return require('./runtime-state-store');

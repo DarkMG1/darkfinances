@@ -27,6 +27,7 @@ finance-dashboard/test/browser-static.test.js text eol=lf
 finance-dashboard/test/contracts.test.js text eol=lf
 finance-dashboard/test/domain-services.test.js text eol=lf
 finance-dashboard/test/operation-journal.test.js text eol=lf
+finance-dashboard/test/server-operation-journal.test.js text eol=lf
 finance-dashboard/test/reimbursement-trust.test.js text eol=lf
 finance-dashboard/test/server-money-boundaries.test.js text eol=lf
 ops/bin/backup-coordinated.sh text eol=lf

@@ -18,6 +18,7 @@ function defaultSplitwiseStateFiles(dir) {
 
 function splitwiseExtraEnvForDir(dir, extra = {}) {
   return {
+    ALLOW_RAW_ACTUAL_API: '1',
     OWES_TRUTH_PATH: path.join(dir, 'owes-truth.json'),
     SPLITWISE_MIRROR_RESOLUTIONS_PATH: path.join(dir, 'splitwise-mirror-resolutions.json'),
     TRANSACTION_DELETION_SAGAS_PATH: path.join(dir, 'transaction-deletion-sagas.json'),
