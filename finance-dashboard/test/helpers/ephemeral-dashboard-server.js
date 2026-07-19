@@ -20,6 +20,26 @@ const RESERVED_ENV_KEYS = new Set([
   'DEMO_ONLY',
 ]);
 
+const TRUST_SEMANTICS_ENV_KEYS = Object.freeze([
+  'FINANCE_TRUST_PROXY_HOPS',
+  'PUBLIC_ORIGIN',
+  'WEBAUTHN_ORIGIN',
+  'WEBAUTHN_RP_ID',
+]);
+
+function parentEnvWithoutTrustSemantics(parentEnv = process.env) {
+  const env = { ...parentEnv };
+  for (const key of TRUST_SEMANTICS_ENV_KEYS) delete env[key];
+  return env;
+}
+
+function finalizeTrustProxyHopsEnv(env, extraEnv = {}) {
+  if (!Object.prototype.hasOwnProperty.call(extraEnv, 'FINANCE_TRUST_PROXY_HOPS')) {
+    delete env.FINANCE_TRUST_PROXY_HOPS;
+  }
+  return env;
+}
+
 function dashboardRoot() {
   return path.resolve(__dirname, '..', '..');
 }
@@ -60,8 +80,8 @@ function buildDashboardServerEnv({
     WEBAUTHN_ORIGIN: 'http://127.0.0.1:0',
     WEBAUTHN_RP_ID: 'localhost',
   };
-  return {
-    ...parentEnv,
+  return finalizeTrustProxyHopsEnv({
+    ...parentEnvWithoutTrustSemantics(parentEnv),
     ...defaults,
     ...extraEnv,
     ...(nodeOptions ? { NODE_OPTIONS: nodeOptions } : {}),
@@ -70,7 +90,7 @@ function buildDashboardServerEnv({
     PORT: String(port),
     TEST_SERVER_INSTANCE_ID: instanceId,
     FINANCE_API_TOKEN,
-  };
+  }, extraEnv);
 }
 
 function attachChildLogHandlers(child, logs, state = {}) {
@@ -253,9 +273,12 @@ async function startEphemeralDashboardServer(t, options = {}) {
 module.exports = {
   FINANCE_API_TOKEN,
   RESERVED_ENV_KEYS,
+  TRUST_SEMANTICS_ENV_KEYS,
   attachChildLogHandlers,
   buildDashboardServerEnv,
   dashboardRoot,
+  finalizeTrustProxyHopsEnv,
+  parentEnvWithoutTrustSemantics,
   parseReadyLine,
   pingTestInstanceId,
   registerEphemeralServerCleanup,
