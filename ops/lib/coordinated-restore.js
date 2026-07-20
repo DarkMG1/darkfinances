@@ -29,6 +29,7 @@ const {
 const {
   captureDashboardReleaseIdentity,
   runPostRestartHealthChecks,
+  resolveActualServerDataDir,
 } = require('./coordinated-backup-health');
 const { loadWriterInventory } = require('./writer-inventory');
 const { runStagedRestore } = require('./staged-restore');
@@ -100,6 +101,7 @@ async function runCoordinatedRestore(options = {}) {
   let interrupted = false;
   const releaseManifestDigest = options.releaseManifestDigest || null;
   let boundDashboardReleaseIdentity = options.dashboardReleaseIdentityDigest || null;
+  const actualServerDataDir = resolveActualServerDataDir(env, options);
   let outstandingAdmission = null;
   let admissionConsumed = false;
   const preQuiesced = options.preQuiesced === true || preQuiescedRestoreMode(env);
@@ -306,7 +308,17 @@ async function runCoordinatedRestore(options = {}) {
       const restartResults = await restartAll(context, snapshotsById);
       if (journal) {
         journal.restartResults = restartResults;
-        if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
+        const restartFailures = restartResults.filter((entry) => entry.ok === false);
+        if (restartFailures.length > 0) {
+          const failed = restartFailures.map((entry) => entry.id).join(', ');
+          appendJournalError(journal, `restart failures: ${failed}`);
+          if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
+            journal.phase = PHASE.RECOVERY_REQUIRED;
+          }
+          primaryError = primaryError
+            ? new Error(`${primaryError.message}; restart failures: ${failed}`)
+            : new Error(`restart failures: ${failed}`);
+        } else if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
           journal.phase = PHASE.RESTART_COMPLETE;
         }
         writeRunJournal(layout.journalPath, journal);
@@ -317,6 +329,8 @@ async function runCoordinatedRestore(options = {}) {
         env,
         runners,
         expectedReleaseGeneration: boundDashboardReleaseIdentity,
+        expectedActualGeneration: options.actualDataGeneration ?? journal?.generationBindings?.actualDataGeneration ?? null,
+        actualServerDataDir,
         timeoutMs: options.healthTimeoutMs,
         pollMs: options.healthPollMs,
       });
@@ -328,14 +342,14 @@ async function runCoordinatedRestore(options = {}) {
           journal.phase = PHASE.COMPLETE;
         } else if (!health.ok) {
           appendJournalError(journal, 'post-restart health verification failed');
-          journal.phase = PHASE.RECOVERY_REQUIRED;
+          if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
+            journal.phase = PHASE.RECOVERY_REQUIRED;
+          }
+          if (!primaryError) {
+            primaryError = new Error('post-restart health verification failed');
+          }
         }
         writeRunJournal(layout.journalPath, journal);
-      }
-      if (!primaryError && !health.ok) primaryError = new Error('post-restart health verification failed');
-      const restartFailures = restartResults.filter((entry) => entry.ok === false);
-      if (restartFailures.length > 0 && !primaryError) {
-        primaryError = new Error(`restart failures: ${restartFailures.map((entry) => entry.id).join(', ')}`);
       }
     }
     if (lock) lock.release();

@@ -35,6 +35,7 @@ const {
 const {
   captureDashboardReleaseIdentity,
   runPostRestartHealthChecks,
+  resolveActualServerDataDir,
 } = require('./coordinated-backup-health');
 const { loadWriterInventory, writerInventoryDigest } = require('./writer-inventory');
 const { writeFileAtomic } = require('./restore-durable-io');
@@ -358,7 +359,7 @@ async function runCoordinatedBackup(options = {}) {
   const includeActual = options.includeActual === true || env.BACKUP_INCLUDE_ACTUAL_DATA === '1';
   const dashboardDir = path.resolve(options.dashboardDir || env.FINANCE_DASHBOARD_DIR || path.join(env.HOME || '', 'finance-dashboard'));
   const destination = path.resolve(options.destination || env.DARKFINANCES_BACKUP_DIR || path.join(env.HOME || '', 'darkfinances-backups'));
-  const actualDataDir = path.resolve(options.actualDataDir || env.ACTUAL_DATA_DIR || path.join(env.HOME || '', 'actual', 'data'));
+  const actualDataDir = resolveActualServerDataDir(env, options);
   const repoRoot = path.resolve(options.repoRoot || env.DARKFINANCES_REPO_ROOT || path.join(__dirname, '..', '..'));
   const runners = options.runners || createDefaultRunners(env, options);
   const inventory = options.inventory || loadWriterInventory();
@@ -634,7 +635,17 @@ async function runCoordinatedBackup(options = {}) {
       const restartResults = await restartAll(context, snapshotsById);
       if (journal) {
         journal.restartResults = restartResults;
-        if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
+        const restartFailures = restartResults.filter((entry) => entry.ok === false);
+        if (restartFailures.length > 0) {
+          const failed = restartFailures.map((entry) => entry.id).join(', ');
+          appendJournalError(journal, `restart failures: ${failed}`);
+          if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
+            journal.phase = PHASE.RECOVERY_REQUIRED;
+          }
+          primaryError = primaryError
+            ? new Error(`${primaryError.message}; restart failures: ${failed}`)
+            : new Error(`restart failures: ${failed}`);
+        } else if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
           journal.phase = PHASE.RESTART_COMPLETE;
         }
         try {
@@ -651,6 +662,7 @@ async function runCoordinatedBackup(options = {}) {
         runners,
         expectedActualGeneration: actualDataGeneration,
         expectedReleaseGeneration: boundReleaseGeneration,
+        actualServerDataDir: actualDataDir,
         timeoutMs: options.healthTimeoutMs || undefined,
         pollMs: options.healthPollMs || undefined,
       });
@@ -662,22 +674,18 @@ async function runCoordinatedBackup(options = {}) {
           journal.phase = PHASE.COMPLETE;
         } else if (!health.ok) {
           appendJournalError(journal, 'post-restart health verification failed');
-          if (journal.phase !== PHASE.FAILED) journal.phase = PHASE.RECOVERY_REQUIRED;
+          if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
+            journal.phase = PHASE.RECOVERY_REQUIRED;
+          }
+          if (!primaryError) {
+            primaryError = new Error('post-restart health verification failed');
+          }
         }
         try {
           writeRunJournal(layout.journalPath, journal);
         } catch {
           // best-effort
         }
-      }
-      const restartFailures = restartResults.filter((entry) => entry.ok === false);
-      if (restartFailures.length > 0) {
-        const failed = restartFailures.map((entry) => entry.id).join(', ');
-        primaryError = primaryError
-          ? new Error(`${primaryError.message}; restart failures: ${failed}`)
-          : new Error(`restart failures: ${failed}`);
-      } else if (!primaryError && !health.ok) {
-        primaryError = new Error('post-restart health verification failed');
       }
     }
     if (lock) lock.release();

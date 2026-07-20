@@ -76,6 +76,12 @@ function dashboardReleaseManifestPath(env, dashboardDir) {
   return env.RELEASE_MANIFEST_PATH || path.join(dashboardDir, 'release-manifest.json');
 }
 
+function resolveActualServerDataDir(env = process.env, options = {}) {
+  if (options.actualDataDir) return path.resolve(options.actualDataDir);
+  if (env.ACTUAL_SERVER_DATA_DIR) return path.resolve(env.ACTUAL_SERVER_DATA_DIR);
+  return path.resolve(env.HOME || '', 'actual', 'data');
+}
+
 function dashboardWriterRunning(snapshotsById) {
   const snapshot = snapshotsById?.get?.('finance-dashboard');
   if (!snapshot) return false;
@@ -232,6 +238,7 @@ async function checkActualContainerHealth(context) {
     runners = createDefaultRunners(context.env),
     env = process.env,
     expectedGeneration = null,
+    actualServerDataDir = null,
   } = context;
   if (env.BACKUP_INCLUDE_ACTUAL_DATA !== '1') {
     return { ok: true, component: 'actual-container', skipped: true };
@@ -249,7 +256,7 @@ async function checkActualContainerHealth(context) {
     };
   }
   if (expectedGeneration) {
-    const actualDataDir = env.ACTUAL_DATA_DIR || `${env.HOME || ''}/actual/data`;
+    const actualDataDir = actualServerDataDir || resolveActualServerDataDir(env);
     const { computeActualDataGeneration } = require('./writer-quiescence');
     const current = computeActualDataGeneration(actualDataDir);
     if (current !== expectedGeneration) {
@@ -275,23 +282,30 @@ async function checkSystemdUnitHealth(writer, context) {
     return { ok: false, component: writer.id, error: 'systemctl unavailable' };
   }
   const active = runners.systemctlIsActive(writer.scope, writer.unit);
-  const expected = writer.type === 'systemd-timer'
-    ? ['active', 'waiting']
-    : ['inactive', 'dead', 'failed'];
   const normalized = String(active.state || '').trim().toLowerCase();
-  if (writer.originallyEnabled && writer.type === 'systemd-timer') {
-    if (!['active', 'waiting'].includes(normalized)) {
-      return { ok: false, component: writer.id, error: `timer state=${normalized}` };
+
+  if (writer.type === 'systemd-timer') {
+    if (writer.originallyActive || writer.originallyEnabled) {
+      if (!['active', 'waiting'].includes(normalized)) {
+        return { ok: false, component: writer.id, error: `timer state=${normalized}` };
+      }
+      return { ok: true, component: writer.id, diagnostics: { state: normalized } };
+    }
+    return { ok: true, component: writer.id, skipped: true };
+  }
+
+  if (writer.type === 'systemd-service') {
+    const expected = ['inactive', 'dead', 'failed'];
+    if (writer.originallyActive && !['active', 'activating'].includes(normalized)) {
+      return { ok: false, component: writer.id, error: `service state=${normalized}` };
+    }
+    if (!writer.originallyActive && !expected.includes(normalized) && normalized !== 'inactive') {
+      return { ok: false, component: writer.id, error: `unexpected state=${normalized}` };
     }
     return { ok: true, component: writer.id, diagnostics: { state: normalized } };
   }
-  if (writer.originallyActive && !['active', 'activating'].includes(normalized)) {
-    return { ok: false, component: writer.id, error: `service state=${normalized}` };
-  }
-  if (!writer.originallyActive && !expected.includes(normalized) && normalized !== 'inactive') {
-    return { ok: false, component: writer.id, error: `unexpected state=${normalized}` };
-  }
-  return { ok: true, component: writer.id, diagnostics: { state: normalized } };
+
+  return { ok: false, component: writer.id, error: `unsupported writer type ${writer.type}` };
 }
 
 async function runPostRestartHealthChecks({
@@ -301,6 +315,7 @@ async function runPostRestartHealthChecks({
   runners = createDefaultRunners(env),
   expectedActualGeneration = null,
   expectedReleaseGeneration = null,
+  actualServerDataDir = null,
   timeoutMs = DEFAULT_HEALTH_TIMEOUT_MS,
   pollMs = DEFAULT_HEALTH_POLL_MS,
 }) {
@@ -311,6 +326,7 @@ async function runPostRestartHealthChecks({
     timeoutMs,
     pollMs,
     expectedGeneration: expectedReleaseGeneration,
+    actualServerDataDir,
   };
 
   const actual = await checkActualContainerHealth({
@@ -344,6 +360,7 @@ module.exports = {
   unwrapPingPayload,
   normalizeReleaseIdentity,
   hashDashboardReleaseIdentity,
+  resolveActualServerDataDir,
   captureDashboardReleaseIdentity,
   assertFinanceApiTokenForLivePing,
   checkDashboardHealth,
