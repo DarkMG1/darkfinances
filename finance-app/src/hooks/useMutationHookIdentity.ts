@@ -4,7 +4,6 @@ import {
   captureMutationDispatchToken,
   invalidateMutationDispatch,
   isMutationDispatchTokenCurrent,
-  resetMutationHookPendingLock,
 } from '@/lib/mutation-hook-identity';
 import { getProfileGeneration } from '@/lib/notification-reconciliation';
 import { useServerConfig } from '@/state/server';
@@ -30,33 +29,39 @@ export function useMutationHookIdentity(options: UseMutationHookIdentityOptions 
 
   /* eslint-disable react-hooks/refs -- invalidate dispatch tokens synchronously on identity transition before passive effects */
   if (prevIdentityKeyRef.current !== identityKey) {
-    bumpMutationHookEpoch(epochRef);
-    invalidateMutationDispatch(dispatchIdRef, epochRef);
+    bumpMutationHookEpoch(epochRef.current);
+    invalidateMutationDispatch(dispatchIdRef.current, epochRef.current);
     prevIdentityKeyRef.current = identityKey;
   }
   /* eslint-enable react-hooks/refs */
 
   useEffect(() => {
-    resetMutationHookPendingLock(pendingLockRef, pendingLockKind);
+    pendingLockRef.current = pendingLockKind === 'counter' ? 0 : false;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional lock reset on identity change
     setDispatchPending(false);
   }, [identityKey, pendingLockKind]);
 
   useEffect(() => () => {
-    bumpMutationHookEpoch(epochRef);
-    invalidateMutationDispatch(dispatchIdRef, epochRef);
+    bumpMutationHookEpoch(epochRef.current);
+    invalidateMutationDispatch(dispatchIdRef.current, epochRef.current);
   }, []);
 
   const captureDispatchToken = useCallback(
-    () => captureMutationDispatchToken(epochRef, dispatchIdRef, scopeDigest, profileGeneration, formId),
+    () => captureMutationDispatchToken(
+      epochRef.current,
+      dispatchIdRef.current,
+      scopeDigest,
+      profileGeneration,
+      formId,
+    ),
     [formId, profileGeneration, scopeDigest],
   );
 
   const isDispatchTokenCurrent = useCallback(
     (token: MutationDispatchToken) => isMutationDispatchTokenCurrent(
       token,
-      epochRef,
-      dispatchIdRef,
+      epochRef.current,
+      dispatchIdRef.current,
       scopeDigest,
       profileGeneration,
       formId,
@@ -65,7 +70,7 @@ export function useMutationHookIdentity(options: UseMutationHookIdentityOptions 
   );
 
   const resetPendingLock = useCallback(() => {
-    resetMutationHookPendingLock(pendingLockRef, pendingLockKind);
+    pendingLockRef.current = pendingLockKind === 'counter' ? 0 : false;
     setDispatchPending(false);
   }, [pendingLockKind]);
 
