@@ -26,13 +26,52 @@ const {
   restartWritersByPhase,
   auditDeploymentDiscovery,
 } = require('./writer-quiescence');
-const { runPostRestartHealthChecks } = require('./coordinated-backup-health');
+const {
+  captureDashboardReleaseIdentity,
+  runPostRestartHealthChecks,
+} = require('./coordinated-backup-health');
 const { loadWriterInventory } = require('./writer-inventory');
 const { runStagedRestore } = require('./staged-restore');
 const { revokeAdmissionToken } = require('./restore-quiescence-admission');
 
 function createRunId() {
   return crypto.randomUUID();
+}
+
+function preQuiescedRestoreMode(env = process.env) {
+  return env.RESTORE_PRE_QUIESCED === '1';
+}
+
+function needsRestoreQuiescence(journal) {
+  if (!journal) return true;
+  return journal.phase === PHASE.INIT || journal.phase === PHASE.WRITERS_CAPTURED;
+}
+
+function needsStagedRestore(journal) {
+  if (!journal) return true;
+  return journal.phase === PHASE.INIT
+    || journal.phase === PHASE.WRITERS_CAPTURED
+    || journal.phase === PHASE.QUIESCENCE_VERIFIED;
+}
+
+function loadDashboardReleaseIdentityFromJournal(journal) {
+  const digest = journal?.generationBindings?.dashboardReleaseIdentityDigest ?? null;
+  if (!digest) {
+    throw new Error('coordinated restore journal missing dashboard release identity digest');
+  }
+  return digest;
+}
+
+function persistRestoreGenerationBindings(journal, {
+  dashboardReleaseIdentityDigest,
+  releaseManifestDigest = null,
+}) {
+  journal.generationBindings = {
+    ...(journal.generationBindings || {}),
+    dashboardReleaseIdentityDigest,
+    ...(releaseManifestDigest ? { releaseManifestDigest } : {}),
+  };
+  return journal;
 }
 
 async function restartAll(context, snapshotsById) {
@@ -59,9 +98,11 @@ async function runCoordinatedRestore(options = {}) {
   let context = null;
   let primaryError = null;
   let interrupted = false;
-  let boundReleaseGeneration = options.releaseManifestDigest || null;
+  const releaseManifestDigest = options.releaseManifestDigest || null;
+  let boundDashboardReleaseIdentity = options.dashboardReleaseIdentityDigest || null;
   let outstandingAdmission = null;
   let admissionConsumed = false;
+  const preQuiesced = options.preQuiesced === true || preQuiescedRestoreMode(env);
 
   const revokeOutstandingAdmission = (reasonCode) => {
     if (admissionConsumed || !outstandingAdmission) return;
@@ -86,6 +127,9 @@ async function runCoordinatedRestore(options = {}) {
     process.once('SIGINT', () => onSignal('SIGINT'));
     process.once('SIGTERM', () => onSignal('SIGTERM'));
   }
+
+  let restoreResult = null;
+  let result = null;
 
   try {
     if (!dryRun) {
@@ -140,12 +184,16 @@ async function runCoordinatedRestore(options = {}) {
         layout,
         writerInventory: inventory,
         preRunWriters: discovery.snapshots,
-        options: { includeActualData: false, preQuiesced: false, dashboardDir },
+        options: { includeActualData: false, preQuiesced, dashboardDir },
       });
       journal.phase = PHASE.WRITERS_CAPTURED;
       writeRunJournal(layout.journalPath, journal);
     } else {
-      assertJournalBinding(journal, { layout, inventory, options: { dashboardDir, includeActualData: false } });
+      assertJournalBinding(journal, {
+        layout,
+        inventory,
+        options: { dashboardDir, includeActualData: false, preQuiesced },
+      });
       runId = journal.runId;
       for (const prior of journal.preRunWriters || []) {
         const current = snapshotsById.get(prior.id);
@@ -159,58 +207,90 @@ async function runCoordinatedRestore(options = {}) {
       journal.preRunWriters = [...snapshotsById.values()];
     }
 
-    await ensureQuiescentForSnapshot(context, snapshotsById, {
-      stopIfNeeded: true,
-      label: 'restore pre-staged boundary',
-    });
-    journal.phase = PHASE.QUIESCENCE_VERIFIED;
-    writeRunJournal(layout.journalPath, journal);
+    const quiescenceNeeded = needsRestoreQuiescence(journal);
+    const stagedRestoreNeeded = needsStagedRestore(journal);
 
-    const restoreResult = (options.runStagedRestore || runStagedRestore)({
-      archivePath,
-      destinationRoot: dashboardDir,
-      confirm: true,
-      dryRun: false,
-      env: {
-        ...env,
-        COORDINATED_VERIFY_KEY_PATH: env.COORDINATED_VERIFY_KEY_PATH,
-      },
-      coordinatorRoot,
-      layout,
-      runners,
-      releaseManifestDigest: boundReleaseGeneration,
-      actualDataGeneration: options.actualDataGeneration,
-      coordinatedManifestDigest: options.coordinatedManifestDigest,
-      writerInventoryDigest: journal.inventory.writerInventoryDigest,
-      coordinatedSession: {
+    if (!boundDashboardReleaseIdentity) {
+      if (journal?.generationBindings?.dashboardReleaseIdentityDigest) {
+        boundDashboardReleaseIdentity = journal.generationBindings.dashboardReleaseIdentityDigest;
+      } else if (quiescenceNeeded || stagedRestoreNeeded) {
+        boundDashboardReleaseIdentity = await captureDashboardReleaseIdentity({
+          env,
+          runners,
+          dashboardDir,
+          preQuiesced,
+          snapshotsById,
+          timeoutMs: options.healthTimeoutMs,
+          pollMs: options.healthPollMs,
+        });
+        persistRestoreGenerationBindings(journal, {
+          dashboardReleaseIdentityDigest: boundDashboardReleaseIdentity,
+          releaseManifestDigest,
+        });
+        writeRunJournal(layout.journalPath, journal);
+      } else {
+        boundDashboardReleaseIdentity = loadDashboardReleaseIdentityFromJournal(journal);
+      }
+    }
+
+    if (quiescenceNeeded) {
+      await ensureQuiescentForSnapshot(context, snapshotsById, {
+        stopIfNeeded: !preQuiesced,
+        label: 'restore pre-staged boundary',
+      });
+      journal.phase = PHASE.QUIESCENCE_VERIFIED;
+      writeRunJournal(layout.journalPath, journal);
+    }
+
+    let stagedRestoreResult = journal.restoreResult || null;
+    if (stagedRestoreNeeded) {
+      stagedRestoreResult = (options.runStagedRestore || runStagedRestore)({
+        archivePath,
+        destinationRoot: dashboardDir,
+        confirm: true,
+        dryRun: false,
+        env: {
+          ...env,
+          COORDINATED_VERIFY_KEY_PATH: env.COORDINATED_VERIFY_KEY_PATH,
+        },
+        coordinatorRoot,
         layout,
-        runId,
-        journalId: journal.journalId,
-        snapshotsById,
-        context,
-        privateKey: options.privateKey,
+        runners,
+        releaseManifestDigest,
+        actualDataGeneration: options.actualDataGeneration,
+        coordinatedManifestDigest: options.coordinatedManifestDigest,
         writerInventoryDigest: journal.inventory.writerInventoryDigest,
-        onAdmissionIssued: (token) => {
-          outstandingAdmission = token;
+        coordinatedSession: {
+          layout,
+          runId,
+          journalId: journal.journalId,
+          snapshotsById,
+          context,
+          privateKey: options.privateKey,
+          writerInventoryDigest: journal.inventory.writerInventoryDigest,
+          onAdmissionIssued: (token) => {
+            outstandingAdmission = token;
+          },
+          onAdmissionConsumed: () => {
+            admissionConsumed = true;
+            outstandingAdmission = null;
+          },
         },
-        onAdmissionConsumed: () => {
-          admissionConsumed = true;
-          outstandingAdmission = null;
-        },
-      },
-    });
+      });
 
-    journal.phase = PHASE.RESTORE_STAGED;
-    journal.restoreResult = restoreResult;
-    writeRunJournal(layout.journalPath, journal);
-    admissionConsumed = true;
-    outstandingAdmission = null;
+      journal.phase = PHASE.RESTORE_STAGED;
+      journal.restoreResult = stagedRestoreResult;
+      writeRunJournal(layout.journalPath, journal);
+      admissionConsumed = true;
+      outstandingAdmission = null;
+    }
 
-    return {
+    restoreResult = stagedRestoreResult;
+    result = {
       ok: true,
       restoreResult,
       journal,
-      admissionConsumed: true,
+      admissionConsumed: stagedRestoreNeeded ? true : admissionConsumed,
     };
   } catch (error) {
     primaryError = error;
@@ -236,7 +316,7 @@ async function runCoordinatedRestore(options = {}) {
         snapshotsById,
         env,
         runners,
-        expectedReleaseGeneration: boundReleaseGeneration,
+        expectedReleaseGeneration: boundDashboardReleaseIdentity,
         timeoutMs: options.healthTimeoutMs,
         pollMs: options.healthPollMs,
       });
@@ -262,10 +342,15 @@ async function runCoordinatedRestore(options = {}) {
   }
 
   if (primaryError) throw primaryError;
-  return { ok: true, journal };
+  return result || { ok: true, journal };
 }
 
 module.exports = {
   runCoordinatedRestore,
   createRunId,
+  preQuiescedRestoreMode,
+  needsRestoreQuiescence,
+  needsStagedRestore,
+  loadDashboardReleaseIdentityFromJournal,
+  persistRestoreGenerationBindings,
 };

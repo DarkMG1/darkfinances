@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { runCoordinatedBackup, buildCoordinatedManifest } = require('../lib/coordinated-backup');
+const { runCoordinatedBackup, buildCoordinatedManifest, LEGACY_IDENTITY_RECOVERY_MESSAGE } = require('../lib/coordinated-backup');
 const {
   discoverWriters,
   stopWritersByPhase,
@@ -25,12 +25,26 @@ const { parseAdmissionToken, assertAdmissionFresh, assertAdmissionBindings } = r
 const { buildTestAdmissionToken } = require('./fixtures/admission-token-fixtures');
 const { installTestCoordinatorKeys } = require('./fixtures/coordinated-test-helpers');
 const {
-  createMockRunners,
   defaultActiveUnits,
+} = require('./fixtures/coordinated-backup-fixtures');
+const {
+  createBackupRunners,
+  defaultEnvelopedPingResponse,
+  writeSchemaV1ReleaseManifest,
+  writeSchemaV2ReleaseManifest,
+  envelopedPingBody,
+  SCHEMA_V1_RELEASE_IDENTITY,
+  SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
   RELEASE_MANIFEST_BODY,
   RELEASE_MANIFEST_DIGEST,
-} = require('./fixtures/coordinated-backup-fixtures');
-const { runPostRestartHealthChecks } = require('../lib/coordinated-backup-health');
+} = require('./fixtures/coordinated-backup-release-identity-fixtures');
+const {
+  normalizeReleaseIdentity,
+  captureDashboardReleaseIdentity,
+  runPostRestartHealthChecks,
+} = require('../lib/coordinated-backup-health');
+const { verifyBackupBundleArchive } = require('../lib/backup-bundle-verify');
+const { buildBackupBundle } = require('../lib/build-backup-bundle');
 const { bundleToolingSourcePaths } = require('../lib/backup-bundle-tooling');
 const { writeProductionDashboard } = require('./fixtures/backup-bundle-dashboard-fixtures');
 
@@ -41,6 +55,14 @@ function mkRoot(t, prefix) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   return root;
+}
+
+function writeBackupDashboard(dashboard, options = {}) {
+  writeProductionDashboard(dashboard, options);
+  if (options.includeReleaseManifest !== false) {
+    writeSchemaV1ReleaseManifest(dashboard, options.releaseIdentity);
+  }
+  return dashboard;
 }
 
 function stubReleaseManifest() {
@@ -84,7 +106,7 @@ test('reproduces incomplete legacy quiescence: stop exit 0 without inactive proo
   const root = mkRoot(t, 'df-coordinated-repro-');
   const dashboard = path.join(root, 'dashboard');
   fs.mkdirSync(dashboard, { recursive: true });
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
   runners.systemctlStop = () => ({ status: 0, stdout: '' });
   runners.systemctlIsActive = (_scope, unit) => (
     unit === 'finance-dashboard.service'
@@ -110,7 +132,7 @@ test('reproduces incomplete legacy quiescence: stop exit 0 without inactive proo
 test('dry-run performs discovery only and executes zero mutating commands', async (t) => {
   const root = mkRoot(t, 'df-coordinated-dry-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -119,7 +141,7 @@ test('dry-run performs discovery only and executes zero mutating commands', asyn
       operationJournal: { schemaVersion: 1, operations: {} },
     },
   });
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
   const env = envFor(root, dashboard, { BACKUP_DRY_RUN: '1' });
   const result = await runCoordinatedBackup({
     dryRun: true,
@@ -137,7 +159,7 @@ test('dry-run performs discovery only and executes zero mutating commands', asyn
 test('happy path quiesces, backs up bundle, publishes manifest, and restarts in order', async (t) => {
   const root = mkRoot(t, 'df-coordinated-happy-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -146,7 +168,7 @@ test('happy path quiesces, backs up bundle, publishes manifest, and restarts in 
       operationJournal: { schemaVersion: 1, operations: {} },
     },
   });
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const runners = createBackupRunners();
   const env = envFor(root, dashboard);
   const result = await runCoordinatedBackup({
     ...backupOptions(env, runners),
@@ -163,6 +185,8 @@ test('happy path quiesces, backs up bundle, publishes manifest, and restarts in 
   );
   const manifest = JSON.parse(fs.readFileSync(result.coordinatedManifest, 'utf8'));
   assert.equal(manifest.provenanceOnly, true);
+  assert.equal(manifest.generation.dashboardReleaseIdentityDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+  assert.notEqual(manifest.generation.releaseManifestDigest, manifest.generation.dashboardReleaseIdentityDigest);
   assert.equal(manifest.schemaVersion, 2);
   const stopIndex = runners.commands.findIndex((entry) => entry.includes('actual-sync.timer') && entry.includes('stop'));
   const dashboardStop = runners.commands.findIndex((entry) => entry.includes('finance-dashboard.service') && entry.includes('stop'));
@@ -172,12 +196,113 @@ test('happy path quiesces, backs up bundle, publishes manifest, and restarts in 
   assert.ok(dashboardStart > dashboardStop);
   const journal = readRunJournal(path.join(env.DARKFINANCES_BACKUP_DIR, '.darkfinances-coordinated/run-journal.json'));
   assert.equal(journal.phase, PHASE.COMPLETE);
+  assert.equal(journal.generationBindings?.dashboardReleaseIdentityDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+  assert.equal(journal.generationBindings?.identityBindingSource, 'live_capture');
+});
+
+test('FINANCE_EVENT_SYNC_CONFIGURED=1 quiesces active finance-event-sync writers end-to-end', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-event-sync-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const units = {
+    ...defaultActiveUnits(),
+    'finance-event-sync.timer': { active: 'active', enabled: 'enabled' },
+    'finance-event-sync.service': { active: 'active', enabled: 'enabled' },
+  };
+  const runners = createBackupRunners({ units });
+  const env = envFor(root, dashboard, { FINANCE_EVENT_SYNC_CONFIGURED: '1' });
+  const result = await runCoordinatedBackup({
+    ...backupOptions(env, runners),
+    dashboardDir: dashboard,
+    destination: env.DARKFINANCES_BACKUP_DIR,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(fs.existsSync(result.bundleArchive), true);
+
+  const eventTimerStop = runners.commands.findIndex(
+    (entry) => entry.includes('finance-event-sync.timer') && entry.includes('stop'),
+  );
+  const eventServiceStop = runners.commands.findIndex(
+    (entry) => entry.includes('finance-event-sync.service') && entry.includes('stop'),
+  );
+  const actualSyncTimerStop = runners.commands.findIndex(
+    (entry) => entry.includes('actual-sync.timer') && entry.includes('stop'),
+  );
+  const dashboardStop = runners.commands.findIndex(
+    (entry) => entry.includes('finance-dashboard.service') && entry.includes('stop'),
+  );
+  assert.ok(eventTimerStop >= 0);
+  assert.ok(eventServiceStop >= 0);
+  assert.ok(actualSyncTimerStop >= 0);
+  assert.ok(actualSyncTimerStop < eventTimerStop);
+  assert.ok(eventTimerStop < dashboardStop);
+  assert.ok(eventServiceStop < dashboardStop);
+  assert.ok(actualSyncTimerStop < eventServiceStop);
+
+  const eventTimerStart = runners.commands.findIndex(
+    (entry) => entry.includes('finance-event-sync.timer') && entry.includes('start'),
+  );
+  const eventServiceStart = runners.commands.findIndex(
+    (entry) => entry.includes('finance-event-sync.service') && entry.includes('start'),
+  );
+  const dashboardStart = runners.commands.findIndex(
+    (entry) => entry.includes('finance-dashboard.service') && entry.includes('start'),
+  );
+  assert.ok(eventTimerStart > dashboardStart);
+  assert.ok(eventServiceStart > dashboardStart);
+
+  const journal = readRunJournal(path.join(env.DARKFINANCES_BACKUP_DIR, '.darkfinances-coordinated/run-journal.json'));
+  assert.equal(journal.phase, PHASE.COMPLETE);
+  const timerSnapshot = journal.preRunWriters.find((entry) => entry.id === 'finance-event-sync.timer');
+  const serviceSnapshot = journal.preRunWriters.find((entry) => entry.id === 'finance-event-sync.service');
+  assert.equal(timerSnapshot?.originallyActive, true);
+  assert.equal(serviceSnapshot?.originallyActive, true);
+});
+
+test('FINANCE_EVENT_SYNC_CONFIGURED=1 rejects legacy owes-snapshot cron before quiescence', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-event-sync-cron-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const runners = createBackupRunners({
+    units: {
+      ...defaultActiveUnits(),
+      'finance-event-sync.timer': { active: 'active', enabled: 'enabled' },
+      'finance-event-sync.service': { active: 'inactive', enabled: 'enabled' },
+    },
+    crontabListing: '*/30 * * * * bash /home/dark/actual-tools/run.sh owes-snapshot.js\n',
+  });
+  const env = envFor(root, dashboard, { FINANCE_EVENT_SYNC_CONFIGURED: '1' });
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, runners),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /legacy owes-snapshot\.js cron entry must be removed/,
+  );
+  assert.equal(runners.commands.some((entry) => entry.includes('finance-dashboard.service') && entry.includes('stop')), false);
 });
 
 test('originally inactive timer is not started on restart', async (t) => {
   const root = mkRoot(t, 'df-coordinated-inactive-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -188,7 +313,7 @@ test('originally inactive timer is not started on restart', async (t) => {
   });
   const units = defaultActiveUnits();
   units['actual-sync.timer'] = { active: 'inactive', enabled: 'disabled' };
-  const runners = createMockRunners({ units });
+  const runners = createBackupRunners({ units });
   const env = envFor(root, dashboard);
   await runCoordinatedBackup({
     ...backupOptions(env, runners),
@@ -214,7 +339,7 @@ test('lock contention refuses overlapping coordinated backup', (t) => {
 test('hung dashboard drain fails quiescence', async (t) => {
   const root = mkRoot(t, 'df-coordinated-hung-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -223,7 +348,7 @@ test('hung dashboard drain fails quiescence', async (t) => {
       operationJournal: { schemaVersion: 1, operations: {} },
     },
   });
-  const runners = createMockRunners({ units: defaultActiveUnits(), hungDrain: true });
+  const runners = createBackupRunners({ units: defaultActiveUnits(), hungDrain: true });
   const env = envFor(root, dashboard);
   await assert.rejects(
     () => runCoordinatedBackup({
@@ -238,7 +363,7 @@ test('hung dashboard drain fails quiescence', async (t) => {
 test('active actual-sync.service during timer stop fails closed', async (t) => {
   const root = mkRoot(t, 'df-coordinated-timer-fire-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -249,7 +374,7 @@ test('active actual-sync.service during timer stop fails closed', async (t) => {
   });
   const units = defaultActiveUnits();
   units['actual-sync.service'] = { active: 'active', enabled: 'enabled' };
-  const runners = createMockRunners({
+  const runners = createBackupRunners({
     units,
     reappearingWriters: ['actual-sync.service'],
   });
@@ -268,7 +393,7 @@ test('unknown writer state fails closed', (t) => {
   const root = mkRoot(t, 'df-coordinated-unknown-');
   const dashboard = path.join(root, 'dashboard');
   fs.mkdirSync(dashboard, { recursive: true });
-  const runners = createMockRunners({
+  const runners = createBackupRunners({
     units: {
       ...defaultActiveUnits(),
       'finance-dashboard.service': { active: 'unknown', enabled: 'enabled' },
@@ -283,7 +408,7 @@ test('unknown writer state fails closed', (t) => {
 test('restore lock held refuses backup', async (t) => {
   const root = mkRoot(t, 'df-coordinated-restore-lock-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -301,7 +426,7 @@ test('restore lock held refuses backup', async (t) => {
     destinationRoot: dashboard,
     createdAt: new Date().toISOString(),
   }, null, 2)}\n`, { mode: 0o600 });
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
   const env = envFor(root, dashboard);
   await assert.rejects(
     () => runCoordinatedBackup({
@@ -319,7 +444,7 @@ test('container stop failure refuses snapshot', async (t) => {
   const actualData = path.join(root, 'actual', 'data');
   fs.mkdirSync(actualData, { recursive: true });
   fs.writeFileSync(path.join(actualData, 'meta'), 'v1\n');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -328,7 +453,7 @@ test('container stop failure refuses snapshot', async (t) => {
       operationJournal: { schemaVersion: 1, operations: {} },
     },
   });
-  const runners = createMockRunners({
+  const runners = createBackupRunners({
     units: defaultActiveUnits(),
     containers: { actual: 'running' },
     stopFailures: new Set(['actual']),
@@ -353,8 +478,8 @@ test('container stop failure refuses snapshot', async (t) => {
 test('active saga without actual snapshot refuses generation-mismatched backup', async (t) => {
   const root = mkRoot(t, 'df-coordinated-saga-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard);
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  writeBackupDashboard(dashboard);
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
   const env = envFor(root, dashboard);
   await assert.rejects(
     () => runCoordinatedBackup({
@@ -369,7 +494,7 @@ test('active saga without actual snapshot refuses generation-mismatched backup',
 test('backup failure cleans run-owned staging only', async (t) => {
   const root = mkRoot(t, 'df-coordinated-enospc-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -381,7 +506,7 @@ test('backup failure cleans run-owned staging only', async (t) => {
   const prior = path.join(root, 'backups', 'prior.tgz');
   fs.mkdirSync(path.dirname(prior), { recursive: true, mode: 0o700 });
   fs.writeFileSync(prior, 'prior\n', { mode: 0o600 });
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
   const original = fs.mkdtempSync;
   fs.mkdtempSync = () => { throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }); };
   t.after(() => { fs.mkdtempSync = original; });
@@ -400,7 +525,7 @@ test('backup failure cleans run-owned staging only', async (t) => {
 test('multiple restart failures are reported without masking primary backup error', async (t) => {
   const root = mkRoot(t, 'df-coordinated-multi-restart-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -411,7 +536,7 @@ test('multiple restart failures are reported without masking primary backup erro
   });
   const units = defaultActiveUnits();
   units['actual-sync.timer'] = { active: 'active', enabled: 'enabled' };
-  const runners = createMockRunners({ units, restartFailures: new Set(['finance-dashboard.service', 'actual-sync.timer']) });
+  const runners = createBackupRunners({ units, restartFailures: new Set(['finance-dashboard.service', 'actual-sync.timer']) });
   const originalBuild = require('../lib/build-backup-bundle').buildBackupBundle;
   t.after(() => { require('../lib/build-backup-bundle').buildBackupBundle = originalBuild; });
   const env = envFor(root, dashboard);
@@ -442,8 +567,47 @@ test('hostile unit names are rejected by argv runner guards', () => {
 test('relocated install tooling includes coordinated backup modules', () => {
   const sources = bundleToolingSourcePaths();
   assert.ok(sources.includes('ops/lib/coordinated-backup.js'));
+  assert.ok(sources.includes('finance-dashboard/lib/release-identity.js'));
+  assert.ok(sources.includes('finance-dashboard/lib/release-files.js'));
   assert.ok(sources.includes('ops/lib/writer-inventory.json'));
   assert.ok(sources.includes('ops/lib/coordinated-backup-cli.js'));
+});
+
+test('relocated bundle tooling captures schema-v2 release identity from manifest when pre-quiesced', async (t) => {
+  const root = mkRoot(t, 'df-relocated-v2-capture-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, { includeReleaseManifest: false });
+  writeSchemaV2ReleaseManifest(dashboard);
+  const backups = path.join(root, 'backups');
+  fs.mkdirSync(backups, { recursive: true, mode: 0o700 });
+  const archive = path.join(backups, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const extractRoot = path.join(root, 'extract');
+  verifyBackupBundleArchive({ archivePath: archive, publishDir: extractRoot, readOnly: true });
+  const healthModule = path.join(extractRoot, 'tooling/ops/lib/coordinated-backup-health.js');
+  assert.equal(fs.existsSync(healthModule), true);
+  assert.equal(
+    fs.existsSync(path.join(extractRoot, 'tooling/finance-dashboard/lib/release-identity.js')),
+    true,
+  );
+  const { captureDashboardReleaseIdentity } = require(healthModule);
+  const digest = await captureDashboardReleaseIdentity({
+    dashboardDir: dashboard,
+    preQuiesced: true,
+    env: { ...process.env, FINANCE_API_TOKEN: 'test-token' },
+    runners: createBackupRunners({
+      units: {
+        'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+        'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+        'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+      },
+    }),
+    snapshotsById: new Map(),
+    timeoutMs: 200,
+    pollMs: 1,
+  });
+  assert.match(digest, /^[a-f0-9]{64}$/);
+  assert.notEqual(digest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
 });
 
 test('shell wrapper passes bash -n', () => {
@@ -478,9 +642,12 @@ test('coordinated manifest binds generation fields accepted by PR-17', (t) => {
     bundleManifest,
     bundleManifestPath: manifestPath,
     releaseManifestPath: releasePath,
+    dashboardReleaseIdentityDigest: SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
   });
   assert.equal(manifest.kind, 'darkfinances-coordinated-backup-manifest');
   assert.match(manifest.generation.bundleArtifactId, /^[a-f0-9]{64}$/);
+  assert.equal(manifest.generation.dashboardReleaseIdentityDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+  assert.notEqual(manifest.generation.releaseManifestDigest, manifest.generation.dashboardReleaseIdentityDigest);
   assert.equal(manifest.provenanceOnly, true);
   assert.deepEqual(manifest.bindingsAcceptedBy, ['darkfinances-staged-restore-generation-binding']);
 });
@@ -499,7 +666,7 @@ test('all-active and all-inactive writer combinations discover consistently', (t
           : { active: 'inactive', enabled: 'disabled' };
       }
     }
-    const runners = createMockRunners({ units });
+    const runners = createBackupRunners({ units });
     const { snapshots } = discoverWriters({ inventory, env: envFor(root, dashboard), runners, dashboardDir: dashboard });
     assert.ok(snapshots.length >= 3);
   }
@@ -511,7 +678,7 @@ test('restart order restores actual container before dashboard and timers last',
   const actualData = path.join(root, 'actual', 'data');
   fs.mkdirSync(actualData, { recursive: true });
   fs.writeFileSync(path.join(actualData, 'db'), 'data\n');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -520,7 +687,7 @@ test('restart order restores actual container before dashboard and timers last',
       operationJournal: { schemaVersion: 1, operations: {} },
     },
   });
-  const runners = createMockRunners({
+  const runners = createBackupRunners({
     units: defaultActiveUnits(),
     containers: { actual: 'running' },
   });
@@ -547,7 +714,7 @@ test('restart order restores actual container before dashboard and timers last',
 test('health check fails on stale dashboard readiness', async (t) => {
   const root = mkRoot(t, 'df-coordinated-health-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -556,9 +723,11 @@ test('health check fails on stale dashboard readiness', async (t) => {
       operationJournal: { schemaVersion: 1, operations: {} },
     },
   });
-  const runners = createMockRunners({
-    units: defaultActiveUnits(),
-    pingResponse: { status: 503, body: { ok: false } },
+  const runners = createBackupRunners({
+    pingResponses: [
+      defaultEnvelopedPingResponse(),
+      { status: 503, body: envelopedPingBody({ ok: false }) },
+    ],
   });
   const env = envFor(root, dashboard);
   await assert.rejects(
@@ -591,7 +760,7 @@ test('writer reappears after stop fails verification', async (t) => {
   const dashboard = path.join(root, 'dashboard');
   fs.mkdirSync(dashboard, { recursive: true });
   const inventory = loadWriterInventory();
-  const runners = createMockRunners({
+  const runners = createBackupRunners({
     units: defaultActiveUnits(),
     reappearingWriters: ['finance-dashboard.service'],
   });
@@ -611,7 +780,7 @@ test('manual restart phase honors originally inactive components', async (t) => 
   const dashboard = path.join(root, 'dashboard');
   fs.mkdirSync(dashboard, { recursive: true });
   const inventory = loadWriterInventory();
-  const runners = createMockRunners({
+  const runners = createBackupRunners({
     units: {
       'finance-dashboard.service': { active: 'inactive', enabled: 'disabled' },
       'actual-sync.timer': { active: 'inactive', enabled: 'disabled' },
@@ -630,7 +799,7 @@ test('manual restart phase honors originally inactive components', async (t) => 
 test('captureWriterState records pre-run active/enabled/running flags', () => {
   const inventory = loadWriterInventory();
   const writer = inventory.writers.find((entry) => entry.id === 'finance-dashboard');
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
   const snapshot = captureWriterState(writer, { runners, env: {}, dashboardDir: '/tmp/x' });
   assert.equal(snapshot.originallyActive, true);
   assert.equal(snapshot.originallyEnabled, true);
@@ -640,7 +809,7 @@ test('captureWriterState records pre-run active/enabled/running flags', () => {
 test('stale coordinated lock from dead pid is removed and backup proceeds', async (t) => {
   const root = mkRoot(t, 'df-coordinated-stale-lock-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -661,7 +830,7 @@ test('stale coordinated lock from dead pid is removed and backup proceeds', asyn
     canonicalRoot: layout.canonicalRoot,
     createdAt: new Date().toISOString(),
   }, null, 2)}\n`, { mode: 0o600 });
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
   const result = await runCoordinatedBackup({
     ...backupOptions(env, runners),
     dashboardDir: dashboard,
@@ -674,7 +843,7 @@ test('stale coordinated lock from dead pid is removed and backup proceeds', asyn
 test('incomplete run journal resumes with preserved pre-run writer snapshots', async (t) => {
   const root = mkRoot(t, 'df-coordinated-journal-resume-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -687,7 +856,7 @@ test('incomplete run journal resumes with preserved pre-run writer snapshots', a
   const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
   fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
   const inventory = loadWriterInventory();
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
   const { snapshots } = discoverWriters({
     inventory,
     env,
@@ -723,7 +892,7 @@ test('incomplete run journal resumes with preserved pre-run writer snapshots', a
 test('interrupt during quiescence records recovery_required in journal', async (t) => {
   const root = mkRoot(t, 'df-coordinated-signal-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -733,7 +902,7 @@ test('interrupt during quiescence records recovery_required in journal', async (
     },
   });
   let triggerInterrupt = false;
-  const runners = createMockRunners({ units: defaultActiveUnits(), hungDrain: true });
+  const runners = createBackupRunners({ units: defaultActiveUnits(), hungDrain: true });
   const originalStop = runners.systemctlStop.bind(runners);
   runners.systemctlStop = (scope, unit) => {
     if (unit === 'finance-dashboard.service') triggerInterrupt = true;
@@ -759,7 +928,7 @@ test('post-restart health fails on actual data generation mismatch', async () =>
   const { computeActualDataGeneration } = require('../lib/writer-quiescence');
   const expected = computeActualDataGeneration(actualDataDir);
   fs.writeFileSync(path.join(actualDataDir, 'db'), 'after\n');
-  const runners = createMockRunners({ units: defaultActiveUnits(), containers: { actual: 'running' } });
+  const runners = createBackupRunners({ units: defaultActiveUnits(), containers: { actual: 'running' } });
   const env = {
     ...process.env,
     BACKUP_INCLUDE_ACTUAL_DATA: '1',
@@ -804,14 +973,262 @@ test('admission token rejects archive and destination binding drift', (t) => {
   );
 });
 
-test('post-restart health fails when release digest is missing from ping', async () => {
-  const runners = createMockRunners({
-    units: defaultActiveUnits(),
-    pingResponse: {
-      status: 200,
-      body: { ok: true, release: {} },
+test('normalizeReleaseIdentity rejects empty and partial ping release objects', () => {
+  assert.equal(normalizeReleaseIdentity(null), null);
+  assert.equal(normalizeReleaseIdentity({}), null);
+  assert.equal(normalizeReleaseIdentity({ dirty: false }), null);
+  assert.equal(normalizeReleaseIdentity({
+    commit: 'abcdef0',
+    dirty: false,
+    lockSha256: 'b'.repeat(64),
+    contract: 'e92dd64e2bba333f',
+  }), null);
+  assert.equal(normalizeReleaseIdentity({
+    ...SCHEMA_V1_RELEASE_IDENTITY,
+    dirty: undefined,
+  }), null);
+  assert.equal(normalizeReleaseIdentity({
+    ...SCHEMA_V1_RELEASE_IDENTITY,
+    dirty: 'false',
+  }), null);
+  assert.equal(normalizeReleaseIdentity({
+    ...SCHEMA_V1_RELEASE_IDENTITY,
+    lockSha256: 'not-a-valid-sha256',
+  }), null);
+});
+
+test('normalizeReleaseIdentity accepts schema-v1 production tuple shapes', () => {
+  assert.deepEqual(normalizeReleaseIdentity({
+    commit: 'abcdef0',
+    dirty: false,
+    lockSha256: 'b'.repeat(64),
+    contract: 'e92dd64e2bba333f',
+    appVersion: '2.0.0',
+    builtAt: '2026-01-01T00:00:00.000Z',
+  }), {
+    commit: 'abcdef0',
+    dirty: false,
+    lockSha256: 'b'.repeat(64),
+    contract: 'e92dd64e2bba333f',
+    appVersion: '2.0.0',
+    builtAt: '2026-01-01T00:00:00.000Z',
+  });
+  assert.deepEqual(normalizeReleaseIdentity({
+    commit: '1234567',
+    dirty: true,
+    lockSha256: 'c'.repeat(64),
+    contract: 'contract-v1',
+    appVersion: '1.0.0',
+    builtAt: '2026-01-01T00:00:00.000Z',
+  }), {
+    commit: '1234567',
+    dirty: true,
+    lockSha256: 'c'.repeat(64),
+    contract: 'contract-v1',
+    appVersion: '1.0.0',
+    builtAt: '2026-01-01T00:00:00.000Z',
+  });
+});
+
+test('captureDashboardReleaseIdentity fails fast without FINANCE_API_TOKEN when dashboard is running', async () => {
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
+  const snapshotsById = new Map([['finance-dashboard', {
+    id: 'finance-dashboard',
+    originallyActive: true,
+    state: 'active',
+  }]]);
+  const env = { ...process.env };
+  delete env.FINANCE_API_TOKEN;
+  const started = Date.now();
+  await assert.rejects(
+    () => captureDashboardReleaseIdentity({
+      env,
+      runners,
+      dashboardDir: '/tmp/dashboard',
+      snapshotsById,
+      timeoutMs: 5000,
+      pollMs: 1,
+    }),
+    /FINANCE_API_TOKEN must be a non-empty string for live dashboard release identity capture/,
+  );
+  assert.ok(Date.now() - started < 500, 'missing FINANCE_API_TOKEN should fail fast without ping polling');
+  assert.equal(runners.commands.filter((entry) => entry[0] === 'httpGet').length, 0);
+});
+
+test('captureDashboardReleaseIdentity fails fast when FINANCE_API_TOKEN is empty', async () => {
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
+  const snapshotsById = new Map([['finance-dashboard', {
+    id: 'finance-dashboard',
+    originallyActive: true,
+    state: 'active',
+  }]]);
+  await assert.rejects(
+    () => captureDashboardReleaseIdentity({
+      env: { ...process.env, FINANCE_API_TOKEN: '' },
+      runners,
+      dashboardDir: '/tmp/dashboard',
+      snapshotsById,
+      timeoutMs: 5000,
+      pollMs: 1,
+    }),
+    /FINANCE_API_TOKEN must be a non-empty string for live dashboard release identity capture/,
+  );
+  assert.equal(runners.commands.filter((entry) => entry[0] === 'httpGet').length, 0);
+});
+
+test('captureDashboardReleaseIdentity uses manifest without FINANCE_API_TOKEN when pre-quiesced', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-capture-manifest-only-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard);
+  const env = { ...process.env, FINANCE_DASHBOARD_DIR: dashboard };
+  delete env.FINANCE_API_TOKEN;
+  const runners = createBackupRunners({
+    units: {
+      'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+      'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+      'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
     },
   });
+  const digest = await captureDashboardReleaseIdentity({
+    env,
+    runners,
+    dashboardDir: dashboard,
+    preQuiesced: true,
+    snapshotsById: new Map(),
+  });
+  assert.equal(digest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+  assert.equal(runners.commands.filter((entry) => entry[0] === 'httpGet').length, 0);
+});
+
+test('coordinated backup fails fast without FINANCE_API_TOKEN when dashboard is running', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-backup-missing-token-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
+  const env = envFor(root, dashboard);
+  delete env.FINANCE_API_TOKEN;
+  const started = Date.now();
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, runners, { stopDeadlineMs: 500 }),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /FINANCE_API_TOKEN must be a non-empty string for live dashboard release identity capture/,
+  );
+  assert.ok(Date.now() - started < 500, 'coordinated backup should fail fast without FINANCE_API_TOKEN');
+  assert.equal(runners.commands.filter((entry) => entry[0] === 'httpGet').length, 0);
+});
+
+test('captureDashboardReleaseIdentity fails closed on empty ping release object', async () => {
+  const runners = createBackupRunners({
+    pingResponse: {
+      status: 200,
+      body: envelopedPingBody({ ok: true, release: {} }),
+    },
+  });
+  await assert.rejects(
+    () => captureDashboardReleaseIdentity({
+      env: { ...process.env, FINANCE_API_TOKEN: 'test-token' },
+      runners,
+      dashboardDir: '/tmp/dashboard',
+      snapshotsById: new Map([['finance-dashboard', {
+        id: 'finance-dashboard',
+        originallyActive: true,
+        state: 'active',
+      }]]),
+      timeoutMs: 50,
+      pollMs: 1,
+    }),
+    /dashboard release identity unavailable before quiescence/,
+  );
+});
+
+test('post-restart health rejects empty ping release after valid capture digest', async () => {
+  const runners = createBackupRunners({
+    pingResponse: {
+      status: 200,
+      body: envelopedPingBody({ ok: true, release: {} }),
+    },
+  });
+  const health = await runPostRestartHealthChecks({
+    writers: [],
+    snapshotsById: new Map(),
+    env: { ...process.env, FINANCE_API_TOKEN: 'test-token' },
+    runners,
+    expectedReleaseGeneration: SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
+    timeoutMs: 50,
+    pollMs: 1,
+  });
+  assert.equal(health.ok, false);
+  assert.ok(health.results.some((entry) => /release identity missing/.test(entry.error || '')));
+});
+
+test('post-restart health fails when release identity is missing from ping', async () => {
+  const runners = createBackupRunners({
+    pingResponse: {
+      status: 200,
+      body: envelopedPingBody({ ok: true, release: null }),
+    },
+  });
+  const health = await runPostRestartHealthChecks({
+    writers: [],
+    snapshotsById: new Map(),
+    env: { ...process.env, FINANCE_API_TOKEN: 'test-token' },
+    runners,
+    expectedReleaseGeneration: SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
+    timeoutMs: 50,
+    pollMs: 1,
+  });
+  assert.equal(health.ok, false);
+  assert.ok(health.results.some((entry) => /release identity missing/.test(entry.error || '')));
+});
+
+test('post-restart health accepts schema-v1 release tuple from enveloped ping', async () => {
+  const runners = createBackupRunners();
+  const health = await runPostRestartHealthChecks({
+    writers: [],
+    snapshotsById: new Map(),
+    env: { ...process.env, FINANCE_API_TOKEN: 'test-token' },
+    runners,
+    expectedReleaseGeneration: SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
+    timeoutMs: 50,
+    pollMs: 1,
+  });
+  assert.equal(health.ok, true);
+});
+
+test('post-restart health fails on dashboard release identity mismatch', async () => {
+  const mismatched = {
+    ...SCHEMA_V1_RELEASE_IDENTITY,
+    appVersion: '9.9.9',
+  };
+  const runners = createBackupRunners({
+    pingResponse: defaultEnvelopedPingResponse(mismatched),
+  });
+  const health = await runPostRestartHealthChecks({
+    writers: [],
+    snapshotsById: new Map(),
+    env: { ...process.env, FINANCE_API_TOKEN: 'test-token' },
+    runners,
+    expectedReleaseGeneration: SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
+    timeoutMs: 50,
+    pollMs: 1,
+  });
+  assert.equal(health.ok, false);
+  assert.ok(health.results.some((entry) => /release identity mismatch/.test(entry.error || '')));
+});
+
+test('post-restart health does not treat backup release manifest digest as dashboard identity', async () => {
+  const runners = createBackupRunners();
   const health = await runPostRestartHealthChecks({
     writers: [],
     snapshotsById: new Map(),
@@ -822,13 +1239,35 @@ test('post-restart health fails when release digest is missing from ping', async
     pollMs: 1,
   });
   assert.equal(health.ok, false);
-  assert.ok(health.results.some((entry) => /release digest missing/.test(entry.error || '')));
+  assert.notEqual(RELEASE_MANIFEST_DIGEST, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+  assert.ok(health.results.some((entry) => /release identity mismatch/.test(entry.error || '')));
+});
+
+test('capture fails closed when enveloped ping reports null release identity', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-capture-null-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard);
+  const runners = createBackupRunners({
+    pingResponse: {
+      status: 200,
+      body: envelopedPingBody({ ok: true, release: null }),
+    },
+  });
+  const env = envFor(root, dashboard);
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, runners, { stopDeadlineMs: 500 }),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /dashboard release identity unavailable before quiescence/,
+  );
 });
 
 test('timer trigger race during stop fails closed', async (t) => {
   const root = mkRoot(t, 'df-coordinated-trigger-race-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -837,7 +1276,7 @@ test('timer trigger race during stop fails closed', async (t) => {
       operationJournal: { schemaVersion: 1, operations: {} },
     },
   });
-  const runners = createMockRunners({ units: defaultActiveUnits(), timerFiresDuringStop: true });
+  const runners = createBackupRunners({ units: defaultActiveUnits(), timerFiresDuringStop: true });
   const env = envFor(root, dashboard);
   await assert.rejects(
     () => runCoordinatedBackup({
@@ -852,7 +1291,7 @@ test('timer trigger race during stop fails closed', async (t) => {
 test('systemd stop failure refuses backup before snapshot', async (t) => {
   const root = mkRoot(t, 'df-coordinated-systemctl-stop-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -861,7 +1300,7 @@ test('systemd stop failure refuses backup before snapshot', async (t) => {
       operationJournal: { schemaVersion: 1, operations: {} },
     },
   });
-  const runners = createMockRunners({
+  const runners = createBackupRunners({
     units: defaultActiveUnits(),
     stopFailures: new Set(['finance-dashboard.service']),
   });
@@ -879,7 +1318,7 @@ test('systemd stop failure refuses backup before snapshot', async (t) => {
 test('BACKUP_QUIESCE=0 is forbidden', async (t) => {
   const root = mkRoot(t, 'df-coordinated-no-quiesce-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -891,7 +1330,7 @@ test('BACKUP_QUIESCE=0 is forbidden', async (t) => {
   const env = envFor(root, dashboard, { BACKUP_QUIESCE: '0' });
   await assert.rejects(
     () => runCoordinatedBackup({
-      ...backupOptions(env, createMockRunners({ units: defaultActiveUnits() })),
+      ...backupOptions(env, createBackupRunners({ units: defaultActiveUnits() })),
       dashboardDir: dashboard,
       destination: env.DARKFINANCES_BACKUP_DIR,
     }),
@@ -902,7 +1341,7 @@ test('BACKUP_QUIESCE=0 is forbidden', async (t) => {
 test('BACKUP_PRE_QUIESCED=1 rejects active writers and mints no restore token', async (t) => {
   const root = mkRoot(t, 'df-coordinated-pre-quiesced-active-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -914,7 +1353,7 @@ test('BACKUP_PRE_QUIESCED=1 rejects active writers and mints no restore token', 
   const env = envFor(root, dashboard, { BACKUP_PRE_QUIESCED: '1' });
   await assert.rejects(
     () => runCoordinatedBackup({
-      ...backupOptions(env, createMockRunners({ units: defaultActiveUnits() }), { stopDeadlineMs: 200 }),
+      ...backupOptions(env, createBackupRunners({ units: defaultActiveUnits() }), { stopDeadlineMs: 200 }),
       preQuiesced: true,
       dashboardDir: dashboard,
       destination: env.DARKFINANCES_BACKUP_DIR,
@@ -923,10 +1362,10 @@ test('BACKUP_PRE_QUIESCED=1 rejects active writers and mints no restore token', 
   );
 });
 
-test('quiescence_verified resume with active writer fails before snapshot', async (t) => {
-  const root = mkRoot(t, 'df-coordinated-resume-active-');
+test('quiescence_verified resume reuses journal dashboardReleaseIdentityDigest without recapture', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-resume-quiescence-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -939,7 +1378,75 @@ test('quiescence_verified resume with active writer fails before snapshot', asyn
   const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
   fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
   const inventory = loadWriterInventory();
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const setupRunners = createBackupRunners({
+    units: {
+      'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+      'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+      'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+    },
+  });
+  const { snapshots } = discoverWriters({
+    inventory,
+    env,
+    runners: setupRunners,
+    dashboardDir: dashboard,
+  });
+  const journal = createRunJournal({
+    runId: 'resume-quiescence',
+    operation: 'backup',
+    layout,
+    writerInventory: inventory,
+    preRunWriters: snapshots,
+    options: { includeActualData: false, preQuiesced: false, dashboardDir: dashboard },
+  });
+  journal.phase = PHASE.QUIESCENCE_VERIFIED;
+  journal.generationBindings = {
+    dashboardReleaseIdentityDigest: SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
+  };
+  writeRunJournal(layout.journalPath, journal);
+  const mismatchedIdentity = {
+    ...SCHEMA_V1_RELEASE_IDENTITY,
+    appVersion: '9.9.9',
+  };
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, createBackupRunners({
+        units: {
+          'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+          'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+          'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+        },
+        pingResponse: defaultEnvelopedPingResponse(mismatchedIdentity),
+      }), {
+        writeReleaseManifest: stubReleaseManifest(),
+      }),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /post-restart health verification failed/,
+  );
+  const resumed = readRunJournal(layout.journalPath);
+  assert.equal(resumed.generationBindings.dashboardReleaseIdentityDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+  assert.equal(resumed.generationBindings.identityBindingSource, undefined);
+});
+
+test('quiescence_verified resume with active writer fails before snapshot', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-resume-active-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard);
+  const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  const inventory = loadWriterInventory();
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
   const { snapshots } = discoverWriters({ inventory, env, runners, dashboardDir: dashboard });
   const journal = createRunJournal({
     runId: 'resume-active',
@@ -951,7 +1458,7 @@ test('quiescence_verified resume with active writer fails before snapshot', asyn
   });
   journal.phase = PHASE.QUIESCENCE_VERIFIED;
   writeRunJournal(layout.journalPath, journal);
-  const activeRunners = createMockRunners({
+  const activeRunners = createBackupRunners({
     units: defaultActiveUnits(),
     reappearingWriters: ['finance-dashboard.service'],
   });
@@ -968,7 +1475,7 @@ test('quiescence_verified resume with active writer fails before snapshot', asyn
 test('journal resume uses preserved snapshots when live discovery would fail', async (t) => {
   const root = mkRoot(t, 'df-coordinated-resume-unknown-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -981,7 +1488,7 @@ test('journal resume uses preserved snapshots when live discovery would fail', a
   const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
   fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
   const inventory = loadWriterInventory();
-  const goodRunners = createMockRunners({ units: defaultActiveUnits() });
+  const goodRunners = createBackupRunners({ units: defaultActiveUnits() });
   const { snapshots } = discoverWriters({
     inventory,
     env,
@@ -998,7 +1505,7 @@ test('journal resume uses preserved snapshots when live discovery would fail', a
   });
   journal.phase = PHASE.WRITERS_CAPTURED;
   writeRunJournal(layout.journalPath, journal);
-  const badRunners = createMockRunners({
+  const badRunners = createBackupRunners({
     units: {
       ...defaultActiveUnits(),
       'finance-dashboard.service': { active: 'unknown', enabled: 'enabled' },
@@ -1017,7 +1524,7 @@ test('journal resume uses preserved snapshots when live discovery would fail', a
 test('journal resume at backup_complete skips republish and finishes restart', async (t) => {
   const root = mkRoot(t, 'df-coordinated-resume-backup-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -1030,7 +1537,7 @@ test('journal resume at backup_complete skips republish and finishes restart', a
   const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
   fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
   const inventory = loadWriterInventory();
-  const setupRunners = createMockRunners({ units: defaultActiveUnits() });
+  const setupRunners = createBackupRunners({ units: defaultActiveUnits() });
   const { snapshots } = discoverWriters({
     inventory,
     env,
@@ -1044,6 +1551,7 @@ test('journal resume at backup_complete skips republish and finishes restart', a
   fs.writeFileSync(coordinatedManifest, `${JSON.stringify({
     generation: {
       releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+      dashboardReleaseIdentityDigest: SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
       actualDataGeneration: null,
     },
   }, null, 2)}\n`, { mode: 0o600 });
@@ -1063,7 +1571,7 @@ test('journal resume at backup_complete skips republish and finishes restart', a
     coordinatedManifest,
   };
   writeRunJournal(layout.journalPath, journal);
-  const runners = createMockRunners({
+  const runners = createBackupRunners({
     units: {
       'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
       'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
@@ -1091,6 +1599,135 @@ test('journal resume at backup_complete skips republish and finishes restart', a
   assert.equal(buildCalls.count, 0);
 });
 
+test('backup_complete resume migrates legacy coordinated manifest via manifest recapture', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-resume-legacy-migrate-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard);
+  const env = envFor(root, dashboard);
+  const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  const inventory = loadWriterInventory();
+  const setupRunners = createBackupRunners({
+    units: {
+      'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+      'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+      'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+    },
+  });
+  const { snapshots } = discoverWriters({
+    inventory,
+    env,
+    runners: setupRunners,
+    dashboardDir: dashboard,
+  });
+  const bundleArchive = path.join(env.DARKFINANCES_BACKUP_DIR, 'existing-legacy-bundle.tgz');
+  fs.mkdirSync(env.DARKFINANCES_BACKUP_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(bundleArchive, 'bundle\n', { mode: 0o600 });
+  const coordinatedManifest = path.join(env.DARKFINANCES_BACKUP_DIR, 'coordinated-backup-legacy.json');
+  fs.writeFileSync(coordinatedManifest, `${JSON.stringify({
+    generation: {
+      releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+      actualDataGeneration: null,
+    },
+  }, null, 2)}\n`, { mode: 0o600 });
+  const journal = createRunJournal({
+    runId: 'resume-legacy',
+    operation: 'backup',
+    layout,
+    writerInventory: inventory,
+    preRunWriters: snapshots,
+    options: { includeActualData: false, preQuiesced: false, dashboardDir: dashboard },
+  });
+  journal.phase = PHASE.BACKUP_COMPLETE;
+  journal.artifacts = {
+    bundleArchive,
+    bundleManifest: `${bundleArchive}.manifest.json`,
+    releaseManifest: path.join(env.DARKFINANCES_BACKUP_DIR, 'release.json'),
+    coordinatedManifest,
+  };
+  writeRunJournal(layout.journalPath, journal);
+  const result = await runCoordinatedBackup({
+    ...backupOptions(env, createBackupRunners({
+      units: {
+        'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+        'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+        'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+      },
+    }), {
+      writeReleaseManifest: stubReleaseManifest(),
+    }),
+    dashboardDir: dashboard,
+    destination: env.DARKFINANCES_BACKUP_DIR,
+  });
+  assert.equal(result.journal.phase, PHASE.COMPLETE);
+  assert.equal(result.journal.generationBindings.dashboardReleaseIdentityDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+  assert.equal(result.journal.generationBindings.identityBindingSource, 'legacy_manifest_recapture');
+});
+
+test('backup_complete resume fails closed when legacy identity cannot be recovered', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-resume-legacy-fail-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, { includeReleaseManifest: false });
+  const env = envFor(root, dashboard);
+  const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  const inventory = loadWriterInventory();
+  const { snapshots } = discoverWriters({
+    inventory,
+    env,
+    runners: createBackupRunners({
+      units: {
+        'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+        'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+        'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+      },
+    }),
+    dashboardDir: dashboard,
+  });
+  const bundleArchive = path.join(env.DARKFINANCES_BACKUP_DIR, 'existing-legacy-fail.tgz');
+  fs.mkdirSync(env.DARKFINANCES_BACKUP_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(bundleArchive, 'bundle\n', { mode: 0o600 });
+  const coordinatedManifest = path.join(env.DARKFINANCES_BACKUP_DIR, 'coordinated-backup-legacy-fail.json');
+  fs.writeFileSync(coordinatedManifest, `${JSON.stringify({
+    generation: {
+      releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+      actualDataGeneration: null,
+    },
+  }, null, 2)}\n`, { mode: 0o600 });
+  const journal = createRunJournal({
+    runId: 'resume-legacy-fail',
+    operation: 'backup',
+    layout,
+    writerInventory: inventory,
+    preRunWriters: snapshots,
+    options: { includeActualData: false, preQuiesced: false, dashboardDir: dashboard },
+  });
+  journal.phase = PHASE.BACKUP_COMPLETE;
+  journal.artifacts = {
+    bundleArchive,
+    bundleManifest: `${bundleArchive}.manifest.json`,
+    releaseManifest: path.join(env.DARKFINANCES_BACKUP_DIR, 'release.json'),
+    coordinatedManifest,
+  };
+  writeRunJournal(layout.journalPath, journal);
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, createBackupRunners({
+        units: {
+          'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+          'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+          'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+        },
+      }), {
+        writeReleaseManifest: stubReleaseManifest(),
+      }),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    new RegExp(LEGACY_IDENTITY_RECOVERY_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
+});
+
 test('writerStatesForAdmission throws when required writer is active', () => {
   const map = snapshotsMap([
     { id: 'finance-dashboard', state: 'active', originallyActive: true, originallyRunning: true },
@@ -1107,7 +1744,7 @@ test('docker restart policy is disabled during quiescence and restored on restar
   fs.writeFileSync(compose, 'services:\n  actual:\n    image: test\n', { mode: 0o600 });
   const inventory = loadWriterInventory();
   const writer = inventory.writers.find((entry) => entry.id === 'actual-container');
-  const runners = createMockRunners({
+  const runners = createBackupRunners({
     units: defaultActiveUnits(),
     containers: { actual: 'running' },
     restartPolicies: { actual: 'unless-stopped' },
@@ -1134,7 +1771,7 @@ test('docker restart policy is disabled during quiescence and restored on restar
 test('journal resume rejects writer inventory digest drift', async (t) => {
   const root = mkRoot(t, 'df-coordinated-digest-drift-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -1147,7 +1784,7 @@ test('journal resume rejects writer inventory digest drift', async (t) => {
   const layout = coordinatedLayoutForRoot(env.DARKFINANCES_BACKUP_DIR);
   fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
   const inventory = loadWriterInventory();
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
   const journal = createRunJournal({
     runId: 'digest-drift',
     operation: 'backup',
@@ -1189,7 +1826,7 @@ test('signed admission token rejects forgery and wrong verification key', (t) =>
 test('BACKUP_PRE_QUIESCED=1 happy path verifies quiescence without stop commands', async (t) => {
   const root = mkRoot(t, 'df-coordinated-pre-quiesced-happy-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -1199,7 +1836,7 @@ test('BACKUP_PRE_QUIESCED=1 happy path verifies quiescence without stop commands
     },
   });
   const env = envFor(root, dashboard, { BACKUP_PRE_QUIESCED: '1' });
-  const runners = createMockRunners({
+  const runners = createBackupRunners({
     units: {
       'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
       'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
@@ -1217,12 +1854,14 @@ test('BACKUP_PRE_QUIESCED=1 happy path verifies quiescence without stop commands
   assert.ok(!runners.commands.some((cmd) => cmd[0] === 'systemctl' && cmd.includes('stop')));
   const manifest = JSON.parse(fs.readFileSync(result.coordinatedManifest, 'utf8'));
   assert.equal(manifest.provenanceOnly, true);
+  assert.equal(manifest.generation.dashboardReleaseIdentityDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+  assert.notEqual(manifest.generation.releaseManifestDigest, manifest.generation.dashboardReleaseIdentityDigest);
 });
 
 test('writer reappearance fails at named snapshot hooks', async (t) => {
   const root = mkRoot(t, 'df-coordinated-hook-reappear-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -1240,7 +1879,7 @@ test('writer reappearance fails at named snapshot hooks', async (t) => {
     'pre-publish-actual-archive',
     'pre-release-manifest',
   ]) {
-    const runners = createMockRunners({
+    const runners = createBackupRunners({
       units: {
         'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
         'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
@@ -1268,7 +1907,7 @@ test('writer reappearance fails at named snapshot hooks', async (t) => {
 test('coordinated manifest digest binds restore admission coordinatedManifestDigest field', (t) => {
   const root = mkRoot(t, 'df-coordinated-manifest-bind-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },
@@ -1302,6 +1941,7 @@ test('coordinated manifest digest binds restore admission coordinatedManifestDig
     bundleManifest,
     bundleManifestPath,
     releaseManifestPath: releasePath,
+    dashboardReleaseIdentityDigest: SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
   });
   const coordinatedManifestPath = path.join(root, 'coordinated.json');
   fs.writeFileSync(coordinatedManifestPath, `${JSON.stringify(coordinatedManifest, null, 2)}\n`, { mode: 0o600 });
@@ -1329,7 +1969,7 @@ test('tooling closure includes coordinated restore and build-backup dependencies
 test('shell wrapper dry-run exits 2 without mutating destination', (t) => {
   const root = mkRoot(t, 'df-coordinated-shell-dry-');
   const dashboard = path.join(root, 'dashboard');
-  writeProductionDashboard(dashboard, {
+  writeBackupDashboard(dashboard, {
     overrides: {
       bulkOperationSagas: { schemaVersion: 1, sagas: {} },
       transactionSagas: { schemaVersion: 1, sagas: {} },

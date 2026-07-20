@@ -118,6 +118,21 @@ function boundedOutput(text) {
   return `${value.slice(0, MAX_CAPTURE_BYTES)}…[truncated]`;
 }
 
+const NO_CRONTAB_FOR_USER_PATTERN = /^no crontab for /i;
+
+function interpretCrontabListResult(result) {
+  const stderr = boundedOutput(result.stderr).trim();
+  const stdout = boundedOutput(result.stdout);
+  if (result.status === 0) {
+    return { listing: stdout, empty: !stdout.trim() };
+  }
+  if (NO_CRONTAB_FOR_USER_PATTERN.test(stderr)) {
+    return { listing: '', empty: true };
+  }
+  const detail = stderr || `exit status ${result.status ?? 'unknown'}`;
+  throw new Error(`crontab -l failed: ${detail}`);
+}
+
 function spawnBounded(command, args, options = {}) {
   const timeoutMs = options.timeoutMs || DEFAULT_COMMAND_TIMEOUT_MS;
   const result = spawnSync(command, args, {
@@ -251,6 +266,15 @@ function createDefaultRunners(env = process.env, options = {}) {
     sleep(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
     },
+
+    crontabList(runOptions = {}) {
+      return spawnBounded('crontab', ['-l'], { env: runOptions.env || env, timeoutMs });
+    },
+
+    readUserCrontabListing(runOptions = {}) {
+      const result = this.crontabList(runOptions);
+      return interpretCrontabListResult(result);
+    },
   };
 }
 
@@ -277,4 +301,6 @@ module.exports = {
   assertSafeComposeFile,
   spawnBounded,
   boundedOutput,
+  NO_CRONTAB_FOR_USER_PATTERN,
+  interpretCrontabListResult,
 };

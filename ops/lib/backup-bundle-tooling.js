@@ -51,6 +51,7 @@ const SCRIPT_TOOLING_SEEDS = Object.freeze([
 ]);
 
 const DASHBOARD_TOOLING_SEED = 'finance-dashboard/lib/runtime-state-store.js';
+const RELEASE_IDENTITY_TOOLING_SEED = 'finance-dashboard/lib/release-identity.js';
 
 function resolveRequireTarget(baseFile, request) {
   let target = path.normalize(path.join(path.dirname(baseFile), request));
@@ -92,6 +93,11 @@ function dashboardToolingFiles() {
   return collectLibClosure([seed]).filter((rel) => rel.startsWith('finance-dashboard/lib/'));
 }
 
+function releaseIdentityToolingFiles() {
+  const seed = path.join(REPO_ROOT, RELEASE_IDENTITY_TOOLING_SEED);
+  return collectLibClosure([seed]).filter((rel) => rel.startsWith('finance-dashboard/lib/'));
+}
+
 function bundleToolingSourcePaths() {
   const opsAbs = OPS_TOOLING_FILES.map((rel) => path.join(REPO_ROOT, rel));
   const opsClosure = collectLibClosure(opsAbs).filter((rel) => (
@@ -103,6 +109,7 @@ function bundleToolingSourcePaths() {
     ...OPS_TOOLING_FILES,
     ...opsClosure,
     ...dashboardToolingFiles(),
+    ...releaseIdentityToolingFiles(),
     ...scriptsToolingFiles(),
   ])].sort();
 }
@@ -144,7 +151,9 @@ module.exports = {
   OPS_TOOLING_FILES,
   SCRIPT_TOOLING_SEEDS,
   DASHBOARD_TOOLING_SEED,
+  RELEASE_IDENTITY_TOOLING_SEED,
   dashboardToolingFiles,
+  releaseIdentityToolingFiles,
   scriptsToolingFiles,
   bundleToolingSourcePaths,
   bundleDestinationRelative,

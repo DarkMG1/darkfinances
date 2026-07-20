@@ -25,6 +25,11 @@ function createMockRunners(initial = {}) {
   let timerFiresDuringStop = initial.timerFiresDuringStop === true;
   let reappearingWriters = new Set(initial.reappearingWriters || []);
   let tarShouldHang = initial.tarShouldHang === true;
+  let crontabListing = Object.prototype.hasOwnProperty.call(initial, 'crontabListing')
+    ? initial.crontabListing
+    : undefined;
+  let crontabListError = initial.crontabListError ?? null;
+  const commandExistsSet = new Set(initial.commandExists === false ? [] : ['systemctl', 'docker', 'crontab', 'tar']);
 
   const api = {
     commands,
@@ -33,7 +38,8 @@ function createMockRunners(initial = {}) {
     restartPolicies,
     setPingResponse(value) { pingResponse = value; },
     setHungDrain(value) { hungDrain = value; },
-    commandExists() { return true; },
+    setCrontabListing(value) { crontabListing = value; },
+    commandExists(name) { return commandExistsSet.has(name); },
     listActiveSystemdUnits() {
       return [...units.entries()]
         .filter(([, entry]) => ['active', 'activating'].includes(entry.active))
@@ -137,6 +143,20 @@ function createMockRunners(initial = {}) {
     sleep(ms) {
       commands.push(['sleep', String(ms)]);
       return Promise.resolve();
+    },
+    crontabList() {
+      commands.push(['crontab', '-l']);
+      if (crontabListError) {
+        return typeof crontabListError === 'function' ? crontabListError() : crontabListError;
+      }
+      if (crontabListing === undefined || crontabListing === null) {
+        return { status: 1, stdout: '', stderr: 'no crontab for user\n' };
+      }
+      return { status: 0, stdout: crontabListing, stderr: '' };
+    },
+    readUserCrontabListing() {
+      const { interpretCrontabListResult } = require('../../lib/ops-command-runners');
+      return interpretCrontabListResult(api.crontabList());
     },
   };
   return api;

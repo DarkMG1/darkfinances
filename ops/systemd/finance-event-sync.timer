@@ -1,0 +1,11 @@
+[Unit]
+Description=Finance event who-owes snapshot (every 30 minutes, Pacific time)
+
+[Timer]
+OnCalendar=*-*-* *:00/30:00 America/Los_Angeles
+Persistent=true
+RandomizedDelaySec=120
+Unit=finance-event-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -12,10 +12,18 @@ const { sha256File } = require('../lib/backup-verify');
 const { coordinatedLayoutForRoot } = require('../lib/coordinated-operation-layout');
 const { consumeAdmission, revokeAdmission, registryRootForLayout } = require('../lib/coordinated-admission-registry');
 const { assertAdmissionRegistryState, issueSignedAdmissionToken } = require('../lib/restore-quiescence-admission');
-const { PHASE } = require('../lib/coordinated-run-journal');
+const { PHASE, createRunJournal, writeRunJournal } = require('../lib/coordinated-run-journal');
 const { buildTestAdmissionToken, registerTestAdmission } = require('./fixtures/admission-token-fixtures');
 const { installTestCoordinatorKeys, installFakeSystemctl, writeTrustedAdmissionToken, assertPreviewOnlyCommands } = require('./fixtures/coordinated-test-helpers');
-const { createMockRunners, defaultActiveUnits, RELEASE_MANIFEST_DIGEST } = require('./fixtures/coordinated-backup-fixtures');
+const { createMockRunners, defaultActiveUnits } = require('./fixtures/coordinated-backup-fixtures');
+const {
+  createBackupRunners,
+  defaultEnvelopedPingResponse,
+  writeSchemaV1ReleaseManifest,
+  envelopedPingBody,
+  SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
+  RELEASE_MANIFEST_DIGEST,
+} = require('./fixtures/coordinated-backup-release-identity-fixtures');
 const { writeProductionDashboard } = require('./fixtures/backup-bundle-dashboard-fixtures');
 const { loadWriterInventory } = require('../lib/writer-inventory');
 
@@ -237,6 +245,20 @@ function dashboardFixture(root) {
       operationJournal: { schemaVersion: 1, operations: {} },
     },
   });
+  writeSchemaV1ReleaseManifest(root);
+}
+
+function restoreOptions(env, runners, extra = {}) {
+  return {
+    pollMs: 1,
+    stopDeadlineMs: 2000,
+    healthTimeoutMs: 200,
+    healthPollMs: 10,
+    registerSignalHandlers: false,
+    ...extra,
+    env,
+    runners,
+  };
 }
 
 test('coordinated restore happy path stops, restores, consumes admission, and restarts', async (t) => {
@@ -250,15 +272,16 @@ test('coordinated restore happy path stops, restores, consumes admission, and re
   const keys = installTestCoordinatorKeys(root);
   const coordinatorRoot = path.join(root, 'backups');
   const layout = coordinatedLayoutForRoot(coordinatorRoot);
-  const runners = createMockRunners({ units: defaultActiveUnits() });
+  const runners = createBackupRunners();
   let issuedToken = null;
+  let stagedRestoreCalls = 0;
   const result = await runCoordinatedRestore({
     archivePath: archive,
     destinationRoot: dashboard,
     coordinatorRoot,
     privateKey: keys.pair.privateKey,
     releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
-    env: {
+    ...restoreOptions({
       ...process.env,
       HOME: root,
       FINANCE_DASHBOARD_DIR: dashboard,
@@ -266,9 +289,11 @@ test('coordinated restore happy path stops, restores, consumes admission, and re
       COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
       COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
       COORDINATED_TEST_SKIP_LOCK: '1',
-    },
-    runners,
+      FINANCE_API_TOKEN: 'test-token',
+    }, runners),
     runStagedRestore: (opts) => {
+      stagedRestoreCalls += 1;
+      assert.equal(opts.releaseManifestDigest, RELEASE_MANIFEST_DIGEST);
       assert.ok(opts.coordinatedSession);
       issuedToken = issueSignedAdmissionToken({
         layout: opts.coordinatedSession.layout,
@@ -281,7 +306,7 @@ test('coordinated restore happy path stops, restores, consumes admission, and re
           archiveSha256: sha256File(archive),
           destinationRoot: dashboard,
           manifestArtifactId: require('../lib/backup-bundle-verify').readManifestFromArchive(archive).artifact.id,
-          releaseManifestDigest: 'b'.repeat(64),
+          releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
           coordinatedManifestDigest: 'c'.repeat(64),
           writerInventoryDigest: opts.coordinatedSession.writerInventoryDigest,
           actualDataGeneration: null,
@@ -294,12 +319,562 @@ test('coordinated restore happy path stops, restores, consumes admission, and re
       return { ok: true, phase: 'complete' };
     },
   });
+  assert.equal(stagedRestoreCalls, 1);
   assert.equal(result.admissionConsumed, true);
+  assert.equal(result.journal.phase, PHASE.COMPLETE);
+  assert.equal(result.journal.generationBindings.dashboardReleaseIdentityDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+  assert.equal(result.journal.generationBindings.releaseManifestDigest, RELEASE_MANIFEST_DIGEST);
+  assert.notEqual(result.journal.generationBindings.releaseManifestDigest, result.journal.generationBindings.dashboardReleaseIdentityDigest);
   assert.ok(runners.commands.some((cmd) => cmd.join(' ').includes('stop')));
   assert.ok(runners.commands.some((cmd) => cmd.join(' ').includes('start')));
   assert.throws(() => assertAdmissionRegistryState(issuedToken, layout), /consumed/);
-  assert.ok([PHASE.RESTORE_STAGED, PHASE.RESTART_COMPLETE, PHASE.HEALTH_VERIFIED, PHASE.COMPLETE]
-    .includes(result.journal.phase));
+});
+
+test('coordinated restore health succeeds while releaseManifestDigest differs from dashboard identity', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-digest-sep-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  fs.mkdirSync(dashboard, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dashboard, 'rules.json'), '[]\n', { mode: 0o600 });
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  const unrelatedManifestDigest = 'd'.repeat(64);
+  assert.notEqual(unrelatedManifestDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+  const result = await runCoordinatedRestore({
+    archivePath: archive,
+    destinationRoot: dashboard,
+    coordinatorRoot,
+    privateKey: keys.pair.privateKey,
+    releaseManifestDigest: unrelatedManifestDigest,
+    ...restoreOptions({
+      ...process.env,
+      HOME: root,
+      FINANCE_DASHBOARD_DIR: dashboard,
+      DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+      COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+      COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+      COORDINATED_TEST_SKIP_LOCK: '1',
+      FINANCE_API_TOKEN: 'test-token',
+    }, createBackupRunners()),
+    runStagedRestore: (opts) => {
+      assert.equal(opts.releaseManifestDigest, unrelatedManifestDigest);
+      const token = issueSignedAdmissionToken({
+        layout: opts.coordinatedSession.layout,
+        runId: opts.coordinatedSession.runId,
+        journalId: opts.coordinatedSession.journalId,
+        snapshotsById: opts.coordinatedSession.snapshotsById,
+        context: opts.coordinatedSession.context,
+        privateKey: keys.pair.privateKey,
+        bindings: {
+          archiveSha256: sha256File(archive),
+          destinationRoot: dashboard,
+          manifestArtifactId: require('../lib/backup-bundle-verify').readManifestFromArchive(archive).artifact.id,
+          releaseManifestDigest: unrelatedManifestDigest,
+          coordinatedManifestDigest: 'c'.repeat(64),
+          writerInventoryDigest: opts.coordinatedSession.writerInventoryDigest,
+          actualDataGeneration: null,
+        },
+      });
+      opts.coordinatedSession.onAdmissionConsumed?.();
+      const { consumeAdmissionToken } = require('../lib/restore-quiescence-admission');
+      consumeAdmissionToken(layout, token);
+      return { ok: true, phase: 'complete' };
+    },
+  });
+  assert.equal(result.journal.phase, PHASE.COMPLETE);
+  assert.equal(result.journal.generationBindings.releaseManifestDigest, unrelatedManifestDigest);
+  assert.equal(result.journal.generationBindings.dashboardReleaseIdentityDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+});
+
+test('coordinated restore fails fast without FINANCE_API_TOKEN when dashboard is running', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-missing-token-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  writeSchemaV1ReleaseManifest(dashboard);
+  fs.mkdirSync(dashboard, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dashboard, 'rules.json'), '[]\n', { mode: 0o600 });
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
+  const env = {
+    ...process.env,
+    HOME: root,
+    FINANCE_DASHBOARD_DIR: dashboard,
+    DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+    COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+    COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+    COORDINATED_TEST_SKIP_LOCK: '1',
+  };
+  delete env.FINANCE_API_TOKEN;
+  const started = Date.now();
+  await assert.rejects(
+    () => runCoordinatedRestore({
+      archivePath: archive,
+      destinationRoot: dashboard,
+      coordinatorRoot,
+      privateKey: keys.pair.privateKey,
+      releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+      ...restoreOptions(env, runners, { stopDeadlineMs: 500 }),
+    }),
+    /FINANCE_API_TOKEN must be a non-empty string for live dashboard release identity capture/,
+  );
+  assert.ok(Date.now() - started < 500, 'coordinated restore should fail fast without FINANCE_API_TOKEN');
+  assert.equal(runners.commands.filter((entry) => entry[0] === 'httpGet').length, 0);
+});
+
+test('coordinated restore uses manifest without FINANCE_API_TOKEN when pre-quiesced', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-manifest-only-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  writeSchemaV1ReleaseManifest(dashboard);
+  fs.mkdirSync(dashboard, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dashboard, 'rules.json'), '[]\n', { mode: 0o600 });
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  const runners = createBackupRunners({ units: quiescedUnits() });
+  const env = {
+    ...process.env,
+    HOME: root,
+    FINANCE_DASHBOARD_DIR: dashboard,
+    DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+    COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+    COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+    COORDINATED_TEST_SKIP_LOCK: '1',
+    BACKUP_PRE_QUIESCED: '1',
+  };
+  delete env.FINANCE_API_TOKEN;
+  let stagedRestoreCalls = 0;
+  const result = await runCoordinatedRestore({
+    archivePath: archive,
+    destinationRoot: dashboard,
+    coordinatorRoot,
+    privateKey: keys.pair.privateKey,
+    releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+    ...restoreOptions(env, runners),
+    runStagedRestore: (opts) => {
+      stagedRestoreCalls += 1;
+      const token = issueSignedAdmissionToken({
+        layout: opts.coordinatedSession.layout,
+        runId: opts.coordinatedSession.runId,
+        journalId: opts.coordinatedSession.journalId,
+        snapshotsById: opts.coordinatedSession.snapshotsById,
+        context: opts.coordinatedSession.context,
+        privateKey: keys.pair.privateKey,
+        bindings: {
+          archiveSha256: sha256File(archive),
+          destinationRoot: dashboard,
+          manifestArtifactId: require('../lib/backup-bundle-verify').readManifestFromArchive(archive).artifact.id,
+          releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+          coordinatedManifestDigest: 'c'.repeat(64),
+          writerInventoryDigest: opts.coordinatedSession.writerInventoryDigest,
+          actualDataGeneration: null,
+        },
+      });
+      const { consumeAdmissionToken } = require('../lib/restore-quiescence-admission');
+      consumeAdmissionToken(layout, token);
+      opts.coordinatedSession.onAdmissionConsumed?.();
+      return { ok: true, phase: 'complete' };
+    },
+  });
+  assert.equal(stagedRestoreCalls, 1);
+  assert.equal(result.journal.generationBindings.dashboardReleaseIdentityDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+});
+
+test('RESTORE_PRE_QUIESCED=1 verifies quiescence without stop commands', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-pre-quiesced-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  fs.mkdirSync(dashboard, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dashboard, 'rules.json'), '[]\n', { mode: 0o600 });
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  const runners = createBackupRunners({ units: quiescedUnits() });
+  const env = {
+    ...process.env,
+    HOME: root,
+    FINANCE_DASHBOARD_DIR: dashboard,
+    DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+    COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+    COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+    COORDINATED_TEST_SKIP_LOCK: '1',
+    RESTORE_PRE_QUIESCED: '1',
+  };
+  delete env.FINANCE_API_TOKEN;
+  let stagedRestoreCalls = 0;
+  const result = await runCoordinatedRestore({
+    archivePath: archive,
+    destinationRoot: dashboard,
+    coordinatorRoot,
+    privateKey: keys.pair.privateKey,
+    releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+    ...restoreOptions(env, runners),
+    runStagedRestore: (opts) => {
+      stagedRestoreCalls += 1;
+      const token = issueSignedAdmissionToken({
+        layout: opts.coordinatedSession.layout,
+        runId: opts.coordinatedSession.runId,
+        journalId: opts.coordinatedSession.journalId,
+        snapshotsById: opts.coordinatedSession.snapshotsById,
+        context: opts.coordinatedSession.context,
+        privateKey: keys.pair.privateKey,
+        bindings: {
+          archiveSha256: sha256File(archive),
+          destinationRoot: dashboard,
+          manifestArtifactId: require('../lib/backup-bundle-verify').readManifestFromArchive(archive).artifact.id,
+          releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+          coordinatedManifestDigest: 'c'.repeat(64),
+          writerInventoryDigest: opts.coordinatedSession.writerInventoryDigest,
+          actualDataGeneration: null,
+        },
+      });
+      const { consumeAdmissionToken } = require('../lib/restore-quiescence-admission');
+      consumeAdmissionToken(layout, token);
+      opts.coordinatedSession.onAdmissionConsumed?.();
+      return { ok: true, phase: 'complete' };
+    },
+  });
+  assert.equal(stagedRestoreCalls, 1);
+  assert.ok(!runners.commands.some((cmd) => cmd[0] === 'systemctl' && cmd.includes('stop')));
+  assert.equal(result.journal.options.preQuiesced, true);
+  assert.equal(result.journal.generationBindings.dashboardReleaseIdentityDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+});
+
+test('FINANCE_EVENT_SYNC_CONFIGURED=1 rejects legacy owes-snapshot cron before restore quiescence', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-event-sync-cron-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const runners = createBackupRunners({
+    units: quiescedUnits(),
+    crontabListing: '*/30 * * * * bash /home/dark/actual-tools/run.sh owes-snapshot.js\n',
+  });
+  await assert.rejects(
+    () => runCoordinatedRestore({
+      archivePath: archive,
+      destinationRoot: dashboard,
+      coordinatorRoot,
+      privateKey: keys.pair.privateKey,
+      releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+      ...restoreOptions({
+        ...process.env,
+        HOME: root,
+        FINANCE_DASHBOARD_DIR: dashboard,
+        DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+        COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+        COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+        COORDINATED_TEST_SKIP_LOCK: '1',
+        FINANCE_EVENT_SYNC_CONFIGURED: '1',
+        FINANCE_API_TOKEN: 'test-token',
+      }, runners),
+    }),
+    /legacy owes-snapshot\.js cron entry must be removed/,
+  );
+});
+
+test('coordinated restore capture fails closed on empty ping release object', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-empty-release-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  fs.mkdirSync(dashboard, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dashboard, 'rules.json'), '[]\n', { mode: 0o600 });
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const runners = createBackupRunners({
+    pingResponse: {
+      status: 200,
+      body: envelopedPingBody({ ok: true, release: {} }),
+    },
+  });
+  await assert.rejects(
+    () => runCoordinatedRestore({
+      archivePath: archive,
+      destinationRoot: dashboard,
+      coordinatorRoot,
+      privateKey: keys.pair.privateKey,
+      releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+      ...restoreOptions({
+        ...process.env,
+        HOME: root,
+        FINANCE_DASHBOARD_DIR: dashboard,
+        DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+        COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+        COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+        COORDINATED_TEST_SKIP_LOCK: '1',
+        FINANCE_API_TOKEN: 'test-token',
+      }, runners),
+    }),
+    /dashboard release identity unavailable before quiescence/,
+  );
+});
+
+test('coordinated restore fails closed when post-restart ping reports null release identity', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-null-ping-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  fs.mkdirSync(dashboard, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dashboard, 'rules.json'), '[]\n', { mode: 0o600 });
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  const runners = createBackupRunners({
+    pingResponses: [
+      defaultEnvelopedPingResponse(),
+      { status: 200, body: envelopedPingBody({ ok: true, release: null }) },
+    ],
+  });
+  await assert.rejects(
+    () => runCoordinatedRestore({
+      archivePath: archive,
+      destinationRoot: dashboard,
+      coordinatorRoot,
+      privateKey: keys.pair.privateKey,
+      releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+      ...restoreOptions({
+        ...process.env,
+        HOME: root,
+        FINANCE_DASHBOARD_DIR: dashboard,
+        DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+        COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+        COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+        COORDINATED_TEST_SKIP_LOCK: '1',
+        FINANCE_API_TOKEN: 'test-token',
+      }, runners),
+      runStagedRestore: (opts) => {
+        const token = issueSignedAdmissionToken({
+          layout: opts.coordinatedSession.layout,
+          runId: opts.coordinatedSession.runId,
+          journalId: opts.coordinatedSession.journalId,
+          snapshotsById: opts.coordinatedSession.snapshotsById,
+          context: opts.coordinatedSession.context,
+          privateKey: keys.pair.privateKey,
+          bindings: {
+            archiveSha256: sha256File(archive),
+            destinationRoot: dashboard,
+            manifestArtifactId: require('../lib/backup-bundle-verify').readManifestFromArchive(archive).artifact.id,
+            releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+            coordinatedManifestDigest: 'c'.repeat(64),
+            writerInventoryDigest: opts.coordinatedSession.writerInventoryDigest,
+            actualDataGeneration: null,
+          },
+        });
+        opts.coordinatedSession.onAdmissionConsumed?.();
+        const { consumeAdmissionToken } = require('../lib/restore-quiescence-admission');
+        consumeAdmissionToken(layout, token);
+        return { ok: true, phase: 'complete' };
+      },
+    }),
+    /post-restart health verification failed/,
+  );
+});
+
+test('coordinated restore fails closed when post-restart ping reports empty release object', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-empty-post-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  fs.mkdirSync(dashboard, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dashboard, 'rules.json'), '[]\n', { mode: 0o600 });
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  const runners = createBackupRunners({
+    pingResponses: [
+      defaultEnvelopedPingResponse(),
+      { status: 200, body: envelopedPingBody({ ok: true, release: {} }) },
+    ],
+  });
+  await assert.rejects(
+    () => runCoordinatedRestore({
+      archivePath: archive,
+      destinationRoot: dashboard,
+      coordinatorRoot,
+      privateKey: keys.pair.privateKey,
+      releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+      ...restoreOptions({
+        ...process.env,
+        HOME: root,
+        FINANCE_DASHBOARD_DIR: dashboard,
+        DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+        COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+        COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+        COORDINATED_TEST_SKIP_LOCK: '1',
+        FINANCE_API_TOKEN: 'test-token',
+      }, runners),
+      runStagedRestore: (opts) => {
+        const token = issueSignedAdmissionToken({
+          layout: opts.coordinatedSession.layout,
+          runId: opts.coordinatedSession.runId,
+          journalId: opts.coordinatedSession.journalId,
+          snapshotsById: opts.coordinatedSession.snapshotsById,
+          context: opts.coordinatedSession.context,
+          privateKey: keys.pair.privateKey,
+          bindings: {
+            archiveSha256: sha256File(archive),
+            destinationRoot: dashboard,
+            manifestArtifactId: require('../lib/backup-bundle-verify').readManifestFromArchive(archive).artifact.id,
+            releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+            coordinatedManifestDigest: 'c'.repeat(64),
+            writerInventoryDigest: opts.coordinatedSession.writerInventoryDigest,
+            actualDataGeneration: null,
+          },
+        });
+        opts.coordinatedSession.onAdmissionConsumed?.();
+        require('../lib/restore-quiescence-admission').consumeAdmissionToken(layout, token);
+        return { ok: true, phase: 'complete' };
+      },
+    }),
+    /post-restart health verification failed/,
+  );
+});
+
+test('coordinated restore journal resume at restore_staged skips staged restore and completes health', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-resume-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  fs.mkdirSync(dashboard, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dashboard, 'rules.json'), '[]\n', { mode: 0o600 });
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  fs.mkdirSync(layout.controlRoot, { recursive: true, mode: 0o700 });
+  const inventory = loadWriterInventory();
+  const setupRunners = createMockRunners({ units: quiescedUnits() });
+  const { snapshots } = require('../lib/writer-quiescence').discoverWriters({
+    inventory,
+    env: { ...process.env, HOME: root, FINANCE_DASHBOARD_DIR: dashboard },
+    runners: setupRunners,
+    dashboardDir: dashboard,
+  });
+  const journal = createRunJournal({
+    runId: 'restore-resume',
+    operation: 'restore',
+    layout,
+    writerInventory: inventory,
+    preRunWriters: snapshots,
+    options: { includeActualData: false, preQuiesced: false, dashboardDir: dashboard },
+  });
+  journal.phase = PHASE.RESTORE_STAGED;
+  journal.generationBindings = {
+    dashboardReleaseIdentityDigest: SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
+    releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+  };
+  journal.restoreResult = { ok: true, phase: 'complete' };
+  writeRunJournal(layout.journalPath, journal);
+  let stagedRestoreCalls = 0;
+  const result = await runCoordinatedRestore({
+    archivePath: archive,
+    destinationRoot: dashboard,
+    coordinatorRoot,
+    privateKey: keys.pair.privateKey,
+    releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+    ...restoreOptions({
+      ...process.env,
+      HOME: root,
+      FINANCE_DASHBOARD_DIR: dashboard,
+      DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+      COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+      COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+      COORDINATED_TEST_SKIP_LOCK: '1',
+      FINANCE_API_TOKEN: 'test-token',
+    }, createBackupRunners({ units: quiescedUnits() })),
+    runStagedRestore: () => {
+      stagedRestoreCalls += 1;
+      return { ok: true, phase: 'complete' };
+    },
+  });
+  assert.equal(stagedRestoreCalls, 0);
+  assert.equal(result.journal.phase, PHASE.COMPLETE);
+  assert.equal(result.journal.generationBindings.dashboardReleaseIdentityDigest, SCHEMA_V1_RELEASE_IDENTITY_DIGEST);
+});
+
+test('coordinated restore fails closed when post-restart dashboard release identity mismatches', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-mismatch-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  fs.mkdirSync(dashboard, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dashboard, 'rules.json'), '[]\n', { mode: 0o600 });
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  const mismatched = {
+    commit: '0000000',
+    dirty: true,
+    lockSha256: 'e'.repeat(64),
+    contract: 'deadbeefdeadbeef',
+    appVersion: '9.9.9',
+    builtAt: '2099-01-01T00:00:00.000Z',
+  };
+  const runners = createBackupRunners({
+    pingResponses: [
+      defaultEnvelopedPingResponse(),
+      defaultEnvelopedPingResponse(mismatched),
+    ],
+  });
+  await assert.rejects(
+    () => runCoordinatedRestore({
+      archivePath: archive,
+      destinationRoot: dashboard,
+      coordinatorRoot,
+      privateKey: keys.pair.privateKey,
+      releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+      ...restoreOptions({
+        ...process.env,
+        HOME: root,
+        FINANCE_DASHBOARD_DIR: dashboard,
+        DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+        COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+        COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+        COORDINATED_TEST_SKIP_LOCK: '1',
+        FINANCE_API_TOKEN: 'test-token',
+      }, runners),
+      runStagedRestore: (opts) => {
+        const token = issueSignedAdmissionToken({
+          layout: opts.coordinatedSession.layout,
+          runId: opts.coordinatedSession.runId,
+          journalId: opts.coordinatedSession.journalId,
+          snapshotsById: opts.coordinatedSession.snapshotsById,
+          context: opts.coordinatedSession.context,
+          privateKey: keys.pair.privateKey,
+          bindings: {
+            archiveSha256: sha256File(archive),
+            destinationRoot: dashboard,
+            manifestArtifactId: require('../lib/backup-bundle-verify').readManifestFromArchive(archive).artifact.id,
+            releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+            coordinatedManifestDigest: 'c'.repeat(64),
+            writerInventoryDigest: opts.coordinatedSession.writerInventoryDigest,
+            actualDataGeneration: null,
+          },
+        });
+        opts.coordinatedSession.onAdmissionConsumed?.();
+        require('../lib/restore-quiescence-admission').consumeAdmissionToken(layout, token);
+        return { ok: true, phase: 'complete' };
+      },
+    }),
+    /post-restart health verification failed/,
+  );
 });
 
 test('coordinated restore failure after token issue revokes admission', async (t) => {

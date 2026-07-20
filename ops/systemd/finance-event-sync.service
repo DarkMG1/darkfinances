@@ -1,0 +1,11 @@
+[Unit]
+Description=Finance event who-owes snapshot (Splitwise)
+Wants=network-online.target
+After=network-online.target
+OnFailure=finance-sync-failure@%n.service
+
+[Service]
+Type=oneshot
+Environment=TZ=America/Los_Angeles
+UMask=0077
+ExecStart=/usr/bin/bash %h/actual-tools/run.sh owes-snapshot.js
