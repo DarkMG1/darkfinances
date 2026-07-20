@@ -274,6 +274,12 @@ function ownedIdsForFamily(family, saga) {
         if (id != null) ids.add(String(id));
       }
       if (saga.replacementIds?.parentId != null) ids.add(String(saga.replacementIds.parentId));
+      for (const id of saga.retiredReplacementLegIds || []) {
+        if (id != null) ids.add(String(id));
+      }
+      for (const id of Object.values(saga.idMap || {})) {
+        if (id != null) ids.add(String(id));
+      }
       for (const id of saga.restoredIds?.legIds || []) {
         if (id != null) ids.add(String(id));
       }

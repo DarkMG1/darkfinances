@@ -282,6 +282,65 @@ test('split caller converges when Actual reverses split leg order after sync', a
   }
 });
 
+test('split caller survives metadata sync leg reorder and id regeneration through note edit', async () => {
+  const manual = {
+    ...simple,
+    imported_id: null,
+    imported_payee: null,
+  };
+  configure(manual, manual.id);
+  actual.setMutateSplitLegIdentityOnMetadataSync(true);
+  try {
+    const split = await splitTransaction({
+      id: manual.id,
+      accountId: 'account',
+      date: manual.date,
+      legs: [
+        { amount: -4, categoryId: 'category-1', notes: 'first' },
+        { amount: -6, categoryId: 'category-2', notes: 'second' },
+      ],
+    });
+    assertResponseCompatibility(split, 'create');
+    assert.ok(split.legIds.every((id) => /-(meta|postmeta)-/.test(String(id))));
+    await syncNow();
+    const parent = actual.inspect().rows[0];
+    assert.ok(parent.subtransactions.every((leg) => /-(meta|postmeta)-/.test(String(leg.id))));
+    assert.deepEqual(new Set(split.legIds), new Set(parent.subtransactions.map((leg) => leg.id)));
+    assertReferenceMoved(parent.id);
+
+    const firstLeg = parent.subtransactions.find((leg) => leg.notes === 'first');
+    assert.ok(firstLeg);
+    const noteEdit = await setTransactionNotes({
+      id: firstLeg.id,
+      notes: 'updated first',
+      isLeg: true,
+      parentId: parent.id,
+      accountId: 'account',
+      date: manual.date,
+    });
+    assertResponseCompatibility(noteEdit, 'rebuild-split');
+    await syncNow();
+    const live = actual.inspect().rows[0];
+    const liveEditedLeg = live.subtransactions.find((leg) => leg.notes === 'updated first');
+    assert.ok(liveEditedLeg);
+    assert.equal(noteEdit.id, liveEditedLeg.id);
+    assert.equal(noteEdit.parentId, live.id);
+    assertReferenceMoved(live.id);
+
+    const unsplit = await removeSplit({
+      id: live.id,
+      accountId: 'account',
+      date: manual.date,
+      categoryId: 'category-final',
+    });
+    assertResponseCompatibility(unsplit, 'unsplit');
+    assertReferenceMoved(unsplit.id);
+    assert.equal(actual.inspect().rows[0].subtransactions.length, 0);
+  } finally {
+    actual.setMutateSplitLegIdentityOnMetadataSync(false);
+  }
+});
+
 test('split caller returns replacement IDs and preserves response shape', async () => {
   configure(simple);
   const result = await splitTransaction({

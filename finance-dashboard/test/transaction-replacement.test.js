@@ -27,6 +27,7 @@ const {
   shapeMatches,
   transactionFingerprint,
   transactionShape,
+  rollbackReplacementMap,
 } = require('../lib/transaction-replacement-saga');
 test.beforeEach(() => {
   fs.rmSync(process.env.TRANSACTION_SAGAS_PATH, { force: true });
@@ -301,6 +302,90 @@ test('replacement map matches retained legs when Actual returns reversed order',
   assert.deepEqual(
     transactionReplacementMap(original, replacement, ['old-leg-1', 'old-leg-2'], intended),
     { 'old-parent': 'new-parent', 'old-leg-1': 'new-leg-1', 'old-leg-2': 'new-leg-2' },
+  );
+});
+
+test('rollback replacement map resolves legs by idMap content not checkpoint order', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: {
+      parentId: 'new-parent',
+      legIds: ['new-leg-2', 'new-leg-1'],
+    },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+  };
+  const restored = {
+    id: 'restored-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'restored-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      { id: 'restored-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+    ],
+  };
+  assert.deepEqual(rollbackReplacementMap(saga, restored), {
+    'old-parent': 'restored-parent',
+    'old-leg-1': 'restored-leg-1',
+    'old-leg-2': 'restored-leg-2',
+    'new-parent': 'restored-parent',
+    'new-leg-1': 'restored-leg-1',
+    'new-leg-2': 'restored-leg-2',
+  });
+});
+
+test('rollback replacement map fails closed without refreshed idMap', () => {
+  const saga = {
+    original: { id: 'old-parent', subtransactions: [] },
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1'] },
+  };
+  assert.throws(
+    () => rollbackReplacementMap(saga, { id: 'restored-parent', subtransactions: [] }),
+    /requires refreshed idMap/,
+  );
+});
+
+test('rollback replacement map fails closed when checkpoint leg ids are absent from idMap', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [{ amount: -400, category: 'cat-1', notes: 'leg one' }],
+    },
+    legOwnership: ['old-leg-1'],
+    replacementIds: { parentId: 'new-parent', legIds: ['stale-leg-id'] },
+    idMap: { 'old-parent': 'new-parent', 'old-leg-1': 'live-leg-id' },
+  };
+  assert.throws(
+    () => rollbackReplacementMap(saga, {
+      id: 'restored-parent',
+      payee: parentPayee,
+      subtransactions: [{ id: 'restored-leg-1', amount: -400, category: 'cat-1', notes: 'leg one' }],
+    }),
+    /stale/,
   );
 });
 

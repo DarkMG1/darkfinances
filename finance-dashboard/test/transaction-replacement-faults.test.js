@@ -18,6 +18,11 @@ for (const [key, name] of Object.entries({
 })) process.env[key] = path.join(dir, name);
 
 const {
+  applyMetadataSyncMutations,
+  markMetadataSyncMutation,
+  resetMetadataSyncMutationState,
+} = require('./fixtures/actual-metadata-sync-mutation');
+const {
   SagaInterruption,
   addableTransaction,
   assertTransactionReplacementAvailable,
@@ -167,6 +172,7 @@ function durableActual({
   ignoreSparseNullImportedIdUpdates = false,
   deferImportedIdUntilSync = false,
   reverseSplitLegOrderOnSync = false,
+  mutateSplitLegIdentityOnMetadataSync = false,
 } = {}) {
   const state = {
     rows: structuredClone(rows),
@@ -178,8 +184,18 @@ function durableActual({
     failAccountEnumeration: false,
     queryFailures: new Set(),
     sequence: 0,
+    legSequence: 0,
     fired: new Set(),
     counts: { add: 0, delete: 0, update: 0, sync: 0 },
+    mutateSplitLegIdentityOnMetadataSync,
+  };
+  const applyMetadataSplitLegMutation = (row) => {
+    if (!row.is_parent || !Array.isArray(row.subtransactions) || row.subtransactions.length <= 1) return;
+    row.subtransactions = [...row.subtransactions].reverse().map((leg) => ({
+      ...structuredClone(leg),
+      id: `${row.id}-postmeta-${++state.legSequence}`,
+      parent_id: row.id,
+    }));
   };
   const adapter = {
     state,
@@ -266,19 +282,31 @@ function durableActual({
       if (deferImportedIdUntilSync && Object.prototype.hasOwnProperty.call(patch, 'imported_id')) {
         row._staleImportedId = row.imported_id;
       }
+      const metadataRestore = row.is_parent
+        && !Array.isArray(patch.subtransactions)
+        && Object.prototype.hasOwnProperty.call(patch, 'imported_id');
       Object.assign(row, patch);
       if (patch.imported_id === '') row.imported_id = null;
+      if (metadataRestore && state.mutateSplitLegIdentityOnMetadataSync) {
+        row._pendingMetadataSyncMutation = true;
+      }
     },
     async sync() {
       state.counts.sync += 1;
       if (deferImportedIdUntilSync) {
         for (const row of state.rows) delete row._staleImportedId;
       }
-      if (reverseSplitLegOrderOnSync) {
-        for (const row of state.rows) {
-          if (row.is_parent && Array.isArray(row.subtransactions) && row.subtransactions.length > 1) {
-            row.subtransactions = [...row.subtransactions].reverse();
-          }
+      for (const row of state.rows) {
+        if (state.mutateSplitLegIdentityOnMetadataSync && row._pendingMetadataSyncMutation) {
+          applyMetadataSplitLegMutation(row);
+          delete row._pendingMetadataSyncMutation;
+          continue;
+        }
+        if (reverseSplitLegOrderOnSync
+          && row.is_parent
+          && Array.isArray(row.subtransactions)
+          && row.subtransactions.length > 1) {
+          row.subtransactions = [...row.subtransactions].reverse();
         }
       }
       canonicalizeSplitLegPayees(state.rows);
@@ -1262,6 +1290,107 @@ test('metadata restore preserves explicit different leg payees when Actual rever
   await recoverTransactionSagas(api);
   assert.equal(latestSaga().phase, 'completed');
   const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.deepEqual(
+    [...persisted.subtransactions.map((leg) => leg.payee)].sort(),
+    ['leg-payee-1', 'leg-payee-2'],
+  );
+});
+
+test('metadata sync leg id regeneration refreshes replacement ids before reference migration', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActual({
+    rows: [manualOriginal, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement: manualCloneSplit(),
+  });
+  assert.ok(added.subtransactions.every((leg) => String(leg.id).includes('-postmeta-')));
+  await recoverTransactionSagas(api);
+  const saga = latestSaga();
+  assert.equal(saga.phase, 'completed');
+  assert.ok(saga.replacementIds.legIds.every((id) => String(id).includes('-postmeta-')));
+  assert.equal(saga.idMap[String(manualOriginal.id)], saga.replacementIds.parentId);
+  assert.ok((saga.retiredReplacementLegIds || []).length >= 1);
+  assertReferencesAreLive(api);
+});
+
+test('initial manual split and leg note edit converge when metadata sync regenerates leg ids', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActual({
+    rows: [manualOriginal, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const splitAdded = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement: manualCloneSplit(),
+  });
+  await recoverTransactionSagas(api);
+
+  const templates = manualSplitParent().subtransactions;
+  const parent = {
+    ...manualSplitParent(),
+    id: splitAdded.id,
+    subtransactions: splitAdded.subtransactions.map((leg) => {
+      const template = templates.find((candidate) => candidate.notes === leg.notes)
+        || templates.find((candidate) => candidate.amount === leg.amount);
+      return {
+        ...template,
+        id: leg.id,
+        parent_id: splitAdded.id,
+        payee: manualOriginal.payee,
+      };
+    }),
+  };
+  api.state.rows = api.state.rows.filter((row) => row.id !== splitAdded.id);
+  api.state.rows.push(parent);
+
+  const noteReplacement = addableTransaction(parent, {
+    category: undefined,
+    subtransactions: [
+      { amount: -500, category: 'cat-1', notes: 'updated' },
+      { amount: -734, category: 'cat-1', notes: 'second' },
+    ],
+  });
+  const edited = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: parent,
+    replacement: noteReplacement,
+    requestedLegs: parent.subtransactions.map((leg) => ({ id: String(leg.id) })),
+  });
+  assert.equal(edited.subtransactions.find((leg) => leg.notes === 'updated')?.notes, 'updated');
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  assertReferencesAreLive(api);
+});
+
+test('rollback remaps regenerated replacement leg ids back to restored originals', async () => {
+  resetStores();
+  const api = durableActual({ mutateSplitLegIdentityOnMetadataSync: true });
+  const replacement = intendedSplit();
+  const injector = faultSchedule([{ point: 'before:reference-plan-checkpoint', mode: 'error' }]);
+  await interruptReplacement(api, replacement, injector);
+  await recoverPastFault(api, injector);
+  assert.equal(latestSaga().phase, 'rolled_back');
+  assertConverged(api, replacement);
+});
+
+test('metadata sync leg id regeneration preserves explicit different leg payees', async () => {
+  resetStores();
+  const api = durableActual({ mutateSplitLegIdentityOnMetadataSync: true });
+  const replacement = intendedSplit();
+  await replaceActualTransaction(api, {
+    accountId: 'account',
+    original,
+    replacement,
+  });
+  await recoverTransactionSagas(api);
+  const persisted = api.state.rows.find((row) => row.id.startsWith('actual-'));
   assert.deepEqual(
     [...persisted.subtransactions.map((leg) => leg.payee)].sort(),
     ['leg-payee-1', 'leg-payee-2'],

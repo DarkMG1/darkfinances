@@ -181,6 +181,79 @@ function transactionReplacementMap(
   return idMap;
 }
 
+function replacementCheckpointFromTransaction(saga, transaction) {
+  const legOwnership = saga.legOwnership || deriveLegOwnership(
+    saga.original,
+    saga.replacement,
+    saga.requestedLegs || undefined,
+  );
+  return {
+    replacementIds: transactionIds(transaction),
+    idMap: transactionReplacementMap(
+      saga.original,
+      transaction,
+      legOwnership,
+      saga.replacement,
+    ),
+  };
+}
+
+function retiredReplacementLegIds(saga, nextLegIds) {
+  const next = new Set((nextLegIds || []).map(String));
+  const retired = new Set((saga.retiredReplacementLegIds || []).map(String));
+  for (const id of saga.replacementIds?.legIds || []) {
+    if (!next.has(String(id))) retired.add(String(id));
+  }
+  return [...retired];
+}
+
+function rollbackReplacementMap(saga, restored) {
+  const restoredOwnership = (saga.original.subtransactions || []).map((leg) => String(leg.id));
+  const originalToRestored = transactionReplacementMap(
+    saga.original,
+    restored,
+    restoredOwnership,
+    saga.original,
+  );
+  if (!saga.replacementIds) return originalToRestored;
+  if (!saga.idMap || typeof saga.idMap !== 'object') {
+    throw new Error('rollback replacement mapping requires refreshed idMap');
+  }
+  const replacementParentId = String(saga.replacementIds.parentId);
+  const replacementToRestored = {
+    [replacementParentId]: String(restored.id),
+  };
+  for (const [originalId, replacementTarget] of Object.entries(saga.idMap)) {
+    const restoredTarget = originalToRestored[String(originalId)];
+    if (restoredTarget == null) {
+      throw new Error('rollback replacement leg mapping is incomplete');
+    }
+    replacementToRestored[String(replacementTarget)] = String(restoredTarget);
+  }
+  const retainedReplacementLegIds = new Set(
+    Object.values(saga.idMap)
+      .map(String)
+      .filter((id) => id !== replacementParentId),
+  );
+  for (const retainedReplacementLegId of retainedReplacementLegIds) {
+    if (!(saga.replacementIds.legIds || []).map(String).includes(retainedReplacementLegId)) {
+      throw new Error('rollback replacement checkpoint leg ids are stale');
+    }
+  }
+  for (const replacementLegId of saga.replacementIds.legIds || []) {
+    if (Object.prototype.hasOwnProperty.call(replacementToRestored, String(replacementLegId))) continue;
+    replacementToRestored[String(replacementLegId)] = String(restored.id);
+  }
+  for (const replacementLegId of saga.retiredReplacementLegIds || []) {
+    if (Object.prototype.hasOwnProperty.call(replacementToRestored, String(replacementLegId))) continue;
+    replacementToRestored[String(replacementLegId)] = String(restored.id);
+  }
+  if (saga.replacementId && String(saga.replacementId) !== replacementParentId) {
+    replacementToRestored[String(saga.replacementId)] = String(restored.id);
+  }
+  return mergeMaps(originalToRestored, replacementToRestored);
+}
+
 function normalizedTransferId(value) {
   if (value == null || value === false) return null;
   const normalized = String(value).trim();
@@ -239,9 +312,7 @@ function metadataRestoreFields(row, intendedImportedId) {
   const payload = addableTransaction(row, {
     imported_id: restorableImportedId(intendedImportedId),
   });
-  if (!Array.isArray(row.subtransactions) || !row.subtransactions.length) {
-    delete payload.subtransactions;
-  }
+  delete payload.subtransactions;
   return payload;
 }
 
@@ -304,6 +375,12 @@ function sagaOwnedIds(saga) {
   addCheckpointedIds(ids, saga?.replacementIds);
   addCheckpointedIds(ids, saga?.restoredIds);
   for (const id of [saga?.replacementId, saga?.recoveryTransactionId]) {
+    if (id != null) ids.add(String(id));
+  }
+  for (const id of saga?.retiredReplacementLegIds || []) {
+    if (id != null) ids.add(String(id));
+  }
+  for (const id of Object.values(saga?.idMap || {})) {
     if (id != null) ids.add(String(id));
   }
   return ids;
@@ -611,32 +688,35 @@ function createTransactionReplacementSaga({
   }
 
   function rollbackMapFor(saga, restored) {
-    const restoredOwnership = (saga.original.subtransactions || []).map((leg) => String(leg.id));
-    const originalToRestored = transactionReplacementMap(
-      saga.original,
-      restored,
-      restoredOwnership,
-      saga.original,
-    );
-    const maps = [originalToRestored];
-    if (saga.replacementIds) {
-      const replacementToRestored = {
-        [String(saga.replacementIds.parentId)]: String(restored.id),
-      };
-      const ownership = saga.legOwnership || deriveLegOwnership(
-        saga.original,
-        saga.replacement,
-        saga.requestedLegs || undefined,
-      );
-      saga.replacementIds.legIds.forEach((id, index) => {
-        const originalId = ownership[index];
-        replacementToRestored[String(id)] = originalId == null
-          ? String(restored.id)
-          : originalToRestored[String(originalId)];
-      });
-      maps.push(replacementToRestored);
+    return rollbackReplacementMap(saga, restored);
+  }
+
+  async function ensureLiveReplacementCheckpoint(api, saga, faultInjector, checkpointName) {
+    const rows = await transactionsFor(api, saga);
+    const added = rowById(rows, saga.replacementIds?.parentId);
+    if (!added || !shapeMatches(added, saga.replacement)) {
+      return unresolved(saga, 'replacement row is absent or changed', faultInjector);
     }
-    return mergeMaps(...maps);
+    const liveLegIds = (added.subtransactions || []).map((leg) => String(leg.id));
+    const checkpointLegIds = (saga.replacementIds?.legIds || []).map(String);
+    const sortedLive = [...liveLegIds].sort();
+    const sortedCheckpoint = [...checkpointLegIds].sort();
+    if (JSON.stringify(sortedLive) === JSON.stringify(sortedCheckpoint)) {
+      return { transaction: added };
+    }
+    let refreshed;
+    try {
+      refreshed = replacementCheckpointFromTransaction(saga, added);
+    } catch (error) {
+      return unresolved(saga, error.message, faultInjector);
+    }
+    await checkpoint(saga, {
+      replacementId: refreshed.replacementIds.parentId,
+      replacementIds: refreshed.replacementIds,
+      idMap: refreshed.idMap,
+      retiredReplacementLegIds: retiredReplacementLegIds(saga, refreshed.replacementIds.legIds),
+    }, checkpointName, faultInjector);
+    return { transaction: added };
   }
 
   async function prepareReferenceMigration(saga, direction, idMap, phase, faultInjector) {
@@ -843,7 +923,23 @@ function createTransactionReplacementSaga({
           convergeReason: 'replacement metadata or financial shape did not converge',
         });
         if (converged.unresolved) return converged;
-        await checkpoint(saga, { phase: 'replacement_ready', lastError: null }, 'replacement-ready-checkpoint', faultInjector);
+        const convergedRow = converged.row;
+        let refreshedIds;
+        let refreshedIdMap;
+        try {
+          refreshedIds = transactionIds(convergedRow);
+          refreshedIdMap = replacementMapFor(saga, convergedRow);
+        } catch (error) {
+          return unresolved(saga, error.message, faultInjector);
+        }
+        await checkpoint(saga, {
+          phase: 'replacement_ready',
+          replacementId: refreshedIds.parentId,
+          replacementIds: refreshedIds,
+          idMap: refreshedIdMap,
+          retiredReplacementLegIds: retiredReplacementLegIds(saga, refreshedIds.legIds),
+          lastError: null,
+        }, 'replacement-ready-checkpoint', faultInjector);
         continue;
       }
 
@@ -852,6 +948,23 @@ function createTransactionReplacementSaga({
         const added = rowById(rows, saga.replacementIds?.parentId);
         if (!added || !shapeMatches(added, saga.replacement)) {
           return unresolved(saga, 'replacement row is absent or changed', faultInjector);
+        }
+        let refreshedIds;
+        let refreshedIdMap;
+        try {
+          refreshedIds = transactionIds(added);
+          refreshedIdMap = replacementMapFor(saga, added);
+        } catch (error) {
+          return unresolved(saga, error.message, faultInjector);
+        }
+        if (JSON.stringify(refreshedIds.legIds) !== JSON.stringify(saga.replacementIds?.legIds || [])
+          || JSON.stringify(refreshedIdMap) !== JSON.stringify(saga.idMap || {})) {
+          await checkpoint(saga, {
+            replacementId: refreshedIds.parentId,
+            replacementIds: refreshedIds,
+            idMap: refreshedIdMap,
+            retiredReplacementLegIds: retiredReplacementLegIds(saga, refreshedIds.legIds),
+          }, 'replacement-pre-reference-id-checkpoint', faultInjector);
         }
         if (!saga.referenceMigration || saga.referenceMigration.direction !== 'forward') {
           await prepareReferenceMigration(
@@ -873,8 +986,15 @@ function createTransactionReplacementSaga({
       }
 
       if (saga.phase === 'references_migrated') {
+        const live = await ensureLiveReplacementCheckpoint(
+          api,
+          saga,
+          faultInjector,
+          'replacement-return-id-checkpoint',
+        );
+        if (live.unresolved) return live;
+        const added = live.transaction;
         const rows = await transactionsFor(api, saga);
-        const added = rowById(rows, saga.replacementIds?.parentId);
         if (!added
           || rowById(rows, saga.original.id)
           || importedIdentityConflict(rows, saga.replacement.imported_id, [added.id])
@@ -906,10 +1026,15 @@ function createTransactionReplacementSaga({
         return { needsSync: true };
       }
       if (saga.phase === 'completed') {
-        const rows = await transactionsFor(api, saga);
-        const transaction = rowById(rows, saga.replacementIds?.parentId);
+        const live = await ensureLiveReplacementCheckpoint(
+          api,
+          saga,
+          faultInjector,
+          'replacement-completed-id-checkpoint',
+        );
+        if (live.unresolved) return live;
         return {
-          transaction,
+          transaction: live.transaction,
           idMap: saga.idMap,
           references: saga.referenceMigration?.stats,
         };
@@ -1015,8 +1140,16 @@ function createTransactionReplacementSaga({
           convergeReason: 'restored transaction did not converge',
         });
         if (converged.unresolved) return converged;
+        let refreshedRestoredIds;
+        try {
+          refreshedRestoredIds = transactionIds(converged.row);
+        } catch (error) {
+          return unresolved(saga, error.message, faultInjector);
+        }
         await checkpoint(saga, {
           phase: 'restored_ready',
+          restoredIds: refreshedRestoredIds,
+          recoveryTransactionId: refreshedRestoredIds.parentId,
           rollbackIdMap: rollbackMapFor(saga, converged.row),
           lastError: null,
         }, 'restored-ready-checkpoint', faultInjector);
@@ -1342,6 +1475,8 @@ module.exports = {
   assertReconstructableTransaction,
   canonicalLegMultiset,
   createTransactionReplacementSaga,
+  rollbackReplacementMap,
+  replacementCheckpointFromTransaction,
   shapeMatches,
   transactionFingerprint,
   transactionReplacementMap,
