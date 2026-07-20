@@ -25,6 +25,8 @@ function envWithoutShellcheck(t, extra = {}) {
   const { CI, GITHUB_ACTIONS, ...base } = process.env;
   return {
     ...base,
+    CI: '',
+    GITHUB_ACTIONS: '',
     PATH: binDir,
     ...extra,
   };
