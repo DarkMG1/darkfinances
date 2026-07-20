@@ -14,6 +14,7 @@ const {
 const {
   bundleToolingSourcePaths,
   dashboardToolingFiles,
+  releaseIdentityToolingFiles,
 } = require('../lib/backup-bundle-tooling');
 const {
   BUNDLE_KIND,
@@ -114,7 +115,13 @@ test('bundle tooling closure resolves within dashboard lib seeds', () => {
   assert.ok(tooling.includes('ops/lib/backup-verify.js'));
   assert.ok(tooling.includes('ops/lib/backup-bundle-manifest.js'));
   assert.ok(tooling.includes('finance-dashboard/lib/runtime-state-store.js'));
+  assert.ok(tooling.includes('finance-dashboard/lib/release-identity.js'));
+  assert.ok(tooling.includes('finance-dashboard/lib/release-files.js'));
+  assert.ok(tooling.includes('finance-dashboard/lib/release-schema.js'));
   for (const relative of dashboardToolingFiles()) {
+    assert.ok(fs.existsSync(path.join(repoRoot, relative)), relative);
+  }
+  for (const relative of releaseIdentityToolingFiles()) {
     assert.ok(fs.existsSync(path.join(repoRoot, relative)), relative);
   }
 });

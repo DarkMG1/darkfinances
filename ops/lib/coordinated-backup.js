@@ -32,7 +32,10 @@ const {
   assertActualGenerationStable,
   auditDeploymentDiscovery,
 } = require('./writer-quiescence');
-const { runPostRestartHealthChecks } = require('./coordinated-backup-health');
+const {
+  captureDashboardReleaseIdentity,
+  runPostRestartHealthChecks,
+} = require('./coordinated-backup-health');
 const { loadWriterInventory, writerInventoryDigest } = require('./writer-inventory');
 const { writeFileAtomic } = require('./restore-durable-io');
 
@@ -61,11 +64,15 @@ function buildCoordinatedManifest({
   releaseManifestPath,
   actualArchivePath = null,
   actualDataGeneration = null,
+  dashboardReleaseIdentityDigest = null,
 }) {
   const releaseDigest = releaseManifestPath && fs.existsSync(releaseManifestPath)
     ? sha256File(releaseManifestPath)
     : null;
   if (!releaseDigest) throw new Error('coordinated manifest requires release manifest digest');
+  if (!dashboardReleaseIdentityDigest) {
+    throw new Error('coordinated manifest requires dashboard release identity digest');
+  }
   return {
     kind: COORDINATED_MANIFEST_KIND,
     schemaVersion: COORDINATED_MANIFEST_SCHEMA_VERSION,
@@ -78,6 +85,7 @@ function buildCoordinatedManifest({
       bundleManifestDigest: sha256File(bundleManifestPath),
       runtimeInventoryDigest: bundleManifest.runtimeState.inventoryDigest,
       releaseManifestDigest: releaseDigest,
+      dashboardReleaseIdentityDigest,
       actualDataGeneration,
       writerInventoryDigest: journal.inventory.writerInventoryDigest,
     },
@@ -142,7 +150,91 @@ function needsBackupPublish(journal) {
     || journal.phase === PHASE.QUIESCENCE_VERIFIED;
 }
 
+const LEGACY_IDENTITY_RECOVERY_MESSAGE = 'coordinated backup predates dashboardReleaseIdentityDigest and release identity cannot be recovered from the journal or manifest; clear .darkfinances-coordinated/run-journal.json after verifying release-manifest.json matches the live deployment, then restart backup';
+
+function persistBackupGenerationBindings(journal, bindings) {
+  journal.generationBindings = {
+    ...(journal.generationBindings || {}),
+    ...bindings,
+  };
+  return journal;
+}
+
+function dashboardReleaseIdentityFromJournal(journal) {
+  return journal?.generationBindings?.dashboardReleaseIdentityDigest ?? null;
+}
+
+function readCoordinatedManifestGeneration(journal) {
+  const manifestPath = journal?.artifacts?.coordinatedManifest;
+  if (!manifestPath || !fs.existsSync(manifestPath)) return null;
+  const coordinated = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  return coordinated.generation ?? null;
+}
+
+async function resolveDashboardReleaseIdentityDigest({
+  journal,
+  env,
+  runners,
+  dashboardDir,
+  preQuiesced,
+  snapshotsById,
+  timeoutMs,
+  pollMs,
+  allowLegacyRecapture = false,
+}) {
+  const boundFromJournal = dashboardReleaseIdentityFromJournal(journal);
+  if (boundFromJournal) return boundFromJournal;
+
+  const generation = readCoordinatedManifestGeneration(journal);
+  if (generation?.dashboardReleaseIdentityDigest) {
+    persistBackupGenerationBindings(journal, {
+      dashboardReleaseIdentityDigest: generation.dashboardReleaseIdentityDigest,
+      identityBindingSource: 'coordinated_manifest',
+    });
+    return generation.dashboardReleaseIdentityDigest;
+  }
+
+  if (!allowLegacyRecapture && generation && !generation.dashboardReleaseIdentityDigest) {
+    throw new Error(LEGACY_IDENTITY_RECOVERY_MESSAGE);
+  }
+
+  let digest;
+  try {
+    digest = await captureDashboardReleaseIdentity({
+      env,
+      runners,
+      dashboardDir,
+      preQuiesced,
+      snapshotsById,
+      timeoutMs,
+      pollMs,
+    });
+  } catch (captureError) {
+    if (generation && !generation.dashboardReleaseIdentityDigest) {
+      throw new Error(LEGACY_IDENTITY_RECOVERY_MESSAGE);
+    }
+    throw captureError;
+  }
+  persistBackupGenerationBindings(journal, {
+    dashboardReleaseIdentityDigest: digest,
+    identityBindingSource: generation && !generation.dashboardReleaseIdentityDigest
+      ? 'legacy_manifest_recapture'
+      : 'live_capture',
+  });
+  return digest;
+}
+
 function loadGenerationBindingsFromJournal(journal) {
+  const boundFromJournal = dashboardReleaseIdentityFromJournal(journal);
+  if (boundFromJournal) {
+    const generation = readCoordinatedManifestGeneration(journal);
+    return {
+      actualDataGeneration: generation?.actualDataGeneration
+        ?? journal.generationBindings?.actualDataGeneration
+        ?? null,
+      boundReleaseGeneration: boundFromJournal,
+    };
+  }
   if (!journal?.artifacts?.coordinatedManifest) {
     throw new Error('coordinated manifest missing during journal resume');
   }
@@ -150,11 +242,21 @@ function loadGenerationBindingsFromJournal(journal) {
   if (!fs.existsSync(manifestPath)) {
     throw new Error('coordinated manifest missing during journal resume');
   }
-  const coordinated = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  return {
-    actualDataGeneration: coordinated.generation?.actualDataGeneration ?? null,
-    boundReleaseGeneration: coordinated.generation?.releaseManifestDigest ?? null,
-  };
+  const generation = readCoordinatedManifestGeneration(journal);
+  if (!generation) {
+    throw new Error('coordinated manifest missing generation bindings during journal resume');
+  }
+  if (generation.dashboardReleaseIdentityDigest) {
+    persistBackupGenerationBindings(journal, {
+      dashboardReleaseIdentityDigest: generation.dashboardReleaseIdentityDigest,
+      identityBindingSource: 'coordinated_manifest',
+    });
+    return {
+      actualDataGeneration: generation.actualDataGeneration ?? null,
+      boundReleaseGeneration: generation.dashboardReleaseIdentityDigest,
+    };
+  }
+  throw new Error(LEGACY_IDENTITY_RECOVERY_MESSAGE);
 }
 
 function resultFromJournalArtifacts(journal) {
@@ -357,6 +459,18 @@ async function runCoordinatedBackup(options = {}) {
     const publishNeeded = needsBackupPublish(journal);
     if (publishNeeded) {
       resolveReleaseManifestInvocation(options, env, repoRoot);
+      boundReleaseGeneration = await resolveDashboardReleaseIdentityDigest({
+        journal,
+        env,
+        runners,
+        dashboardDir,
+        preQuiesced,
+        snapshotsById,
+        timeoutMs: options.healthTimeoutMs || undefined,
+        pollMs: options.healthPollMs || undefined,
+        allowLegacyRecapture: true,
+      });
+      writeRunJournal(layout.journalPath, journal);
       await ensureQuiescentForSnapshot(context, snapshotsById, {
         stopIfNeeded: !preQuiesced,
         label: 'initial snapshot boundary',
@@ -368,9 +482,27 @@ async function runCoordinatedBackup(options = {}) {
     }
 
     if (!publishNeeded) {
-      const bindings = loadGenerationBindingsFromJournal(journal);
-      actualDataGeneration = bindings.actualDataGeneration;
-      boundReleaseGeneration = bindings.boundReleaseGeneration;
+      try {
+        const bindings = loadGenerationBindingsFromJournal(journal);
+        actualDataGeneration = bindings.actualDataGeneration;
+        boundReleaseGeneration = bindings.boundReleaseGeneration;
+      } catch (error) {
+        if (error.message !== LEGACY_IDENTITY_RECOVERY_MESSAGE) throw error;
+        boundReleaseGeneration = await resolveDashboardReleaseIdentityDigest({
+          journal,
+          env,
+          runners,
+          dashboardDir,
+          preQuiesced: true,
+          snapshotsById,
+          timeoutMs: options.healthTimeoutMs || undefined,
+          pollMs: options.healthPollMs || undefined,
+          allowLegacyRecapture: true,
+        });
+        writeRunJournal(layout.journalPath, journal);
+        const generation = readCoordinatedManifestGeneration(journal);
+        actualDataGeneration = generation?.actualDataGeneration ?? null;
+      }
       result = resultFromJournalArtifacts(journal);
       result.actualDataGeneration = actualDataGeneration;
     } else {
@@ -450,7 +582,6 @@ async function runCoordinatedBackup(options = {}) {
       }
       fs.chmodSync(releaseManifestFinal, 0o600);
       journal.artifacts.releaseManifest = releaseManifestFinal;
-      boundReleaseGeneration = sha256File(releaseManifestFinal);
 
       const coordinatedManifest = buildCoordinatedManifest({
         journal,
@@ -459,6 +590,7 @@ async function runCoordinatedBackup(options = {}) {
         releaseManifestPath: releaseManifestFinal,
         actualArchivePath: actualArchiveFinal,
         actualDataGeneration,
+        dashboardReleaseIdentityDigest: boundReleaseGeneration,
       });
       const coordinatedManifestFinal = path.join(destination, `coordinated-backup-${runId}.json`);
       writeFileAtomic(coordinatedManifestFinal, `${JSON.stringify(coordinatedManifest, null, 2)}\n`, 0o600);
@@ -565,6 +697,10 @@ module.exports = {
   createRunId,
   preQuiescedMode,
   needsBackupPublish,
+  persistBackupGenerationBindings,
+  resolveDashboardReleaseIdentityDigest,
   loadGenerationBindingsFromJournal,
+  readCoordinatedManifestGeneration,
+  LEGACY_IDENTITY_RECOVERY_MESSAGE,
   resultFromJournalArtifacts,
 };

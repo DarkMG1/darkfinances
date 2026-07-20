@@ -26,6 +26,10 @@ const {
   reportUnexpectedReconciliationError,
 } = require('../src/lib/notification-reconciliation-errors');
 
+/** 1am Pacific on 2026-07-19 so fixture bills due 2026-07-20/21 stay day-before (no same-day dedupe). */
+const FIXED_RECONCILE_NOW_MS = Date.parse('2026-07-19T08:00:00Z');
+const FIXED_FINANCE_TODAY = '2026-07-19';
+
 function bill(dueDate, overrides = {}) {
   return {
     key: 'rent',
@@ -196,6 +200,14 @@ function baseSettings(overrides = {}) {
   };
 }
 
+function scheduledReconcileInput(overrides = {}) {
+  const input = { ...overrides };
+  if (input.billsReady && Array.isArray(input.bills) && input.bills.length > 0 && input.financeToday == null) {
+    input.financeToday = FIXED_FINANCE_TODAY;
+  }
+  return input;
+}
+
 function createReconciler(store, notificationsApi, options = {}) {
   return createNotificationReconciler({
     notifications: notificationsApi,
@@ -203,6 +215,7 @@ function createReconciler(store, notificationsApi, options = {}) {
     storage: store.storage,
     assertReconciliationCurrent,
     withReconciliationGuard,
+    nowMs: options.nowMs ?? (() => FIXED_RECONCILE_NOW_MS),
     classifyBillReminder,
     buildBillNotificationContent: (b, kind) => ({
       title: kind === 'overdue' ? 'Bill overdue' : 'Bill due today',
@@ -259,7 +272,7 @@ test.beforeEach(() => {
 });
 
 test('classifyBillReminder scopes same-day dedupe keys by profile', () => {
-  const now = Date.parse('2026-07-16T12:00:00');
+  const now = Date.parse('2026-07-16T12:00:00Z');
   assert.equal(
     classifyBillReminder(bill('2026-07-16'), now, 'server-a').sameDayKey,
     billSameDayKey('server-a', 'rent', '2026-07-16'),
@@ -360,6 +373,7 @@ test('bills query completion reschedules without cancelling event lane', async (
     settings: baseSettings({ bills: true }),
     bills: [bill('2026-07-20')],
     billsReady: true,
+    financeToday: FIXED_FINANCE_TODAY,
   });
 
   await Promise.all([scheduled.run, event.run]);
@@ -548,13 +562,13 @@ test('partial bill scheduling rolls back newly scheduled IDs on lane cancellatio
   );
 
   await assert.rejects(
-    reconciler.reconcileScheduledNotifications({
+    reconciler.reconcileScheduledNotifications(scheduledReconcileInput({
       token,
       scope: 'server-a',
       settings: baseSettings({ bills: true }),
       bills: [bill('2026-07-20'), bill('2026-07-21')],
       billsReady: true,
-    }),
+    })),
     (error) => error.code === 'NOTIFICATION_RECONCILIATION_STALE',
   );
 
@@ -611,13 +625,13 @@ test('permission denied never schedules enabled categories', async () => {
   const reconciler = createReconciler(store, notificationsApi);
   const token = beginReconciliation('scheduled', 0, 'server-a');
 
-  await reconciler.reconcileScheduledNotifications({
+  await reconciler.reconcileScheduledNotifications(scheduledReconcileInput({
     token,
     scope: 'server-a',
     settings: baseSettings({ weekly: true, bills: true }),
     bills: [bill('2026-07-20')],
     billsReady: true,
-  });
+  }));
 
   assert.equal(notificationsApi.scheduled.length, 0);
   assert.deepEqual(notificationsApi.cancelled, []);
@@ -1030,13 +1044,13 @@ test('bill rollback CAS restores previous tracked IDs after cancellation', async
   };
 
   await assert.rejects(
-    reconciler.reconcileScheduledNotifications({
+    reconciler.reconcileScheduledNotifications(scheduledReconcileInput({
       token,
       scope: 'server-a',
       settings: baseSettings({ bills: true }),
       bills: [bill('2026-07-20')],
       billsReady: true,
-    }),
+    })),
     (error) => error.code === 'NOTIFICATION_RECONCILIATION_STALE',
   );
 
@@ -1158,7 +1172,7 @@ for (const faultEvent of STAGE_FAULT_EVENTS) {
         : undefined;
 
       await assert.rejects(
-        reconciler.reconcileScheduledNotifications({
+        reconciler.reconcileScheduledNotifications(scheduledReconcileInput({
           token,
           scope: 'server-a',
           settings: baseSettings({
@@ -1167,7 +1181,7 @@ for (const faultEvent of STAGE_FAULT_EVENTS) {
           }),
           bills,
           billsReady: category === 'bills',
-        }),
+        })),
         (error) => error.code === 'NOTIFICATION_RECONCILIATION_STALE',
       );
 
@@ -1185,7 +1199,7 @@ for (const faultEvent of STAGE_FAULT_EVENTS) {
       assertOsMatchesKvTrackedLive(reconciler, 'server-a', category, notificationsApi);
 
       const restartToken = beginReconciliation('scheduled', 0, 'server-a');
-      await reconciler.reconcileScheduledNotifications({
+      await reconciler.reconcileScheduledNotifications(scheduledReconcileInput({
         token: restartToken,
         scope: 'server-a',
         settings: baseSettings({
@@ -1194,7 +1208,7 @@ for (const faultEvent of STAGE_FAULT_EVENTS) {
         }),
         bills,
         billsReady: category === 'bills',
-      });
+      }));
       assertOsMatchesKvTrackedLive(reconciler, 'server-a', category, notificationsApi);
       assert.ok(reconciler.readCommittedScheduledIds('server-a', category).length > 0);
     });

@@ -14,10 +14,13 @@ reverse-proxy settings, and alert delivery before installation.
 | `systemd/finance-dashboard.service` | Private user service for the Express dashboard. |
 | `systemd/actual-sync.service` | One-shot scheduled bank-sync service. |
 | `systemd/actual-sync.timer` | Twice-daily Pacific-time bank-sync schedule. |
+| `systemd/finance-event-sync.service` | One-shot who-owes snapshot (`owes-snapshot.js`). |
+| `systemd/finance-event-sync.timer` | Half-hour Pacific-time who-owes snapshot schedule. |
 | `systemd/finance-sync-failure@.service` | `OnFailure` bridge to the alert script. |
 | `bin/backup-dashboard-runtime.sh` | Private archive of dashboard JSON sidecars and receipts. |
 | `bin/build-backup-bundle.sh` | Relocatable runtime backup bundle with embedded verification tooling. |
-| `bin/backup-coordinated.sh` | Quiesced PR-16 bundle backup with writer inventory, run journal, generation manifest, and restore admission token. |
+| `bin/backup-coordinated.sh` | Quiesced PR-16 bundle backup with writer inventory, run journal, and generation manifest. |
+| `bin/restore-coordinated.sh` | Coordinated live restore with writer quiescence, admission tokens, and restart (`RESTORE_PRE_QUIESCED` applies here only). |
 | `bin/write-dashboard-release-manifest.sh` | Content-address the reviewed files in a dashboard deployment. |
 | `bin/verify-backup.sh` | Schema/checksum/receipt validation for a runtime archive. |
 | `bin/verify-backup-bundle.sh` | Read-only validation for a relocatable runtime backup bundle. |
@@ -204,7 +207,166 @@ systemctl --user status actual-sync.service
 journalctl --user -u actual-sync.service --since today
 ```
 
-## 5. Configure failure alerts
+## 5. Install scheduled who-owes snapshot sync
+
+Production historically ran Splitwise snapshot collection from cron every 30 minutes:
+
+```cron
+*/30 * * * * bash /home/dark/actual-tools/run.sh owes-snapshot.js
+```
+
+Prefer the reviewed user units below. They reproduce the half-hour cadence in `America/Los_Angeles`,
+apply a private umask, run as a safe oneshot job, deliver failures through the same
+`finance-sync-failure@.service` bridge as bank sync, and log to the user journal instead of a
+separate cron log file.
+
+Prerequisites:
+
+- `~/actual-tools` is deployed from this repository (including `run.sh` and `owes-snapshot.js`).
+- Private `~/actual-tools/.actual.env` (copy from `actual-tools/.actual.env.example`) with
+  `ACTUAL_SERVER_URL`, `ACTUAL_PASSWORD`, `ACTUAL_SYNC_ID`, `OWES_TRUTH_PATH`, and `FIX_DATA_DIR`
+  pointing at an owned disposable cache directory (for example `$HOME/.cache/actual-tools`). `run.sh`
+  sources `.actual.env`, wipes `FIX_DATA_DIR` on each run, and refuses unsafe, missing, or
+  non-directory paths.
+- Private `~/actual-tools/.splitwise.env` when live Splitwise reads are required.
+- Section 6 (failure alerts) is installed so `OnFailure` can notify on nonzero exits.
+
+The timer fires at `:00` and `:30` each hour in `America/Los_Angeles`, is persistent across
+downtime, and adds up to two minutes of randomized delay.
+
+Check a running installation with:
+
+```bash
+systemctl --user list-timers finance-event-sync.timer
+systemctl --user status finance-event-sync.service
+journalctl --user -u finance-event-sync.service --since today
+```
+
+### New hosts (no legacy cron)
+
+Fresh installs with no existing snapshot cron may install, verify, and enable in one pass:
+
+```bash
+mkdir -p "$HOME/.config/systemd/user"
+install -m 600 ops/systemd/finance-event-sync.service \
+  "$HOME/.config/systemd/user/finance-event-sync.service"
+install -m 600 ops/systemd/finance-event-sync.timer \
+  "$HOME/.config/systemd/user/finance-event-sync.timer"
+systemd-analyze --user verify \
+  "$HOME/.config/systemd/user/finance-event-sync.service" \
+  "$HOME/.config/systemd/user/finance-event-sync.timer"
+systemctl --user daemon-reload
+systemctl --user enable --now finance-event-sync.timer
+systemctl --user start finance-event-sync.service
+```
+
+Before the first coordinated backup on that host, export `FINANCE_EVENT_SYNC_CONFIGURED=1` anywhere
+`backup-coordinated.sh` runs (see below).
+
+### Migrate from cron (production)
+
+Do **not** enable the systemd timer while cron still runs. Duplicate writers race on
+`owes-truth.json` and break coordinated backup quiescence. Use this transaction-safe sequence:
+
+1. **Install and verify only** — copy units and run `systemd-analyze`, but do not enable or start:
+
+```bash
+mkdir -p "$HOME/.config/systemd/user"
+install -m 600 ops/systemd/finance-event-sync.service \
+  "$HOME/.config/systemd/user/finance-event-sync.service"
+install -m 600 ops/systemd/finance-event-sync.timer \
+  "$HOME/.config/systemd/user/finance-event-sync.timer"
+systemd-analyze --user verify \
+  "$HOME/.config/systemd/user/finance-event-sync.service" \
+  "$HOME/.config/systemd/user/finance-event-sync.timer"
+systemctl --user daemon-reload
+```
+
+2. **Save and remove only the legacy cron line** — keep a restorable copy, then delete the
+   `*/30 … owes-snapshot.js` entry from crontab (or your scheduler of record):
+
+```bash
+crontab -l | tee "$HOME/finance-event-sync.cron.bak"
+crontab -e   # remove the owes-snapshot.js line only; leave other jobs untouched
+```
+
+Confirm no in-flight snapshot process remains before enabling systemd (otherwise two writers can
+race):
+
+```bash
+if pgrep -f 'owes-snapshot\.js' >/dev/null; then
+  echo "wait for in-flight owes-snapshot.js to finish" >&2
+  exit 1
+fi
+```
+
+3. **Set the coordinator flag** before the next coordinated backup:
+
+```bash
+export FINANCE_EVENT_SYNC_CONFIGURED=1
+```
+
+Persist that export in the shell wrapper, systemd drop-in, or environment file sourced by
+`backup-coordinated.sh`. Without the flag, event-sync writers are omitted from the inventory and
+backup may proceed while snapshot jobs still run.
+
+Example wrapper (sources dashboard secrets without printing them):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+set -a
+. "$HOME/.openclaw/finance-dashboard.env"
+set +a
+export FINANCE_EVENT_SYNC_CONFIGURED=1
+exec "$HOME/.local/bin/backup-coordinated.sh" "$@"
+```
+
+4. **Enable, start, and manually verify** one successful run — finish steps 2–4 as **one maintenance
+   transaction**. Do **not** run `backup-coordinated.sh`, `restore-coordinated.sh`, or
+   `restore-dashboard-runtime.sh` live between removing cron and confirming the systemd timer works;
+   the deployment is mid-migration and writers are ambiguous until step 4 succeeds.
+
+```bash
+systemctl --user enable --now finance-event-sync.timer
+systemctl --user start finance-event-sync.service
+journalctl --user -u finance-event-sync.service --since "5 min ago"
+```
+
+5. **On unit failure in step 4**, restore the saved cron line immediately (before extended
+   debugging) so snapshot collection resumes:
+
+```bash
+systemctl --user disable --now finance-event-sync.timer 2>/dev/null || true
+crontab "$HOME/finance-event-sync.cron.bak"
+```
+
+Then investigate the journal, fix `.actual.env` / `.splitwise.env` / paths, and retry the migration
+from step 1 once the root cause is resolved.
+
+### Roll back to cron
+
+If you must revert after a completed migration:
+
+```bash
+systemctl --user disable --now finance-event-sync.timer
+rm -f "$HOME/.config/systemd/user/finance-event-sync.service" \
+      "$HOME/.config/systemd/user/finance-event-sync.timer"
+systemctl --user daemon-reload
+```
+
+Re-add the reviewed cron entry only after confirming no systemd timer remains enabled:
+
+```cron
+CRON_TZ=America/Los_Angeles
+*/30 * * * * bash /home/dark/actual-tools/run.sh owes-snapshot.js
+```
+
+Unset `FINANCE_EVENT_SYNC_CONFIGURED` (or remove the export) so coordinated backup no longer waits
+for units that are not installed.
+
+## 6. Configure failure alerts
 
 The provided alert script uses `openclaw cron list --json` to reuse the Telegram target from the
 existing `finance-morning` job. It does not store that target in git.
@@ -215,11 +377,13 @@ install -m 600 ops/systemd/finance-sync-failure@.service \
   "$HOME/.config/systemd/user/finance-sync-failure@.service"
 systemctl --user daemon-reload
 ALERT_DRY_RUN=1 "$HOME/.local/bin/finance-sync-alert.sh" actual-sync.service
+ALERT_DRY_RUN=1 "$HOME/.local/bin/finance-sync-alert.sh" finance-event-sync.service
 ```
 
 The dry run still requires OpenClaw and a discoverable destination. If you do not use OpenClaw,
 replace `finance-sync-alert.sh` with your alert provider or remove `OnFailure` from the sync service.
-A broken alert handler must not be mistaken for a successful bank sync; inspect both units.
+A broken alert handler must not be mistaken for a successful bank sync or snapshot; inspect both the
+failing job unit and `finance-sync-failure@*.service`.
 
 ## Back up dashboard runtime state
 
@@ -326,7 +490,7 @@ bundle verification as evidence of a successful production restore.
 - Captures an immutable run journal with pre-mutation writer `active`/`enabled`/`running` snapshots from the authoritative inventory (`ops/lib/writer-inventory.json`).
 - Stops writers in order: timers → active jobs → dashboard (systemd `SIGTERM` graceful drain via PR-14) → Actual container when `BACKUP_INCLUDE_ACTUAL_DATA=1` → restore-lock check.
 - Verifies quiescence with bounded polling; a successful stop command alone is not proof.
-- Builds a PR-16 relocatable bundle, optional Actual data archive, release manifest, coordinated generation manifest, and short-TTL restore admission token bound to artifact/destination/generation evidence.
+- Builds a PR-16 relocatable bundle, optional Actual data archive, release manifest, and coordinated generation manifest. It does not mint restore authority.
 - Restarts only originally active/enabled components in safe order (Actual → dashboard health → jobs/timers), then runs source-fresh health checks.
 - On failure/interrupt, cleans run-owned staging only, preserves prior backups, and leaves `recovery_required` journal state when restart or health checks fail.
 
@@ -345,16 +509,44 @@ DARKFINANCES_REPO_ROOT=/path/to/darkfinances \
   "$HOME/.local/bin/backup-coordinated.sh"
 ```
 
+Source the private dashboard environment before coordinated backup or restore so
+`FINANCE_API_TOKEN` (and related paths) are present without echoing secrets:
+
+```bash
+set -a
+. "$HOME/.openclaw/finance-dashboard.env"
+set +a
+export FINANCE_EVENT_SYNC_CONFIGURED=1   # after cron → systemd migration only
+"$HOME/.local/bin/backup-coordinated.sh"
+```
+
+When `FINANCE_EVENT_SYNC_CONFIGURED=1`, coordinated backup and restore run a fail-closed deployment
+audit: bounded `crontab -l` (argv-only, no shell) must show **no active** (non-comment) legacy
+`owes-snapshot.js` cron lines. Commented examples and `no crontab for user` are accepted; ambiguous
+`crontab` failures fail the run.
+
 Environment:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `BACKUP_INCLUDE_ACTUAL_DATA` | `0` | Also archive `ACTUAL_DATA_DIR` and bind Actual generation |
-| `BACKUP_PRE_QUIESCED` | unset | Verify-only mode when writers were stopped out-of-band (never skips verification or mints restore authority) |
+| `BACKUP_PRE_QUIESCED` | unset | Pre-quiesced backup: writers were stopped out-of-band; skips stop commands but still polls until all inventoried writers are quiescent; never mints restore authority |
 | `BACKUP_DRY_RUN` | `0` | Discovery/plan only |
-| `FINANCE_EVENT_SYNC_CONFIGURED` | unset | Include optional event-sync writers when `1` |
+| `FINANCE_EVENT_SYNC_CONFIGURED` | unset | When `1`, coordinated backup quiesces `finance-event-sync.timer`/`.service` and rejects active legacy `owes-snapshot.js` cron entries |
 
 `BACKUP_QUIESCE=0` is forbidden. Restore admission tokens are Ed25519-signed, short-lived, and issued only by the coordinated restore session while it holds the exclusive coordination lock — never during backup.
+
+`BACKUP_PRE_QUIESCED=1` is a stop-skip mode for operators who already stopped writers manually
+(maintenance window, incident response). It **never** skips quiescence polling or generation binding
+checks; it only skips issuing new `systemctl stop` / `docker compose stop` commands. Backup still
+creates artifacts. Do not set the flag to bypass a live writer — active timers, jobs, or the
+dashboard still fail the run.
+
+`RESTORE_PRE_QUIESCED=1` applies **only** to coordinated restore (`restore-coordinated.sh` /
+`runCoordinatedRestore`). The standalone `restore-dashboard-runtime.sh` helper ignores this flag.
+Set it only when the same out-of-band stop sequence used for backup has already been performed and
+verified; it skips stop commands but still re-verifies quiescence before the first destination
+mutation.
 
 ## Restore dashboard runtime state
 
@@ -386,6 +578,9 @@ RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
   /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
 ```
 
+This standalone helper does **not** honor `RESTORE_PRE_QUIESCED` and does not stop/start systemd
+writers itself. Use coordinated restore when you need PR-18 stop/restart orchestration.
+
 The helper:
 
 - Accepts only PR-16 verified backup bundles (sidecar manifest, checksum, embedded manifest, closed-world inventory).
@@ -414,6 +609,49 @@ The helper:
 
 Afterward, verify `/api/v1/ping`, browser passkey login, the app, receipts, reimbursements, and
 reconciliation state.
+
+## Coordinated live restore
+
+Install the coordinated restore entrypoint next to the backup helper:
+
+```bash
+install -m 700 ops/bin/restore-coordinated.sh \
+  "$HOME/.local/bin/restore-coordinated.sh"
+```
+
+Source dashboard secrets the same way as coordinated backup (never print `FINANCE_API_TOKEN`):
+
+```bash
+set -a
+. "$HOME/.openclaw/finance-dashboard.env"
+set +a
+export FINANCE_EVENT_SYNC_CONFIGURED=1   # when event-sync systemd is installed
+"$HOME/.local/bin/restore-coordinated.sh" /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
+```
+
+Dry-run preview (`RESTORE_DRY_RUN=1` or `--dry-run`) performs read-only writer discovery only; it
+does not mutate the destination. During a live restore, the coordinated restore session issues a
+short-lived admission token while holding its exclusive lock, then performs writer stop → staged
+swap → restart/health verification. Backup never mints restore authority.
+
+When writers were stopped out-of-band immediately before restore, only this coordinated path honors
+`RESTORE_PRE_QUIESCED=1`: it skips issuing new stop commands but still re-verifies quiescence before
+the first destination mutation (same stop-skip semantics as `BACKUP_PRE_QUIESCED=1` for backup):
+
+```bash
+set -a
+. "$HOME/.openclaw/finance-dashboard.env"
+set +a
+export RESTORE_PRE_QUIESCED=1
+export FINANCE_EVENT_SYNC_CONFIGURED=1
+"$HOME/.local/bin/restore-coordinated.sh" /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
+```
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RESTORE_PRE_QUIESCED` | unset | Coordinated restore only: skip stop commands when writers were stopped out-of-band; still verifies quiescence |
+| `RESTORE_DRY_RUN` | unset | Coordinated restore discovery/preview only (`restore-coordinated.sh`; not `restore-dashboard-runtime.sh`) |
+| `FINANCE_EVENT_SYNC_CONFIGURED` | unset | When `1`, coordinated restore quiesces event-sync writers and rejects active legacy `owes-snapshot.js` cron |
 
 ## Graceful shutdown verification
 
@@ -480,5 +718,5 @@ sidecars blindly; corruption recovery may depend on `.last-good` files.
 - Leave passkey enrollment variables unset except during short enrollment windows.
 - Never expose demo headers as a route to live resolvers.
 - Test backups and restore previews regularly.
-- Monitor `actual-sync.timer` and alert delivery.
+- Monitor `actual-sync.timer`, `finance-event-sync.timer` (when installed), and alert delivery.
 - Keep secrets and generated financial data out of git.

@@ -27,6 +27,8 @@ export interface NotificationReconcilerDeps {
   buildSubscriptionNotificationContent: (names: string[], privacy: string) => { title: string; body: string };
   isCashAccount: (account: unknown) => boolean;
   onStageEvent?: (event: string, context: Record<string, unknown>) => void | Promise<void>;
+  /** Wall-clock source for bill reminder classification; defaults to Date.now. */
+  nowMs?: () => number;
 }
 
 export interface ScheduledNotificationReconcileInput {

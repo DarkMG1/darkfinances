@@ -76,13 +76,14 @@ function scopedKey(key, scope) {
  *   storage: Record<string, any>;
  *   assertReconciliationCurrent: (token: any) => void;
  *   withReconciliationGuard: (token: any, fn: () => any) => Promise<any>;
- *   classifyBillReminder: (bill: any, now?: number) => any;
+ *   classifyBillReminder: (bill: any, now?: number, scope?: string, financeToday?: string) => any;
  *   buildBillNotificationContent: (bill: any, kind: string, privacy: string) => { title: string; body: string };
  *   buildLargeChargeNotificationContent: (top: any, extra: number, privacy: string) => { title: string; body: string };
  *   buildLowBalanceNotificationContent: (account: any, extra: number, privacy: string) => { title: string; body: string };
  *   buildRepaymentNotificationContent: (suggestion: any, extra: number, privacy: string) => { title: string; body: string };
  *   buildSubscriptionNotificationContent: (names: string[], privacy: string) => { title: string; body: string };
  *   isCashAccount: (account: any) => boolean;
+ *   nowMs?: () => number;
  * }} deps
  */
 function createNotificationReconciler(deps) {
@@ -100,6 +101,7 @@ function createNotificationReconciler(deps) {
     buildSubscriptionNotificationContent,
     isCashAccount,
     onStageEvent,
+    nowMs = Date.now,
   } = deps;
 
   function readTrackedScheduledIds(scope) {
@@ -249,7 +251,7 @@ function createNotificationReconciler(deps) {
         const dedupe = `${billItem.key}-${billItem.dueDate}`;
         if (seen.has(dedupe)) continue;
         seen.add(dedupe);
-        const plan = classifyBillReminder(billItem, Date.now(), scope, financeToday);
+        const plan = classifyBillReminder(billItem, nowMs(), scope, financeToday);
         if (!plan || plan.kind === 'overdue') continue;
         if (plan.sameDayKey && kv.getBool(plan.sameDayKey, false)) continue;
         const content = buildBillNotificationContent(billItem, plan.kind, settings.privacy);

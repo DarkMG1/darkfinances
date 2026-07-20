@@ -11,6 +11,7 @@ const {
   loadWriterInventory,
   writersForPhase,
 } = require('./writer-inventory');
+const { interpretCrontabListResult } = require('./ops-command-runners');
 
 const DEFAULT_STOP_DEADLINE_MS = 60_000;
 const DEFAULT_VERIFY_POLL_MS = 500;
@@ -455,7 +456,63 @@ async function previewQuiescenceForRestore(context, snapshotsById, {
   };
 }
 
+function auditLegacyOwesSnapshotCron(context) {
+  const { env, runners } = context;
+  if (env.FINANCE_EVENT_SYNC_CONFIGURED !== '1') return;
+
+  if (!runners.commandExists('crontab')) {
+    throw new Error('crontab command unavailable for deployment audit while FINANCE_EVENT_SYNC_CONFIGURED=1');
+  }
+  if (typeof runners.crontabList !== 'function' && typeof runners.readUserCrontabListing !== 'function') {
+    throw new Error('crontab inspection unavailable for deployment audit while FINANCE_EVENT_SYNC_CONFIGURED=1');
+  }
+
+  let listing;
+  try {
+    if (typeof runners.readUserCrontabListing === 'function') {
+      ({ listing } = runners.readUserCrontabListing());
+    } else {
+      ({ listing } = interpretCrontabListResult(runners.crontabList()));
+    }
+  } catch (error) {
+    throw new Error(`legacy owes-snapshot cron audit failed: ${error.message}`);
+  }
+
+  const activeLines = findActiveLegacyOwesSnapshotCronLines(listing);
+  if (activeLines.length > 0) {
+    throw new Error(
+      'legacy owes-snapshot.js cron entry must be removed before coordinated operations when FINANCE_EVENT_SYNC_CONFIGURED=1',
+    );
+  }
+}
+
+function isCrontabCommentOrEmpty(line) {
+  const trimmed = String(line || '').trim();
+  return !trimmed || trimmed.startsWith('#');
+}
+
+function findActiveLegacyOwesSnapshotCronLines(listing) {
+  return String(listing || '')
+    .split(/\r?\n/)
+    .filter((line) => !isCrontabCommentOrEmpty(line))
+    .filter((line) => /\bowes-snapshot\.js\b/.test(line));
+}
+
+function readUserCrontabListing(runners) {
+  if (!runners.commandExists('crontab')) {
+    throw new Error('crontab command unavailable');
+  }
+  if (typeof runners.readUserCrontabListing === 'function') {
+    return runners.readUserCrontabListing();
+  }
+  if (typeof runners.crontabList !== 'function') {
+    throw new Error('crontab inspection unavailable');
+  }
+  return interpretCrontabListResult(runners.crontabList());
+}
+
 function auditDeploymentDiscovery(context) {
+  auditLegacyOwesSnapshotCron(context);
   const inventory = context.inventory || loadWriterInventory();
   const { runners, env } = context;
   const issues = [];
@@ -548,6 +605,10 @@ module.exports = {
   ensureQuiescentForSnapshot,
   previewQuiescenceForRestore,
   auditDeploymentDiscovery,
+  auditLegacyOwesSnapshotCron,
+  findActiveLegacyOwesSnapshotCronLines,
+  readUserCrontabListing,
+  isCrontabCommentOrEmpty,
   assertActualGenerationStable,
   computeActualDataGeneration,
 };
