@@ -121,7 +121,9 @@ test('legacy web reimbursement renders MetricValue totals without NaN or fabrica
   assert.doesNotMatch(browserSources, /fmtPos\(data\.totalOwed\)/);
   assert.match(browserSources, /return fallback;/);
 
-  assert.match(appReimbursement, /totalOwedMetric\?\.complete \? \(totalOwedMetric\.value \?\? 0\)/);
+  assert.match(appReimbursement, /totalOwedMetric\?\.complete && isKnownMoney\(totalOwedMetric\.value\)/);
+  assert.doesNotMatch(appReimbursement, /totalOwedMetric\.value \?\? 0/);
+  assert.match(appReimbursement, /formatOptionalPos\(netValue, fmtPos\)/);
   assert.match(appReimbursement, /grandLowerBound != null \?/);
 });
 
