@@ -16,7 +16,8 @@ test('MutationSheet exposes backdrop and sheet as siblings for accessibility', (
 test('onSuccessClose errors are caught and rebaseline flags set before deferred close', () => {
   const source = fs.readFileSync(path.join(root, 'src/hooks/useMutationForm.ts'), 'utf8');
   assert.match(source, /setBaseline\(\{ \.\.\.fieldsRef\.current \}\)/);
-  assert.match(source, /try\s*\{\s*onSuccessClose\?\.\(\)/);
+  assert.match(source, /successCloseCallbackRef\.current = onSuccessCloseRef\.current/);
+  assert.match(source, /try\s*\{\s*closeSucceededForm\?\.\(\)/);
   assert.match(source, /suppressPersistRef\.current = true/);
   assert.match(source, /requestAnimationFrame/);
 });
