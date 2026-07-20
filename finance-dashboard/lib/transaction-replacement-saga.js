@@ -316,6 +316,76 @@ function metadataRestoreFields(row, intendedImportedId) {
   return payload;
 }
 
+const POST_REFERENCE_PLAN_PHASES = new Set([
+  'references_pending',
+  'references_migrated',
+  'sync_pending',
+  'completed',
+]);
+
+function forwardReferenceMigrationLocked(saga) {
+  const migration = saga?.referenceMigration;
+  if (!migration || migration.direction !== 'forward') return false;
+  if ((migration.completed || []).length > 0) return true;
+  if (POST_REFERENCE_PLAN_PHASES.has(saga.phase)) return true;
+  return saga.phase === 'replacement_ready' && migration.idMap != null;
+}
+
+function sortedReplacementLegIds(transaction) {
+  return (transaction?.subtransactions || []).map((leg) => String(leg.id)).sort();
+}
+
+function checkpointReplacementLegIds(saga) {
+  return (saga.replacementIds?.legIds || []).map(String).sort();
+}
+
+function replacementLegIdDrift(saga, transaction) {
+  return JSON.stringify(sortedReplacementLegIds(transaction))
+    !== JSON.stringify(checkpointReplacementLegIds(saga));
+}
+
+function replacementIdMapDrift(saga, transaction) {
+  try {
+    const live = replacementCheckpointFromTransaction(saga, transaction);
+    return JSON.stringify(live.idMap) !== JSON.stringify(saga.idMap || {});
+  } catch {
+    return true;
+  }
+}
+
+function referenceMigrationIdMapStale(saga) {
+  if (!saga?.referenceMigration?.idMap) return false;
+  return JSON.stringify(saga.idMap || {}) !== JSON.stringify(saga.referenceMigration.idMap);
+}
+
+function migrationTargetsMissing(transaction, idMap) {
+  const liveIds = new Set([String(transaction.id)]);
+  for (const leg of transaction.subtransactions || []) {
+    liveIds.add(String(leg.id));
+  }
+  for (const target of Object.values(idMap || {})) {
+    if (!liveIds.has(String(target))) return true;
+  }
+  return false;
+}
+
+function postMigrationReplacementDriftReason(saga, transaction) {
+  if (!forwardReferenceMigrationLocked(saga)) return null;
+  if (referenceMigrationIdMapStale(saga)) {
+    return 'replacement idMap drifted from reference migration plan';
+  }
+  if (replacementLegIdDrift(saga, transaction)) {
+    return 'replacement leg ids drifted after reference migration started';
+  }
+  if (replacementIdMapDrift(saga, transaction)) {
+    return 'replacement idMap drifted after reference migration started';
+  }
+  if (migrationTargetsMissing(transaction, saga.referenceMigration?.idMap)) {
+    return 'reference migration targets are absent from live replacement row';
+  }
+  return null;
+}
+
 function transactionShape(transaction, importedId = transaction?.imported_id) {
   const legs = Array.isArray(transaction?.subtransactions) ? transaction.subtransactions : [];
   const parentPayee = normalizedValue(transaction?.payee);
@@ -381,6 +451,9 @@ function sagaOwnedIds(saga) {
     if (id != null) ids.add(String(id));
   }
   for (const id of Object.values(saga?.idMap || {})) {
+    if (id != null) ids.add(String(id));
+  }
+  for (const id of Object.values(saga?.referenceMigration?.idMap || {})) {
     if (id != null) ids.add(String(id));
   }
   return ids;
@@ -691,17 +764,33 @@ function createTransactionReplacementSaga({
     return rollbackReplacementMap(saga, restored);
   }
 
-  async function ensureLiveReplacementCheckpoint(api, saga, faultInjector, checkpointName) {
+  async function ensureLiveReplacementCheckpoint(api, saga, faultInjector, checkpointName, {
+    allowRefresh = true,
+  } = {}) {
     const rows = await transactionsFor(api, saga);
     const added = rowById(rows, saga.replacementIds?.parentId);
     if (!added || !shapeMatches(added, saga.replacement)) {
       return unresolved(saga, 'replacement row is absent or changed', faultInjector);
     }
-    const liveLegIds = (added.subtransactions || []).map((leg) => String(leg.id));
-    const checkpointLegIds = (saga.replacementIds?.legIds || []).map(String);
-    const sortedLive = [...liveLegIds].sort();
-    const sortedCheckpoint = [...checkpointLegIds].sort();
-    if (JSON.stringify(sortedLive) === JSON.stringify(sortedCheckpoint)) {
+    const driftReason = postMigrationReplacementDriftReason(saga, added);
+    if (driftReason) {
+      return unresolved(saga, driftReason, faultInjector);
+    }
+    const legDrift = replacementLegIdDrift(saga, added);
+    const idMapDrift = replacementIdMapDrift(saga, added);
+    const verifyOnly = !allowRefresh || forwardReferenceMigrationLocked(saga);
+    if (verifyOnly) {
+      if (legDrift || idMapDrift) {
+        return unresolved(
+          saga,
+          'replacement checkpoint drift after reference migration started',
+          faultInjector,
+        );
+      }
+      await checkpoint(saga, {}, checkpointName, faultInjector);
+      return { transaction: added };
+    }
+    if (!legDrift && !idMapDrift) {
       return { transaction: added };
     }
     let refreshed;
@@ -717,6 +806,17 @@ function createTransactionReplacementSaga({
       retiredReplacementLegIds: retiredReplacementLegIds(saga, refreshed.replacementIds.legIds),
     }, checkpointName, faultInjector);
     return { transaction: added };
+  }
+
+  async function verifyReplacementRowForMigration(api, saga) {
+    const rows = await transactionsFor(api, saga);
+    const added = rowById(rows, saga.replacementIds?.parentId);
+    if (!added || !shapeMatches(added, saga.replacement)) {
+      throw new Error('replacement row is absent or changed during reference migration');
+    }
+    const driftReason = postMigrationReplacementDriftReason(saga, added);
+    if (driftReason) throw new Error(driftReason);
+    return added;
   }
 
   async function prepareReferenceMigration(saga, direction, idMap, phase, faultInjector) {
@@ -740,7 +840,11 @@ function createTransactionReplacementSaga({
     }
     for (const step of referenceSteps) {
       if (migration.completed.includes(step)) continue;
-      await transactionsFor(api, saga);
+      if (direction === 'forward') {
+        await verifyReplacementRowForMigration(api, saga);
+      } else {
+        await transactionsFor(api, saga);
+      }
       await checkpoint(saga, { referenceStep: step }, `reference-${step}-pending-checkpoint`, faultInjector);
       await boundary(faultInjector, `reference-${step}-write`, saga, async () => {
         applyReferenceStep(step, migration.idMap, migration);
@@ -949,22 +1053,27 @@ function createTransactionReplacementSaga({
         if (!added || !shapeMatches(added, saga.replacement)) {
           return unresolved(saga, 'replacement row is absent or changed', faultInjector);
         }
-        let refreshedIds;
-        let refreshedIdMap;
-        try {
-          refreshedIds = transactionIds(added);
-          refreshedIdMap = replacementMapFor(saga, added);
-        } catch (error) {
-          return unresolved(saga, error.message, faultInjector);
+        const driftReason = postMigrationReplacementDriftReason(saga, added);
+        if (driftReason) {
+          return unresolved(saga, driftReason, faultInjector);
         }
-        if (JSON.stringify(refreshedIds.legIds) !== JSON.stringify(saga.replacementIds?.legIds || [])
-          || JSON.stringify(refreshedIdMap) !== JSON.stringify(saga.idMap || {})) {
-          await checkpoint(saga, {
-            replacementId: refreshedIds.parentId,
-            replacementIds: refreshedIds,
-            idMap: refreshedIdMap,
-            retiredReplacementLegIds: retiredReplacementLegIds(saga, refreshedIds.legIds),
-          }, 'replacement-pre-reference-id-checkpoint', faultInjector);
+        if (!forwardReferenceMigrationLocked(saga)) {
+          let refreshedIds;
+          let refreshedIdMap;
+          try {
+            refreshedIds = transactionIds(added);
+            refreshedIdMap = replacementMapFor(saga, added);
+          } catch (error) {
+            return unresolved(saga, error.message, faultInjector);
+          }
+          if (replacementLegIdDrift(saga, added) || replacementIdMapDrift(saga, added)) {
+            await checkpoint(saga, {
+              replacementId: refreshedIds.parentId,
+              replacementIds: refreshedIds,
+              idMap: refreshedIdMap,
+              retiredReplacementLegIds: retiredReplacementLegIds(saga, refreshedIds.legIds),
+            }, 'replacement-pre-reference-id-checkpoint', faultInjector);
+          }
         }
         if (!saga.referenceMigration || saga.referenceMigration.direction !== 'forward') {
           await prepareReferenceMigration(
@@ -991,6 +1100,7 @@ function createTransactionReplacementSaga({
           saga,
           faultInjector,
           'replacement-return-id-checkpoint',
+          { allowRefresh: false },
         );
         if (live.unresolved) return live;
         const added = live.transaction;
@@ -1031,6 +1141,7 @@ function createTransactionReplacementSaga({
           saga,
           faultInjector,
           'replacement-completed-id-checkpoint',
+          { allowRefresh: false },
         );
         if (live.unresolved) return live;
         return {
@@ -1215,6 +1326,13 @@ function createTransactionReplacementSaga({
             || importedIdentityConflict(rows, saga.replacement.imported_id, [replacement.id])
             || !shapeMatches(replacement, saga.replacement)) {
             const error = new Error('replacement changed before terminal checkpoint');
+            await rememberError(saga, error, 'sync_pending', faultInjector);
+            firstError ||= error;
+            continue;
+          }
+          const driftReason = postMigrationReplacementDriftReason(saga, replacement);
+          if (driftReason) {
+            const error = new Error(driftReason);
             await rememberError(saga, error, 'sync_pending', faultInjector);
             firstError ||= error;
             continue;
@@ -1476,6 +1594,9 @@ module.exports = {
   canonicalLegMultiset,
   createTransactionReplacementSaga,
   rollbackReplacementMap,
+  forwardReferenceMigrationLocked,
+  metadataRestoreFields,
+  postMigrationReplacementDriftReason,
   replacementCheckpointFromTransaction,
   shapeMatches,
   transactionFingerprint,

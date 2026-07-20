@@ -28,6 +28,9 @@ const {
   transactionFingerprint,
   transactionShape,
   rollbackReplacementMap,
+  metadataRestoreFields,
+  forwardReferenceMigrationLocked,
+  postMigrationReplacementDriftReason,
 } = require('../lib/transaction-replacement-saga');
 test.beforeEach(() => {
   fs.rmSync(process.env.TRANSACTION_SAGAS_PATH, { force: true });
@@ -473,4 +476,67 @@ test('startup recovery finishes sidecar migration after replacement commit', asy
   const saga = JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas.crash;
   assert.equal(saga.status, 'completed');
   assert.equal(synced, true);
+});
+
+test('metadataRestoreFields omits subtransactions from parent-only metadata patch', () => {
+  const parent = {
+    id: 'parent',
+    date: '2026-07-09',
+    amount: -1000,
+    payee: 'payee-id',
+    imported_id: 'df-replace:temp',
+    is_parent: true,
+    subtransactions: [
+      { id: 'leg-1', parent_id: 'parent', amount: -500, category: 'cat-1' },
+      { id: 'leg-2', parent_id: 'parent', amount: -500, category: 'cat-2' },
+    ],
+  };
+  const payload = metadataRestoreFields(parent, null);
+  assert.equal(payload.imported_id, null);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload, 'subtransactions'), false);
+});
+
+test('forwardReferenceMigrationLocked is false before plan and true after reference migration starts', () => {
+  const prePlan = {
+    phase: 'replacement_ready',
+    referenceMigration: null,
+  };
+  assert.equal(forwardReferenceMigrationLocked(prePlan), false);
+  const planned = {
+    phase: 'references_pending',
+    referenceMigration: {
+      direction: 'forward',
+      idMap: { 'old-parent': 'new-parent' },
+      completed: [],
+    },
+  };
+  assert.equal(forwardReferenceMigrationLocked(planned), true);
+});
+
+test('postMigrationReplacementDriftReason detects stale idMap after reference migration', () => {
+  const saga = {
+    phase: 'sync_pending',
+    replacementIds: { parentId: 'new-parent', legIds: ['leg-a', 'leg-b'] },
+    idMap: { 'old-parent': 'new-parent', 'old-leg-a': 'leg-a', 'old-leg-b': 'leg-b' },
+    referenceMigration: {
+      direction: 'forward',
+      idMap: { 'old-parent': 'new-parent', 'old-leg-a': 'leg-a', 'old-leg-b': 'leg-b' },
+      completed: ['receipts'],
+    },
+  };
+  const transaction = {
+    id: 'new-parent',
+    date: '2026-07-09',
+    amount: -1000,
+    payee: 'payee-id',
+    is_parent: true,
+    subtransactions: [
+      { id: 'leg-a-regenerated', parent_id: 'new-parent', amount: -500, category: 'cat-1' },
+      { id: 'leg-b-regenerated', parent_id: 'new-parent', amount: -500, category: 'cat-2' },
+    ],
+  };
+  assert.match(
+    postMigrationReplacementDriftReason(saga, transaction),
+    /drifted after reference migration started/,
+  );
 });

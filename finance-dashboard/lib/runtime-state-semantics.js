@@ -280,6 +280,9 @@ function ownedIdsForFamily(family, saga) {
       for (const id of Object.values(saga.idMap || {})) {
         if (id != null) ids.add(String(id));
       }
+      for (const id of Object.values(saga.referenceMigration?.idMap || {})) {
+        if (id != null) ids.add(String(id));
+      }
       for (const id of saga.restoredIds?.legIds || []) {
         if (id != null) ids.add(String(id));
       }

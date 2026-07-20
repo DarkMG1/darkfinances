@@ -845,6 +845,41 @@ const OWNERSHIP_ADVERSARIAL = [
     buildAttack: () => ({ schemaVersion: 1, operations: {} }),
     pattern: /cannot drop a nonterminal operation/,
   },
+  {
+    name: 'transactionSagas',
+    buildOriginal: (stamp) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          id: 'active',
+          recordVersion: 2,
+          phase: 'references_pending',
+          updatedAt: stamp,
+          original: { id: 'txn-original', subtransactions: [{ id: 'txn-leg-old' }] },
+          replacementIds: { parentId: 'txn-replacement', legIds: ['txn-leg-new'] },
+          idMap: { 'txn-original': 'txn-replacement', 'txn-leg-old': 'txn-leg-new' },
+          retiredReplacementLegIds: ['txn-leg-retired'],
+          referenceMigration: {
+            direction: 'forward',
+            idMap: { 'txn-original': 'txn-replacement', 'txn-leg-old': 'txn-leg-new' },
+            stats: {},
+            completed: ['receipts'],
+          },
+        },
+      },
+    }),
+    buildAttack: (original) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          ...original.sagas.active,
+          retiredReplacementLegIds: [],
+          idMap: { 'txn-original': 'txn-replacement' },
+        },
+      },
+    }),
+    pattern: /cannot weaken ownership/,
+  },
 ];
 
 for (const scenario of OWNERSHIP_ADVERSARIAL) {

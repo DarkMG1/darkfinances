@@ -740,12 +740,16 @@ const forwardBoundaries = [
   'replacement-add',
   'replacement-reconcile',
   'replacement-id-checkpoint',
+  'replacement-ready-checkpoint',
+  'replacement-metadata-restore',
+  'replacement-metadata-reconcile',
   'reference-receipts-write',
   'reference-links-write',
   'reference-suggestions-write',
   'reference-reconciliation-write',
   'reference-phantomSeen-write',
   'reference-reviewState-write',
+  'replacement-return-id-checkpoint',
 ];
 
 test('forward replacement converges across every durable fault boundary', async (t) => {
@@ -1434,6 +1438,9 @@ const rollbackBoundaries = [
   'original-restoration',
   'restored-reconcile',
   'restored-id-checkpoint',
+  'restored-metadata-restore',
+  'restored-metadata-reconcile',
+  'restored-ready-checkpoint',
   'reference-receipts-write',
   'reference-links-write',
   'reference-suggestions-write',
@@ -2001,4 +2008,126 @@ test('stored saga errors are bounded and redact credentials', async () => {
   const serialized = fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8');
   assert.ok(!serialized.includes(secret));
   assert.ok(activeSaga().lastError.message.length <= 160);
+});
+
+test('metadata restore preserves bank imported_payee and split leg payees through convergence', async () => {
+  resetStores();
+  const api = durableActual();
+  const replacement = intendedSplit();
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original,
+    replacement,
+  });
+  assert.equal(latestSaga().phase, 'sync_pending');
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.imported_payee, original.imported_payee);
+  assert.deepEqual(
+    [...persisted.subtransactions.map((leg) => leg.payee)].sort(),
+    ['leg-payee-1', 'leg-payee-2'],
+  );
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const converged = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(converged.imported_id, original.imported_id);
+  assert.equal(converged.imported_payee, original.imported_payee);
+});
+
+test('retired replacement leg ids block concurrent admission until saga terminalizes', async () => {
+  resetStores();
+  const api = durableActual({ mutateSplitLegIdentityOnMetadataSync: true });
+  const replacement = intendedSplit();
+  const injector = faultSchedule([{ point: 'before:reference-plan-checkpoint' }]);
+  await interruptReplacement(api, replacement, injector);
+  const saga = latestSaga();
+  const retiredId = (saga.retiredReplacementLegIds || [])[0];
+  assert.ok(retiredId, 'expected a retired replacement leg id after pre-reference refresh');
+  assert.throws(
+    () => assertTransactionReplacementAvailable({ accountId: 'account', ids: [retiredId] }),
+    (error) => error.code === 'TRANSACTION_REPLACEMENT_IN_PROGRESS',
+  );
+  await recoverPastFault(api, injector);
+  assert.equal(latestSaga().phase, 'completed');
+  assert.doesNotThrow(() => assertTransactionReplacementAvailable({
+    accountId: 'account',
+    ids: [retiredId, latestSaga().replacementIds.parentId],
+  }));
+});
+
+test('sync_pending terminalization fails closed when replacement leg ids churn after reference migration', async () => {
+  resetStores();
+  const api = durableActual();
+  const replacement = intendedSplit();
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original,
+    replacement,
+  });
+  assert.equal(latestSaga().phase, 'sync_pending');
+  const parent = api.state.rows.find((row) => row.id === added.id);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...leg,
+    id: `${leg.id}-postmigration-${index}`,
+  }));
+  await assert.rejects(
+    recoverTransactionSagas(api),
+    /drifted after reference migration started|reference migration targets are absent/,
+  );
+  assert.equal(latestSaga().phase, 'sync_pending');
+  assert.ok(latestSaga().lastError);
+});
+
+test('references_pending recovery fails closed when live leg ids drift from migration plan', async () => {
+  resetStores();
+  const api = durableActual();
+  const replacement = intendedSplit();
+  const injector = faultSchedule([{ point: 'before:reference-receipts-pending-checkpoint' }]);
+  await interruptReplacement(api, replacement, injector);
+  assert.equal(latestSaga().phase, 'references_pending');
+  const saga = latestSaga();
+  const parent = api.state.rows.find((row) => row.id === saga.replacementIds.parentId);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...leg,
+    id: `${leg.id}-midmigration-${index}`,
+  }));
+  await assert.rejects(
+    recoverTransactionSagas(api),
+    /drifted after reference migration started|reference migration targets are absent/,
+  );
+  assert.equal(latestSaga().phase, 'references_pending');
+  assert.ok(latestSaga().lastError);
+});
+
+test('forward replacement converges across metadata restore checkpoints with leg id regeneration before reference migration', async (t) => {
+  for (const boundary of [
+    'replacement-ready-checkpoint',
+    'replacement-metadata-restore',
+    'replacement-metadata-reconcile',
+  ]) {
+    for (const side of ['before', 'after']) {
+      await t.test(`${side}:${boundary}:pre-reference-regeneration`, async () => {
+        resetStores(manualOriginal.id);
+        const api = durableActual({
+          rows: [manualOriginal, unrelated],
+          ignoreSparseNullImportedIdUpdates: true,
+          mutateSplitLegIdentityOnMetadataSync: true,
+        });
+        const replacement = manualCloneSplit();
+        const injector = faultSchedule([{ point: `${side}:${boundary}` }]);
+        await assert.rejects(
+          replaceActualTransaction(api, {
+            accountId: 'account',
+            original: manualOriginal,
+            replacement,
+            faultInjector: injector,
+          }),
+        );
+        assert.ok(injector.entries.every((entry) => entry.fired));
+        await recoverPastFault(api, injector);
+        assert.equal(latestSaga().phase, 'completed');
+        assert.ok(latestSaga().replacementIds.legIds.every((id) => String(id).includes('-postmeta-')));
+        assertReferencesAreLive(api);
+      });
+    }
+  }
 });
