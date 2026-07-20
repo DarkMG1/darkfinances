@@ -361,8 +361,15 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
             console.log('[mutation-debug] form per-call onSettled start');
           }
           await awaitMutationErrorReconciliation(errorReconciliation);
+          if (__DEV__ && formId === 'add-transaction') {
+            console.log('[mutation-debug] form per-call reconciliation complete');
+          }
           releaseAdmissionForLease(lease);
-          if (!isDispatchTokenCurrent(token)) return;
+          const tokenCurrent = isDispatchTokenCurrent(token);
+          if (__DEV__ && formId === 'add-transaction') {
+            console.log('[mutation-debug] form per-call token current', tokenCurrent, token);
+          }
+          if (!tokenCurrent) return;
           pendingLockRef.current = false;
           setDispatchPending(false);
           if (__DEV__ && formId === 'add-transaction') {
