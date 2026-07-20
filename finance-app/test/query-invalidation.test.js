@@ -5,12 +5,17 @@ const path = require('node:path');
 
 const { scheduleQueryInvalidation } = require('../src/lib/query-invalidation');
 
-test('query invalidation schedules each key without awaiting active refetches', () => {
-  const calls = [];
+test('query invalidation marks keys stale before scheduling active refetches', async () => {
+  const invalidations = [];
+  const refetches = [];
   const neverSettles = new Promise(() => {});
   const queryClient = {
     invalidateQueries(filters) {
-      calls.push(filters);
+      invalidations.push(filters);
+      return neverSettles;
+    },
+    refetchQueries(filters) {
+      refetches.push(filters);
       return neverSettles;
     },
   };
@@ -18,25 +23,37 @@ test('query invalidation schedules each key without awaiting active refetches', 
   const result = scheduleQueryInvalidation(queryClient, ['today', 'transactions']);
 
   assert.equal(result, undefined);
-  assert.deepEqual(calls, [
-    { queryKey: ['today'] },
-    { queryKey: ['transactions'] },
+  assert.deepEqual(invalidations, [
+    { queryKey: ['today'], refetchType: 'none' },
+    { queryKey: ['transactions'], refetchType: 'none' },
+  ]);
+  assert.deepEqual(refetches, []);
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(refetches, [
+    { queryKey: ['today'], type: 'active' },
+    { queryKey: ['transactions'], type: 'active' },
   ]);
 });
 
 test('query invalidation supports full-cache refresh and absorbs scheduler rejection', async () => {
-  let calls = 0;
+  const invalidations = [];
+  const refetches = [];
   const queryClient = {
     invalidateQueries(filters) {
-      calls += 1;
-      assert.equal(filters, undefined);
+      invalidations.push(filters);
+      return Promise.reject(new Error('stale marking failed'));
+    },
+    refetchQueries(filters) {
+      refetches.push(filters);
       return Promise.reject(new Error('background refetch failed'));
     },
   };
 
   assert.equal(scheduleQueryInvalidation(queryClient), undefined);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(calls, 1);
+  assert.deepEqual(invalidations, [{ refetchType: 'none' }]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(refetches, [{ type: 'active' }]);
 });
 
 test('finance mutation success handlers do not await cache refetch completion', () => {

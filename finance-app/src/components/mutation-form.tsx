@@ -184,12 +184,11 @@ export function MutationSheet({
           disabled={canDismiss === false}
         />
         <View
-          testID={testID}
           accessible={false}
           importantForAccessibility="no"
           style={[styles.sheet, { paddingBottom: bottomInset + 16 }]}
         >
-          <Text accessibilityRole="header" style={styles.sheetTitle}>{title}</Text>
+          <Text testID={testID} accessibilityRole="header" style={styles.sheetTitle}>{title}</Text>
           {children}
         </View>
       </View>
