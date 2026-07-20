@@ -18,43 +18,35 @@ function runCheckShell(env = {}) {
   });
 }
 
-function pathWithoutShellcheck() {
-  const which = spawnSync('/bin/bash', ['-lc', 'command -v shellcheck'], { encoding: 'utf8' });
-  const shellcheck = which.stdout.trim();
-  if (!shellcheck) return process.env.PATH || '';
-  const shellcheckDir = path.dirname(shellcheck);
-  return (process.env.PATH || '')
-    .split(':')
-    .filter((entry) => entry && entry !== shellcheckDir)
-    .join(':');
-}
-
-function envWithoutShellcheck(extra = {}) {
+function envWithoutShellcheck(t, extra = {}) {
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-no-shellcheck-'));
+  t.after(() => fs.rmSync(binDir, { recursive: true, force: true }));
+  fs.symlinkSync('/usr/bin/dirname', path.join(binDir, 'dirname'));
   const { CI, GITHUB_ACTIONS, ...base } = process.env;
   return {
     ...base,
-    PATH: '/usr/bin:/bin',
+    PATH: binDir,
     ...extra,
   };
 }
 
-test('check-shell skips cleanly when shellcheck is unavailable locally', () => {
-  const result = runCheckShell(envWithoutShellcheck());
+test('check-shell skips cleanly when shellcheck is unavailable locally', (t) => {
+  const result = runCheckShell(envWithoutShellcheck(t));
 
   assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
   assert.match(result.stdout, /shellcheck: skipped \(not installed/);
 });
 
-test('check-shell fails when shellcheck is unavailable in CI=true', () => {
-  const result = runCheckShell(envWithoutShellcheck({ CI: 'true' }));
+test('check-shell fails when shellcheck is unavailable in CI=true', (t) => {
+  const result = runCheckShell(envWithoutShellcheck(t, { CI: 'true' }));
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /shellcheck: required in CI but not installed/);
   assert.doesNotMatch(result.stdout, /skipped/);
 });
 
-test('check-shell fails when shellcheck is unavailable in GITHUB_ACTIONS=true', () => {
-  const result = runCheckShell(envWithoutShellcheck({ GITHUB_ACTIONS: 'true' }));
+test('check-shell fails when shellcheck is unavailable in GITHUB_ACTIONS=true', (t) => {
+  const result = runCheckShell(envWithoutShellcheck(t, { GITHUB_ACTIONS: 'true' }));
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /shellcheck: required in CI but not installed/);
