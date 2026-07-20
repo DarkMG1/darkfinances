@@ -165,9 +165,10 @@ export function MutationSheet({
     onRequestClose();
   };
   const backdropTestID = testID ? `${testID}-backdrop` : 'mutation-sheet-backdrop';
+  if (!visible) return null;
   return (
     <Modal
-      visible={visible}
+      visible
       animationType={Platform.OS === 'ios' ? 'slide' : 'fade'}
       transparent
       onRequestClose={handleClose}

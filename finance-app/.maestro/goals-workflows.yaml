@@ -22,9 +22,6 @@ appId: ${MAESTRO_APP_ID}
     id: goals-edit-sheet
 - tapOn:
     id: goals-edit-sheet-backdrop
-- tapOn:
-    text: Discard
-    optional: true
 - assertNotVisible:
     id: goals-edit-sheet
 - tapOn:

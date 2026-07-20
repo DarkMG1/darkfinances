@@ -12,6 +12,7 @@ test('MutationSheet keeps sheet container non-accessible with separate backdrop'
   assert.match(source, /<Text testID=\{testID\} accessibilityRole="header"/);
   assert.doesNotMatch(source, /<View\s+testID=\{testID\}[\s\S]*accessibilityLabel=\{title\}/);
   assert.match(source, /accessibilityLabel="Dismiss sheet"/);
+  assert.match(source, /if \(!visible\) return null/);
   assert.match(source, /modalDismissRegion:\s*\{\s*flex:\s*1/);
   assert.doesNotMatch(source, /modalDismissRegion:\s*\{[\s\S]*StyleSheet\.absoluteFill/);
 });
