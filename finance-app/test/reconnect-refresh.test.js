@@ -764,6 +764,9 @@ test('reconnect stale banner exposes accessible status surface', () => {
   assert.match(banner, /\{\.\.\.visibleStatusLiveRegionProps\(\)\}/);
   assert.doesNotMatch(banner, /<AccessibilityLiveRegion/);
   assert.match(banner, /testID="reconnect-stale-banner"/);
+  assert.match(banner, /const subscribe = useCallback/);
+  assert.match(banner, /const getSnapshot = useCallback/);
+  assert.match(banner, /useSyncExternalStore\(subscribe, getSnapshot, getSnapshot\)/);
 });
 
 test('connectivity tracker ignores initial unknown to online', () => {
