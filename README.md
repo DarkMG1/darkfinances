@@ -69,7 +69,7 @@ See [`actual-tools/README.md`](./actual-tools/README.md) for setup and operation
 
 ## Requirements
 
-- Node.js 24+ and npm 10+ (`engines` enforced by `npm run check:toolchain`).
+- Node.js 24+ and the npm version declared in `packageManager` (`npm run check:toolchain`; CI runs `node scripts/ensure-declared-npm.js` before installs).
 - npm with workspace support (`finance-dashboard`, `finance-app`, `actual-tools`).
 - A self-hosted Actual Budget server aligned with the dashboard's `@actual-app/api` version.
 - Optional Splitwise API credentials and Venmo statement exports.
@@ -78,7 +78,20 @@ See [`actual-tools/README.md`](./actual-tools/README.md) for setup and operation
 
 ## Quick start
 
-Install workspace dependencies:
+Install workspace dependencies. When your global npm differs from the repo's declared
+`packageManager` version (for example npm 11 on Node 26), bootstrap the pinned npm before
+installing or running verification locally:
+
+```bash
+node scripts/ensure-declared-npm.js
+npm install
+```
+
+`npm run check:toolchain` rejects npm drift from `packageManager`; CI runs the same bootstrap
+step before every `npm ci`. This is a local development convenience, not part of production
+deployment.
+
+If npm already matches, `ensure-declared-npm` is a no-op:
 
 ```bash
 npm install
@@ -122,9 +135,10 @@ The package READMEs describe optional integrations separately.
 
 ## Verification
 
-Run the complete repository suite:
+Run the complete repository suite (after matching the declared npm when needed):
 
 ```bash
+node scripts/ensure-declared-npm.js
 npm run check
 ```
 
