@@ -82,6 +82,7 @@ export default function ReviewScreen() {
     mutationLabel: 'Acknowledge task',
     onRefetch: () => review.refetch(),
   });
+  const tasksKnown = Array.isArray(review.data?.tasks);
   const tasks = review.data?.tasks ?? [];
 
   const openTask = (task: ReviewTask) => {
@@ -154,7 +155,7 @@ export default function ReviewScreen() {
       <QueryScreenBody
         query={review}
         loading={<SkeletonList rows={6} />}
-        empty={<EmptyState icon="checkmark.circle">Nothing needs review right now</EmptyState>}
+        empty={<EmptyState icon={tasksKnown ? 'checkmark.circle' : 'exclamationmark.triangle'}>{tasksKnown ? 'Nothing needs review right now' : 'Review details unavailable'}</EmptyState>}
         hasContent={tasks.length > 0}
         refetchBannerTestID="review-refetch-banner"
         renderContent={(reviewData) => {

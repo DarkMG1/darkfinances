@@ -53,10 +53,10 @@ export default function DebtScreen() {
                 <Avatar label={d.name} size={36} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.name}>{d.name}</Text>
-                  <Text style={styles.sub}>{d.apr}% APR · {fmtPos(d.minPayment)}/mo · {d.strategy}</Text>
-                  <Text style={styles.sub}>{d.payoffDate ? `Payoff ${fmtDate(d.payoffDate)} · ${d.months} months · ${fmtPos(d.totalInterest ?? 0)} interest` : 'Payment too low to project payoff'}</Text>
+                  <Text style={styles.sub}>{isKnownMoney(d.apr) ? `${d.apr}% APR` : 'APR unavailable'} · {formatOptionalPos(d.minPayment, fmtPos)}/mo · {d.strategy}</Text>
+                  <Text style={styles.sub}>{d.payoffDate ? `Payoff ${fmtDate(d.payoffDate)} · ${d.months} months · ${formatOptionalPos(d.totalInterest, fmtPos)} interest` : 'Payment too low to project payoff'}</Text>
                 </View>
-                <Text style={styles.amt}>{fmtPos(d.balance)}</Text>
+                <Text style={styles.amt}>{formatOptionalPos(d.balance, fmtPos)}</Text>
               </View>
             ))}
           </Card>

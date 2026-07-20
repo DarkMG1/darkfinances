@@ -207,7 +207,10 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     setMutationFormDraft(scopeDigest, formId, fields, profileGeneration);
   }, [baseline, fields, formId, formIdentityKey, hydrationReadyIdentity, persistDraft, profileGeneration, scopeDigest]);
 
-  const isLocked = dispatchPending || phase === 'submitting' || phase === 'reconciling';
+  const isLocked = dispatchPending
+    || phase === 'submitting'
+    || phase === 'reconciling'
+    || phase === 'success';
   const isDirty = useMemo(
     () => shouldTreatMutationFormAsDirty(
       hydrationReadyIdentity,
@@ -257,6 +260,8 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
         onSuccessClose?.();
       } catch {
         // User close hook must not leak lock/draft state.
+      } finally {
+        setPhase('idle');
       }
     });
 

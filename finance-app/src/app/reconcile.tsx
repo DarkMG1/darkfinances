@@ -65,7 +65,8 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
   };
 
   const data = recon.data;
-  const total = data?.total ?? 0;
+  const itemsKnown = Array.isArray(data?.items);
+  const itemCount = itemsKnown ? data.items.length : 0;
   const canNext = month < curKey;
 
   const openTxn = (it: ReconItem) => {
@@ -77,8 +78,14 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
   };
   const doClose = () => {
     const reconData = recon.data;
-    const reconTotal = reconData?.total ?? 0;
-    const reconDone = reconData?.reconciledCount ?? 0;
+    const reconItems = reconData?.items ?? [];
+    const reconTotal = Math.max(
+      Number.isFinite(reconData?.total) ? reconData!.total : 0,
+      reconItems.length,
+    );
+    const reconDone = Number.isFinite(reconData?.reconciledCount)
+      ? reconData!.reconciledCount
+      : reconItems.filter((item) => item.reconciled).length;
     const reconAllDone = reconTotal > 0 && reconDone >= reconTotal;
     const reconMonthClosed = !!reconData?.done;
     if (!reconAllDone || reconMonthClosed || banner.isLocked) return;
@@ -111,13 +118,18 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
         <QueryScreenBody
           query={recon}
           loading={null}
-          empty={<EmptyState icon="checkmark.circle">No transactions to reconcile in {monthLabel(month)}</EmptyState>}
-          hasContent={total > 0}
+          empty={<EmptyState icon={itemsKnown ? 'checkmark.circle' : 'exclamationmark.triangle'}>{itemsKnown ? `No transactions to reconcile in ${monthLabel(month)}` : 'Reconciliation details unavailable'}</EmptyState>}
+          hasContent={itemCount > 0}
           refetchBannerTestID="reconcile-refetch-banner"
           renderContent={(reconData) => {
             const reconItems = reconData.items ?? [];
-            const reconTotal = reconData.total ?? 0;
-            const reconDone = reconData.reconciledCount ?? 0;
+            const reconTotal = Math.max(
+              Number.isFinite(reconData.total) ? reconData.total : 0,
+              reconItems.length,
+            );
+            const reconDone = Number.isFinite(reconData.reconciledCount)
+              ? reconData.reconciledCount
+              : reconItems.filter((item) => item.reconciled).length;
             const reconAllDone = reconTotal > 0 && reconDone >= reconTotal;
             const reconMonthClosed = !!reconData.done;
             const reconPct = reconTotal > 0 ? (reconDone / reconTotal) * 100 : 0;

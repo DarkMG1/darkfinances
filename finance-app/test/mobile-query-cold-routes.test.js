@@ -40,8 +40,12 @@ test('cold-route screens use lazy QueryScreenBody renderContent without data! he
 
 test('bills hasContent requires horizonDays shape needed by hero', () => {
   const source = read('src/app/bills.tsx');
-  assert.match(source, /hasContent=\{Boolean\(data\?\.horizonDays/);
+  assert.match(source, /billDetailsKnown = data\?\.horizonDays != null && Array\.isArray\(data\?\.bills\)/);
+  assert.match(source, /hasContent=\{Boolean\(billDetailsKnown && billCount > 0\)\}/);
+  assert.match(source, /Bill details unavailable/);
   assert.match(source, /renderContent=\{\(billData\)/);
+  assert.match(source, /formatOptionalMoney\(billData\.total, fmtMoney\)/);
+  assert.doesNotMatch(source, /fmtMoney\(billData\.total\)/);
 });
 
 test('investments allocation reads use optional byAssetClass chain', () => {
@@ -66,12 +70,15 @@ test('forecast and merchant partial payload reads stay inside renderContent', ()
   assert.match(forecast, /events\?\.slice/);
   assert.match(forecast, /warnings \?\? \[\]/);
   assert.match(forecast, /formatOptionalMoney/);
+  assert.match(forecast, /completeMoneySeries\(pointBalances\)/);
+  assert.match(forecast, /chartUnavailable/);
   assert.match(forecast, /renderContent=\{\(data\)/);
 
   const merchant = read('src/app/merchant/[name].tsx');
   assert.match(merchant, /hist\.data\?\.months \?\? \[\]\)\.find/);
   assert.match(merchant, /selMonth\?\.items \?\? \[\]/);
   assert.match(merchant, /formatOptionalMoney\(merchantData\.total/);
+  assert.match(merchant, /formatOptionalMoney\(selMonth\.total/);
 });
 
 test('subscriptions renderContent consumes typed data argument', () => {
@@ -84,7 +91,22 @@ test('subscriptions renderContent consumes typed data argument', () => {
 test('reconcile drops unused outer item derivations', () => {
   const source = read('src/app/reconcile.tsx');
   assert.doesNotMatch(source, /const items = data\?\.items/);
+  assert.match(source, /itemsKnown = Array\.isArray\(data\?\.items\)/);
+  assert.match(source, /hasContent=\{itemCount > 0\}/);
+  assert.match(source, /Reconciliation details unavailable/);
   assert.match(source, /renderContent=\{\(reconData\)/);
+});
+
+test('review distinguishes missing task payload from a genuine empty review', () => {
+  const source = read('src/app/review.tsx');
+  assert.match(source, /tasksKnown = Array\.isArray\(review\.data\?\.tasks\)/);
+  assert.match(source, /Review details unavailable/);
+});
+
+test('cashflow requires known net values before formatting or coloring them', () => {
+  const source = read('src/app/cashflow.tsx');
+  assert.match(source, /currentNetKnown = .*isKnownMoney\(cur\.net\)/);
+  assert.match(source, /netKnown = monthComplete\(m\) && isKnownMoney\(m\.net\)/);
 });
 
 test('home review distinguishes unknown count from zero and all-clear', () => {
@@ -118,7 +140,19 @@ test('reimbursement summary uses fail-closed money fallbacks for absent aggregat
   assert.match(source, /formatOptionalPos\(summary\?\.fronted/);
   assert.match(source, /formatOptionalPos\(summary\?\.paidBack/);
   assert.match(source, /reimbursementWindowNet\(summary\)/);
+  assert.match(source, /flatMap\(\(\[name, v\]\) => isKnownMoney\(v\?\.net\)/);
+  assert.doesNotMatch(source, /v\?\.net \?\? 0/);
   assert.doesNotMatch(source, /fmtPos\(summary\?\.fronted \?\? 0\)/);
+});
+
+test('investment and debt detail rows do not fabricate unknown values', () => {
+  const investments = read('src/app/investments.tsx');
+  assert.match(investments, /pct == null \? 'Unavailable'/);
+  assert.match(investments, /formatOptionalPos\(h\.value, fmtPos\)/);
+
+  const debt = read('src/app/debt.tsx');
+  assert.match(debt, /formatOptionalPos\(d\.totalInterest, fmtPos\)/);
+  assert.doesNotMatch(debt, /d\.totalInterest \?\? 0/);
 });
 
 test('recurring detail resolves items with empty fallback', () => {

@@ -5,7 +5,7 @@ import { PushScreen } from '@/components/screen';
 import { QueryScreenBody } from '@/components/query-display';
 import { Avatar, Card, CardTitle, EmptyState, Loading } from '@/components/ui';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
-import { formatOptionalMoney, formatOptionalSignedMoney, isKnownMoney } from '@/lib/money-display.js';
+import { formatOptionalMoney, formatOptionalPos, formatOptionalSignedMoney, isKnownMoney } from '@/lib/money-display.js';
 import { colors, fmtMoney, fmtPos, fmtSignedMoney } from '@/theme/colors';
 
 export default function InvestmentsScreen() {
@@ -20,7 +20,9 @@ export default function InvestmentsScreen() {
         hasContent={Boolean(investments.data?.holdings?.length)}
         refetchBannerTestID="investments-refetch-banner"
         renderContent={(data) => {
-          const allocation = Object.entries(data.allocation?.byAssetClass ?? {}).sort((a, b) => b[1] - a[1]);
+          const allocation = Object.entries(data.allocation?.byAssetClass ?? {})
+            .filter((entry) => isKnownMoney(entry[1]))
+            .sort((a, b) => b[1] - a[1]);
           const totalValue = data.totals?.value;
           const gainLoss = data.totals?.gainLoss;
           const heroValue = formatOptionalMoney(totalValue, fmtMoney);
@@ -45,12 +47,12 @@ export default function InvestmentsScreen() {
           <Card style={{ marginBottom: 16 }}>
             <CardTitle>Allocation</CardTitle>
             {allocation.map(([name, value]) => {
-              const pct = isKnownMoney(totalValue) && totalValue > 0 ? (value / totalValue) * 100 : 0;
+              const pct = isKnownMoney(totalValue) && totalValue > 0 ? (value / totalValue) * 100 : null;
               return (
                 <View key={name} testID={`investments-allocation-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`} style={styles.allocRow}>
                   <Text style={styles.allocName}>{name}</Text>
-                  <View style={styles.allocTrack}><View style={[styles.allocFill, { width: `${Math.min(100, pct)}%` }]} /></View>
-                  <Text style={styles.allocValue}>{pct.toFixed(0)}%</Text>
+                  <View style={styles.allocTrack}><View style={[styles.allocFill, { width: `${pct == null ? 0 : Math.min(100, pct)}%` }]} /></View>
+                  <Text style={styles.allocValue}>{pct == null ? 'Unavailable' : `${pct.toFixed(0)}%`}</Text>
                 </View>
               );
             })}
@@ -63,11 +65,11 @@ export default function InvestmentsScreen() {
                 <Avatar label={h.symbol || h.name} size={36} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.name} numberOfLines={1}>{h.symbol || h.name}</Text>
-                  <Text style={styles.sub} numberOfLines={1}>{h.account} · {h.assetClass} · {h.quantity.toLocaleString()} shares</Text>
+                  <Text style={styles.sub} numberOfLines={1}>{h.account} · {h.assetClass} · {Number.isFinite(h.quantity) ? `${h.quantity.toLocaleString()} shares` : 'Quantity unavailable'}</Text>
                 </View>
                 <View style={{ alignItems: 'flex-end' }}>
-                  <Text style={styles.amt}>{fmtPos(h.value)}</Text>
-                  {h.gainLoss != null ? <Text style={[styles.gain, { color: h.gainLoss >= 0 ? colors.green : colors.red }]}>{fmtSignedMoney(h.gainLoss)}</Text> : null}
+                  <Text style={styles.amt}>{formatOptionalPos(h.value, fmtPos)}</Text>
+                  {isKnownMoney(h.gainLoss) ? <Text style={[styles.gain, { color: h.gainLoss! >= 0 ? colors.green : colors.red }]}>{fmtSignedMoney(h.gainLoss!)}</Text> : null}
                 </View>
               </View>
             ))}
@@ -89,7 +91,7 @@ const styles = StyleSheet.create({
   allocName: { color: colors.text, fontSize: 13, width: 120 },
   allocTrack: { flex: 1, height: 8, backgroundColor: colors.surface2, borderRadius: 4, overflow: 'hidden' },
   allocFill: { height: 8, backgroundColor: colors.accentLight },
-  allocValue: { color: colors.muted, fontSize: 12, width: 40, textAlign: 'right' },
+  allocValue: { color: colors.muted, fontSize: 12, width: 72, textAlign: 'right' },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
   name: { color: colors.text, fontSize: 15, fontWeight: '700' },
   sub: { color: colors.muted, fontSize: 12, marginTop: 2 },

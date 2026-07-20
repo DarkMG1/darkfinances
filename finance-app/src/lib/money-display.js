@@ -18,8 +18,14 @@ function formatOptionalSignedMoney(value, fmtSignedMoney) {
   return isKnownMoney(value) ? fmtSignedMoney(value) : UNAVAILABLE_MONEY_LABEL;
 }
 
+function completeMoneySeries(values) {
+  if (!Array.isArray(values) || !values.every(isKnownMoney)) return [];
+  return values;
+}
+
 module.exports = {
   UNAVAILABLE_MONEY_LABEL,
+  completeMoneySeries,
   isKnownMoney,
   formatOptionalPos,
   formatOptionalMoney,

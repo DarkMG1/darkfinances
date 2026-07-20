@@ -31,7 +31,7 @@ export default function MerchantDetail() {
   const currentKey = useFinanceToday().slice(0, 7);
 
   const series = useMemo(
-    () => (hist.data?.months ?? []).map((m) => ({ month: m.month, spend: m.total })),
+    () => (hist.data?.months ?? []).map((m) => ({ month: m.month, spend: isKnownMoney(m.total) ? m.total : null })),
     [hist.data]
   );
 
@@ -89,7 +89,7 @@ export default function MerchantDetail() {
 
           <View style={styles.monthHead}>
             <Text style={styles.monthTitle}>{selMonth ? monthTitle(selMonth.month) : ''}</Text>
-            {selMonth ? <Text style={styles.monthTotal}>{fmtMoney(selMonth.total)}</Text> : null}
+            {selMonth ? <Text style={styles.monthTotal}>{formatOptionalMoney(selMonth.total, fmtMoney)}</Text> : null}
           </View>
 
           {rows.length === 0 ? (

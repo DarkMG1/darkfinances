@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   UNAVAILABLE_MONEY_LABEL,
+  completeMoneySeries,
   isKnownMoney,
   formatOptionalPos,
   formatOptionalMoney,
@@ -26,4 +27,11 @@ test('formatOptional helpers preserve valid zero and fail closed on absent money
   assert.equal(formatOptionalMoney(undefined, fmtMoney), UNAVAILABLE_MONEY_LABEL);
   assert.equal(formatOptionalSignedMoney(0, fmtSigned), '+$0.00');
   assert.equal(formatOptionalSignedMoney(undefined, fmtSigned), UNAVAILABLE_MONEY_LABEL);
+});
+
+test('completeMoneySeries rejects partial or non-finite chart data without fabricating points', () => {
+  assert.deepEqual(completeMoneySeries([0, 12.5, -3]), [0, 12.5, -3]);
+  assert.deepEqual(completeMoneySeries([0, null, 3]), []);
+  assert.deepEqual(completeMoneySeries([0, Number.NaN, 3]), []);
+  assert.deepEqual(completeMoneySeries(undefined), []);
 });

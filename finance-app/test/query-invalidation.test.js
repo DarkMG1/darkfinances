@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { QueryClient, QueryObserver } = require('@tanstack/react-query');
 
 const { scheduleQueryInvalidation } = require('../src/lib/query-invalidation');
 
@@ -54,6 +55,41 @@ test('query invalidation supports full-cache refresh and absorbs scheduler rejec
   assert.deepEqual(invalidations, [{ refetchType: 'none' }]);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(refetches, [{ type: 'active' }]);
+});
+
+test('failed background refetch preserves cached data and records query error', async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  queryClient.setQueryData(['today'], { cached: true });
+  const observer = new QueryObserver(queryClient, {
+    queryKey: ['today'],
+    queryFn: async () => {
+      throw new Error('refetch failed');
+    },
+    retry: false,
+    staleTime: Infinity,
+  });
+  let resolveError;
+  const errored = new Promise((resolve) => {
+    resolveError = resolve;
+  });
+  const unsubscribe = observer.subscribe((result) => {
+    if (result.isError && !result.isFetching) resolveError(result);
+  });
+
+  scheduleQueryInvalidation(queryClient, ['today']);
+  assert.equal(queryClient.getQueryState(['today']).isInvalidated, true);
+
+  const result = await Promise.race([
+    errored,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('refetch did not settle')), 1_000)),
+  ]);
+  assert.deepEqual(result.data, { cached: true });
+  assert.equal(result.error.message, 'refetch failed');
+
+  unsubscribe();
+  queryClient.clear();
 });
 
 test('finance mutation success handlers do not await cache refetch completion', () => {

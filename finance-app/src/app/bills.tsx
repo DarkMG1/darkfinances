@@ -10,6 +10,7 @@ import { Bill } from '@/api/generated/types';
 import { useFinanceToday } from '@/lib/date-only';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { haptics } from '@/lib/haptics';
+import { formatOptionalMoney } from '@/lib/money-display.js';
 import { cadenceLabel, colors, daysUntil, dueLabel, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -71,7 +72,9 @@ export default function Bills() {
   const data = bills.data;
   const [selected, setSelected] = useState<string | null>(null);
 
+  const billDetailsKnown = data?.horizonDays != null && Array.isArray(data?.bills);
   const all = useMemo(() => data?.bills ?? [], [data?.bills]);
+  const billCount = Number.isFinite(data?.count) ? Number(data?.count) : all.length;
 
   const dueByDay = useMemo(() => {
     const m: Record<string, number> = {};
@@ -135,23 +138,28 @@ export default function Bills() {
       <QueryScreenBody
         query={bills}
         loading={<SkeletonList hero rows={5} />}
-        empty={<EmptyState icon="calendar">No upcoming bills detected</EmptyState>}
-        hasContent={Boolean(data?.horizonDays != null && (data?.count ?? 0) > 0)}
+        empty={<EmptyState icon={billDetailsKnown ? 'calendar' : 'exclamationmark.triangle'}>{billDetailsKnown ? 'No upcoming bills detected' : 'Bill details unavailable'}</EmptyState>}
+        hasContent={Boolean(billDetailsKnown && billCount > 0)}
         refetchBannerTestID="bills-refetch-banner"
-        renderContent={(billData) => (
+        renderContent={(billData) => {
+          const resolvedCount = Number.isFinite(billData.count) ? billData.count : (billData.bills?.length ?? 0);
+          const resolvedUnpaidCount = Number.isFinite(billData.unpaidCount)
+            ? billData.unpaidCount
+            : (billData.bills ?? []).filter((bill) => !bill.paid).length;
+          return (
           <>
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               `Unpaid next ${billData.horizonDays} days`,
-              fmtMoney(billData.total),
-              `${billData.unpaidCount} of ${billData.count} bills unpaid`,
+              formatOptionalMoney(billData.total, fmtMoney),
+              `${resolvedUnpaidCount} of ${resolvedCount} bills unpaid`,
             )}
           >
             <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">UNPAID · NEXT {billData.horizonDays} DAYS</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(billData.total)}</Text>
-            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{billData.unpaidCount} of {billData.count} bills unpaid</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{formatOptionalMoney(billData.total, fmtMoney)}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{resolvedUnpaidCount} of {resolvedCount} bills unpaid</Text>
           </View>
 
           {months.map((m) => {
@@ -192,7 +200,8 @@ export default function Bills() {
               ))
             : null}
           </>
-        )}
+          );
+        }}
       />
     </PushScreen>
   );

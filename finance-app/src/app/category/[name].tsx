@@ -308,8 +308,9 @@ function MiniCategoryBars({ months, selected, onSelect }: { months: { month: str
 
 function SortSheet({ visible, value, onSelect, onClose }: { visible: boolean; value: SortKey; onSelect: (key: SortKey) => void; onClose: () => void }) {
   const insets = useSafeAreaInsets();
+  if (!visible) return null;
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} accessibilityViewIsModal>
+    <Modal visible transparent animationType="fade" onRequestClose={onClose} accessibilityViewIsModal>
       <View style={styles.sheetRoot}>
         <View pointerEvents="none" style={styles.sheetDim} />
         <Pressable
