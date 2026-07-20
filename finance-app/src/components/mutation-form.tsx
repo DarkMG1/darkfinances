@@ -174,7 +174,7 @@ export function MutationSheet({
       onRequestClose={handleClose}
       accessibilityViewIsModal
     >
-      <View style={styles.modalRoot} accessibilityViewIsModal>
+      <View style={styles.modalRoot}>
         <View pointerEvents="none" style={styles.modalDim} />
         <Pressable
           testID={backdropTestID}
