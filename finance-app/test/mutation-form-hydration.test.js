@@ -6,6 +6,7 @@ const {
   buildMutationFormIdentityKey,
   shouldMarkHydrationReady,
   shouldPersistMutationFormDraft,
+  shouldTreatMutationFormAsDirty,
 } = require('../src/lib/mutation-form-hydration');
 
 const { mutationFieldsEqual } = require('../src/lib/mutation-fields-equal');
@@ -25,6 +26,31 @@ test('persist blocked until hydration ready identity matches current identity', 
   assert.equal(
     shouldPersistMutationFormDraft('scope:1:other', current, fields, baseline, fieldsEqual, false),
     false,
+  );
+});
+
+test('identity transition does not report a false dirty form before hydration settles', () => {
+  const current = buildMutationFormIdentityKey('demo', 0, 'goals-edit-goal-ef');
+  const staleBaseline = { name: '', target: '' };
+  const goalFields = { name: 'Emergency fund', target: '5000' };
+
+  assert.equal(
+    shouldTreatMutationFormAsDirty(null, current, goalFields, staleBaseline, fieldsEqual),
+    false,
+  );
+  assert.equal(
+    shouldTreatMutationFormAsDirty(current, current, goalFields, goalFields, fieldsEqual),
+    false,
+  );
+  assert.equal(
+    shouldTreatMutationFormAsDirty(
+      current,
+      current,
+      { ...goalFields, name: 'Edited fund' },
+      goalFields,
+      fieldsEqual,
+    ),
+    true,
   );
 });
 

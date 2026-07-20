@@ -13,6 +13,7 @@ import { nextMutationActivationSeq } from '@/lib/mutation-activation-sequence';
 import {
   buildMutationFormIdentityKey,
   shouldPersistMutationFormDraft,
+  shouldTreatMutationFormAsDirty,
 } from '@/lib/mutation-form-hydration';
 import { hapticClientValidationRejected } from '@/lib/haptics';
 import { runStaleRefetch, staleConflictNotice } from '@/lib/mutation-refetch';
@@ -207,7 +208,16 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   }, [baseline, fields, formId, formIdentityKey, hydrationReadyIdentity, persistDraft, profileGeneration, scopeDigest]);
 
   const isLocked = dispatchPending || phase === 'submitting' || phase === 'reconciling';
-  const isDirty = useMemo(() => !mutationFieldsEqual(fields, baseline), [baseline, fields]);
+  const isDirty = useMemo(
+    () => shouldTreatMutationFormAsDirty(
+      hydrationReadyIdentity,
+      formIdentityKey,
+      fields,
+      baseline,
+      mutationFieldsEqual,
+    ),
+    [baseline, fields, formIdentityKey, hydrationReadyIdentity],
+  );
 
   useEffect(() => () => {
     if (successCloseFrameRef.current != null) {

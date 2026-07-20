@@ -26,8 +26,20 @@ function shouldPersistMutationFormDraft(
   return true;
 }
 
+function shouldTreatMutationFormAsDirty(
+  hydrationReadyIdentity,
+  currentIdentity,
+  fields,
+  baseline,
+  fieldsEqual,
+) {
+  if (hydrationReadyIdentity !== currentIdentity) return false;
+  return !fieldsEqual(fields, baseline);
+}
+
 module.exports = {
   buildMutationFormIdentityKey,
   shouldMarkHydrationReady,
   shouldPersistMutationFormDraft,
+  shouldTreatMutationFormAsDirty,
 };
