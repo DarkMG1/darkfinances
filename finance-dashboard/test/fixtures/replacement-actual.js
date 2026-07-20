@@ -6,6 +6,7 @@ let accounts = [];
 let sequence = 0;
 let createPayeeCalls = 0;
 let syncError = null;
+let reverseSplitLegOrderOnSync = false;
 
 function canonicalizeSplitLegPayees() {
   for (const row of rows) {
@@ -29,6 +30,7 @@ function configure({ transactions, payeeRows = [], accountRows = null }) {
   sequence = 0;
   createPayeeCalls = 0;
   syncError = null;
+  reverseSplitLegOrderOnSync = false;
 }
 
 function inspect() {
@@ -44,6 +46,13 @@ async function init() {}
 async function downloadBudget() {}
 async function sync() {
   if (syncError) throw syncError;
+  if (reverseSplitLegOrderOnSync) {
+    for (const row of rows) {
+      if (row.is_parent && Array.isArray(row.subtransactions) && row.subtransactions.length > 1) {
+        row.subtransactions = [...row.subtransactions].reverse();
+      }
+    }
+  }
   canonicalizeSplitLegPayees();
 }
 async function shutdown() {}
@@ -53,6 +62,10 @@ async function getAccounts() {
 
 function setSyncError(error) {
   syncError = error;
+}
+
+function setReverseSplitLegOrderOnSync(value) {
+  reverseSplitLegOrderOnSync = !!value;
 }
 
 async function getTransactions(accountId, start, end) {
@@ -124,6 +137,7 @@ module.exports = {
   init,
   inspect,
   setSyncError,
+  setReverseSplitLegOrderOnSync,
   shutdown,
   sync,
   updateTransaction,

@@ -166,6 +166,7 @@ function durableActual({
   addError = null,
   ignoreSparseNullImportedIdUpdates = false,
   deferImportedIdUntilSync = false,
+  reverseSplitLegOrderOnSync = false,
 } = {}) {
   const state = {
     rows: structuredClone(rows),
@@ -272,6 +273,13 @@ function durableActual({
       state.counts.sync += 1;
       if (deferImportedIdUntilSync) {
         for (const row of state.rows) delete row._staleImportedId;
+      }
+      if (reverseSplitLegOrderOnSync) {
+        for (const row of state.rows) {
+          if (row.is_parent && Array.isArray(row.subtransactions) && row.subtransactions.length > 1) {
+            row.subtransactions = [...row.subtransactions].reverse();
+          }
+        }
       }
       canonicalizeSplitLegPayees(state.rows);
     },
@@ -1167,6 +1175,97 @@ test('metadata restore converges when imported_id read lags behind update until 
   const persisted = api.state.rows.find((row) => row.id === added.id);
   assert.equal(persisted.imported_id, null);
   assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
+});
+
+test('metadata restore converges when Actual reverses split leg order after sync', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActual({
+    rows: [manualOriginal, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    reverseSplitLegOrderOnSync: true,
+  });
+  const replacement = manualCloneSplit();
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement,
+  });
+  assert.equal(added.imported_id, null);
+  assert.equal(added.subtransactions.length, 2);
+  assert.equal(latestSaga().phase, 'sync_pending');
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.imported_id, null);
+  assert.deepEqual(
+    persisted.subtransactions.map((leg) => ({ amount: leg.amount, notes: leg.notes })).sort((a, b) => a.notes.localeCompare(b.notes)),
+    [{ amount: -500, notes: 'first' }, { amount: -734, notes: 'second' }],
+  );
+});
+
+test('initial manual split and split-leg note edit converge when Actual reverses legs after sync', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActual({
+    rows: [manualOriginal, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    reverseSplitLegOrderOnSync: true,
+  });
+  const splitAdded = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement: manualCloneSplit(),
+  });
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+
+  const parent = manualSplitParent();
+  parent.id = splitAdded.id;
+  parent.subtransactions = splitAdded.subtransactions.map((leg, index) => ({
+    ...parent.subtransactions[index],
+    id: leg.id,
+    parent_id: splitAdded.id,
+    payee: manualOriginal.payee,
+  }));
+  api.state.rows = api.state.rows.filter((row) => row.id !== splitAdded.id);
+  api.state.rows.push(parent);
+
+  const noteReplacement = addableTransaction(parent, {
+    category: undefined,
+    subtransactions: [
+      { amount: -500, category: 'cat-1', notes: 'updated' },
+      { amount: -734, category: 'cat-1', notes: 'second' },
+    ],
+  });
+  const edited = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: parent,
+    replacement: noteReplacement,
+    requestedLegs: parent.subtransactions.map((leg) => ({ id: String(leg.id) })),
+  });
+  assert.equal(edited.imported_id, null);
+  assert.equal(edited.subtransactions.find((leg) => leg.amount === -500)?.notes, 'updated');
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const persisted = api.state.rows.find((row) => row.id === edited.id);
+  assert.equal(persisted.subtransactions.find((leg) => leg.amount === -500)?.notes, 'updated');
+});
+
+test('metadata restore preserves explicit different leg payees when Actual reverses order', async () => {
+  resetStores();
+  const api = durableActual({ reverseSplitLegOrderOnSync: true });
+  const replacement = intendedSplit();
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original,
+    replacement,
+  });
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.deepEqual(
+    [...persisted.subtransactions.map((leg) => leg.payee)].sort(),
+    ['leg-payee-1', 'leg-payee-2'],
+  );
 });
 
 test('late imported identity collision remains nonterminal without assigning the duplicate ID', async () => {

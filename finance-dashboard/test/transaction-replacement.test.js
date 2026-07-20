@@ -147,6 +147,83 @@ test('transactionShape does not mutate stored leg payee values', () => {
   assert.equal(txn.subtransactions[1].payee, undefined);
 });
 
+test('shape comparison treats reversed split leg order as the same multiset', () => {
+  const forward = structuredClone(splitShapeBase);
+  const reversed = {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [...splitShapeBase.subtransactions].reverse(),
+  };
+  assert.equal(shapeMatches(forward, reversed), true);
+  assert.equal(
+    transactionFingerprint(forward),
+    transactionFingerprint(reversed),
+  );
+  assert.deepEqual(transactionShape(forward).legs, transactionShape(reversed).legs);
+});
+
+test('shape comparison rejects different leg amounts even when order matches', () => {
+  const baseline = structuredClone(splitShapeBase);
+  const changed = {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [
+      { ...splitShapeBase.subtransactions[0], amount: -401 },
+      splitShapeBase.subtransactions[1],
+    ],
+  };
+  assert.equal(shapeMatches(baseline, changed), false);
+});
+
+test('shape comparison rejects different leg categories notes or payees', () => {
+  const baseline = structuredClone(splitShapeBase);
+  assert.equal(shapeMatches(baseline, {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [
+      { ...splitShapeBase.subtransactions[0], category: 'other-category' },
+      splitShapeBase.subtransactions[1],
+    ],
+  }), false);
+  assert.equal(shapeMatches(baseline, {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [
+      { ...splitShapeBase.subtransactions[0], notes: 'other notes' },
+      splitShapeBase.subtransactions[1],
+    ],
+  }), false);
+  assert.equal(shapeMatches(baseline, {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [
+      { ...splitShapeBase.subtransactions[0], payee: 'other-payee' },
+      splitShapeBase.subtransactions[1],
+    ],
+  }), false);
+});
+
+test('shape comparison preserves duplicate leg multiplicity', () => {
+  const duplicateLeg = { amount: -500, category: 'cat-dup', notes: 'dup' };
+  const twoDupes = {
+    ...structuredClone(splitShapeBase),
+    amount: -2000,
+    subtransactions: [duplicateLeg, { ...duplicateLeg }],
+  };
+  const oneDupe = {
+    ...structuredClone(splitShapeBase),
+    amount: -1500,
+    subtransactions: [duplicateLeg],
+  };
+  assert.equal(shapeMatches(twoDupes, {
+    ...structuredClone(twoDupes),
+    subtransactions: [...twoDupes.subtransactions].reverse(),
+  }), true);
+  assert.equal(shapeMatches(twoDupes, oneDupe), false);
+});
+
+test('transactionShape does not mutate source subtransaction arrays', () => {
+  const txn = structuredClone(splitShapeBase);
+  const before = txn.subtransactions.map((leg) => ({ ...leg }));
+  transactionShape(txn);
+  assert.deepEqual(txn.subtransactions, before);
+});
+
 test('addableSplitLeg omits inherited parent payee but keeps explicit different payee', () => {
   assert.deepEqual(addableSplitLeg(
     { amount: -500, category: 'cat-1', notes: 'first', payee: parentPayee },
@@ -189,6 +266,36 @@ test('replacement map treats Actual canonicalized inherited payee as unnamed int
     subtransactions: [
       { amount: -400, category: 'cat-1', notes: 'updated' },
       { amount: -600, category: 'cat-2', notes: 'leg two' },
+    ],
+  });
+  assert.deepEqual(
+    transactionReplacementMap(original, replacement, ['old-leg-1', 'old-leg-2'], intended),
+    { 'old-parent': 'new-parent', 'old-leg-1': 'new-leg-1', 'old-leg-2': 'new-leg-2' },
+  );
+});
+
+test('replacement map matches retained legs when Actual returns reversed order', () => {
+  const original = {
+    id: 'old-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+      { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+    ],
+  };
+  const replacement = {
+    id: 'new-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'new-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      { id: 'new-leg-1', amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+    ],
+  };
+  const intended = addableTransaction(original, {
+    category: undefined,
+    subtransactions: [
+      { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+      { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
     ],
   });
   assert.deepEqual(

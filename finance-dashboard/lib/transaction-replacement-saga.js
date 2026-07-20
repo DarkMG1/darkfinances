@@ -103,6 +103,12 @@ function sameLegShape(left, right, parentPayee) {
   return JSON.stringify(legShape(left, parentPayee)) === JSON.stringify(legShape(right, parentPayee));
 }
 
+function canonicalLegShapes(legs, parentPayee) {
+  return legs
+    .map((leg) => legShape(leg, parentPayee))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+}
+
 function deriveLegOwnership(original, replacement, requestedLegs) {
   const oldSubs = Array.isArray(original?.subtransactions) ? original.subtransactions : [];
   const newSubs = Array.isArray(replacement?.subtransactions) ? replacement.subtransactions : [];
@@ -244,12 +250,7 @@ function transactionShape(transaction, importedId = transaction?.imported_id) {
     imported_id: normalizedValue(importedId),
     imported_payee: normalizedValue(transaction?.imported_payee),
     category: legs.length ? null : normalizedValue(transaction?.category),
-    legs: legs.map((leg) => ({
-      amount: leg?.amount,
-      category: normalizedValue(leg?.category),
-      notes: normalizedValue(leg?.notes),
-      payee: canonicalLegPayee(leg?.payee, parentPayee),
-    })),
+    legs: canonicalLegShapes(legs, parentPayee),
   };
 }
 

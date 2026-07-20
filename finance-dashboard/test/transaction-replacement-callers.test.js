@@ -245,6 +245,43 @@ test('split caller clears temporary imported identity for manual transactions', 
   assert.equal(saga.phase, 'completed');
 });
 
+test('split caller converges when Actual reverses split leg order after sync', async () => {
+  const manual = {
+    ...simple,
+    imported_id: null,
+    imported_payee: null,
+  };
+  configure(manual);
+  actual.setReverseSplitLegOrderOnSync(true);
+  try {
+    const result = await splitTransaction({
+      id: manual.id,
+      accountId: 'account',
+      date: manual.date,
+      legs: [
+        { amount: -4, categoryId: 'category-1', notes: 'first' },
+        { amount: -6, categoryId: 'category-2', notes: 'second' },
+      ],
+    });
+    assertResponseCompatibility(result, 'create');
+    const parent = actual.inspect().rows[0];
+    assert.equal(parent.imported_id, null);
+    assert.deepEqual(
+      parent.subtransactions.map((leg) => ({ amount: leg.amount, notes: leg.notes })).sort((a, b) => a.notes.localeCompare(b.notes)),
+      [{ amount: -400, notes: 'first' }, { amount: -600, notes: 'second' }],
+    );
+    const saga = Object.values(JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas)[0];
+    assert.equal(saga.phase, 'sync_pending');
+    await syncNow();
+    assert.equal(
+      Object.values(JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas)[0].phase,
+      'completed',
+    );
+  } finally {
+    actual.setReverseSplitLegOrderOnSync(false);
+  }
+});
+
 test('split caller returns replacement IDs and preserves response shape', async () => {
   configure(simple);
   const result = await splitTransaction({
