@@ -1,17 +1,29 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useNavigation, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAccounts, useCategories, useCreateTransaction } from '@/api/hooks/finance.hooks';
-import { Card, CardTitle } from '@/components/ui';
+import {
+  MutationFieldError,
+  MutationFormBanner,
+  MutationLiveRegion,
+  MutationSubmitButton,
+} from '@/components/mutation-form';
+import { Card, CardTitle, ErrorState } from '@/components/ui';
+import { QueryRefetchBanners } from '@/components/query-display';
+import { SkeletonList } from '@/components/skeleton';
+import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
+import { buildAddTransactionRefetchQueries } from '@/lib/screen-query-display-config.js';
+import { useMutationForm } from '@/hooks/useMutationForm';
 import { haptics } from '@/lib/haptics';
+import {
+  collectFieldErrors,
+  parseStrictMoneyDollars,
+  validateDateOnlyField,
+  validateMoneyField,
+} from '@/lib/mutation-form-validation';
 import { colors } from '@/theme/colors';
-
-const pad = (n: number) => String(n).padStart(2, '0');
-const todayYMD = () => {
-  const n = new Date();
-  return `${n.getFullYear()}-${pad(n.getMonth() + 1)}-${pad(n.getDate())}`;
-};
+import { useEditableFinanceDate } from '@/lib/date-only';
 
 type Kind = 'expense' | 'income';
 
@@ -26,30 +38,73 @@ export default function AddTransaction() {
   const [kind, setKind] = useState<Kind>('expense');
   const [amount, setAmount] = useState('');
   const [payee, setPayee] = useState('');
-  const [date, setDate] = useState(todayYMD());
+  const { value: date, setValue: setDate } = useEditableFinanceDate();
   const [notes, setNotes] = useState('');
   const [accountId, setAccountId] = useState<string | null>(null);
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [categoryName, setCategoryName] = useState('');
   const [pickingCat, setPickingCat] = useState(false);
   const amountRef = useRef<TextInput>(null);
+  const dateRef = useRef<TextInput>(null);
 
   const accts = useMemo(() => accounts.data ?? [], [accounts.data]);
-  // General manual entry: surface on-budget (spending) accounts first and default
-  // to the first one — typically checking. Cash spending itself is tracked by
-  // categorizing the synced ATM withdrawal as "Cash & ATM", not as a fake account.
   const ordered = useMemo(
     () => [...accts].sort((a, b) => Number(a.offbudget) - Number(b.offbudget)),
-    [accts]
+    [accts],
   );
   const selectedAccount = accountId ?? ordered.find((a) => !a.offbudget)?.id ?? ordered[0]?.id ?? null;
 
+  const fields = useMemo(() => ({
+    kind,
+    amount,
+    payee,
+    date,
+    notes,
+    accountId: selectedAccount,
+    categoryId,
+  }), [amount, categoryId, date, kind, notes, payee, selectedAccount]);
+
+  const applyFields = useCallback((updater: React.SetStateAction<typeof fields>) => {
+    const prev = fields;
+    const next = typeof updater === 'function' ? updater(prev) : updater;
+    if (next.kind !== undefined) setKind(next.kind as Kind);
+    if (next.amount !== undefined) setAmount(String(next.amount));
+    if (next.payee !== undefined) setPayee(String(next.payee));
+    if (next.date !== undefined) setDate(String(next.date));
+    if (next.notes !== undefined) setNotes(String(next.notes));
+    if (next.accountId !== undefined) setAccountId(next.accountId as string | null);
+    if (next.categoryId !== undefined) setCategoryId(next.categoryId as string | null);
+  }, [fields, setDate]);
+
+  const form = useMutationForm({
+    formId: 'add-transaction',
+    fields,
+    setFields: applyFields,
+    persistDraft: false,
+    mutation: create,
+    mutationLabel: 'Add transaction',
+    fieldOrder: ['amount', 'accountId', 'date', 'payee', 'notes', 'categoryId'],
+    fieldRefs: { amount: amountRef, date: dateRef },
+    onSuccessClose: () => router.back(),
+    validate: (f) => collectFieldErrors({
+      amount: validateMoneyField(f.amount, { label: 'Amount' }),
+      accountId: f.accountId ? null : 'Pick an account.',
+      date: validateDateOnlyField(f.date, 'Date'),
+    }),
+    buildVariables: (f) => {
+      const value = parseStrictMoneyDollars(String(f.amount))!;
+      return {
+        accountId: String(f.accountId),
+        amount: f.kind === 'expense' ? -value : value,
+        payee: String(f.payee).trim() || undefined,
+        date: String(f.date),
+        categoryId: f.categoryId || undefined,
+        notes: String(f.notes).trim() || undefined,
+      };
+    },
+  });
+
   useEffect(() => {
-    // Focus only after the NATIVE push transition fully ends. InteractionManager
-    // resolves before react-native-screens finishes its native animation, so the
-    // keyboard slid up mid-transition and jittered. transitionEnd is the reliable
-    // "screen finished animating in" signal; the timeout is a fallback for when the
-    // event doesn't fire (e.g. reduce-motion is enabled).
     let focused = false;
     const focus = () => {
       if (focused) return;
@@ -66,38 +121,45 @@ export default function AddTransaction() {
     };
   }, [navigation]);
 
-  const submit = () => {
-    const value = parseFloat(amount.replace(/[^0-9.]/g, ''));
-    if (!isFinite(value) || value <= 0) {
-      Alert.alert('Amount', 'Enter an amount greater than zero.');
-      return;
-    }
-    if (!selectedAccount) {
-      Alert.alert('Account', 'Pick an account.');
-      return;
-    }
-    create.mutate(
-      {
-        accountId: selectedAccount,
-        amount: kind === 'expense' ? -value : value,
-        payee: payee.trim() || undefined,
-        date,
-        categoryId: categoryId || undefined,
-        notes: notes.trim() || undefined,
-      },
-      {
-        onSuccess: () => router.back(),
-        onError: (e) => Alert.alert('Could not add', e?.error || e?.message || 'Failed to add the transaction.'),
+  useEffect(() => {
+    const unsub = navigation.addListener('beforeRemove', (e) => {
+      if (form.isLocked) {
+        e.preventDefault();
+        return;
       }
-    );
-  };
+      if (!form.isDirty) return;
+      e.preventDefault();
+      form.requestDismiss(() => navigation.dispatch(e.data.action));
+    });
+    return unsub;
+  }, [form, navigation]);
+
+  const inputLocked = form.isLocked;
+  const accountsLoading = shouldShowInitialLoad(accounts.isLoading, accounts.data);
+  const accountsFatal = shouldShowFatalError(accounts.isError, accounts.data);
+  const categoriesFatal = shouldShowFatalError(categories.isError, categories.data);
+  const addTransactionRefetchQueries = useMemo(
+    () => buildAddTransactionRefetchQueries({ accounts, categories }),
+    [accounts, categories],
+  );
 
   return (
     <KeyboardAvoidingView testID="add-transaction-screen" style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
     <ScrollView style={styles.root} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }} keyboardShouldPersistTaps="handled">
+      <MutationLiveRegion message={form.announce} />
+      <MutationFormBanner outcome={form.outcome} onRetry={form.retry} />
+
+      {accountsLoading ? (
+        <SkeletonList rows={3} />
+      ) : accountsFatal ? (
+        <ErrorState error={accounts.error?.error} onRetry={() => accounts.refetch()} />
+      ) : (
+        <>
+      <QueryRefetchBanners queries={addTransactionRefetchQueries} testID="add-transaction-refetch-banner" />
+
       <View style={styles.typeRow}>
         {(['expense', 'income'] as Kind[]).map((k) => (
-          <Pressable testID={`add-transaction-type-${k}${kind === k ? '-selected' : ''}`} key={k} style={({ pressed }) => [styles.typeBtn, kind === k && (k === 'expense' ? styles.typeExpense : styles.typeIncome), pressed && { opacity: 0.8 }]} onPress={() => { haptics.tap(); setKind(k); }}>
+          <Pressable testID={`add-transaction-type-${k}${kind === k ? '-selected' : ''}`} key={k} style={({ pressed }) => [styles.typeBtn, kind === k && (k === 'expense' ? styles.typeExpense : styles.typeIncome), pressed && !inputLocked && { opacity: 0.8 }, inputLocked && { opacity: 0.5 }]} onPress={() => { if (inputLocked) return; haptics.tap(); setKind(k); }} disabled={inputLocked} accessibilityState={{ disabled: inputLocked }}>
             <Text style={[styles.typeText, kind === k && styles.typeTextActive]}>{k === 'expense' ? 'Expense' : 'Income'}</Text>
           </Pressable>
         ))}
@@ -108,53 +170,87 @@ export default function AddTransaction() {
         <TextInput
           testID="add-transaction-amount-input"
           ref={amountRef}
-          style={styles.amountInput}
+          style={[styles.amountInput, form.getFieldError('amount') ? styles.inputError : null]}
           value={amount}
           onChangeText={setAmount}
+          editable={!inputLocked}
           placeholder="0.00"
           placeholderTextColor={colors.muted}
           keyboardType="decimal-pad"
+          accessibilityLabel="Amount"
+          accessibilityHint={form.getFieldError('amount') ? `Error: ${form.getFieldError('amount')}` : undefined}
         />
       </View>
+      <MutationFieldError error={form.getFieldError('amount')} testID="add-transaction-amount-error" />
 
       <CardTitle>Account</CardTitle>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
         {ordered.map((a) => {
           const active = a.id === selectedAccount;
           return (
-            <Pressable testID={`add-transaction-account-${a.id}${active ? '-selected' : ''}`} key={a.id} style={[styles.chip, active && styles.chipActive]} onPress={() => { haptics.tap(); setAccountId(a.id); }}>
+            <Pressable testID={`add-transaction-account-${a.id}${active ? '-selected' : ''}`} key={a.id} style={[styles.chip, active && styles.chipActive, inputLocked && { opacity: 0.5 }]} onPress={() => { if (inputLocked) return; haptics.tap(); setAccountId(a.id); }} disabled={inputLocked}>
               <Text style={[styles.chipText, active && styles.chipTextActive]} numberOfLines={1}>{a.name}</Text>
             </Pressable>
           );
         })}
       </ScrollView>
+      <MutationFieldError error={form.getFieldError('accountId')} testID="add-transaction-account-error" />
 
       <CardTitle>Payee</CardTitle>
       <Card>
-        <TextInput testID="add-transaction-payee-input" style={styles.input} value={payee} onChangeText={setPayee} placeholder="Who was it?" placeholderTextColor={colors.muted} autoCapitalize="words" />
+        <TextInput testID="add-transaction-payee-input" style={styles.input} value={payee} onChangeText={setPayee} editable={!inputLocked} placeholder="Who was it?" placeholderTextColor={colors.muted} autoCapitalize="words" accessibilityLabel="Payee" />
       </Card>
 
       <CardTitle>Date</CardTitle>
       <Card>
-        <TextInput testID="add-transaction-date-input" style={styles.input} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" placeholderTextColor={colors.muted} autoCapitalize="none" />
+        <TextInput
+          testID="add-transaction-date-input"
+          ref={dateRef}
+          style={[styles.input, form.getFieldError('date') ? styles.inputError : null]}
+          value={date}
+          onChangeText={setDate}
+          editable={!inputLocked}
+          placeholder="YYYY-MM-DD"
+          placeholderTextColor={colors.muted}
+          autoCapitalize="none"
+          accessibilityLabel="Date"
+          accessibilityHint={form.getFieldError('date') ? `Error: ${form.getFieldError('date')}` : undefined}
+        />
       </Card>
+      <MutationFieldError error={form.getFieldError('date')} testID="add-transaction-date-error" />
 
       <CardTitle>Category</CardTitle>
-      <Pressable testID="add-transaction-category-picker" onPress={() => { haptics.tap(); setPickingCat(true); }} style={({ pressed }) => pressed && { opacity: 0.7 }}>
+      {categoriesFatal ? (
+        <Pressable
+          testID="add-transaction-categories-retry"
+          accessibilityRole="button"
+          accessibilityLabel="Categories unavailable, tap to retry"
+          onPress={() => categories.refetch()}
+          style={({ pressed }) => [styles.pickRow, styles.categoryRetry, pressed && { opacity: 0.7 }]}
+        >
+          <Text style={styles.categoryRetryText}>Categories unavailable · tap to retry</Text>
+        </Pressable>
+      ) : (
+      <Pressable testID="add-transaction-category-picker" onPress={() => { if (inputLocked) return; haptics.tap(); setPickingCat(true); }} disabled={inputLocked} style={({ pressed }) => [pressed && !inputLocked && { opacity: 0.7 }, inputLocked && { opacity: 0.5 }]}>
         <Card style={styles.pickRow}>
           <Text style={[styles.pickValue, !categoryName && { color: colors.muted }]}>{categoryName || 'Optional — tap to set'}</Text>
           <Text style={styles.pickArrow}>›</Text>
         </Card>
       </Pressable>
+      )}
 
       <CardTitle>Notes</CardTitle>
       <Card>
-        <TextInput testID="add-transaction-notes-input" style={[styles.input, { minHeight: 44, textAlignVertical: 'top' }]} value={notes} onChangeText={setNotes} placeholder="Add a note…" placeholderTextColor={colors.muted} multiline />
+        <TextInput testID="add-transaction-notes-input" style={[styles.input, { minHeight: 44, textAlignVertical: 'top' }]} value={notes} onChangeText={setNotes} editable={!inputLocked} placeholder="Add a note…" placeholderTextColor={colors.muted} multiline accessibilityLabel="Notes" />
       </Card>
 
-      <Pressable testID="add-transaction-submit-button" style={({ pressed }) => [styles.submit, (create.isPending || pressed) && { opacity: 0.7 }]} onPress={submit} disabled={create.isPending}>
-        <Text style={styles.submitText}>{create.isPending ? 'Adding…' : 'Add transaction'}</Text>
-      </Pressable>
+      <MutationSubmitButton
+        testID="add-transaction-submit-button"
+        label="Add transaction"
+        pendingLabel="Adding…"
+        onPress={form.submit}
+        disabled={inputLocked}
+      />
       <Text style={styles.warn}>This writes to your real budget.</Text>
 
       <Modal visible={pickingCat} animationType="slide" transparent onRequestClose={() => setPickingCat(false)}>
@@ -166,12 +262,12 @@ export default function AddTransaction() {
               keyExtractor={(c) => c.id}
               style={{ maxHeight: 400 }}
               ListHeaderComponent={
-                <Pressable testID="add-transaction-category-none" style={styles.catOption} onPress={() => { setCategoryId(null); setCategoryName(''); setPickingCat(false); }}>
+                <Pressable testID="add-transaction-category-none" style={styles.catOption} onPress={() => { if (inputLocked) return; setCategoryId(null); setCategoryName(''); setPickingCat(false); }} disabled={inputLocked}>
                   <Text style={styles.catOptionText}>Uncategorized</Text>
                 </Pressable>
               }
               renderItem={({ item }) => (
-                <Pressable testID={`add-transaction-category-${item.id}`} style={styles.catOption} onPress={() => { setCategoryId(item.id); setCategoryName(item.name); setPickingCat(false); }}>
+                <Pressable testID={`add-transaction-category-${item.id}`} style={styles.catOption} onPress={() => { if (inputLocked) return; setCategoryId(item.id); setCategoryName(item.name); setPickingCat(false); }} disabled={inputLocked}>
                   <Text style={styles.catOptionText}>{item.name}</Text>
                   <Text style={styles.catOptionGroup}>{item.group}</Text>
                 </Pressable>
@@ -180,6 +276,8 @@ export default function AddTransaction() {
           </View>
         </Pressable>
       </Modal>
+        </>
+      )}
     </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -196,22 +294,23 @@ const styles = StyleSheet.create({
   amountWrap: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginVertical: 12 },
   amountSign: { fontSize: 34, fontWeight: '800' },
   amountInput: { color: colors.text, fontSize: 44, fontWeight: '800', letterSpacing: -1.5, minWidth: 140, textAlign: 'center', padding: 0 },
+  inputError: { borderWidth: 1, borderColor: '#ff6b6b' },
   chips: { gap: 8, paddingVertical: 4, paddingRight: 8 },
-  chip: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, maxWidth: 200 },
+  chip: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, maxWidth: 200, minHeight: 44, justifyContent: 'center' },
   chipActive: { backgroundColor: colors.accent, borderColor: colors.accent },
   chipText: { color: colors.muted, fontSize: 13, fontWeight: '600' },
   chipTextActive: { color: '#fff' },
   input: { color: colors.text, fontSize: 15 },
   pickRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  categoryRetry: { borderWidth: 1, borderColor: colors.red, borderRadius: 12, backgroundColor: colors.surface2, paddingHorizontal: 14, paddingVertical: 12, marginBottom: 4 },
+  categoryRetryText: { color: colors.red, fontSize: 13, fontWeight: '700', flex: 1 },
   pickValue: { color: colors.text, fontSize: 15, flex: 1 },
   pickArrow: { color: colors.muted, fontSize: 20, fontWeight: '700' },
-  submit: { backgroundColor: colors.accent, borderRadius: 12, paddingVertical: 15, alignItems: 'center', marginTop: 20 },
-  submitText: { color: '#fff', fontSize: 16, fontWeight: '700' },
   warn: { color: colors.muted, fontSize: 12, textAlign: 'center', marginTop: 10 },
   modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 },
   sheetTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 12 },
-  catOption: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  catOption: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, minHeight: 44 },
   catOptionText: { color: colors.text, fontSize: 15 },
   catOptionGroup: { color: colors.muted, fontSize: 12 },
 });

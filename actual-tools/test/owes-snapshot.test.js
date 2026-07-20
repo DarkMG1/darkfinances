@@ -7,23 +7,38 @@ const { spawnSync } = require('child_process');
 
 const source = path.resolve(__dirname, '..', 'owes-snapshot.js');
 
-function runFixture(t, mockSource, initial = '{"sentinel":true}\n') {
+function runFixture(t, mockSource, initial = '{"sentinel":true}\n', eventsContent = null) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-owes-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   fs.copyFileSync(source, path.join(dir, 'owes-snapshot.js'));
   fs.writeFileSync(path.join(dir, 'splitwise-lib.js'), mockSource);
   const output = path.join(dir, 'owes-truth.json');
+  const eventsPath = path.join(dir, 'events.json');
   fs.writeFileSync(output, initial);
+  if (eventsContent !== null) fs.writeFileSync(eventsPath, eventsContent);
   const result = spawnSync(process.execPath, [path.join(dir, 'owes-snapshot.js')], {
     env: {
       ...process.env,
       OWES_TRUTH_PATH: output,
-      EVENTS_PATH: path.join(dir, 'missing-events.json'),
+      EVENTS_PATH: eventsContent === null ? path.join(dir, 'missing-events.json') : eventsPath,
     },
     encoding: 'utf8',
   });
   return { dir, output, result };
 }
+
+test('a malformed events file fails closed and preserves the prior snapshot', (t) => {
+  const fixture = runFixture(t, `
+module.exports = {
+  eventToGroup: { first: 'Group 1' },
+  getDirectOwed: async () => (${JSON.stringify(pair(1, 'Group 1'))}),
+  getItemizedOwed: async () => (${JSON.stringify(itemized(1))}),
+};
+`, '{"sentinel":true}\n', '{broken');
+  assert.notEqual(fixture.result.status, 0);
+  assert.match(fixture.result.stderr, /Invalid events file/);
+  assert.equal(fs.readFileSync(fixture.output, 'utf8'), '{"sentinel":true}\n');
+});
 
 const pair = (id, name, amount = 10) => ({
   id,

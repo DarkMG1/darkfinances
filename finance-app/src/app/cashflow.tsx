@@ -4,36 +4,41 @@ import { useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useTrends } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
-import { Card, CardTitle, EmptyState, ErrorState, Loading, StatCard } from '@/components/ui';
-import { GroupedBars } from '@/components/charts';
+import { QueryScreenBody } from '@/components/query-display';
+import { Card, CardTitle, EmptyState, Loading, StatCard } from '@/components/ui';
+import { GroupedBars, trendPeriodComplete } from '@/components/charts';
 import { colors, fmtMoney, fmtPos, monthLabel } from '@/theme/colors';
 import { haptics } from '@/lib/haptics';
+import { isKnownMoney } from '@/lib/money-display.js';
 
 export default function CashFlow() {
   const { width } = useWindowDimensions();
   const router = useRouter();
   const trends = useTrends(12);
-  const months = trends.data?.months ?? [];
-  const cur = months[months.length - 1];
-
-  const labels = months.map((m) => m.month.slice(5));
-  const income = months.map((m) => m.income);
-  const spend = months.map((m) => m.spend);
 
   return (
-    <PushScreen testID="cashflow-screen" refreshing={trends.isFetching} onRefresh={trends.refetch}>
-      {trends.isLoading ? (
-        <Loading />
-      ) : trends.isError && months.length === 0 ? (
-        <ErrorState error={trends.error?.error} onRetry={trends.refetch} />
-      ) : months.length === 0 ? (
-        <EmptyState icon="chart.bar">No cash flow data</EmptyState>
-      ) : (
-        <>
+    <PushScreen testID="cashflow-screen" onRefresh={trends.refetch}>
+      <QueryScreenBody
+        query={trends}
+        loading={<Loading />}
+        empty={<EmptyState icon="chart.bar">No cash flow data</EmptyState>}
+        hasContent={Boolean(trends.data?.months?.length)}
+        refetchBannerTestID="cashflow-refetch-banner"
+        renderContent={(trendData) => {
+          const months = trendData.months ?? [];
+          const cur = months[months.length - 1];
+          const labels = months.map((m) => m.month.slice(5));
+          const monthComplete = trendPeriodComplete;
+          const income = months.map((m) => (monthComplete(m) ? m.income! : null));
+          const spend = months.map((m) => (monthComplete(m) ? m.spend! : null));
+          const chartHasIncomplete = months.some((m) => !monthComplete(m));
+          const currentNetKnown = !!cur && monthComplete(cur) && isKnownMoney(cur.net);
+          return (
+          <>
           <View style={styles.statsRow}>
-            <StatCard testID="cashflow-money-in" label="Money In" value={cur ? fmtPos(cur.income) : '—'} valueColor={colors.green} />
-            <StatCard testID="cashflow-money-out" label="Money Out" value={cur ? fmtPos(cur.spend) : '—'} valueColor={colors.red} />
-            <StatCard testID="cashflow-net" label="Net" value={cur ? fmtMoney(cur.net) : '—'} valueColor={cur && cur.net >= 0 ? colors.green : colors.red} />
+            <StatCard testID="cashflow-money-in" label="Money In" value={cur && monthComplete(cur) ? fmtPos(cur.income!) : 'Unavailable'} valueColor={colors.green} />
+            <StatCard testID="cashflow-money-out" label="Money Out" value={cur && monthComplete(cur) ? fmtPos(cur.spend!) : 'Unavailable'} valueColor={colors.red} />
+            <StatCard testID="cashflow-net" label="Net" value={currentNetKnown ? fmtMoney(cur!.net!) : 'Unavailable'} valueColor={currentNetKnown ? (cur!.net! >= 0 ? colors.green : colors.red) : colors.muted} />
           </View>
 
           <Pressable testID="cashflow-forecast-link" onPress={() => { haptics.tap(); router.push('/forecast' as never); }} style={({ pressed }) => [styles.forecastCard, pressed && { opacity: 0.65 }]}>
@@ -50,6 +55,7 @@ export default function CashFlow() {
           {months.length > 1 ? (
             <Card style={{ marginTop: 12 }}>
               <CardTitle>Income vs Spending · 12 mo</CardTitle>
+              {chartHasIncomplete ? <Text style={styles.incompleteNote} accessibilityRole="text">Some months unavailable — transfer identity unresolved</Text> : null}
               <GroupedBars width={width - 64} labels={labels} seriesA={income} seriesB={spend} />
               <View style={styles.legend}>
                 <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.green }]} /><Text style={styles.legendText}>In</Text></View>
@@ -60,17 +66,22 @@ export default function CashFlow() {
 
           <Card style={{ marginTop: 12 }}>
             <CardTitle>Monthly Net</CardTitle>
-            {[...months].reverse().map((m) => (
-              <View key={m.month} testID={`cashflow-month-row-${m.month}`} style={styles.row}>
-                <Text style={styles.month}>{monthLabel(m.month)}</Text>
-                <Text style={styles.rowIn}>+{fmtPos(m.income)}</Text>
-                <Text style={styles.rowOut}>-{fmtPos(m.spend)}</Text>
-                <Text style={[styles.rowNet, { color: m.net >= 0 ? colors.green : colors.red }]}>{fmtMoney(m.net)}</Text>
-              </View>
-            ))}
+            {[...months].reverse().map((m) => {
+              const netKnown = monthComplete(m) && isKnownMoney(m.net);
+              return (
+                <View key={m.month} testID={`cashflow-month-row-${m.month}`} style={styles.row}>
+                  <Text style={styles.month}>{monthLabel(m.month)}</Text>
+                  <Text style={styles.rowIn}>{monthComplete(m) ? `+${fmtPos(m.income!)}` : 'Unavailable'}</Text>
+                  <Text style={styles.rowOut}>{monthComplete(m) ? `-${fmtPos(m.spend!)}` : 'Unavailable'}</Text>
+                  <Text style={[styles.rowNet, { color: netKnown ? (m.net! >= 0 ? colors.green : colors.red) : colors.muted }]}>{netKnown ? fmtMoney(m.net!) : 'Unavailable'}</Text>
+                </View>
+              );
+            })}
           </Card>
-        </>
-      )}
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }
@@ -86,6 +97,7 @@ const styles = StyleSheet.create({
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   legendDot: { width: 8, height: 8, borderRadius: 4 },
   legendText: { color: colors.muted, fontSize: 11 },
+  incompleteNote: { color: colors.muted, fontSize: 11, marginBottom: 8 },
   row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   month: { color: colors.text, fontSize: 13, flex: 1 },
   rowIn: { color: colors.green, fontSize: 12, width: 78, textAlign: 'right' },

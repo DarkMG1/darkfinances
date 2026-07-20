@@ -1,0 +1,251 @@
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+
+const DASHBOARD_ROOT = path.resolve(__dirname, '..');
+const REPO_ROOT = path.join(DASHBOARD_ROOT, '..');
+const MANIFEST_PATH = path.join(DASHBOARD_ROOT, 'public', 'vendor', 'chart-js.manifest.json');
+const ASSET_PATH = path.join(DASHBOARD_ROOT, 'public', 'vendor', 'chart.umd.js');
+const NOTICE_PATH = path.join(DASHBOARD_ROOT, 'public', 'vendor', 'THIRD-PARTY-NOTICES.txt');
+const LOCKFILE_PACKAGE = 'node_modules/chart.js';
+const SOURCE_RELATIVE = 'dist/chart.umd.js';
+
+function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  hash.update(fs.readFileSync(filePath));
+  return hash.digest('hex');
+}
+
+function sha256Buffer(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+function stripSourceMappingComment(source) {
+  return source.replace(/\n\/\/# sourceMappingURL=.*$/m, '');
+}
+
+function writePinnedChartAsset(sourcePath, assetPath) {
+  const raw = fs.readFileSync(sourcePath, 'utf8');
+  const stripped = stripSourceMappingComment(raw);
+  if (/\n\/\/# sourceMappingURL=/.test(stripped)) {
+    throw new Error('chart.js asset still contains a sourceMappingURL comment after stripping');
+  }
+  fs.writeFileSync(assetPath, stripped);
+  return Buffer.from(stripped, 'utf8');
+}
+
+function loadManifest(manifestPath = MANIFEST_PATH) {
+  return JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+}
+
+function readRootLockEntry(lockfilePath = path.join(REPO_ROOT, 'package-lock.json')) {
+  const lockfile = JSON.parse(fs.readFileSync(lockfilePath, 'utf8'));
+  const entry = lockfile.packages?.[LOCKFILE_PACKAGE];
+  if (!entry) {
+    throw new Error(`lockfile entry missing for ${LOCKFILE_PACKAGE}`);
+  }
+  return entry;
+}
+
+function resolveInstalledSourcePath({
+  dashboardRoot = DASHBOARD_ROOT,
+  repoRoot = REPO_ROOT,
+  sourcePath = null,
+} = {}) {
+  if (sourcePath) return path.resolve(sourcePath);
+  try {
+    const entryPath = require.resolve('chart.js', { paths: [dashboardRoot, repoRoot] });
+    return path.join(path.dirname(entryPath), '..', SOURCE_RELATIVE);
+  } catch {
+    return null;
+  }
+}
+
+function assertManifestShape(manifest) {
+  for (const key of [
+    'package',
+    'version',
+    'lockfilePath',
+    'lockfilePackage',
+    'npmResolved',
+    'npmIntegrity',
+    'sourcePath',
+    'assetPath',
+    'sha256',
+    'size',
+    'license',
+  ]) {
+    if (manifest[key] == null || manifest[key] === '') {
+      throw new Error(`chart.js manifest missing ${key}`);
+    }
+  }
+}
+
+function verifyChartJsAsset({
+  manifestPath = MANIFEST_PATH,
+  assetPath = ASSET_PATH,
+  lockfilePath = path.join(REPO_ROOT, 'package-lock.json'),
+  requireInstalledPackage = false,
+  sourcePath = null,
+  dashboardRoot = DASHBOARD_ROOT,
+  repoRoot = REPO_ROOT,
+} = {}) {
+  const manifest = loadManifest(manifestPath);
+  assertManifestShape(manifest);
+
+  const lockEntry = readRootLockEntry(lockfilePath);
+  if (lockEntry.version !== manifest.version) {
+    throw new Error(`lockfile version ${lockEntry.version} does not match manifest ${manifest.version}`);
+  }
+  if (lockEntry.resolved !== manifest.npmResolved) {
+    throw new Error(`lockfile resolved URL does not match manifest npmResolved`);
+  }
+  if (lockEntry.integrity !== manifest.npmIntegrity) {
+    throw new Error(`lockfile integrity does not match manifest npmIntegrity`);
+  }
+  if (manifest.lockfilePath !== 'package-lock.json') {
+    throw new Error(`manifest lockfilePath must be package-lock.json`);
+  }
+  if (manifest.lockfilePackage !== LOCKFILE_PACKAGE) {
+    throw new Error(`manifest lockfilePackage must be ${LOCKFILE_PACKAGE}`);
+  }
+
+  if (!fs.existsSync(assetPath)) {
+    throw new Error(`committed chart.js asset missing at ${manifest.assetPath}`);
+  }
+
+  const asset = fs.readFileSync(assetPath);
+  if (/\n\/\/# sourceMappingURL=/.test(asset.toString())) {
+    throw new Error('committed chart.js asset must not reference a dangling source map');
+  }
+  const assetDigest = sha256Buffer(asset);
+  if (asset.length !== manifest.size) {
+    throw new Error(`committed chart.js asset size ${asset.length} does not match manifest ${manifest.size}`);
+  }
+  if (assetDigest !== manifest.sha256) {
+    throw new Error(`committed chart.js asset digest does not match manifest sha256`);
+  }
+
+  const installedSourcePath = resolveInstalledSourcePath({ dashboardRoot, repoRoot, sourcePath });
+  if (installedSourcePath) {
+    if (!fs.existsSync(installedSourcePath)) {
+      throw new Error(`installed chart.js source missing at ${manifest.sourcePath}`);
+    }
+    const installedPackageJson = JSON.parse(
+      fs.readFileSync(path.join(path.dirname(installedSourcePath), '..', 'package.json'), 'utf8'),
+    );
+    if (installedPackageJson.version !== manifest.version) {
+      throw new Error(
+        `installed chart.js version ${installedPackageJson.version} does not match manifest ${manifest.version}`,
+      );
+    }
+    const installedRaw = fs.readFileSync(installedSourcePath, 'utf8');
+    const installedStripped = stripSourceMappingComment(installedRaw);
+    const installedDigest = sha256Buffer(Buffer.from(installedStripped, 'utf8'));
+    if (installedDigest !== manifest.sha256) {
+      throw new Error('installed chart.js source digest does not match manifest sha256');
+    }
+    if (installedStripped.length !== manifest.size) {
+      throw new Error('installed chart.js source size does not match manifest size');
+    }
+  } else if (requireInstalledPackage) {
+    throw new Error('chart.js package is not installed');
+  }
+
+  return manifest;
+}
+
+function buildNotice(manifest) {
+  return [
+    'Third-party browser runtime assets',
+    '',
+    `${manifest.package} ${manifest.version} (MIT)`,
+    `Source tarball: ${manifest.npmResolved}`,
+    `Pinned SHA-256: ${manifest.sha256}`,
+    '',
+    'Copyright (c) 2014-2022 Chart.js Contributors',
+    '',
+    'Permission is hereby granted, free of charge, to any person obtaining a copy',
+    'of this software and associated documentation files (the "Software"), to deal',
+    'in the Software without restriction, including without limitation the rights',
+    'to use, copy, modify, merge, publish, distribute, sublicense, and/or sell',
+    'copies of the Software, and to permit persons to whom the Software is',
+    'furnished to do so, subject to the following conditions:',
+    '',
+    'The above copyright notice and this permission notice shall be included in all',
+    'copies or substantial portions of the Software.',
+    '',
+  ].join('\n');
+}
+
+function pinChartJsAsset({
+  manifestPath = MANIFEST_PATH,
+  assetPath = ASSET_PATH,
+  lockfilePath = path.join(REPO_ROOT, 'package-lock.json'),
+  noticePath = NOTICE_PATH,
+  sourcePath = null,
+  dashboardRoot = DASHBOARD_ROOT,
+  repoRoot = REPO_ROOT,
+} = {}) {
+  const lockEntry = readRootLockEntry(lockfilePath);
+  const installedSourcePath = resolveInstalledSourcePath({ dashboardRoot, repoRoot, sourcePath });
+  if (!installedSourcePath || !fs.existsSync(installedSourcePath)) {
+    throw new Error('chart.js must be installed before pinning the browser asset');
+  }
+
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(path.dirname(installedSourcePath), '..', 'package.json'), 'utf8'),
+  );
+  if (packageJson.version !== lockEntry.version) {
+    throw new Error('installed chart.js version does not match lockfile entry');
+  }
+
+  fs.mkdirSync(path.dirname(assetPath), { recursive: true });
+  const assetBuffer = writePinnedChartAsset(installedSourcePath, assetPath);
+  const digest = sha256Buffer(assetBuffer);
+  const size = assetBuffer.length;
+  const manifest = {
+    package: 'chart.js',
+    version: lockEntry.version,
+    license: 'MIT',
+    lockfilePath: 'package-lock.json',
+    lockfilePackage: LOCKFILE_PACKAGE,
+    npmResolved: lockEntry.resolved,
+    npmIntegrity: lockEntry.integrity,
+    sourcePath: 'node_modules/chart.js/dist/chart.umd.js',
+    assetPath: 'public/vendor/chart.umd.js',
+    sha256: digest,
+    size,
+  };
+
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  fs.writeFileSync(noticePath, `${buildNotice(manifest)}\n`);
+  verifyChartJsAsset({
+    manifestPath,
+    assetPath,
+    lockfilePath,
+    requireInstalledPackage: true,
+    sourcePath: installedSourcePath,
+    dashboardRoot,
+    repoRoot,
+  });
+  return manifest;
+}
+
+module.exports = {
+  ASSET_PATH,
+  DASHBOARD_ROOT,
+  LOCKFILE_PACKAGE,
+  MANIFEST_PATH,
+  NOTICE_PATH,
+  REPO_ROOT,
+  assertManifestShape,
+  buildNotice,
+  loadManifest,
+  pinChartJsAsset,
+  readRootLockEntry,
+  resolveInstalledSourcePath,
+  sha256Buffer,
+  sha256File,
+  verifyChartJsAsset,
+};

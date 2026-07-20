@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const api = require('@actual-app/api');
 const sw = require('./splitwise-lib');
+const { todayYMD } = require('./lib/date-only');
 
 const CONFIRM = process.env.CONFIRM === '1';
 const EVENT = process.env.COLLECTION_EVENT;
@@ -57,7 +58,7 @@ function compileDebtors(rule, routed) {
   const payees = await api.getPayees();
   const payeeNames = Object.fromEntries(payees.map((payee) => [payee.id, payee.name || '']));
   const accounts = (await api.getAccounts()).filter((account) => !account.closed && !account.offbudget);
-  const end = new Date().toISOString().slice(0, 10);
+  const end = todayYMD();
   const rows = [];
   for (const account of accounts) {
     for (const transaction of await api.getTransactions(account.id, rule.start, end)) {

@@ -1,13 +1,17 @@
 import { useMemo, useSyncExternalStore } from 'react';
 import * as Notifications from 'expo-notifications';
 import { Account, Bill, RecurringItem, RepaymentSuggestion, Transaction } from '@/api/generated/types';
+import { type NotificationReconciliationToken } from '@/lib/notification-reconciliation';
+import { createNotificationReconciler, type NotificationReconcilerDeps } from '@/lib/notification-reconcile';
+import { classifyBillReminder as classifyBillReminderCore } from '@/lib/notification-scheduling';
 import { kv, storage } from '@/lib/storage';
 import { fmtPos } from '@/theme/colors';
+import {
+  assertReconciliationCurrent,
+  withReconciliationGuard,
+} from '@/lib/notification-reconciliation';
 
 // On-device (local) notifications only — no server push, no APNs entitlement.
-// Scheduled reminders (bills, weekly digest) are re-laid-out whenever the app
-// opens with fresh data; event alerts (large charge, new subscription) fire
-// immediately when newly-detected since the last run.
 
 export const NOTIF = {
   bills: 'notif.bills',
@@ -18,37 +22,40 @@ export const NOTIF = {
   repayments: 'notif.repayments',
   threshold: 'notif.threshold',
   lowBalanceThreshold: 'notif.lowBalanceThreshold',
+  privacy: 'notif.privacy',
+  status: 'notif.status.v2',
+  scheduledIds: 'notif.scheduledIds.v1',
+  legacyMigration: 'notif.legacyScheduleMigration.v1',
   repaySnapshot: 'notif.repaySnapshot.v2',
-  // v2: reset baselines once — demo-mode toggling polluted the v1 snapshots and
-  // could fire spurious "new subscription"/large-charge alerts. v2 re-seeds
-  // silently from real data on the first non-demo run.
   lastSeenTxn: 'notif.lastSeenTxnIds.v3',
   subSnapshot: 'notif.subSnapshot.v2',
   lowBalSnapshot: 'notif.lowBalSnapshot.v2',
 } as const;
 
-let settingsRevision = 0;
-const settingsListeners = new Set<() => void>();
-const subscribeSettings = (listener: () => void) => {
-  settingsListeners.add(listener);
-  return () => settingsListeners.delete(listener);
-};
-const settingsSnapshot = () => settingsRevision;
-export function notifyNotifSettingsChanged() {
-  settingsRevision += 1;
-  settingsListeners.forEach((listener) => listener());
-}
-export function useNotifSettings(): NotifSettings {
-  const revision = useSyncExternalStore(subscribeSettings, settingsSnapshot, settingsSnapshot);
-  return useMemo(() => {
-    void revision;
-    return getNotifSettings();
-  }, [revision]);
-}
-const scopedKey = (key: string, scope: string) => `${key}.${scope}`;
+export type NotificationPrivacy = 'private' | 'detailed';
+export type NotificationCategory = 'bills' | 'largeCharge' | 'newSub' | 'weekly' | 'lowBalance' | 'repayments';
+export type BillReminderKind = 'dayBefore' | 'sameDayLate' | 'overdue';
 
-export const DEFAULT_THRESHOLD = 200;
-export const DEFAULT_LOW_BALANCE = 100;
+export const NOTIFICATION_ROUTES = {
+  bills: '/bills',
+  largeCharge: '/(tabs)/transactions',
+  newSub: '/subscriptions',
+  weekly: '/review',
+  lowBalance: '/networth',
+  repayments: '/reimbursement',
+} as const;
+
+export interface NotificationRoutePayload {
+  route: string;
+  category: NotificationCategory;
+  scope: string;
+}
+
+export interface BillReminderPlan {
+  kind: BillReminderKind;
+  triggerDate: Date | null;
+  sameDayKey: string | null;
+}
 
 export interface NotifSettings {
   bills: boolean;
@@ -59,6 +66,84 @@ export interface NotifSettings {
   repayments: boolean;
   threshold: number;
   lowBalanceThreshold: number;
+  privacy: NotificationPrivacy;
+}
+
+export interface ScheduledNotificationReconcileInput {
+  token: NotificationReconciliationToken;
+  scope: string;
+  settings: NotifSettings;
+  bills?: Bill[];
+  billsReady?: boolean;
+  financeToday?: string;
+}
+
+export interface EventNotificationReconcileInput {
+  token: NotificationReconciliationToken;
+  scope: string;
+  settings: NotifSettings;
+  transactions?: Transaction[];
+  accounts?: Account[];
+  recurring?: RecurringItem[];
+  repayments?: RepaymentSuggestion[];
+}
+
+export interface NotificationStatus {
+  permissionGranted: boolean | null;
+  scheduledCount: number;
+  lastRefresh: Partial<Record<NotificationCategory, string>>;
+}
+
+let settingsRevision = 0;
+const settingsListeners = new Set<() => void>();
+const subscribeSettings = (listener: () => void) => {
+  settingsListeners.add(listener);
+  return () => settingsListeners.delete(listener);
+};
+const settingsSnapshot = () => settingsRevision;
+
+export function notifyNotifSettingsChanged() {
+  settingsRevision += 1;
+  settingsListeners.forEach((listener) => listener());
+}
+
+export function useNotifSettings(): NotifSettings {
+  const revision = useSyncExternalStore(subscribeSettings, settingsSnapshot, settingsSnapshot);
+  return useMemo(() => {
+    void revision;
+    return getNotifSettings();
+  }, [revision]);
+}
+
+const scopedKey = (key: string, scope: string) => `${key}.${scope}`;
+const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+
+export const DEFAULT_THRESHOLD = 200;
+export const DEFAULT_LOW_BALANCE = 100;
+
+const notificationReconciler = createNotificationReconciler({
+  notifications: Notifications,
+  kv,
+  storage,
+  assertReconciliationCurrent,
+  withReconciliationGuard,
+  classifyBillReminder: classifyBillReminderCore,
+  buildBillNotificationContent,
+  buildLargeChargeNotificationContent,
+  buildLowBalanceNotificationContent,
+  buildRepaymentNotificationContent,
+  buildSubscriptionNotificationContent,
+  isCashAccount,
+} as unknown as NotificationReconcilerDeps);
+
+export function getNotificationPrivacy(): NotificationPrivacy {
+  const raw = kv.getString(NOTIF.privacy);
+  return raw === 'detailed' ? 'detailed' : 'private';
+}
+
+export function setNotificationPrivacy(mode: NotificationPrivacy): void {
+  kv.setString(NOTIF.privacy, mode);
+  notifyNotifSettingsChanged();
 }
 
 export function getNotifSettings(): NotifSettings {
@@ -71,7 +156,22 @@ export function getNotifSettings(): NotifSettings {
     repayments: kv.getBool(NOTIF.repayments, false),
     threshold: kv.getNum(NOTIF.threshold, DEFAULT_THRESHOLD),
     lowBalanceThreshold: kv.getNum(NOTIF.lowBalanceThreshold, DEFAULT_LOW_BALANCE),
+    privacy: getNotificationPrivacy(),
   };
+}
+
+function readScopedStatus(scope: string): NotificationStatus {
+  const raw = kv.getString(scopedKey(NOTIF.status, scope));
+  if (!raw) return { permissionGranted: null, scheduledCount: 0, lastRefresh: {} };
+  try {
+    return JSON.parse(raw) as NotificationStatus;
+  } catch {
+    return { permissionGranted: null, scheduledCount: 0, lastRefresh: {} };
+  }
+}
+
+export function getNotificationStatus(scope: string): NotificationStatus {
+  return readScopedStatus(scope);
 }
 
 Notifications.setNotificationHandler({
@@ -92,155 +192,165 @@ export async function ensurePermission(): Promise<boolean> {
   return (await Notifications.requestPermissionsAsync()).granted;
 }
 
+export function clearNotificationRoutingState(): void {
+  notificationReconciler.clearNotificationRoutingState();
+}
+
+export async function dismissDeliveredNotificationsForScope(scope?: string): Promise<void> {
+  await notificationReconciler.dismissDeliveredNotificationsForScope(scope);
+}
+
+export async function purgeNotificationProfileState(scope?: string): Promise<void> {
+  await notificationReconciler.purgeNotificationProfileState(scope);
+}
+
 export async function clearFinanceNotifications(scope?: string): Promise<void> {
-  await Notifications.cancelAllScheduledNotificationsAsync();
-  const prefixes = [
-    NOTIF.lastSeenTxn,
-    NOTIF.subSnapshot,
-    NOTIF.lowBalSnapshot,
-    NOTIF.repaySnapshot,
-    'notif.billSameDay.',
-  ];
-  for (const key of storage.getAllKeys()) {
-    if (!prefixes.some((prefix) => key.startsWith(prefix))) continue;
-    if (!scope || key.endsWith(`.${scope}`) || key.startsWith('notif.billSameDay.')) storage.remove(key);
-  }
+  await purgeNotificationProfileState(scope);
 }
 
-async function present(title: string, body: string) {
-  await Notifications.scheduleNotificationAsync({ content: { title, body }, trigger: null });
+export async function reconcileScheduledNotifications(input: ScheduledNotificationReconcileInput): Promise<void> {
+  await notificationReconciler.reconcileScheduledNotifications(input);
 }
 
-const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+export async function reconcileEventNotifications(input: EventNotificationReconcileInput): Promise<void> {
+  await notificationReconciler.reconcileEventNotifications(input);
+}
 
-// Re-lay-out all *scheduled* notifications (bills + weekly digest). Cleanly
-// cancels everything scheduled and rebuilds, so it's safe to call on every load.
-export async function rescheduleScheduled(bills: Bill[], settings: NotifSettings) {
-  if (!(await hasPermission())) return;
-  await Notifications.cancelAllScheduledNotificationsAsync();
-
-  if (settings.bills) {
-    const seen = new Set<string>();
-    let n = 0;
-    for (const b of bills) {
-      if (n >= 20) break;
-      if (b.paid) continue;
-      const id = `${b.key}-${b.dueDate}`;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const [y, m, d] = b.dueDate.split('-').map(Number);
-      let remind = new Date(y, m - 1, d - 1, 9, 0, 0); // 9am the day before
-      const dueEnd = new Date(y, m - 1, d, 23, 59, 59);
-      if (dueEnd.getTime() < Date.now()) continue;
-      const dueToday = remind.getTime() <= Date.now();
-      let sameDayKey: string | null = null;
-      if (dueToday) {
-        sameDayKey = `notif.billSameDay.${id}`;
-        if (kv.getBool(sameDayKey, false)) continue;
-        remind = new Date(Date.now() + 5_000);
-      }
-      await Notifications.scheduleNotificationAsync({
-        content: { title: `${cap(b.payee)} bill due ${dueToday ? 'today' : 'tomorrow'}`, body: `${fmtPos(b.amount)} · ${b.category}` },
-        trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: remind },
-      });
-      if (sameDayKey) kv.setBool(sameDayKey, true);
-      n++;
+export function resetNotificationBaseline(category: NotificationCategory, scope: string): void {
+  const keyByCategory: Partial<Record<NotificationCategory, string>> = {
+    largeCharge: scopedKey(NOTIF.lastSeenTxn, scope),
+    newSub: scopedKey(NOTIF.subSnapshot, scope),
+    lowBalance: scopedKey(NOTIF.lowBalSnapshot, scope),
+    repayments: scopedKey(NOTIF.repaySnapshot, scope),
+  };
+  const key = keyByCategory[category];
+  if (key) kv.setString(key, null);
+  if (category === 'bills') {
+    for (const storageKey of storage.getAllKeys()) {
+      if (storageKey.startsWith(`notif.billSameDay.v2.${scope}.`)) storage.remove(storageKey);
     }
   }
-
-  if (settings.weekly) {
-    await Notifications.scheduleNotificationAsync({
-      content: { title: 'Your weekly money check-in', body: 'Open DarkFinances to review this week.' },
-      trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: 1, hour: 9, minute: 0 },
-    });
-  }
 }
 
-// Fire an immediate alert for any new large charge since the last run.
-export async function checkLargeCharges(txns: Transaction[], settings: NotifSettings, scope = 'default') {
-  if (!settings.largeCharge || !(await hasPermission()) || !txns.length) return;
-  const key = scopedKey(NOTIF.lastSeenTxn, scope);
-  const raw = kv.getString(key);
-  if (!raw) {
-    kv.setString(key, JSON.stringify(txns.map((transaction) => transaction.id))); // baseline; don't fire on historical data
-    return;
-  }
-  let seen: string[] = [];
-  try { seen = JSON.parse(raw); } catch { seen = []; }
-  const seenSet = new Set(seen);
-  const fresh = txns.filter((t) => !seenSet.has(t.id) && t.amount < 0 && Math.abs(t.amount) >= settings.threshold);
-  if (fresh.length) {
-    const top = fresh.reduce((a, b) => (Math.abs(b.amount) > Math.abs(a.amount) ? b : a));
-    const extra = fresh.length > 1 ? ` (+${fresh.length - 1} more)` : '';
-    await present('Large charge detected', `${fmtPos(Math.abs(top.amount))} at ${top.payee || 'unknown'}${extra}`);
-  }
-  kv.setString(key, JSON.stringify([...new Set([...txns.map((transaction) => transaction.id), ...seen])].slice(0, 2000)));
+export function isCashAccount(account: Account): boolean {
+  return !account.offbudget && !account.hidden && account.role === 'operating_cash';
 }
 
-// Alert when an on-budget cash account newly drops below the threshold. A
-// snapshot of already-low account ids prevents re-alerting on every app open
-// until the balance recovers above the limit.
-export async function checkLowBalances(accounts: Account[], settings: NotifSettings, scope = 'default') {
-  if (!settings.lowBalance || !(await hasPermission()) || !accounts.length) return;
-  const limit = settings.lowBalanceThreshold;
-  const low = accounts.filter((a) => !a.offbudget && !a.hidden && a.balance < limit);
-  const lowIds = low.map((a) => a.id);
-  const key = scopedKey(NOTIF.lowBalSnapshot, scope);
-  const raw = kv.getString(key);
-  if (raw == null) {
-    kv.setString(key, JSON.stringify(lowIds)); // baseline; don't fire on first run
-    return;
-  }
-  let prev: string[] = [];
-  try { prev = JSON.parse(raw); } catch { prev = []; }
-  const fresh = low.filter((a) => !prev.includes(a.id));
-  if (fresh.length) {
-    const worst = fresh.reduce((a, b) => (b.balance < a.balance ? b : a));
-    const extra = fresh.length > 1 ? ` (+${fresh.length - 1} more)` : '';
-    await present('Low balance', `${worst.name} is at ${fmtPos(worst.balance)}${extra}`);
-  }
-  kv.setString(key, JSON.stringify(lowIds));
+export function classifyBillReminder(
+  bill: Bill,
+  now = Date.now(),
+  scope = 'default',
+  financeToday?: string,
+): BillReminderPlan | null {
+  return classifyBillReminderCore(bill, now, scope, financeToday);
 }
 
-// Alert when a new repayment suggestion appears (an incoming payment that likely
-// settles what someone owes). Snapshots suggested inflow ids so each is announced once.
-export async function checkRepaymentSuggestions(suggestions: RepaymentSuggestion[], settings: NotifSettings, scope = 'default') {
-  if (!settings.repayments || !(await hasPermission())) return;
-  const ids = suggestions.map((s) => s.inflow.id);
-  const key = scopedKey(NOTIF.repaySnapshot, scope);
-  const raw = kv.getString(key);
-  if (raw == null) {
-    kv.setString(key, JSON.stringify(ids)); // baseline; don't fire on first run
-    return;
+export function buildBillNotificationContent(
+  bill: Bill,
+  kind: BillReminderKind,
+  privacy: NotificationPrivacy,
+): { title: string; body: string } {
+  if (privacy === 'private') {
+    const title = kind === 'overdue'
+      ? 'Bill overdue'
+      : kind === 'sameDayLate'
+        ? 'Bill due today'
+        : 'Bill due tomorrow';
+    return {
+      title,
+      body: 'Open DarkFinances to review upcoming bills.',
+    };
   }
-  let prev: string[] = [];
-  try { prev = JSON.parse(raw); } catch { prev = []; }
-  const fresh = suggestions.filter((s) => !prev.includes(s.inflow.id));
-  if (fresh.length) {
-    const top = fresh[0];
-    const extra = fresh.length > 1 ? ` (+${fresh.length - 1} more)` : '';
-    await present('Repayment to review', `${fmtPos(top.inflow.amount)} from ${cap(top.person)} may settle what they owe${extra}`);
-  }
-  kv.setString(key, JSON.stringify(ids));
+  const when = kind === 'overdue'
+    ? 'overdue'
+    : kind === 'sameDayLate'
+      ? 'today'
+      : 'tomorrow';
+  return {
+    title: `${cap(bill.payee)} bill due ${when}`,
+    body: `${fmtPos(bill.amount)} · ${bill.category}`,
+  };
 }
 
-// Fire an immediate alert when a previously-unseen active subscription appears.
-export async function checkNewSubscriptions(items: RecurringItem[], settings: NotifSettings, scope = 'default') {
-  if (!settings.newSub || !(await hasPermission())) return;
-  const activeKeys = items.filter((i) => i.status === 'active').map((i) => i.key);
-  const key = scopedKey(NOTIF.subSnapshot, scope);
-  const raw = kv.getString(key);
-  if (!raw) {
-    kv.setString(key, JSON.stringify(activeKeys));
-    return;
+export function buildLargeChargeNotificationContent(
+  top: Transaction,
+  extraCount: number,
+  privacy: NotificationPrivacy,
+): { title: string; body: string } {
+  if (privacy === 'private') {
+    return {
+      title: 'Large charge detected',
+      body: 'Open DarkFinances to review recent activity.',
+    };
   }
-  let prev: string[] = [];
-  try { prev = JSON.parse(raw); } catch { prev = []; }
-  const fresh = activeKeys.filter((k) => !prev.includes(k));
-  if (fresh.length) {
-    const names = items.filter((i) => fresh.includes(i.key)).map((i) => cap(i.payee));
-    const extra = names.length > 1 ? ` (+${names.length - 1} more)` : '';
-    await present('New subscription detected', `${names[0]}${extra}`);
-  }
-  kv.setString(key, JSON.stringify(activeKeys));
+  const extra = extraCount > 0 ? ` (+${extraCount} more)` : '';
+  return {
+    title: 'Large charge detected',
+    body: `${fmtPos(Math.abs(top.amount))} at ${top.payee || 'unknown'}${extra}`,
+  };
 }
+
+export function buildLowBalanceNotificationContent(
+  account: Account,
+  extraCount: number,
+  privacy: NotificationPrivacy,
+): { title: string; body: string } {
+  if (privacy === 'private') {
+    return {
+      title: 'Low cash balance',
+      body: 'Open DarkFinances to review account balances.',
+    };
+  }
+  const extra = extraCount > 0 ? ` (+${extraCount} more)` : '';
+  return {
+    title: 'Low balance',
+    body: `${account.name} is at ${fmtPos(account.balance)}${extra}`,
+  };
+}
+
+export function buildRepaymentNotificationContent(
+  suggestion: RepaymentSuggestion,
+  extraCount: number,
+  privacy: NotificationPrivacy,
+): { title: string; body: string } {
+  if (privacy === 'private') {
+    return {
+      title: 'Repayment to review',
+      body: 'Open DarkFinances to review incoming payments.',
+    };
+  }
+  const extra = extraCount > 0 ? ` (+${extraCount} more)` : '';
+  return {
+    title: 'Repayment to review',
+    body: `${fmtPos(suggestion.inflow.amount)} from ${cap(suggestion.person)} may settle what they owe${extra}`,
+  };
+}
+
+export function buildSubscriptionNotificationContent(
+  names: string[],
+  privacy: NotificationPrivacy,
+): { title: string; body: string } {
+  if (privacy === 'private') {
+    return {
+      title: 'New subscription detected',
+      body: 'Open DarkFinances to review recurring charges.',
+    };
+  }
+  const extra = names.length > 1 ? ` (+${names.length - 1} more)` : '';
+  return {
+    title: 'New subscription detected',
+    body: `${names[0]}${extra}`,
+  };
+}
+
+export function parseNotificationRoute(data: unknown): NotificationRoutePayload | null {
+  const payload = notificationReconciler.parseNotificationRoute(data);
+  if (!payload) return null;
+  return {
+    route: payload.route,
+    category: payload.category as NotificationCategory,
+    scope: payload.scope,
+  };
+}
+
+export { createNotificationReconciler } from '@/lib/notification-reconcile';

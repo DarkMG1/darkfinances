@@ -3,8 +3,12 @@ import { StyleSheet, Text, View } from 'react-native';
 import { useIncome } from '@/api/hooks/finance.hooks';
 import { IncomeStream } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
-import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Avatar, Card, EmptyState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
+import { useFinanceToday } from '@/lib/date-only';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { formatOptionalMoney, formatOptionalPos } from '@/lib/money-display.js';
 import { cadenceLabel, colors, dueLabel, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
@@ -29,46 +33,61 @@ function Row({ s, muted }: { s: IncomeStream; muted?: boolean }) {
 }
 
 export default function Income() {
+  const financeToday = useFinanceToday();
   const income = useIncome();
   const data = income.data;
-  const active = (data?.streams ?? []).filter((s) => s.active);
-  const inactive = (data?.streams ?? []).filter((s) => !s.active);
 
   return (
-    <PushScreen testID="income-screen" refreshing={income.isFetching} onRefresh={income.refetch}>
-      {income.isLoading ? (
-        <SkeletonList hero rows={4} />
-      ) : income.isError && !data ? (
-        <ErrorState error={income.error?.error} onRetry={income.refetch} />
-      ) : !data || data.count === 0 ? (
-        <EmptyState icon="dollarsign.circle">No recurring income detected yet</EmptyState>
-      ) : (
-        <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>MONTHLY INCOME</Text>
-            <Text style={styles.heroValue}>{fmtMoney(data.monthlyTotal)}</Text>
-            <Text style={styles.heroSub}>
-              {data.nextPayday
-                ? `Next: ${cap(data.nextPaydayPayee ?? 'paycheck')} · ${dueLabel(data.nextPayday)} · ${fmtPos(data.nextPaydayAmount ?? 0)}`
-                : `${data.activeCount} active stream${data.activeCount === 1 ? '' : 's'}`}
-            </Text>
+    <PushScreen testID="income-screen" onRefresh={income.refetch}>
+      <QueryScreenBody
+        query={income}
+        loading={<SkeletonList hero rows={4} />}
+        empty={<EmptyState icon="dollarsign.circle">No recurring income detected yet</EmptyState>}
+        hasContent={Boolean(data && data.count > 0)}
+        refetchBannerTestID="income-refetch-banner"
+        renderContent={(incomeData) => {
+          const activeStreams = (incomeData.streams ?? []).filter((s) => s.active);
+          const inactiveStreams = (incomeData.streams ?? []).filter((s) => !s.active);
+          const monthlyTotalLabel = formatOptionalMoney(incomeData.monthlyTotal, fmtMoney);
+          const nextAmountLabel = incomeData.nextPayday
+            ? formatOptionalPos(incomeData.nextPaydayAmount, fmtPos)
+            : null;
+          const nextSub = incomeData.nextPayday
+            ? `Next: ${cap(incomeData.nextPaydayPayee ?? 'paycheck')} · ${dueLabel(incomeData.nextPayday, financeToday)} · ${nextAmountLabel}`
+            : `${incomeData.activeCount ?? 0} active stream${(incomeData.activeCount ?? 0) === 1 ? '' : 's'}`;
+          return (
+          <>
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              'Monthly income',
+              monthlyTotalLabel,
+              nextSub,
+            )}
+          >
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">MONTHLY INCOME</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{monthlyTotalLabel}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{nextSub}</Text>
           </View>
 
-          {active.length ? (
+          {activeStreams.length ? (
             <View style={{ marginTop: 8 }}>
               <SectionLabel>Active</SectionLabel>
-              <Card style={styles.list}>{active.map((s) => <Row key={s.key} s={s} />)}</Card>
+              <Card style={styles.list}>{activeStreams.map((s) => <Row key={s.key} s={s} />)}</Card>
             </View>
           ) : null}
 
-          {inactive.length ? (
+          {inactiveStreams.length ? (
             <View style={{ marginTop: 8 }}>
               <SectionLabel>Paused</SectionLabel>
-              <Card style={styles.list}>{inactive.map((s) => <Row key={s.key} s={s} muted />)}</Card>
+              <Card style={styles.list}>{inactiveStreams.map((s) => <Row key={s.key} s={s} muted />)}</Card>
             </View>
           ) : null}
-        </>
-      )}
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }

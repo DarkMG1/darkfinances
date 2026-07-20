@@ -3,11 +3,14 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useBills } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
-import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Avatar, Card, EmptyState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { Bill } from '@/api/generated/types';
-import { financeToday } from '@/lib/date-only';
+import { useFinanceToday } from '@/lib/date-only';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { haptics } from '@/lib/haptics';
+import { formatOptionalMoney } from '@/lib/money-display.js';
 import { cadenceLabel, colors, daysUntil, dueLabel, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -21,7 +24,7 @@ function CalendarMonth({ year, month, dueByDay, selected, onSelect }: {
   selected: string | null;
   onSelect: (day: string | null) => void;
 }) {
-  const today = financeToday();
+  const today = useFinanceToday();
   const monthName = new Date(year, month, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   const startWeekday = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -64,11 +67,14 @@ function CalendarMonth({ year, month, dueByDay, selected, onSelect }: {
 
 export default function Bills() {
   const router = useRouter();
+  const financeToday = useFinanceToday();
   const bills = useBills();
   const data = bills.data;
   const [selected, setSelected] = useState<string | null>(null);
 
+  const billDetailsKnown = data?.horizonDays != null && Array.isArray(data?.bills);
   const all = useMemo(() => data?.bills ?? [], [data?.bills]);
+  const billCount = Number.isFinite(data?.count) ? Number(data?.count) : all.length;
 
   const dueByDay = useMemo(() => {
     const m: Record<string, number> = {};
@@ -79,12 +85,12 @@ export default function Bills() {
   const months = useMemo(() => {
     const set = new Set<string>();
     for (const b of all) set.add(b.dueDate.slice(0, 7));
-    set.add(financeToday().slice(0, 7));
+    set.add(financeToday.slice(0, 7));
     return Array.from(set).sort().map((k) => {
       const [y, mo] = k.split('-').map(Number);
       return { year: y, month: mo - 1 };
     });
-  }, [all]);
+  }, [all, financeToday]);
 
   // Buckets shown when no specific day is selected. A selected day renders its
   // items inline beneath the calendar month instead (see below).
@@ -95,18 +101,22 @@ export default function Bills() {
       { title: 'Later', items: [] },
     ];
     for (const b of all) {
-      const d = daysUntil(b.dueDate);
+      const d = daysUntil(b.dueDate, financeToday);
+      if (d == null) {
+        buckets[2].items.push(b);
+        continue;
+      }
       if (d <= 7) buckets[0].items.push(b);
       else if (d <= 14) buckets[1].items.push(b);
       else buckets[2].items.push(b);
     }
     return buckets.filter((g) => g.items.length);
-  }, [all]);
+  }, [all, financeToday]);
 
   // Read-only: paid is auto-derived on the server from a matched real charge —
   // there's no manual "mark paid" (you can't fake a payment that didn't happen).
   const renderRow = (b: Bill) => {
-    const paidLabel = b.paid ? (b.matched ? `paid ${fmtDay(b.matched.date)}` : 'paid') : dueLabel(b.dueDate);
+    const paidLabel = b.paid ? (b.matched ? `paid ${fmtDay(b.matched.date)}` : 'paid') : `estimated ${dueLabel(b.dueDate, financeToday)}`;
     const variance = b.variance ?? null;
     const varianceText = variance != null && Math.abs(variance) >= 0.01 ? ` · ${variance > 0 ? '+' : ''}${fmtMoney(variance)} vs expected` : '';
     return (
@@ -124,19 +134,32 @@ export default function Bills() {
   };
 
   return (
-    <PushScreen testID="bills-screen" refreshing={bills.isFetching} onRefresh={bills.refetch}>
-      {bills.isLoading ? (
-        <SkeletonList hero rows={5} />
-      ) : bills.isError && !data ? (
-        <ErrorState error={bills.error?.error} onRetry={bills.refetch} />
-      ) : !data || data.count === 0 ? (
-        <EmptyState icon="calendar">No upcoming bills detected</EmptyState>
-      ) : (
-        <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>UNPAID · NEXT {data.horizonDays} DAYS</Text>
-            <Text style={styles.heroValue}>{fmtMoney(data.total)}</Text>
-            <Text style={styles.heroSub}>{data.unpaidCount} of {data.count} bills unpaid</Text>
+    <PushScreen testID="bills-screen" onRefresh={bills.refetch}>
+      <QueryScreenBody
+        query={bills}
+        loading={<SkeletonList hero rows={5} />}
+        empty={<EmptyState icon={billDetailsKnown ? 'calendar' : 'exclamationmark.triangle'}>{billDetailsKnown ? 'No upcoming bills detected' : 'Bill details unavailable'}</EmptyState>}
+        hasContent={Boolean(billDetailsKnown && billCount > 0)}
+        refetchBannerTestID="bills-refetch-banner"
+        renderContent={(billData) => {
+          const resolvedCount = Number.isFinite(billData.count) ? billData.count : (billData.bills?.length ?? 0);
+          const resolvedUnpaidCount = Number.isFinite(billData.unpaidCount)
+            ? billData.unpaidCount
+            : (billData.bills ?? []).filter((bill) => !bill.paid).length;
+          return (
+          <>
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              `Unpaid next ${billData.horizonDays} days`,
+              formatOptionalMoney(billData.total, fmtMoney),
+              `${resolvedUnpaidCount} of ${resolvedCount} bills unpaid`,
+            )}
+          >
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">UNPAID · NEXT {billData.horizonDays} DAYS</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{formatOptionalMoney(billData.total, fmtMoney)}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{resolvedUnpaidCount} of {resolvedCount} bills unpaid</Text>
           </View>
 
           {months.map((m) => {
@@ -154,7 +177,7 @@ export default function Bills() {
                 {dayItems ? (
                   <View style={{ marginTop: 6 }}>
                     <View style={styles.selHead}>
-                      <SectionLabel>{dueLabel(selected!)}</SectionLabel>
+                      <SectionLabel>{selected ? dueLabel(selected, financeToday) : ''}</SectionLabel>
                       <Text style={styles.clearSelText} onPress={() => setSelected(null)}>Show all</Text>
                     </View>
                     {dayItems.length ? (
@@ -176,8 +199,10 @@ export default function Bills() {
                 </View>
               ))
             : null}
-        </>
-      )}
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }

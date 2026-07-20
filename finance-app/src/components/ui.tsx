@@ -2,11 +2,21 @@ import React from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextStyle, View, ViewStyle } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
+import {
+  AccessibilityAnnouncementEffect,
+  visibleStatusLiveRegionProps,
+} from '@/components/accessibility-live-region';
 import { colors } from '@/theme/colors';
 import { categoryIcon, monogramColor } from '@/theme/categoryIcons';
 
-export function Card({ children, style, testID }: { children: React.ReactNode; style?: ViewStyle; testID?: string }) {
-  return <View testID={testID} style={[styles.card, style]}>{children}</View>;
+export function Card({ children, style, testID, ...a11y }: {
+  children: React.ReactNode;
+  style?: ViewStyle;
+  testID?: string;
+  accessible?: boolean;
+  accessibilityLabel?: string;
+}) {
+  return <View testID={testID} style={[styles.card, style]} {...a11y}>{children}</View>;
 }
 
 export function SectionLabel({ children, right }: { children: React.ReactNode; right?: React.ReactNode }) {
@@ -22,31 +32,34 @@ export function CardTitle({ children, style }: { children: React.ReactNode; styl
   return <Text style={[styles.cardTitle, style]}>{children}</Text>;
 }
 
-export function StatCard({ label, value, valueColor, sub, subColor, onPress, testID }: {
-  label: string; value: string; valueColor?: string; sub?: string; subColor?: string; onPress?: () => void; testID?: string;
+export function StatCard({ label, value, valueColor, sub, subColor, onPress, testID, accessibilityLabel }: {
+  label: string; value: string; valueColor?: string; sub?: string; subColor?: string; onPress?: () => void; testID?: string; accessibilityLabel?: string;
 }) {
+  const a11yLabel = accessibilityLabel ?? (sub ? `${label}, ${value}, ${sub}` : `${label}, ${value}`);
   const body = (
     <>
-      <Text style={styles.statLabel}>{label}</Text>
+      <Text style={styles.statLabel} accessibilityElementsHidden importantForAccessibility="no">{label}</Text>
       <Text
         style={[styles.statValue, valueColor ? { color: valueColor } : null]}
         numberOfLines={1}
         adjustsFontSizeToFit
         minimumFontScale={0.6}
+        accessibilityElementsHidden
+        importantForAccessibility="no"
       >
         {value}
       </Text>
-      {sub ? <Text style={[styles.statSub, subColor ? { color: subColor } : null]}>{sub}</Text> : null}
+      {sub ? <Text style={[styles.statSub, subColor ? { color: subColor } : null]} accessibilityElementsHidden importantForAccessibility="no">{sub}</Text> : null}
     </>
   );
   if (onPress) {
     return (
-      <Pressable testID={testID} style={({ pressed }) => [styles.card, styles.statCard, pressed && { opacity: 0.6 }]} onPress={onPress}>
+      <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={a11yLabel} style={({ pressed }) => [styles.card, styles.statCard, pressed && { opacity: 0.6 }]} onPress={onPress}>
         {body}
       </Pressable>
     );
   }
-  return <View testID={testID} style={[styles.card, styles.statCard]}>{body}</View>;
+  return <View testID={testID} accessible accessibilityLabel={a11yLabel} style={[styles.card, styles.statCard]}>{body}</View>;
 }
 
 // Offline merchant/category avatar. Pass `label` (payee) for a colored monogram,
@@ -109,7 +122,7 @@ export function ListRow({ avatar, title, subtitle, value, valueColor, valueSub, 
   );
   if (onPress) {
     return (
-      <Pressable testID={testID} onPress={onPress} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}>
+      <Pressable accessibilityRole="button" testID={testID} onPress={onPress} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}>
         {inner}
       </Pressable>
     );
@@ -126,7 +139,7 @@ export function PressableScale({ onPress, children, style, scale = 0.97, disable
   disabled?: boolean;
 }) {
   return (
-    <Pressable onPress={onPress} disabled={disabled} style={({ pressed }) => [style as ViewStyle, pressed && { opacity: 0.88, transform: [{ scale }] }]}>
+    <Pressable accessibilityRole={onPress ? 'button' : undefined} onPress={onPress} disabled={disabled} style={({ pressed }) => [style as ViewStyle, pressed && { opacity: 0.88, transform: [{ scale }] }]}>
       {children}
     </Pressable>
   );
@@ -168,23 +181,25 @@ export function TagChips({
   style,
   onPressTag,
   onRemoveTag,
+  disabled = false,
 }: {
   tags: { raw: string; label: string; kind: 'event' | 'tag' }[];
   style?: ViewStyle;
   onPressTag?: (raw: string) => void;
   onRemoveTag?: (raw: string) => void;
+  disabled?: boolean;
 }) {
   if (!tags?.length) return null;
   return (
-    <View style={[styles.tagRow, style]}>
+    <View style={[styles.tagRow, style, disabled && { opacity: 0.45 }]}>
       {tags.map((t, i) => {
         const tint = t.kind === 'event' ? colors.accentLight : colors.green;
         return (
           <View key={t.raw + i} style={[styles.tag, t.kind === 'event' ? styles.tagEvent : styles.tagPerson]}>
             <Pressable
-              onPress={onPressTag ? () => onPressTag(t.raw) : undefined}
-              disabled={!onPressTag}
-              style={({ pressed }) => [styles.tagPress, pressed && onPressTag ? { opacity: 0.6 } : null]}
+              onPress={onPressTag && !disabled ? () => onPressTag(t.raw) : undefined}
+              disabled={!onPressTag || disabled}
+              style={({ pressed }) => [styles.tagPress, pressed && onPressTag && !disabled ? { opacity: 0.6 } : null]}
             >
               <SymbolView
                 name={t.kind === 'event' ? 'mappin.and.ellipse' : 'number'}
@@ -198,7 +213,7 @@ export function TagChips({
               </Text>
             </Pressable>
             {onRemoveTag ? (
-              <Pressable hitSlop={8} onPress={() => onRemoveTag(t.raw)} style={({ pressed }) => (pressed ? { opacity: 0.5 } : null)}>
+              <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${t.label} tag`} accessibilityState={{ disabled }} hitSlop={16} onPress={() => { if (!disabled) onRemoveTag(t.raw); }} disabled={disabled} style={({ pressed }) => (pressed && !disabled ? { opacity: 0.5 } : null)}>
                 <SymbolView name="xmark.circle.fill" tintColor={tint} size={13} resizeMode="scaleAspectFit" style={styles.tagRemove} />
               </Pressable>
             ) : null}
@@ -229,14 +244,22 @@ export function EmptyState({ children, icon }: { children: React.ReactNode; icon
   );
 }
 
-export function ErrorState({ error, onRetry }: { error?: string; onRetry?: () => void }) {
+export function ErrorState({ error, onRetry, retryLabel = 'Tap to retry' }: { error?: string; onRetry?: () => void; retryLabel?: string }) {
+  const message = error || 'Something went wrong';
   return (
     <Animated.View entering={FadeIn.duration(260)} style={styles.center}>
-      <SymbolView name="exclamationmark.triangle" tintColor={colors.red} size={32} resizeMode="scaleAspectFit" style={{ opacity: 0.85 }} />
-      <Text style={[styles.muted, { color: colors.red, textAlign: 'center' }]}>{error || 'Something went wrong'}</Text>
+      <AccessibilityAnnouncementEffect message={message} />
+      <SymbolView name="exclamationmark.triangle" tintColor={colors.red} size={32} resizeMode="scaleAspectFit" style={{ opacity: 0.85 }} accessibilityElementsHidden importantForAccessibility="no" />
+      <Text
+        accessibilityRole="text"
+        {...visibleStatusLiveRegionProps()}
+        style={[styles.muted, { color: colors.red, textAlign: 'center' }]}
+      >
+        {message}
+      </Text>
       {onRetry ? (
-        <Pressable onPress={onRetry} style={({ pressed }) => pressed && { opacity: 0.6 }}>
-          <Text style={[styles.muted, { color: colors.accentLight, marginTop: 4, fontWeight: '600' }]}>Tap to retry</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel={retryLabel} onPress={onRetry} style={({ pressed }) => [styles.retry, pressed && { opacity: 0.6 }]}>
+          <Text style={[styles.muted, { color: colors.accentLight, marginTop: 4, fontWeight: '600' }]}>{retryLabel}</Text>
         </Pressable>
       ) : null}
     </Animated.View>
@@ -266,7 +289,7 @@ const styles = StyleSheet.create({
   splitPill: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: 'rgba(124,110,247,0.16)', borderRadius: 5, paddingHorizontal: 5, paddingVertical: 2, flexShrink: 0 },
   splitPillText: { color: colors.accentLight, fontSize: 9, fontWeight: '800', letterSpacing: 0.4 },
   avatar: { alignItems: 'center', justifyContent: 'center' },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, minHeight: 44 },
   rowMid: { flex: 1, minWidth: 0 },
   rowTitle: { color: colors.text, fontSize: 15, fontWeight: '600' },
   rowSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
@@ -285,4 +308,5 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', padding: 24 },
   emptyIcon: { width: 34, height: 34, marginBottom: 10, opacity: 0.6 },
   muted: { color: colors.muted, fontSize: 13 },
+  retry: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12 },
 });

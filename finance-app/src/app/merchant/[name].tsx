@@ -4,10 +4,13 @@ import Animated, { FadeInDown } from 'react-native-reanimated';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useMerchantHistory } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
-import { Avatar, Card, EmptyState, ErrorState, PendingPill, SplitPill } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Avatar, Card, EmptyState, PendingPill, SplitPill } from '@/components/ui';
 import { MonthNavigator } from '@/components/charts';
 import { SkeletonList } from '@/components/skeleton';
-import { financeToday } from '@/lib/date-only';
+import { useFinanceToday } from '@/lib/date-only';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { formatOptionalMoney, isKnownMoney } from '@/lib/money-display.js';
 import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -25,33 +28,45 @@ export default function MerchantDetail() {
   const [selected, setSelected] = useState('');
   const hist = useMerchantHistory(name, months);
 
-  const currentKey = financeToday().slice(0, 7);
+  const currentKey = useFinanceToday().slice(0, 7);
 
   const series = useMemo(
-    () => (hist.data?.months ?? []).map((m) => ({ month: m.month, spend: m.total })),
+    () => (hist.data?.months ?? []).map((m) => ({ month: m.month, spend: isKnownMoney(m.total) ? m.total : null })),
     [hist.data]
   );
 
-  // Default to the most recent month that actually has spend (falls back to current).
   const selectedMonth = selected || [...(hist.data?.months ?? [])].reverse().find((m) => m.count > 0)?.month || currentKey;
-  const selMonth = hist.data?.months.find((m) => m.month === selectedMonth);
+  const selMonth = (hist.data?.months ?? []).find((m) => m.month === selectedMonth);
   const rows = selMonth?.items ?? [];
 
   return (
-    <PushScreen testID="merchant-detail-screen" refreshing={hist.isFetching} onRefresh={hist.refetch}>
+    <PushScreen testID="merchant-detail-screen" onRefresh={hist.refetch}>
       <Stack.Screen options={{ title: name || 'Merchant' }} />
-      {hist.isLoading && !hist.data ? (
-        <SkeletonList hero rows={7} />
-      ) : hist.isError && !hist.data ? (
-        <ErrorState error={hist.error?.error} onRetry={hist.refetch} />
-      ) : (
-        <>
-          <View style={styles.hero}>
+      <QueryScreenBody
+        query={hist}
+        loading={<SkeletonList hero rows={7} />}
+        empty={null}
+        hasContent={hist.data != null}
+        refetchBannerTestID="merchant-refetch-banner"
+        renderContent={(merchantData) => {
+          const totalLabel = formatOptionalMoney(merchantData.total, fmtMoney);
+          const avgLabel = isKnownMoney(merchantData.avg) ? fmtMoney(merchantData.avg) : null;
+          return (
+          <>
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              name || 'Merchant',
+              totalLabel,
+              `${merchantData.count ?? 0} transactions${avgLabel ? `, ${avgLabel} net average` : ''}, last ${months} months`,
+            )}
+          >
             <Avatar label={name} size={52} style={{ marginBottom: 10 }} />
-            <Text style={styles.heroValue}>{fmtMoney(hist.data?.total ?? 0)}</Text>
-            <Text style={styles.heroSub}>
-              {hist.data?.count ?? 0} transaction{(hist.data?.count ?? 0) === 1 ? '' : 's'}
-              {hist.data?.avg ? ` · ${fmtMoney(hist.data.avg)} net avg` : ''}
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{totalLabel}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
+              {merchantData.count ?? 0} transaction{(merchantData.count ?? 0) === 1 ? '' : 's'}
+              {avgLabel ? ` · ${avgLabel} net avg` : ''}
               {` · last ${months}mo`}
             </Text>
           </View>
@@ -74,7 +89,7 @@ export default function MerchantDetail() {
 
           <View style={styles.monthHead}>
             <Text style={styles.monthTitle}>{selMonth ? monthTitle(selMonth.month) : ''}</Text>
-            {selMonth ? <Text style={styles.monthTotal}>{fmtMoney(selMonth.total)}</Text> : null}
+            {selMonth ? <Text style={styles.monthTotal}>{formatOptionalMoney(selMonth.total, fmtMoney)}</Text> : null}
           </View>
 
           {rows.length === 0 ? (
@@ -109,8 +124,10 @@ export default function MerchantDetail() {
               ))}
             </Card>
           )}
-        </>
-      )}
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }

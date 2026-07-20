@@ -1,13 +1,22 @@
 import React, { useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useConfirmRepayment, useDismissRepayment, useReimbursement, useRepaymentSuggestions } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
+import { QueryRefetchBanners, resolveQueryDisplay } from '@/components/query-display';
+import { buildReimbursementRefetchQueries } from '@/lib/screen-query-display-config.js';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, Pill } from '@/components/ui';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { SkeletonList } from '@/components/skeleton';
+import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
+import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { OwesPerson, ReimbLeg, RepaymentSuggestion } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
+import { formatOptionalPos, formatOptionalSignedMoney, isKnownMoney } from '@/lib/money-display.js';
+import { reimbursementWindowNet } from '@/lib/reimbursement-window-net.js';
 import { colors, fmtDate, fmtPos, fmtSignedMoney } from '@/theme/colors';
+import { reimbursementWindow, type ReimbursementRangeKey, useFinanceToday } from '@/lib/date-only';
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 type Status = 'outstanding' | 'partial' | 'settled';
@@ -35,22 +44,15 @@ const bucketTitle = (name: string) => {
 
 // Summary window presets. Debts (People) are always lifetime; this only scopes
 // the fronted / paid-back / net headline so you can review, e.g., just June.
-type RangeKey = 'mtd' | '7d' | '30d' | 'life';
+type RangeKey = ReimbursementRangeKey;
 const RANGES: { key: RangeKey; label: string }[] = [
   { key: 'mtd', label: 'MTD' },
   { key: '7d', label: '7D' },
   { key: '30d', label: '30D' },
   { key: 'life', label: 'All' },
 ];
-const pad2 = (n: number) => String(n).padStart(2, '0');
-const ymd = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-function windowFor(r: RangeKey): { from?: string; to?: string; label: string } {
-  const now = new Date();
-  const to = ymd(now);
-  if (r === 'mtd') return { from: `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-01`, to, label: 'This month' };
-  if (r === '7d') { const d = new Date(now); d.setDate(d.getDate() - 6); return { from: ymd(d), to, label: 'Last 7 days' }; }
-  if (r === '30d') { const d = new Date(now); d.setDate(d.getDate() - 29); return { from: ymd(d), to, label: 'Last 30 days' }; }
-  return { label: 'Lifetime' };
+function windowFor(r: RangeKey, anchor: string) {
+  return reimbursementWindow(r, anchor);
 }
 
 // A person's debt is either tracked in a Splitwise trip/group, a set of direct
@@ -58,46 +60,82 @@ function windowFor(r: RangeKey): { from?: string; to?: string; label: string } {
 // so who owes you is stable regardless of which month you're browsing elsewhere.
 export default function Reimbursement() {
   const router = useRouter();
+  const financeToday = useFinanceToday();
   const [range, setRange] = useState<RangeKey>('mtd');
-  const win = windowFor(range);
+  const win = useMemo(() => windowFor(range, financeToday), [range, financeToday]);
   const reimb = useReimbursement({ from: win.from, to: win.to });
   const suggestions = useRepaymentSuggestions();
   const confirm = useConfirmRepayment();
   const dismiss = useDismissRepayment();
+  const admissionRef = useMutationScreenAdmission();
+  const dismissAction = useMutationAction({
+    mutation: dismiss,
+    mutationLabel: 'Dismiss suggestion',
+    admissionRef,
+    onRefetch: () => suggestions.refetch(),
+  });
+  const confirmAction = useMutationAction({
+    mutation: confirm,
+    mutationLabel: 'Confirm repayment',
+    admissionRef,
+    onActivate: () => dismissAction.clear(),
+    onRefetch: () => { suggestions.refetch(); reimb.refetch(); },
+  });
+  const banner = useMutationBannerCoordinator(useMemo(() => [
+    { key: 'confirm', outcome: confirmAction.outcome, retry: confirmAction.retry, announce: confirmAction.announce, isLocked: confirmAction.isLocked, activitySeq: confirmAction.activitySeq },
+    { key: 'dismiss', outcome: dismissAction.outcome, retry: dismissAction.retry, announce: dismissAction.announce, isLocked: dismissAction.isLocked, activitySeq: dismissAction.activitySeq },
+  ], [
+    confirmAction.activitySeq, confirmAction.announce, confirmAction.isLocked, confirmAction.outcome, confirmAction.retry,
+    dismissAction.activitySeq, dismissAction.announce, dismissAction.isLocked, dismissAction.outcome, dismissAction.retry,
+  ]));
   const [acting, setActing] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
   const owes = reimb.data?.owes ?? [];
   const summary = reimb.data?.summary;
-  const grandTotal = reimb.data?.totalOwed ?? 0;
+  const totalOwedMetric = reimb.data?.totalOwed;
+  const grandTotal = totalOwedMetric?.complete && isKnownMoney(totalOwedMetric.value)
+    ? totalOwedMetric.value
+    : null;
+  const grandLowerBound = !totalOwedMetric?.complete ? totalOwedMetric?.lowerBound : null;
   const debtorCount = reimb.data?.debtorCount ?? owes.length;
-  const sugg = suggestions.data?.suggestions ?? [];
+  const sugg = suggestions.data?.complete === false ? [] : (suggestions.data?.suggestions ?? []);
   const snapshot = snapshotLabel(reimb.data?.owesSource, reimb.data?.owesGeneratedAt, reimb.data?.owesWarning);
-  const windowNet = (summary?.paidBack ?? 0) - (summary?.fronted ?? 0);
-  const netValue = range === 'life' ? (summary?.outstanding ?? grandTotal) : windowNet;
-  const netGood = range === 'life' ? netValue <= 0.5 : netValue >= -0.005;
+  const windowNet = reimbursementWindowNet(summary);
+  const netValue = range === 'life'
+    ? (summary?.outstanding ?? (totalOwedMetric?.complete ? totalOwedMetric.value : null))
+    : windowNet;
+  const netDisplay = range === 'life'
+    ? formatOptionalPos(netValue, fmtPos)
+    : formatOptionalSignedMoney(netValue, fmtSignedMoney);
+  const netGood = range === 'life'
+    ? (isKnownMoney(netValue) && netValue! <= 0.5)
+    : isKnownMoney(netValue) && netValue! >= -0.005;
 
   // Group/trip fronts not attributed to a specific person (net < 0 = owed to you).
   const bucketList = useMemo(() => {
     const b = reimb.data?.buckets ?? {};
     return Object.entries(b)
-      .map(([name, v]) => ({ name, owed: -(v?.net ?? 0), count: v?.count ?? 0, legs: v?.legs ?? [] }))
+      .flatMap(([name, v]) => isKnownMoney(v?.net)
+        ? [{ name, owed: -v!.net!, count: v?.count ?? 0, legs: v?.legs ?? [] }]
+        : [])
       .filter((x) => x.owed > 0.5)
       .sort((a, b2) => b2.owed - a.owed);
   }, [reimb.data]);
 
   const onConfirm = (s: RepaymentSuggestion) => {
+    if (banner.isLocked) return;
     setActing(s.id);
     haptics.tap();
-    confirm.mutate({ id: s.id }, {
-      onSuccess: () => { haptics.success(); setActing(null); },
-      onError: (e) => { setActing(null); Alert.alert('Could not confirm', e.error || 'Refresh and try again.'); },
+    confirmAction.run({ id: s.id }, {
+      onSettled: () => setActing(null),
     });
   };
   const onDismiss = (s: RepaymentSuggestion) => {
+    if (banner.isLocked) return;
     setActing(s.id);
     haptics.tap();
-    dismiss.mutate({ id: s.id, inflowId: s.inflow.id }, { onSuccess: () => setActing(null), onError: () => setActing(null) });
+    dismissAction.run({ id: s.id, inflowId: s.inflow.id }, { onSettled: () => setActing(null) });
   };
 
   const toggle = (key: string) => { haptics.tap(); setOpen((o) => ({ ...o, [key]: !o[key] })); };
@@ -124,6 +162,11 @@ export default function Reimbursement() {
     });
   };
   const loading = reimb.isLoading && !reimb.data;
+  const reimbDisplay = resolveQueryDisplay(reimb);
+  const reimbursementRefetchQueries = useMemo(
+    () => buildReimbursementRefetchQueries({ reimb, suggestions }),
+    [reimb, suggestions],
+  );
 
   const personStatus = (p: OwesPerson): Status => (p.owed <= 0.5 ? 'settled' : 'outstanding');
   const subLabel = (p: OwesPerson): string => {
@@ -134,27 +177,52 @@ export default function Reimbursement() {
   };
 
   return (
-    <PushScreen testID="reimbursement-screen" refreshing={reimb.isFetching || suggestions.isFetching} onRefresh={() => { reimb.refetch(); suggestions.refetch(); }}>
+    <PushScreen testID="reimbursement-screen" onRefresh={() => Promise.all([reimb.refetch(), suggestions.refetch()])}>
+      <MutationLiveRegion message={banner.announce} />
+      <MutationFormBanner
+        outcome={banner.outcome}
+        onRetry={banner.retry}
+        onRefetch={() => { suggestions.refetch(); reimb.refetch(); }}
+      />
       {loading ? (
         <SkeletonList rows={5} />
-      ) : reimb.isError && !reimb.data ? (
-        <ErrorState error={reimb.error?.error} onRetry={reimb.refetch} />
+      ) : reimbDisplay.fatalError ? (
+        <ErrorState error={reimbDisplay.errorMessage} onRetry={reimb.refetch} />
       ) : (
         <>
+          <QueryRefetchBanners queries={reimbursementRefetchQueries} testID="reimbursement-refetch-banner" />
           <Card style={{ marginBottom: 16 }}>
-            <Text style={styles.total}>{fmtPos(grandTotal)}</Text>
-            <Text style={styles.totalLabel}>owed to you · {debtorCount} {debtorCount === 1 ? 'person' : 'people'} · {cutoffLabel(reimb.data?.ledgerCutoff)}</Text>
+            <Text style={styles.total}>
+              {grandTotal != null ? fmtPos(grandTotal) : grandLowerBound != null ? `${totalOwedMetric?.lowerBoundLabel || 'at least'} ${fmtPos(grandLowerBound)}` : '—'}
+            </Text>
+            <Text style={styles.totalLabel}>
+              owed to you · {debtorCount ?? '—'} {debtorCount === 1 ? 'person' : 'people'} · {cutoffLabel(reimb.data?.ledgerCutoff)}
+              {totalOwedMetric?.complete === false ? ' · partial ledger scan' : ''}
+            </Text>
             <Text style={[styles.sourceLabel, reimb.data?.owesWarning && { color: colors.yellow }]}>{snapshot}</Text>
+            {reimb.data?.lastKnownSplitwise ? (
+              <View style={styles.staleNotice}>
+                <Text style={styles.staleTitle}>Splitwise is not included in the current total</Text>
+                <Text style={styles.staleText}>
+                  Last known: {fmtPos(reimb.data.lastKnownSplitwise.total)}
+                  {reimb.data.lastKnownSplitwise.generatedAt
+                    ? ` · updated ${fmtDate(reimb.data.lastKnownSplitwise.generatedAt.slice(0, 10))}`
+                    : ''}
+                </Text>
+              </View>
+            ) : null}
 
             <View style={styles.rangeRow}>
               {RANGES.map((r) => {
                 const on = r.key === range;
+                const rangeLocked = banner.isLocked;
                 return (
                   <Pressable
                     testID={`reimbursement-range-${r.key}${on ? '-selected' : ''}`}
                     key={r.key}
-                    onPress={() => { haptics.tap(); setRange(r.key); }}
-                    style={({ pressed }) => [styles.rangeChip, on && styles.rangeChipOn, pressed && { opacity: 0.7 }]}
+                    disabled={rangeLocked}
+                    onPress={() => { if (rangeLocked) return; haptics.tap(); setRange(r.key); }}
+                    style={({ pressed }) => [styles.rangeChip, on && styles.rangeChipOn, pressed && !rangeLocked && { opacity: 0.7 }, rangeLocked && { opacity: 0.45 }]}
                   >
                     <Text style={[styles.rangeText, on && styles.rangeTextOn]}>{r.label}</Text>
                   </Pressable>
@@ -165,16 +233,16 @@ export default function Reimbursement() {
 
             <View style={styles.sumRow}>
               <View style={styles.sumChip}>
-                <Text style={styles.sumVal}>{fmtPos(summary?.fronted ?? 0)}</Text>
+                <Text style={styles.sumVal}>{formatOptionalPos(summary?.fronted, fmtPos)}</Text>
                 <Text style={styles.sumLabel}>fronted</Text>
               </View>
               <View style={styles.sumChip}>
-                <Text style={[styles.sumVal, { color: colors.green }]}>{fmtPos(summary?.paidBack ?? 0)}</Text>
+                <Text style={[styles.sumVal, { color: colors.green }]}>{formatOptionalPos(summary?.paidBack, fmtPos)}</Text>
                 <Text style={styles.sumLabel}>paid back</Text>
               </View>
               <View style={styles.sumChip}>
                 <Text style={[styles.sumVal, { color: netGood ? colors.green : colors.red }]}>
-                  {range === 'life' ? fmtPos(netValue) : fmtSignedMoney(netValue)}
+                  {netDisplay}
                 </Text>
                 <Text style={styles.sumLabel}>{range === 'life' ? 'still owed' : 'net cash flow'}</Text>
               </View>
@@ -186,7 +254,7 @@ export default function Reimbursement() {
               <CardTitle>Suggested repayments</CardTitle>
               <Card style={{ marginBottom: 16 }}>
                 {sugg.map((s, i) => {
-                  const busy = acting === s.id;
+                  const busy = acting === s.id || banner.isLocked;
                   return (
                     <View key={s.id} testID={`reimbursement-suggestion-${i}`} style={[styles.suggest, i > 0 && styles.suggestDivider]}>
                       <View style={styles.suggestHead}>
@@ -208,8 +276,8 @@ export default function Reimbursement() {
                         </View>
                       ) : null}
                       <View style={styles.suggestActions}>
-                        <Pressable testID={`reimbursement-suggestion-confirm-${i}`} onPress={() => onConfirm(s)} disabled={busy} style={({ pressed }) => [styles.confirmBtn, pressed && { opacity: 0.7 }, busy && { opacity: 0.5 }]}>
-                          {busy && confirm.isPending ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.confirmText}>Confirm</Text>}
+                        <Pressable testID={`reimbursement-suggestion-confirm-${i}`} onPress={() => onConfirm(s)} disabled={busy} style={({ pressed }) => [styles.confirmBtn, pressed && !busy && { opacity: 0.7 }, busy && { opacity: 0.5 }]}>
+                          {acting === s.id && confirmAction.isLocked ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.confirmText}>Confirm</Text>}
                         </Pressable>
                         <Pressable testID={`reimbursement-suggestion-dismiss-${i}`} onPress={() => onDismiss(s)} disabled={busy} style={({ pressed }) => [styles.dismissBtn, pressed && { opacity: 0.7 }, busy && { opacity: 0.5 }]}>
                           <Text style={styles.dismissText}>Dismiss</Text>
@@ -339,6 +407,9 @@ const styles = StyleSheet.create({
   total: { color: colors.green, fontSize: 32, fontWeight: '800', letterSpacing: -1 },
   totalLabel: { color: colors.muted, fontSize: 13, marginTop: 2 },
   sourceLabel: { color: colors.muted, fontSize: 11, marginTop: 5, lineHeight: 15 },
+  staleNotice: { marginTop: 10, padding: 10, borderRadius: 10, backgroundColor: colors.yellow + '18', borderWidth: 1, borderColor: colors.yellow + '55' },
+  staleTitle: { color: colors.yellow, fontSize: 12, fontWeight: '800' },
+  staleText: { color: colors.muted, fontSize: 11, marginTop: 3 },
   rangeRow: { flexDirection: 'row', gap: 6, marginTop: 14, backgroundColor: colors.surface2, borderRadius: 10, padding: 3 },
   rangeChip: { flex: 1, paddingVertical: 7, borderRadius: 8, alignItems: 'center' },
   rangeChipOn: { backgroundColor: colors.accent },

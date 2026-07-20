@@ -1,6 +1,56 @@
 // Response types for the DarkFinances API (/api/v1/*). Mirrors dataModule.js output.
 
 export type Nullish<T> = T | null | undefined;
+export type AccountRole = 'operating_cash' | 'protected_savings' | 'credit_card' | 'loan' | 'investment' | 'excluded' | 'unknown';
+
+export interface SplitwiseMirrorIdentity {
+  status: 'valid' | 'disagreement' | 'invalid' | 'migration_required' | 'not_configured';
+  configuredSources: {
+    env: string | null;
+    saga: string | null;
+    owesConfig: string | null;
+  };
+  legacyNameCandidates: string[];
+  migrationRequired: boolean;
+}
+
+export type CreditLiabilityCoverage = 'exclude' | 'current_balance' | 'statement';
+
+export interface AccountCreditStatementOverride {
+  balanceCents: number;
+  paymentDueDate: string;
+  observedAt: string;
+}
+
+export interface AccountOverrideEntry {
+  name?: string;
+  hidden?: boolean;
+  role?: AccountRole;
+  creditLiabilityCoverage?: CreditLiabilityCoverage;
+  paymentRecurringKey?: string;
+  fundingAccountId?: string;
+  statement?: AccountCreditStatementOverride;
+  clearCreditLiability?: boolean;
+}
+
+export interface AccountCreditLiabilityOverride {
+  coverage: CreditLiabilityCoverage | null;
+  paymentRecurringKey: string | null;
+  fundingAccountId: string | null;
+  statement: AccountCreditStatementOverride | null;
+}
+
+export interface AccountCreditLiabilityPolicy {
+  mode: 'unknown' | 'exclude' | 'current_balance' | 'statement';
+  eligible: boolean;
+  coverageKind: 'current_balance' | 'statement' | null;
+  paymentRecurringKey: string | null;
+  fundingAccountId: string | null;
+  obligationCents: number | null;
+  paymentDueDate: string | null;
+  observedAt: string | null;
+  quarantineReasons: string[];
+}
 
 export interface Account {
   id: string;
@@ -8,6 +58,18 @@ export interface Account {
   offbudget: boolean;
   balance: number;
   hidden?: boolean;
+  role: AccountRole;
+  roleSource: 'explicit' | 'unknown';
+  inclusion?: {
+    netWorth: boolean;
+    operatingCash: boolean;
+    liquidCash: boolean;
+    spending: boolean;
+    obligations: boolean;
+    forecast: boolean;
+  };
+  creditLiability?: AccountCreditLiabilityOverride | null;
+  creditLiabilityPolicy?: AccountCreditLiabilityPolicy | null;
 }
 
 export interface ManualAsset {
@@ -19,9 +81,13 @@ export interface ManualAsset {
 }
 export interface ManualAssets {
   items: ManualAsset[];
-  assets: number;
-  liabilities: number;
-  net: number;
+  assets: number | null;
+  liabilities: number | null;
+  net: number | null;
+  complete?: boolean;
+  incompleteReasons?: string[];
+  assetCents?: number | null;
+  liabilityCents?: number | null;
 }
 
 export interface InvestmentHolding {
@@ -60,17 +126,25 @@ export interface Investments {
 export interface Reports {
   generatedAt: string;
   month: string;
+  completeness?: ProjectionCompleteness;
   saved: { id: string; title: string; subtitle: string }[];
   monthlyReview: {
-    income: number;
-    spend: number;
-    net: number;
+    income: number | null;
+    spend: number | null;
+    net: number | null;
+    knownSpendSubtotal?: number;
+    knownIncomeSubtotal?: number;
+    completeness?: ProjectionCompleteness;
     transactionCount: number;
     largest: Transaction[];
     uncategorized: Transaction[];
   };
-  categoryTrends: { name: string; spend: number; pct: number }[];
+  categoryTrends: { name: string; spend: number; pct: number | null }[];
   merchantTrends: { payee: string; spend: number; count: number }[];
+  /** True when merchantTrends is a top-N slice of a conserving full aggregate. */
+  merchantTrendsTruncated?: boolean;
+  categoryTrendsComplete?: boolean;
+  merchantTrendsComplete?: boolean;
   tagSummary: Tag[];
   cashFlow: TrendMonth[];
 }
@@ -155,30 +229,64 @@ export interface MerchantHistory {
   months: MerchantHistoryMonth[];
 }
 
+export interface ProjectionCompleteness {
+  complete: boolean;
+  incompleteReasons: string[];
+  transferIdentityUnresolvedCount: number;
+  transferIdentityReasons: string[];
+}
+
 export interface SpendSummary {
   spending: Record<string, number>;
-  totalSpend: number;
-  totalIncome: number;
+  totalSpend: number | null;
+  totalIncome: number | null;
+  knownSpendSubtotal?: number;
+  knownIncomeSubtotal?: number;
+  completeness: ProjectionCompleteness;
 }
 export interface Spending {
   current: SpendSummary;
   prev: SpendSummary;
   month: string;
+  completeness?: ProjectionCompleteness;
+  scope?: {
+    accountProjectionRevision?: string;
+    spendingIncludedAccountIds?: string[];
+  };
 }
 
 export interface TrendMonth {
   month: string;
-  netWorth: number;
-  spend: number;
-  income: number;
-  net: number;
+  netWorth: number | null;
+  spend: number | null;
+  income: number | null;
+  net: number | null;
+  complete?: boolean;
+  knownSpendSubtotal?: number;
+  knownIncomeSubtotal?: number;
+  completeness?: ProjectionCompleteness;
 }
 export interface Trends {
   months: TrendMonth[];
+  completeness?: ProjectionCompleteness;
   scope?: {
     includesClosedAccountHistory: boolean;
     includesManualAssets: boolean;
     excludedHiddenAccounts: boolean;
+    excludedRoles?: string[];
+    queriedFrom?: string;
+    queriedTo?: string;
+    netWorthHistoryComplete?: boolean;
+    netWorthIncludedRoles?: AccountRole[];
+    netWorthIncludedAccountIds?: string[];
+    accountProjectionRevision?: string;
+    splitwiseMirrorAccountId?: string | null;
+    splitwiseMirrorExcludedFromNetWorth?: boolean;
+    splitwiseMirrorIdentity?: SplitwiseMirrorIdentity | null;
+    spendingIncludedAccountIds?: string[];
+    spendingProjectionComplete?: boolean;
+    demoSyntheticHistory?: boolean;
+    months?: number;
   };
 }
 
@@ -189,6 +297,12 @@ export interface BudgetCategory {
   target: number;
   spent: number;
   remaining: number;
+  reserve: number | null;
+  envelope: number | null;
+  envelopeDebt: number | null;
+  reserveCents: number | null;
+  envelopeCents: number | null;
+  envelopeDebtCents: number | null;
   projected: number;
   expectedToDate: number | null;
   dailyPace: number;
@@ -198,6 +312,8 @@ export interface BudgetCategory {
   status: 'on_track' | 'watch' | 'over' | 'snoozed';
   rolloverMode: string;
   rolloverAmount: number;
+  rolloverConfigured: boolean;
+  resolved: boolean;
   annualTarget: number | null;
   trueExpenseCadence: string | null;
   snoozedMonth: string | null;
@@ -287,14 +403,33 @@ export interface OwesPerson {
 }
 export interface Reimbursement {
   range: { from: string; to: string };
-  totalOwed: number;
-  debtorCount: number;
-  summary?: { fronted: number; paidBack: number; outstanding: number; window?: { from: string; to: string }; lifetime?: boolean };
+  totalOwed: MetricValue;
+  debtorCount: number | null;
+  summary?: {
+    fronted: number;
+    paidBack: number;
+    outstanding: number | null;
+    outstandingMetric?: MetricValue | null;
+    window?: { from: string; to: string };
+    lifetime?: boolean;
+  };
   owes: OwesPerson[];
   owesSource?: string;
   owesGeneratedAt?: string | null;
   owesWarning?: string | null;
+  lastKnownSplitwise?: {
+    generatedAt: string | null;
+    total: number;
+    bySlug: Record<string, { event: string; amount: number }[]>;
+    source: string;
+  } | null;
   ledgerCutoff?: string | null;
+  ledgerScan?: {
+    queriedFrom: string;
+    configuredFrom: string;
+    to: string;
+    complete: boolean;
+  };
   people: ReimbPerson[];
   events: ReimbEvent[];
   expected: ExpectedEvent[];
@@ -309,7 +444,8 @@ export type ReviewTaskKind =
   | 'pending'
   | 'repayment'
   | 'price_change'
-  | 'reconciliation';
+  | 'reconciliation'
+  | 'transfer_identity';
 export type ReviewTaskAction =
   | 'open_transaction'
   | 'categorize'
@@ -340,15 +476,21 @@ export interface ReviewTask {
   action: ReviewTaskAction;
   amount: number;
   date: string | null;
+  stableKey: string;
+  contentHash: string;
+  contentVersion: number;
   transaction?: ReviewTransactionRef;
   person?: string;
   key?: string;
   month?: string;
+  transferReason?: string;
 }
 export interface ReviewInbox {
   generatedAt: string;
   month: string;
   count: number;
+  hiddenCount?: number;
+  migrationRequired?: number;
   counts: Partial<Record<ReviewTaskKind, number>>;
   tasks: ReviewTask[];
 }
@@ -378,15 +520,18 @@ export interface Insights {
   uncategorized: { date: string; payee: string; amount: number }[];
   recurring: { payee: string; category: string; monthsSeen: number; estimated: number }[];
   anomalies: { category: string; current: number; avg: number; deltaPct: number | null }[];
+  completeness?: ProjectionCompleteness;
 }
 
-export type Cadence = 'weekly' | 'biweekly' | 'monthly' | 'bimonthly' | 'quarterly' | 'semiannual' | 'annual';
+export type Cadence = 'weekly' | 'biweekly' | 'semimonthly' | 'monthly' | 'bimonthly' | 'quarterly' | 'semiannual' | 'annual';
 export type RecurringStatus = 'active' | 'inactive' | 'cancelled';
 
 export interface RecurringItem {
   key: string;
   payee: string;
   category: string;
+  categoryId?: string | null;
+  categoryIdentityStatus?: 'explicit' | 'inferred' | 'ambiguous' | 'missing';
   cadence: Cadence;
   amount: number;
   monthlyEquivalent: number;
@@ -394,8 +539,9 @@ export interface RecurringItem {
   occurrences: number;
   firstCharged: string;
   lastCharged: string;
-  nextRenewal: string;
-  renewalWindow: { start: string; end: string };
+  nextRenewal: string | null;
+  renewalWindow: { start: string; end: string } | null;
+  projectionUncertain?: boolean;
   priceChange: { from: number; to: number; pct: number } | null;
   confidence: number;
   firstSeen: string;
@@ -457,6 +603,8 @@ export interface ForecastEvent {
   label: string;
   amount: number;
   kind: 'income' | 'bill' | 'budget' | 'reimbursement';
+  provenance: 'known' | 'planned' | 'inferred' | 'possible';
+  sourceId?: string | null;
 }
 export interface ForecastPoint {
   date: string;
@@ -475,9 +623,32 @@ export interface Forecast {
   events: ForecastEvent[];
   assumptions?: {
     liquidAccounts: { id: string; name: string }[];
-    genericBudgetTarget: number;
+    /** @deprecated Use assumptions.genericBudget.target */
+    genericBudgetTarget: number | null;
+    genericBudget: {
+      target: number | null;
+      remaining: number | null;
+      complete: boolean;
+      incompleteReasons: string[];
+    };
     billsExcludedFromGenericBudget: boolean;
     reimbursementsIncluded: boolean;
+    obligationGraph?: {
+      version: number;
+      complete: boolean;
+      incompleteReasons: string[];
+    };
+    stsContainment?: {
+      complete: boolean;
+      incompleteReasons: string[];
+    };
+    projectionContainment?: {
+      complete: boolean;
+      stsContainmentIncomplete: boolean;
+      graphEventsWithheld: boolean;
+      knownEventsIncludedDespiteStsIncomplete?: boolean;
+      incompleteReasons: string[];
+    };
   };
   possibleReimbursement?: { date: string; amount: number; includedInBalance: false } | null;
   warnings: string[];
@@ -528,9 +699,44 @@ export interface ReimbTxnRef {
   account?: string;
   imported?: boolean;
 }
+export interface ReimbLinkEndpoint extends ReimbTxnRef {
+  allocated?: number | null;
+  allocatedCents?: number | null;
+  allocationTrusted?: boolean;
+  allocationAmbiguous?: boolean;
+  allocationReason?: string;
+  linkVersion?: number;
+  linkKey?: string;
+}
+export interface ReimbLinkCapacity {
+  role: 'inflow' | 'expense';
+  absCapCents: number;
+  allocatedTrustedCents: number;
+  remainingTrustedCents: number;
+  ambiguousLinkCount: number;
+  completeness: 'complete' | 'ambiguous' | 'overallocated';
+  completenessReason?: string | null;
+}
+export interface ReimbLegacyReportRow {
+  linkKey: string;
+  inflowId: string | null;
+  expenseId: string | null;
+  inflowDate: string | null;
+  expenseDate: string | null;
+  reason: string;
+  createdAt: string | null;
+}
+export interface ReimbLegacyReport {
+  ambiguousCount: number;
+  rows: ReimbLegacyReportRow[];
+  generatedAt: string;
+}
 export interface ReimbLinks {
-  asInflow: (ReimbTxnRef & { allocated?: number })[]; // expenses this inflow repays
-  asExpense: (ReimbTxnRef & { allocated?: number })[]; // inflows that repaid this expense
+  links?: ReimbLinkEndpoint[];
+  asInflow: ReimbLinkEndpoint[];
+  asExpense: ReimbLinkEndpoint[];
+  capacity?: ReimbLinkCapacity | null;
+  legacyReport?: ReimbLegacyReport;
 }
 
 // Repayment auto-matcher: a suggested match of an incoming payment to what a
@@ -557,6 +763,8 @@ export interface RepaymentSuggestion {
 export interface RepaymentSuggestions {
   suggestions: RepaymentSuggestion[];
   count: number;
+  complete?: boolean;
+  incompleteReasons?: string[];
   generatedAt: string;
   range: { from: string; to: string };
 }
@@ -636,6 +844,112 @@ export interface ReimbursementLedger {
   months: { month: string; spend: number }[];
 }
 
+export interface ReimbursementExportEndpointScope {
+  absCapCents: number | null;
+  allocatedTrustedCents: number | null;
+  remainingTrustedCents: number | null;
+  ambiguousLinkCount: number | null;
+  completeness?: string;
+  completenessReason?: string | null;
+  linkCountLowerBound?: number;
+}
+
+export interface ReimbursementExportEndpoint {
+  id: string;
+  role: 'inflow' | 'expense' | null;
+  live: boolean;
+  date?: string | null;
+  payee?: string;
+  amountCents?: number | null;
+  global: ReimbursementExportEndpointScope;
+  window: {
+    allocatedTrustedCents: number | null;
+    linkCountLowerBound: number;
+  } | null;
+}
+
+export interface ReimbursementExportPerson {
+  person: string;
+  allocatedTrustedCents: number | null;
+}
+
+export interface ReimbursementExportProvenance {
+  actualGeneration: number | null;
+  linksRevision: number | null;
+  release: Record<string, unknown> | null;
+  linksSidecarDigest: string | null;
+  inputDigests: Record<string, unknown>;
+  operationBinding: Record<string, unknown> | null;
+}
+
+export interface ReimbursementExportIncompleteSection {
+  section: string;
+  [key: string]: unknown;
+}
+
+export interface ReimbursementExportScopeTotals {
+  trustedAllocationCents: number | null;
+  linkCount: number;
+  trustedLinkCountLowerBound: number;
+  ambiguousLinkCountLowerBound: number;
+  authoritative: boolean;
+}
+
+export interface ReimbursementExportLinkEndpointRef {
+  id: string;
+  date: string | null;
+  payee: string;
+  amountCents: number | null;
+  accountId: string | null;
+  account: string;
+  identityFingerprint?: string;
+  admissionFingerprint?: string | null;
+  categoryId?: string | null;
+}
+
+export interface ReimbursementExportLink {
+  linkKey: string;
+  inflowId: string | null;
+  expenseId: string | null;
+  person: string | null;
+  allocationCents: number | null;
+  allocationTrusted: boolean;
+  allocationAmbiguous: boolean;
+  allocationReason: string;
+  linkVersion: number;
+  inflow: ReimbursementExportLinkEndpointRef | null;
+  expense: ReimbursementExportLinkEndpointRef | null;
+  inflowOrphan: boolean;
+  expenseOrphan: boolean;
+  identityMismatch?: boolean;
+  eligibilityMismatch?: boolean;
+}
+
+export interface ReimbursementExport {
+  schemaVersion: number;
+  allocationPolicyVersion: string;
+  generatedAt: string;
+  financeTimeZone: string;
+  window: { from: string | null; to: string | null };
+  scopes: {
+    window: { active: boolean; totals: ReimbursementExportScopeTotals; links: ReimbursementExportLink[] };
+    global: { totals: ReimbursementExportScopeTotals; links: ReimbursementExportLink[] };
+  };
+  provenance: ReimbursementExportProvenance;
+  completeness: { status: 'complete' | 'incomplete'; reasons: Record<string, unknown>[] };
+  totals: {
+    trustedAllocationCents: number | null;
+    linkCount: number;
+    trustedLinkCount: number;
+    ambiguousLinkCount: number;
+    authoritative: boolean;
+  };
+  links: ReimbursementExportLink[];
+  endpoints: Record<string, ReimbursementExportEndpoint>;
+  people: ReimbursementExportPerson[];
+  incompleteSections: ReimbursementExportIncompleteSection[];
+}
+
 export interface Receipt {
   id: string;
   txnId: string;
@@ -646,6 +960,7 @@ export interface Receipt {
   amount: number | null;
   date: string | null;
   source: string;
+  evidenceStatus: 'needs-review' | 'matched' | 'mismatch' | 'unreadable';
   uploadedAt: string;
 }
 export interface Receipts {
@@ -661,6 +976,45 @@ export interface CreateTransactionInput {
   notes?: string;
 }
 
+export interface GoalFeasibility {
+  remainingCents: number;
+  remaining: number;
+  monthlyRequiredCents: number | null;
+  monthlyRequired: number | null;
+  deadlineOverdue: boolean;
+  accountStatus: 'manual' | 'linked' | 'missing' | 'closed' | 'hidden' | 'excluded';
+  accountRole: string | null;
+  overAllocated: boolean;
+  overAllocatedCents: number;
+  feasible: boolean | null;
+  advisoryOnly: true;
+}
+
+export interface GoalAccountSummary {
+  accountId: string;
+  role: string | null;
+  accountStatus: string;
+  capacityCents: number | null;
+  allocatedCents: number;
+  unallocatedCents: number | null;
+  overAllocatedCents: number | null;
+  goalIds: string[];
+  capacity: number | null;
+  allocated: number;
+  unallocated: number | null;
+  overAllocated: number | null;
+}
+
+export interface GoalAdvisory {
+  complete: boolean;
+  advisoryOnly: true;
+  incompleteReasons?: string[];
+  totalRemainingCents: number;
+  monthlyPressureCents: number;
+  overAllocatedAccounts: GoalAccountSummary[];
+  overAllocatedAccountCount: number;
+}
+
 export interface Goal {
   id: string;
   name: string;
@@ -669,7 +1023,12 @@ export interface Goal {
   deadline?: string | null;
   current: number;
   pct: number | null;
+  fundingSource?: 'allocated-account' | 'manual';
+  availableInAccount?: number | null;
+  monthlyRequired?: number | null;
+  feasibility?: GoalFeasibility;
 }
+
 export interface GoalInput {
   id?: string;
   name: string;
@@ -682,6 +1041,7 @@ export interface GoalInput {
 export interface OkResult {
   ok: boolean;
   id?: string;
+  feasibility?: GoalFeasibility | null;
   previousId?: string;
   parentId?: string;
   legIds?: string[];
@@ -729,12 +1089,35 @@ export interface CategorizeResult {
   previousId?: string;
   parentId?: string;
 }
+export interface ReconnectFreshnessEvidence {
+  ok: boolean;
+  probeKind: string;
+  cacheGenerationBefore: number;
+  cacheGenerationAfter: number;
+  sourceObservedAt: number;
+  sourceObservedRevision: string | null;
+  financeTimeZone: string;
+  deployIdentity: string | null;
+  coalesced?: boolean;
+}
 export interface Ping {
   ok: boolean;
   ts: number;
   startedAt?: string;
   financeTimeZone?: string;
   queuedMutations?: number;
+  actualCoordinator?: {
+    generation: number;
+    queued?: number;
+  };
+  release?: {
+    commit: string | null;
+    dirty: boolean;
+    lockSha256: string | null;
+    contract: string | null;
+    appVersion: string | null;
+    builtAt: string | null;
+  } | null;
   actual?: {
     ready: boolean;
     initializedAt?: string | null;
@@ -742,4 +1125,83 @@ export interface Ping {
     lastErrorAt?: string | null;
     lastError?: string | null;
   };
+}
+
+export interface ObligationReservation {
+  id: string;
+  label: string;
+  date: string;
+  amountCents: number;
+  role: string;
+  reserved: boolean;
+  source?: { kind?: string; key?: string; id?: string; provenance?: string };
+  explanation?: string[];
+  incompleteReasons?: string[];
+}
+
+export interface ObligationGraphSummary {
+  version: number;
+  nodeCount: number;
+  edgeCount: number;
+  occurrenceCount: number;
+  reservedOutflowCents: number;
+  completeness: { complete: boolean; incompleteReasons: string[]; occurrenceCount: number; reservedOccurrenceCount: number };
+}
+
+export interface ObligationGraphView {
+  version: number;
+  summary: ObligationGraphSummary;
+  completeness: { complete: boolean; incompleteReasons: string[]; occurrenceCount: number; reservedOccurrenceCount: number };
+  reservations: ObligationReservation[];
+}
+
+export interface MetricProvenance {
+  metric: string;
+  asOf: string;
+  financeDate: string;
+  sources: { type: string; id?: string; role?: AccountRole }[];
+  method: string;
+  excludes: string[];
+}
+export interface MetricValue {
+  value: number | null;
+  valueCents: number | null;
+  complete: boolean;
+  incompleteReasons: string[];
+  provenance: MetricProvenance;
+  lowerBound?: number | null;
+  lowerBoundLabel?: string | null;
+}
+export interface Today {
+  asOf: string;
+  financeDate: string;
+  revision: string;
+  complete: boolean;
+  incompleteReasons: string[];
+  health: NonNullable<Ping['actual']>;
+  accounts: Account[];
+  metrics?: {
+    netWorth: MetricValue;
+    liquidCash: MetricValue;
+    operatingCash: MetricValue;
+  };
+  scope?: {
+    accountProjectionRevision?: string;
+    netWorthIncludedAccountIds?: string[];
+    splitwiseMirrorAccountId?: string | null;
+    splitwiseMirrorIdentity?: SplitwiseMirrorIdentity | null;
+    netWorthIncludesManualAssets?: boolean;
+    netWorthHistoryScope?: string;
+  };
+  spending: Spending;
+  liquidity: { safeToSpend: MetricValue; goalAdvisory?: GoalAdvisory | null };
+  obligationGraph?: ObligationGraphView;
+  obligations: {
+    bills: Bill[];
+    nextIncome: IncomeStream | null;
+    source: 'inferred' | 'confirmed' | 'obligation-graph';
+    reserved?: ObligationReservation[];
+  };
+  review: ReviewInbox;
+  activity: { recent: Transaction[] };
 }

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { testConnection } from '@/api/client/requests';
+import { verifyConnectionConfig } from '@/api/client/requests';
 import { useServerConfig } from '@/state/server';
 import { colors } from '@/theme/colors';
 
@@ -21,9 +21,12 @@ export default function Onboarding() {
     setBusy(true);
     setStatus('Connecting…');
     try {
-      const ok = await testConnection(url.trim(), token.trim(), false);
-      if (!ok) throw new Error('Server did not confirm');
-      await setConfig({ serverUrl: url.trim(), token: token.trim(), demo: false });
+      const verified = await verifyConnectionConfig({
+        serverUrl: url,
+        token,
+        demo: false,
+      });
+      await setConfig(verified);
       // gate in _layout will switch to the tabs automatically
     } catch (e: any) {
       setStatus(e?.error || e?.message || 'Connection failed');
@@ -39,9 +42,12 @@ export default function Onboarding() {
     setBusy(true);
     setStatus('Loading demo…');
     try {
-      const ok = await testConnection(demoServer, 'demo', true);
-      if (!ok) throw new Error('Demo server did not confirm');
-      await setConfig({ serverUrl: demoServer, token: 'demo', demo: true });
+      const verified = await verifyConnectionConfig({
+        serverUrl: demoServer,
+        token: 'demo',
+        demo: true,
+      });
+      await setConfig(verified);
     } catch (e: any) {
       setStatus(e?.error || e?.message || 'Demo connection failed');
       setBusy(false);

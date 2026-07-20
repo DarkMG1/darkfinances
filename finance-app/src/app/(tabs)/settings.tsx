@@ -1,23 +1,41 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, Pressable, Share, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, Share, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
 import * as Updates from 'expo-updates';
 import { Screen } from '@/components/screen';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationAction } from '@/hooks/useMutationAction';
 import { Card, CardTitle } from '@/components/ui';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
 import { useReconcilePending, useSetReconcileEnabled } from '@/api/hooks/finance.hooks';
+import { resolveReconcileEnabledSetting } from '@/lib/settings-query-display.js';
 import { useServerConfig } from '@/state/server';
-import { testConnection } from '@/api/client/requests';
+import { verifyConnectionConfig } from '@/api/client/requests';
 import { authenticate, isBiometricAvailable } from '@/lib/biometric';
+import { checkForUpdatesManual, useOtaUpdateStatus } from '@/lib/auto-update';
 import { DASHBOARD_WIDGETS, useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { buildRedactedDiagnostics } from '@/lib/diagnostics';
+import {
+  CONNECTION_SAVE_ACTIONS,
+  connectionButtonControlState,
+  connectionSwitchAccessibilityLabel,
+  createSettingsConnectionSaveAdmission,
+  disconnectButtonVisibleLabel,
+  runSettingsConnectionSave,
+  settingsConnectionSaveSkippedMessage,
+} from '@/lib/settings-connection-save.js';
 import { DEFAULT_LOW_BALANCE, DEFAULT_THRESHOLD, ensurePermission, getNotifSettings, NOTIF, notifyNotifSettingsChanged } from '@/lib/notifications';
+import { getFinanceCapabilities } from '@/lib/capabilities';
+import { isNotificationReconciliationActive } from '@/lib/notification-reconciliation-active';
 import { kv } from '@/lib/storage';
 import { colors } from '@/theme/colors';
 
 type NotifKey = 'bills' | 'largeCharge' | 'newSub' | 'weekly' | 'lowBalance' | 'repayments';
 
 const mask = (t: string | null) => (t ? `••••${t.slice(-4)}` : '—');
+
+type ConnectionSaveAction = typeof CONNECTION_SAVE_ACTIONS[keyof typeof CONNECTION_SAVE_ACTIONS];
 
 export default function Settings() {
   const { serverUrl, token, faceId, demo, setConfig, clear } = useServerConfig();
@@ -26,22 +44,47 @@ export default function Settings() {
   const [editUrl, setEditUrl] = useState(serverUrl ?? '');
   const [newToken, setNewToken] = useState('');
   const [status, setStatus] = useState<string | null>(null);
-  const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+  const connectionAdmissionRef = useRef(createSettingsConnectionSaveAdmission());
+  const [busyOwner, setBusyOwner] = useState<{ lease: number; action: ConnectionSaveAction } | null>(null);
+  const [connectionAnnounce, setConnectionAnnounce] = useState('');
+  const connectionBusy = busyOwner != null;
+  const saveUrlControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.SAVE_URL, busyOwner);
+  const saveTokenControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.SAVE_TOKEN, busyOwner);
+  const testControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.TEST, busyOwner);
+  const disconnectControl = connectionButtonControlState(CONNECTION_SAVE_ACTIONS.DISCONNECT, busyOwner);
+  const connectionSaveHooks = useMemo(() => ({
+    onAcquired: (lease: number, action: ConnectionSaveAction) => setBusyOwner({ lease, action }),
+    onReleased: (lease: number) => setBusyOwner((current) => (current?.lease === lease ? null : current)),
+  }), []);
+  const liveUpdateStatus = useOtaUpdateStatus();
   const [notif, setNotif] = useState(getNotifSettings());
   const [thresholdText, setThresholdText] = useState(String(getNotifSettings().threshold || DEFAULT_THRESHOLD));
   const [lowText, setLowText] = useState(String(getNotifSettings().lowBalanceThreshold || DEFAULT_LOW_BALANCE));
   const reconPending = useReconcilePending();
   const setReconcileEnabled = useSetReconcileEnabled();
   const [reconEnabled, setReconEnabled] = useState<boolean | null>(null);
+  const reconcileSetting = resolveReconcileEnabledSetting(reconPending, reconEnabled);
+  const reconcileToggleAction = useMutationAction({
+    mutation: setReconcileEnabled,
+    mutationLabel: 'Update reconciliation setting',
+    onRefetch: () => reconPending.refetch(),
+  });
   const dashboard = useDashboardWidgets();
+  const capabilities = getFinanceCapabilities();
+  const notificationsAvailable = isNotificationReconciliationActive({
+    configured: !!serverUrl && !!token,
+    demo,
+    notificationsCapable: capabilities.notifications,
+  });
 
   useEffect(() => {
     isBiometricAvailable().then(setBioAvailable);
   }, []);
 
-  const reconEnabledValue = reconEnabled ?? !!reconPending.data?.enabled;
+  const reconEnabledValue = reconcileSetting.enabled;
 
   const toggleNotif = async (key: NotifKey, value: boolean) => {
+    if (!notificationsAvailable) return;
     if (value && !(await ensurePermission())) {
       Alert.alert('Notifications off', 'Enable notifications for DarkFinances in iOS Settings to use alerts.');
       return;
@@ -71,27 +114,8 @@ export default function Settings() {
     }
   };
 
-  const checkUpdates = async () => {
-    if (!Updates.isEnabled) {
-      setUpdateStatus('OTA runs only in a release (sideloaded) build');
-      return;
-    }
-    setUpdateStatus('Checking…');
-    try {
-      const res = await Updates.checkForUpdateAsync();
-      if (!res.isAvailable) {
-        setUpdateStatus('Up to date');
-        return;
-      }
-      setUpdateStatus('Downloading update…');
-      await Updates.fetchUpdateAsync();
-      Alert.alert('Update ready', 'Restart now to apply the latest version?', [
-        { text: 'Later', style: 'cancel', onPress: () => setUpdateStatus('Update will apply on next launch') },
-        { text: 'Restart', onPress: () => Updates.reloadAsync() },
-      ]);
-    } catch (e: any) {
-      setUpdateStatus(e?.message || 'Update check failed');
-    }
+  const checkUpdates = () => {
+    void checkForUpdatesManual();
   };
   const exportDiagnostics = async () => {
     const diagnostics = buildRedactedDiagnostics({ serverUrl, demo, faceId });
@@ -101,89 +125,181 @@ export default function Settings() {
     });
   };
 
+  const announceConnectionStatus = (message: string) => {
+    setStatus(message);
+    setConnectionAnnounce(message);
+  };
+
   const toggleFaceId = async (value: boolean) => {
-    if (value) {
-      const ok = await authenticate('Enable Face ID lock');
-      if (!ok) return;
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.FACE_ID, value ? 'Confirm Face ID…' : 'Updating security…', async () => {
+      if (value) {
+        const ok = await authenticate('Enable Face ID lock');
+        if (!ok) {
+          announceConnectionStatus('Face ID lock not enabled');
+          return;
+        }
+      }
+      await setConfig({ faceId: value });
+      announceConnectionStatus(value ? 'Face ID lock enabled' : 'Face ID lock disabled');
+    });
+  };
+
+  const runConnectionSave = async (action: ConnectionSaveAction, statusLabel: string, task: () => Promise<void>) => {
+    const outcome = await runSettingsConnectionSave(
+      connectionAdmissionRef.current,
+      async () => {
+        setStatus(statusLabel);
+        await task();
+      },
+      {
+        ...connectionSaveHooks,
+        onAcquired: (lease: number) => connectionSaveHooks.onAcquired(lease, action),
+      },
+    );
+    if (outcome.skipped) {
+      announceConnectionStatus(settingsConnectionSaveSkippedMessage(action));
     }
-    await setConfig({ faceId: value });
+    return outcome;
   };
 
   const test = async () => {
-    setStatus('Testing…');
-    try {
-      const candidateUrl = editUrl.trim() || serverUrl || '';
-      const candidateToken = newToken.trim() || token || '';
-      const ok = await testConnection(candidateUrl, candidateToken, demo);
-      setStatus(ok ? 'Connected ✓' : 'Failed');
-    } catch (e: any) {
-      setStatus(e?.error || e?.message || 'Failed');
-    }
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.TEST, 'Testing…', async () => {
+      try {
+        const candidateUrl = editUrl.trim() || serverUrl || '';
+        const candidateToken = newToken.trim() || token || '';
+        await verifyConnectionConfig({ serverUrl: candidateUrl, token: candidateToken, demo });
+        setStatus('Connected ✓');
+      } catch (e: any) {
+        setStatus(e?.error || e?.message || 'Failed');
+      }
+    });
   };
 
   const saveUrl = async () => {
-    if (editUrl.trim()) {
-      setStatus('Verifying server…');
+    if (!editUrl.trim()) return;
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.SAVE_URL, 'Verifying server…', async () => {
       try {
-        const ok = await testConnection(editUrl.trim(), newToken.trim() || token || '', demo);
-        if (!ok) throw new Error('Server did not confirm');
-        await setConfig({ serverUrl: editUrl.trim() });
+        const verified = await verifyConnectionConfig({
+          serverUrl: editUrl,
+          token: newToken.trim() || token || '',
+          demo,
+        });
+        await setConfig(verified);
+        setEditUrl(verified.serverUrl);
+        if (newToken.trim()) setNewToken('');
         setStatus('Server URL updated');
       } catch (e: any) {
         setStatus(e?.error || e?.message || 'Could not verify server');
       }
-    }
+    });
   };
   const saveToken = async () => {
-    if (newToken.trim()) {
-      setStatus('Verifying token…');
+    if (!newToken.trim()) return;
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.SAVE_TOKEN, 'Verifying token…', async () => {
       try {
-        const ok = await testConnection(editUrl.trim() || serverUrl || '', newToken.trim(), false);
-        if (!ok) throw new Error('Server did not confirm');
-        await setConfig({ token: newToken.trim() });
+        const verified = await verifyConnectionConfig({
+          serverUrl: editUrl.trim() || serverUrl || '',
+          token: newToken,
+          demo: false,
+        });
+        await setConfig(verified);
+        setEditUrl(verified.serverUrl);
         setNewToken('');
-        setStatus('Token updated');
+        setStatus(demo ? 'Token updated; demo mode turned off' : 'Token updated');
       } catch (e: any) {
         setStatus(e?.error || e?.message || 'Could not verify token');
       }
-    }
+    });
   };
   const setDemoMode = async (value: boolean) => {
-    try {
-      if (value) {
-        const ok = await testConnection(editUrl.trim() || serverUrl || '', token || '', true);
-        if (!ok) throw new Error('Demo endpoint did not confirm');
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.DEMO, value ? 'Enabling demo…' : 'Disabling demo…', async () => {
+      try {
+        const verified = await verifyConnectionConfig({
+          serverUrl: editUrl.trim() || serverUrl || '',
+          token: newToken.trim() || token || '',
+          demo: value,
+        });
+        await setConfig(verified);
+        setEditUrl(verified.serverUrl);
+        if (newToken.trim()) setNewToken('');
+      } catch (e: any) {
+        Alert.alert('Could not change demo mode', e?.error || e?.message || 'Please try again.');
       }
-      await setConfig({ demo: value });
-    } catch (e: any) {
-      Alert.alert('Could not change demo mode', e?.error || e?.message || 'Please try again.');
-    }
+    });
   };
 
   const disconnect = () => {
     Alert.alert('Disconnect', 'Remove the saved server and token from this device?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Disconnect', style: 'destructive', onPress: () => clear() },
+      {
+        text: 'Disconnect',
+        style: 'destructive',
+        onPress: () => {
+          void runConnectionSave(CONNECTION_SAVE_ACTIONS.DISCONNECT, 'Disconnecting…', async () => {
+            try {
+              await clear();
+              setStatus('Disconnected');
+            } catch (e: any) {
+              Alert.alert(
+                'Could not disconnect',
+                e?.error || e?.message || 'A pending finance operation must be reconciled first.',
+              );
+            }
+          });
+        },
+      },
     ]);
   };
 
   return (
     <Screen title="Settings" testID="settings-screen">
+      <MutationLiveRegion message={connectionAnnounce || reconcileToggleAction.announce} />
+      <MutationFormBanner outcome={reconcileToggleAction.outcome} onRetry={reconcileToggleAction.retry} onRefetch={() => reconPending.refetch()} />
       <CardTitle>Connection</CardTitle>
       <Card style={{ marginBottom: 16 }}>
         <Text style={styles.label}>Server URL</Text>
-        <TextInput testID="settings-server-url-input" style={styles.input} value={editUrl} onChangeText={setEditUrl} autoCapitalize="none" autoCorrect={false} />
-        <Pressable testID="settings-save-url-button" style={({ pressed }) => [styles.smallBtn, pressed && { opacity: 0.85 }]} onPress={saveUrl}><Text style={styles.smallBtnText}>Save URL</Text></Pressable>
+        <TextInput testID="settings-server-url-input" style={styles.input} value={editUrl} onChangeText={setEditUrl} autoCapitalize="none" autoCorrect={false} editable={!connectionBusy} />
+        <Pressable
+          testID="settings-save-url-button"
+          accessibilityRole="button"
+          accessibilityLabel={saveUrlControl.accessibilityLabel}
+          accessibilityState={{ disabled: saveUrlControl.disabled, busy: saveUrlControl.busy }}
+          style={({ pressed }) => [styles.smallBtn, (pressed && !saveUrlControl.disabled) && { opacity: 0.85 }, saveUrlControl.disabled && { opacity: 0.6 }]}
+          disabled={saveUrlControl.disabled}
+          onPress={saveUrl}
+        >
+          {saveUrlControl.showSpinner ? <ActivityIndicator color="#fff" /> : <Text style={styles.smallBtnText}>{saveUrlControl.visibleLabel}</Text>}
+        </Pressable>
 
         <Text style={[styles.label, { marginTop: 16 }]}>API Token</Text>
         <Text style={styles.maskedToken}>{mask(token)}</Text>
-        <TextInput testID="settings-token-input" style={styles.input} value={newToken} onChangeText={setNewToken} autoCapitalize="none" autoCorrect={false} secureTextEntry placeholder="Replace token…" placeholderTextColor={colors.muted} />
-        <Pressable testID="settings-save-token-button" style={({ pressed }) => [styles.smallBtn, pressed && { opacity: 0.85 }]} onPress={saveToken}><Text style={styles.smallBtnText}>Update Token</Text></Pressable>
-
-        <Pressable testID="settings-test-connection-button" style={({ pressed }) => [styles.smallBtn, { marginTop: 16, backgroundColor: colors.surface2 }, pressed && { opacity: 0.7 }]} onPress={test}>
-          <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>Test Connection</Text>
+        <TextInput testID="settings-token-input" style={styles.input} value={newToken} onChangeText={setNewToken} autoCapitalize="none" autoCorrect={false} secureTextEntry placeholder="Replace token…" placeholderTextColor={colors.muted} editable={!connectionBusy} />
+        <Pressable
+          testID="settings-save-token-button"
+          accessibilityRole="button"
+          accessibilityLabel={saveTokenControl.accessibilityLabel}
+          accessibilityState={{ disabled: saveTokenControl.disabled, busy: saveTokenControl.busy }}
+          style={({ pressed }) => [styles.smallBtn, (pressed && !saveTokenControl.disabled) && { opacity: 0.85 }, saveTokenControl.disabled && { opacity: 0.6 }]}
+          disabled={saveTokenControl.disabled}
+          onPress={saveToken}
+        >
+          {saveTokenControl.showSpinner ? <ActivityIndicator color="#fff" /> : <Text style={styles.smallBtnText}>{saveTokenControl.visibleLabel}</Text>}
         </Pressable>
-        {status ? <Text style={styles.status}>{status}</Text> : null}
+
+        <Pressable
+          testID="settings-test-connection-button"
+          accessibilityRole="button"
+          accessibilityLabel={testControl.accessibilityLabel}
+          accessibilityState={{ disabled: testControl.disabled, busy: testControl.busy }}
+          style={({ pressed }) => [styles.smallBtn, { marginTop: 16, backgroundColor: colors.surface2 }, (pressed && !testControl.disabled) && { opacity: 0.7 }, testControl.disabled && { opacity: 0.6 }]}
+          disabled={testControl.disabled}
+          onPress={test}
+        >
+          {testControl.showSpinner ? <ActivityIndicator color={colors.accentLight} /> : <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>{testControl.visibleLabel}</Text>}
+        </Pressable>
+        {status ? (
+          <Text testID="settings-connection-status" accessibilityRole="text" style={styles.status}>{status}</Text>
+        ) : null}
       </Card>
 
       <CardTitle>Security</CardTitle>
@@ -193,7 +309,15 @@ export default function Settings() {
             <Text style={styles.switchLabel}>Face ID Lock</Text>
             <Text style={styles.switchSub}>{bioAvailable ? 'Require Face ID on open' : 'Not available on this device'}</Text>
           </View>
-          <Switch testID="settings-face-id-switch" value={faceId} onValueChange={toggleFaceId} disabled={!bioAvailable} trackColor={{ true: colors.accent }} />
+          <Switch
+            testID="settings-face-id-switch"
+            value={faceId}
+            onValueChange={toggleFaceId}
+            disabled={!bioAvailable || connectionBusy}
+            accessibilityLabel={connectionSwitchAccessibilityLabel(CONNECTION_SAVE_ACTIONS.FACE_ID, busyOwner)}
+            accessibilityState={{ disabled: !bioAvailable || connectionBusy, busy: busyOwner?.action === CONNECTION_SAVE_ACTIONS.FACE_ID }}
+            trackColor={{ true: colors.accent }}
+          />
         </View>
       </Card>
 
@@ -204,7 +328,15 @@ export default function Settings() {
             <Text style={styles.switchLabel}>Show demo data</Text>
             <Text style={styles.switchSub}>Replace everything with sample finances — safe to show others. Your real data is never touched.</Text>
           </View>
-          <Switch testID="settings-demo-mode-switch" value={demo} onValueChange={setDemoMode} trackColor={{ true: colors.accent }} />
+          <Switch
+            testID="settings-demo-mode-switch"
+            value={demo}
+            onValueChange={setDemoMode}
+            disabled={connectionBusy}
+            accessibilityLabel={connectionSwitchAccessibilityLabel(CONNECTION_SAVE_ACTIONS.DEMO, busyOwner)}
+            accessibilityState={{ disabled: connectionBusy, busy: busyOwner?.action === CONNECTION_SAVE_ACTIONS.DEMO }}
+            trackColor={{ true: colors.accent }}
+          />
         </View>
       </Card>
 
@@ -243,14 +375,38 @@ export default function Settings() {
           <View style={{ flex: 1, paddingRight: 12 }}>
             <Text style={styles.switchLabel}>Monthly reconciliation</Text>
             <Text style={styles.switchSub}>At month-end, review every expense and close out the month. You will be reminded until it is done.</Text>
+            {reconcileSetting.fatalError ? (
+              <Pressable
+                testID="settings-reconciliation-retry"
+                accessibilityRole="button"
+                accessibilityLabel="Reconciliation setting unavailable, tap to retry"
+                onPress={() => reconPending.refetch()}
+                style={({ pressed }) => [pressed && { opacity: 0.7 }]}
+              >
+                <Text style={styles.reconcileError}>Setting unavailable · tap to retry</Text>
+              </Pressable>
+            ) : null}
           </View>
           <Switch
             testID="settings-reconciliation-switch"
             value={reconEnabledValue}
-            onValueChange={(v) => { setReconEnabled(v); setReconcileEnabled.mutate({ enabled: v }); }}
+            onValueChange={(v) => {
+              if (reconcileSetting.switchDisabled) return;
+              const prev = reconEnabledValue;
+              setReconEnabled(v);
+              reconcileToggleAction.run({ enabled: v }, { rollback: () => setReconEnabled(prev) });
+            }}
+            disabled={reconcileToggleAction.isLocked || reconcileSetting.switchDisabled}
             trackColor={{ true: colors.accent }}
           />
         </View>
+        {reconcileSetting.refetchError ? (
+          <QueryRefetchBanner
+            testID="settings-reconciliation-refetch-banner"
+            message="Could not refresh reconciliation setting · showing cached value · tap to retry"
+            onRetry={() => reconPending.refetch()}
+          />
+        ) : null}
 
         <Pressable testID="settings-reconcile-row" style={({ pressed }) => [styles.navRow, pressed && { opacity: 0.6 }]} onPress={() => router.push('/reconcile')}>
           <View style={{ flex: 1, paddingRight: 12 }}>
@@ -263,25 +419,40 @@ export default function Settings() {
 
       <CardTitle>Notifications</CardTitle>
       <Card style={{ marginBottom: 16 }}>
-        <NotifSwitch testID="settings-notif-bills" label="Bills due" sub="Remind me the day before" value={notif.bills} onChange={(v) => toggleNotif('bills', v)} />
-        <NotifSwitch testID="settings-notif-large-charge" label="Large charges" sub={`Alert over $${notif.threshold}`} value={notif.largeCharge} onChange={(v) => toggleNotif('largeCharge', v)} />
+        {!notificationsAvailable ? (
+          <View testID="settings-notifications-unavailable">
+            <Text style={styles.switchLabel}>Alerts unavailable</Text>
+            <Text style={styles.switchSub} testID={demo ? 'settings-notifications-unavailable-demo-copy' : undefined}>
+              {demo
+                ? 'Notification alerts do not run in demo mode. Turn off demo mode to configure alerts.'
+                : capabilities.freeSideload
+                  ? 'This sideload build does not include notification support. Use a full release build to enable alerts.'
+                  : 'Connect to your server to configure on-device alerts.'}
+            </Text>
+          </View>
+        ) : (
+          <>
+        <NotifSwitch testID="settings-notif-bills" label="Bills due" sub="Remind me the day before" value={notif.bills} onChange={(v) => toggleNotif('bills', v)} disabled={!notificationsAvailable} />
+        <NotifSwitch testID="settings-notif-large-charge" label="Large charges" sub={`Alert over $${notif.threshold}`} value={notif.largeCharge} onChange={(v) => toggleNotif('largeCharge', v)} disabled={!notificationsAvailable} />
         {notif.largeCharge ? (
           <View style={styles.thresholdRow}>
             <Text style={styles.switchSub}>Large-charge threshold ($)</Text>
             <TextInput testID="settings-large-charge-threshold-input" style={styles.thresholdInput} value={thresholdText} onChangeText={setThresholdText} onBlur={saveThreshold} keyboardType="decimal-pad" />
           </View>
         ) : null}
-        <NotifSwitch testID="settings-notif-low-balance" label="Low balance" sub={`Alert under $${notif.lowBalanceThreshold} in a cash account`} value={notif.lowBalance} onChange={(v) => toggleNotif('lowBalance', v)} />
+        <NotifSwitch testID="settings-notif-low-balance" label="Low balance" sub={`Alert under $${notif.lowBalanceThreshold} in a cash account`} value={notif.lowBalance} onChange={(v) => toggleNotif('lowBalance', v)} disabled={!notificationsAvailable} />
         {notif.lowBalance ? (
           <View style={styles.thresholdRow}>
             <Text style={styles.switchSub}>Low-balance threshold ($)</Text>
             <TextInput testID="settings-low-balance-threshold-input" style={styles.thresholdInput} value={lowText} onChangeText={setLowText} onBlur={saveLowThreshold} keyboardType="decimal-pad" />
           </View>
         ) : null}
-        <NotifSwitch testID="settings-notif-new-sub" label="New subscriptions" sub="When a new recurring charge appears" value={notif.newSub} onChange={(v) => toggleNotif('newSub', v)} />
-        <NotifSwitch testID="settings-notif-repayments" label="Repayments to review" sub="When an incoming payment may settle a debt" value={notif.repayments} onChange={(v) => toggleNotif('repayments', v)} />
-        <NotifSwitch testID="settings-notif-weekly" label="Weekly digest" sub="Sunday 9am check-in" value={notif.weekly} onChange={(v) => toggleNotif('weekly', v)} last />
+        <NotifSwitch testID="settings-notif-new-sub" label="New subscriptions" sub="When a new recurring charge appears" value={notif.newSub} onChange={(v) => toggleNotif('newSub', v)} disabled={!notificationsAvailable} />
+        <NotifSwitch testID="settings-notif-repayments" label="Repayments to review" sub="When an incoming payment may settle a debt" value={notif.repayments} onChange={(v) => toggleNotif('repayments', v)} disabled={!notificationsAvailable} />
+        <NotifSwitch testID="settings-notif-weekly" label="Weekly digest" sub="Sunday 9am check-in" value={notif.weekly} onChange={(v) => toggleNotif('weekly', v)} last disabled={!notificationsAvailable} />
         <Text style={styles.notifHint}>Alerts are on-device and refresh when you open the app.</Text>
+          </>
+        )}
       </Card>
 
       <CardTitle>About</CardTitle>
@@ -300,24 +471,32 @@ export default function Settings() {
         <Pressable testID="settings-export-diagnostics-button" style={({ pressed }) => [styles.smallBtn, { marginTop: 8, backgroundColor: colors.surface2 }, pressed && { opacity: 0.7 }]} onPress={exportDiagnostics}>
           <Text style={[styles.smallBtnText, { color: colors.accentLight }]}>Export Redacted Diagnostics</Text>
         </Pressable>
-        {updateStatus ? <Text style={styles.status}>{updateStatus}</Text> : null}
+        {liveUpdateStatus ? <Text style={styles.status}>{liveUpdateStatus}</Text> : null}
       </Card>
 
-      <Pressable testID="settings-disconnect-button" style={({ pressed }) => [styles.disconnect, pressed && { opacity: 0.7 }]} onPress={disconnect}>
-        <Text style={styles.disconnectText}>Disconnect</Text>
+      <Pressable
+        testID="settings-disconnect-button"
+        accessibilityRole="button"
+        accessibilityLabel={disconnectControl.accessibilityLabel}
+        accessibilityState={{ disabled: disconnectControl.disabled, busy: disconnectControl.busy }}
+        style={({ pressed }) => [styles.disconnect, disconnectControl.disabled && { opacity: 0.45 }, pressed && !disconnectControl.disabled && { opacity: 0.7 }]}
+        disabled={disconnectControl.disabled}
+        onPress={disconnect}
+      >
+        <Text style={styles.disconnectText}>{disconnectButtonVisibleLabel(busyOwner)}</Text>
       </Pressable>
     </Screen>
   );
 }
 
-function NotifSwitch({ label, sub, value, onChange, last, testID }: { label: string; sub: string; value: boolean; onChange: (v: boolean) => void; last?: boolean; testID?: string }) {
+function NotifSwitch({ label, sub, value, onChange, last, testID, disabled }: { label: string; sub: string; value: boolean; onChange: (v: boolean) => void; last?: boolean; testID?: string; disabled?: boolean }) {
   return (
     <View style={[styles.switchRow, styles.notifRow, last && { borderBottomWidth: 0 }]}>
       <View style={{ flex: 1, paddingRight: 12 }}>
         <Text style={styles.switchLabel}>{label}</Text>
         <Text style={styles.switchSub}>{sub}</Text>
       </View>
-      <Switch testID={testID} value={value} onValueChange={onChange} trackColor={{ true: colors.accent }} />
+      <Switch testID={testID} value={value} onValueChange={onChange} disabled={disabled} trackColor={{ true: colors.accent }} />
     </View>
   );
 }
@@ -339,6 +518,7 @@ const styles = StyleSheet.create({
   navArrow: { color: colors.muted, fontSize: 22, fontWeight: '700' },
   switchLabel: { color: colors.text, fontSize: 15, fontWeight: '600' },
   switchSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
+  reconcileError: { color: colors.red, fontSize: 12, fontWeight: '700', marginTop: 8 },
   aboutRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 4 },
   aboutKey: { color: colors.muted, fontSize: 14 },
   aboutVal: { color: colors.text, fontSize: 14, fontWeight: '600' },

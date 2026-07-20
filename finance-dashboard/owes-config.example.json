@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to owes-config.json (gitignored). Drives the Who-Owes-Me baseline. All fields optional; the Splitwise snapshot (owes-truth.json) is authoritative when present. Amounts in 'expected' are integer CENTS.",
+  "_comment": "Copy to owes-config.json (gitignored). Drives the Who-Owes-Me baseline. All fields optional; the Splitwise snapshot (owes-truth.json) is authoritative when present. Amounts in 'expected' are integer CENTS; manualTrips amounts are DOLLARS.",
   "expected": {
     "trip-2026": { "alex": 25000, "sam": 12500 }
   },

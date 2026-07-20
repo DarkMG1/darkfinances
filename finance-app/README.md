@@ -90,6 +90,123 @@ normalized URL, token, and demo state. When it changes, the app:
 
 This prevents data from one server or demo session appearing in another.
 
+## Mutation idempotency and recovery
+
+One logical mobile mutation is the combination of the live server/profile identity, uppercase HTTP
+method, canonical endpoint pathname, canonically key-sorted query pairs, and canonical JSON variables.
+Object keys are sorted recursively; array order and duplicate-query-value order are preserved. A
+SHA-256 digest of that identity is the local lookup key. The URL, token, endpoint, query, and variables
+exist only while computing the digest and are never written to idempotency storage.
+
+Before a live mutation can use the network, the app writes a `prepared` MMKV record and then writes
+`dispatching`. The record contains only schema version, 64-character request and profile digests, the
+idempotency key, lifecycle state, and timestamps. The same MMKV snapshot carries a non-sensitive
+monotonic generation number that makes later terminal invocations distinct. Keys are domain-separated
+SHA-256 values derived
+from the request/profile digests, timestamp, and durable generation number; the profile digest includes
+the server's documented long-random API token. Hashing uses the audited JavaScript-only
+`@noble/hashes` package and adds no native module.
+
+The same key is reused while the record is:
+
+- `prepared`: no dispatch was recorded, so a user invocation may send it once with the existing key.
+- `dispatching` or `outcome_unknown`: the app performs authenticated
+  `GET /api/v1/operations/:key` status reads and never automatically replays the mutation.
+
+`completed` returns the server's durable result and removes the local record. `failed` reconstructs the
+server's stored status/code/message, throws it, and removes the record. Only after one of those terminal
+outcomes—or after discarding a `prepared` record that was provably never dispatched—may a later
+intentional mutation receive a new key. Timeout, abort, transport failure, malformed response,
+`started`, `local_applied`, `sync_unknown`, and explicit `OUTCOME_UNKNOWN` all retain the key.
+`OPERATION_NOT_FOUND` after dispatch is also outcome-unknown: the request may predate server journal
+retention or admission may have failed, so a missing record is never permission to resend.
+
+Pending metadata is rehydrated from MMKV after restart. Startup and foreground recovery issue status
+GETs only; they do not replay POST, PUT, PATCH, or DELETE requests, start background mutation workers,
+or persist React Query's mutation cache. If foreground recovery finds a completed operation, all active
+finance queries for that same profile are marked stale and refetched without haptics. Other profiles
+remain untouched. A refetch failure leaves those queries stale and records only a stable error code,
+numeric status, and timestamp; it does not restore the completed operation or send a mutation. A later
+successful foreground reconciliation or profile purge clears that diagnostic; a failed reconciliation
+or blocked purge retains it. Demo mutations bypass idempotency persistence entirely.
+
+Changing or deleting a live profile is blocked while that profile has a `dispatching` or
+`outcome_unknown` record. This intentionally keeps the old URL/token available for authenticated
+reconciliation instead of silently deleting a safety record and allowing a duplicate under a new
+profile. A profile change may discard `prepared` records because they were durably recorded before any
+network dispatch. This safety-over-convenience tradeoff can temporarily prevent disconnecting when the
+server cannot be reached; replacement/abandonment recovery is deliberately outside this mechanism.
+
+## Mutation outcome haptics (L5)
+
+Generic write confirmation haptics are owned exclusively by `useFinanceMutation` in
+`src/api/client/requests.ts`. **Logical haptic identity is the idempotency operation key**
+(the durable `Idempotency-Key` header value). The request digest derived from profile,
+method, endpoint, and body is **callback lookup only** — it resolves the operation key in
+mutation `onSuccess` / `onError` handlers. Each operation key emits at most one success
+**or** one error haptic:
+
+- Terminal success → one `success` haptic, then the session closes.
+- Terminal failure (4xx with a stable code) → one `warning` haptic, then the session closes.
+- Non-terminal transport/outcome-unknown states (`OUTCOME_UNKNOWN`, timeout while the operation journal
+  retains the key) → **no** haptic until a terminal outcome is known; the session stays open.
+- A later distinct user action with the same payload receives a **new** idempotency key and may
+  haptic again after the prior operation reached a terminal outcome.
+- Idempotency status polling, in-flight replay/coalescing, foreground reconciliation, and cache
+  refetches after recovered completions → **no** haptics.
+- Pass `suppressOutcomeHaptic: true` on a mutation hook for non-user/background writes.
+
+The in-memory session map is capped (128 by default). Expired and least-recent abandoned unknown
+sessions are evicted before new tracking is installed. When every slot holds a genuinely active
+retry, excess operations are not tracked and emit no outcome haptic rather than evicting an active
+operation.
+
+Screens may keep `haptics.tap()` for navigation and selection. Documented semantic exceptions that do
+**not** duplicate mutation outcome ownership:
+
+- Destructive-action confirmation (`haptics.warning()` before a delete dialog).
+- Non-mutation failures such as CSV export (`buildQuery` GET).
+
+Screens must **not** call `haptics.success()` or `haptics.warning()` inside mutation `onSuccess` /
+`onError` callbacks. Client-side validation rejected before a request may use
+`hapticClientValidationRejected()` when the UX already promises tactile feedback. Capability/platform
+haptic errors are swallowed and never change mutation results.
+
+Inventory and behavioral tests live in `test/haptic-call-site-inventory.js` and
+`test/mutation-outcome-haptics.test.js`.
+
+## Mutation form UX (PR-37)
+
+Sheets and full-screen mutation flows preserve user input on recoverable errors.
+Shared helpers live under `src/lib/mutation-form-*.js`, `src/hooks/useMutationForm.ts`,
+`src/hooks/useMutationAction.ts`, `src/hooks/useMutationScreen.ts`, and
+`src/components/mutation-form.tsx`.
+
+- Client validation uses the same strict money, date, and allocation rules as the
+  request contract; the server remains authoritative for terminal outcomes.
+- API `issues[]` paths map to inline field errors with VoiceOver live-region
+  announcements and focus on the first invalid field.
+- Recoverable transport/admission/sync-unknown failures keep the sheet open and
+  offer **Retry** with the same idempotency key — copy never tells users to mint
+  new keys. PR-07 retains the same key across 429/503 admission retries.
+- Multi-action screens (transaction detail, reconcile toggles) use
+  `useMutationScreen` for a single global lock, banner retry/dismiss, and stale
+  refetch on 409 conflicts. Screens with separate form/delete/apply actions use
+  `useMutationBannerCoordinator` so **Retry** replays only the action that owns
+  the displayed outcome.
+- Stale/conflict responses trigger targeted refetch; saga-owned 409s stay open
+  with retry guidance.
+- Submit buttons lock while `useFinanceMutation` is pending (including status
+  reconciliation); dismiss is blocked until the in-flight operation settles.
+- Profile purge clears in-memory mutation drafts via `purgeMutationFormDrafts`.
+- Outcome haptics remain owned exclusively by `useFinanceMutation` (PR-40).
+
+Tests: `test/mutation-form-*.test.js`, `test/mutation-inventory.test.js`,
+`test/mutation-banner-coordinator.test.js`,
+`test/request-operation-state.test.js`, `test/request-operation-fake-server.test.js`.
+Maestro: `.maestro/mutation-validation-errors.yaml`, `.maestro/mutation-validation-banner-dismiss.yaml`,
+`.maestro/mutation-validation-draft-preservation.yaml`.
+
 ## Demo mode
 
 Tap **Use demo data** during onboarding. Demo mode uses the dashboard's isolated synthetic fixtures,
@@ -109,6 +226,8 @@ The default development demo URL is `http://127.0.0.1:5007`. A build can overrid
 - Face ID can lock the UI after a configurable grace period.
 - The iOS privacy shield covers app content immediately when the app leaves the foreground.
 - Financial query caches are scoped to the configured server and cleared on disconnect.
+- Pending mutation storage contains digests and lifecycle metadata only, never request bodies, financial
+  values, receipt images, credentials, or server URLs.
 - Receipt images are resized and converted on device, then uploaded immediately; they are not retained
   as an app-managed local receipt archive.
 - Widget data is minimized and cleared on disconnect or demo mode.
@@ -193,6 +312,7 @@ entitlements, disables the widget target, compiles without code signing, and pac
 
 ```text
 build/sideload/DarkFinances-<version>-<build>-unsigned.ipa
+build/sideload/DarkFinances-<version>-<build>-release-manifest.json
 ```
 
 Sideloadly signs that IPA at installation time with the selected Apple ID. This path requires Xcode,
@@ -208,15 +328,28 @@ EAS Update can publish JavaScript and asset changes to an installed compatible n
 
 ```bash
 npm run ota:publish
-bash scripts/ota-publish.sh preview "describe the update"
+bash scripts/ota-publish.sh preview "describe the preview update"
+bash scripts/ota-publish.sh free-sideload "describe the sideload update"
 ```
 
-The default branch/environment is `production`. OTA updates cannot add or change native modules,
-plugins, entitlements, Info.plist values, widgets, or the native privacy shield. Those changes require a
-new IPA/native build.
+The default target uses the full runtime with the `production` branch/channel/environment. `preview`
+uses the same full runtime with the checked-in `preview` branch/channel/environment.
+`free-sideload` uses its isolated runtime and branch/channel with the production EAS environment.
+Production and preview mappings must match `eas.json`; arbitrary channel or environment substitution
+is rejected. OTA updates cannot add or change native modules, plugins, entitlements, Info.plist
+values, widgets, or the native privacy shield. Those changes require a new IPA/native build.
 
-`runtimeVersion` follows the app version. Changing `expo.version` creates a new native runtime; rebuild
-and reinstall before expecting updates for that version.
+Immediately before publication, the script captures the source digest. It publishes directly to the
+requested stable branch, captures EAS machine-readable update evidence, and writes
+`dist/ota-release-manifest.json` only if the returned branch/runtime and configured channel still
+match and the source digest is unchanged. Publication precedes provenance generation; a provenance
+failure does not roll back EAS, but it produces no valid final manifest and preserves the private
+temporary EAS JSON for diagnosis. `OTA_CHANNEL`, when set, must equal the configured branch channel.
+Set `OTA_MANIFEST_PATH` to choose a different destination.
+
+The full build follows the app version. The free-sideload build uses
+`<app-version>-free-sideload` on the separate `free-sideload` channel. Changing either runtime requires
+a rebuild and reinstall before expecting updates for that binary.
 
 ## Quality checks
 

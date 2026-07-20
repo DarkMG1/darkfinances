@@ -13,13 +13,18 @@ for (const [key, name] of Object.entries({
   REIMB_SUGGEST_PATH: 'suggestions.json',
   RECON_PATH: 'reconciliation.json',
   PHANTOM_SEEN_PATH: 'phantom-seen.json',
+  TRANSACTION_SAGAS_PATH: 'transaction-sagas.json',
 })) process.env[key] = path.join(dir, name);
 
 const {
   addableTransaction,
+  recoverTransactionSagas,
   replaceActualTransaction,
   transactionReplacementMap,
 } = require('../dataModule');
+test.beforeEach(() => {
+  fs.rmSync(process.env.TRANSACTION_SAGAS_PATH, { force: true });
+});
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 function fakeApi(original, { failFirstAdd = false } = {}) {
@@ -27,7 +32,12 @@ function fakeApi(original, { failFirstAdd = false } = {}) {
   let sequence = 0;
   let addCalls = 0;
   return {
-    async getTransactions() { return structuredClone(rows); },
+    async getAccounts() {
+      return [{ id: 'account', name: 'Account', closed: false, offbudget: false }];
+    },
+    async getTransactions(accountId) {
+      return accountId == null || accountId === 'account' ? structuredClone(rows) : [];
+    },
     async deleteTransaction(id) { rows = rows.filter((row) => row.id !== id); },
     async addTransactions(_accountId, [transaction]) {
       addCalls += 1;
@@ -45,6 +55,11 @@ function fakeApi(original, { failFirstAdd = false } = {}) {
         subtransactions: subs,
       });
     },
+    async updateTransaction(id, fields) {
+      const row = rows.find((transaction) => transaction.id === id);
+      if (row) Object.assign(row, structuredClone(fields));
+    },
+    async sync() {},
   };
 }
 
@@ -95,7 +110,7 @@ test('replacement identifies the new parent and generated leg IDs', async () => 
   assert.deepEqual(transactionReplacementMap(original, added), { 'old-parent': 'replacement-1' });
 });
 
-test('failed replacement restores the original financial row and reports its recovery ID', async () => {
+test('unknown add failure stays nonterminal and recovery finishes the intended replacement', async () => {
   const api = fakeApi(original, { failFirstAdd: true });
   await assert.rejects(
     replaceActualTransaction(api, {
@@ -106,10 +121,58 @@ test('failed replacement restores the original financial row and reports its rec
         subtransactions: [{ amount: -500 }, { amount: -500 }],
       }),
     }),
-    (error) => error.message === 'simulated add failure' && error.recoveryTransactionId === 'replacement-1'
+    /simulated add failure/
   );
+  await recoverTransactionSagas(api);
+  await recoverTransactionSagas(api);
   const rows = await api.getTransactions();
   assert.equal(rows.length, 1);
   assert.equal(rows[0].amount, original.amount);
   assert.equal(rows[0].imported_id, original.imported_id);
+  assert.equal(rows[0].subtransactions.length, 2);
+});
+
+test('startup recovery finishes sidecar migration after replacement commit', async () => {
+  const replacement = {
+    ...addableTransaction(original),
+    id: 'replacement-after-crash',
+    is_parent: false,
+    subtransactions: [],
+  };
+  fs.writeFileSync(process.env.RECEIPTS_PATH, JSON.stringify({
+    byTxn: {
+      [original.id]: [{ id: 'receipt-1', txnId: original.id, file: 'receipt.jpg' }],
+    },
+  }));
+  fs.writeFileSync(process.env.TRANSACTION_SAGAS_PATH, JSON.stringify({
+    schemaVersion: 1,
+    sagas: {
+      crash: {
+        id: 'crash',
+        status: 'replacement-added',
+        accountId: 'account',
+        original,
+        replacement: addableTransaction(original),
+        replacementId: replacement.id,
+        requestedLegs: null,
+        beforeIds: [original.id],
+        startedAt: '2026-07-09T00:00:00.000Z',
+        updatedAt: '2026-07-09T00:00:01.000Z',
+      },
+    },
+  }));
+  let synced = false;
+  await recoverTransactionSagas({
+    async getAccounts() {
+      return [{ id: 'account', name: 'Account', closed: false, offbudget: false }];
+    },
+    async getTransactions() { return [structuredClone(replacement)]; },
+    async sync() { synced = true; },
+  });
+  const receipts = JSON.parse(fs.readFileSync(process.env.RECEIPTS_PATH, 'utf8'));
+  assert.equal(receipts.byTxn[original.id], undefined);
+  assert.equal(receipts.byTxn[replacement.id][0].txnId, replacement.id);
+  const saga = JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas.crash;
+  assert.equal(saga.status, 'completed');
+  assert.equal(synced, true);
 });

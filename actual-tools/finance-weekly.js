@@ -9,73 +9,58 @@
  * Env (via run.sh + .actual.env): ACTUAL_SERVER_URL, ACTUAL_PASSWORD, ACTUAL_SYNC_ID, FIX_DATA_DIR
  */
 const api = require('@actual-app/api');
+const { addDays, FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
+const { buildToolCategoryInfo, classifiedLeavesForAccounts, incompleteTransferLeaves } = require('./lib/transfer-classification');
+const {
+  fetchAccountTransactionsBounded,
+  loadLedgerReadContext,
+  validateCanonicalDateRange,
+} = require('./lib/bounded-ledger-access');
 
-const TZ = process.env.FINANCE_TIME_ZONE || process.env.TZ || 'America/Los_Angeles';
 const c2 = (cents) => (Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (cents) => (cents < 0 ? '-$' : '$') + c2(cents);
 const signed = (cents) => (cents < 0 ? '-$' : '+$') + c2(cents);
 
-function financeToday() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-}
-function addDays(ymd, n) {
-  const [Y, M, D] = ymd.split('-').map(Number);
-  const dt = new Date(Date.UTC(Y, M - 1, D));
-  dt.setUTCDate(dt.getUTCDate() + n);
-  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
-}
-
 const MM_CAT = /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i;
 const REIMB_CAT = /^reimbursement$/i;
-const TRANSFER_PAYEE = /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i;
 
 (async () => {
   await api.init({ dataDir: process.env.FIX_DATA_DIR, serverURL: process.env.ACTUAL_SERVER_URL, password: process.env.ACTUAL_PASSWORD });
   await api.downloadBudget(process.env.ACTUAL_SYNC_ID);
 
-  const today = financeToday();
+  const today = todayYMD();
   const thisStart = addDays(today, -6), thisEnd = today;
   const lastStart = addDays(today, -13), lastEnd = addDays(today, -7);
 
   const groups = await api.getCategoryGroups();
-  const catInfo = {};
-  for (const g of groups) {
-    const inc = g.is_income === true || /^income$/i.test(g.name || '');
-    const mm = /money\s*movement/i.test(g.name || '');
-    for (const c of (g.categories || [])) {
-      let k = 'spend';
-      if (inc) k = 'income';
-      else if (REIMB_CAT.test(c.name || '')) k = 'reimb';
-      else if (mm || MM_CAT.test(c.name || '')) k = 'mm';
-      catInfo[c.id] = { name: c.name, kind: k };
-    }
-  }
+  const catInfo = buildToolCategoryInfo(groups);
   const nameOf = (id) => (id && catInfo[id] ? catInfo[id].name : '(uncategorized)');
-  const kindOf = (id) => (id && catInfo[id] ? catInfo[id].kind : 'uncat');
   const payees = await api.getPayees();
   const pn = {}; for (const p of payees) pn[p.id] = p.name || '';
-  const accounts = await api.getAccounts();
-
-  const leaves = [];
-  for (const a of accounts) {
-    const tx = await api.getTransactions(a.id, lastStart, today);
-    for (const t of tx) {
-      const payeeName = pn[t.payee] || '';
-      const pTransfer = !!(t.transfer_id || t.transferred_id) || TRANSFER_PAYEE.test(payeeName);
-      const isSplit = t.subtransactions && t.subtransactions.length;
-      const ls = isSplit
-        ? t.subtransactions.map((s) => ({ amount: s.amount, catId: s.category, transfer: !!s.transfer_id }))
-        : [{ amount: t.amount, catId: t.category, transfer: pTransfer }];
-      for (const lf of ls) {
-        let kind = kindOf(lf.catId);
-        if (kind === 'uncat' && (lf.transfer || pTransfer)) kind = 'mm';
-        leaves.push({ date: t.date, payee: payeeName, amount: lf.amount, catName: lf.catId ? nameOf(lf.catId) : (kind === 'mm' ? 'Transfer' : '(uncategorized)'), kind, onbudget: !a.offbudget });
-      }
-    }
+  const ctx = await loadLedgerReadContext(api);
+  validateCanonicalDateRange(lastStart, today, { purpose: 'finance weekly' });
+  const accounts = ctx.accountsRaw;
+  const transactionsByAccountId = new Map();
+  const batches = await fetchAccountTransactionsBounded(api, {
+    accounts,
+    start: lastStart,
+    end: today,
+  });
+  for (const { account: a, transactions: tx } of batches) {
+    transactionsByAccountId.set(a.id, tx);
   }
+  const classified = classifiedLeavesForAccounts(accounts, transactionsByAccountId, catInfo, (t) => pn[t.payee] || '');
+  const leaves = classified.map((lf) => ({
+    date: lf.date,
+    payee: lf.payee,
+    amount: lf.amount,
+    catName: lf.kind === 'transfer' ? 'Transfer' : lf.catId ? nameOf(lf.catId) : '(uncategorized)',
+    kind: lf.kind,
+    onbudget: lf.onbudget,
+  }));
 
   const inRange = (d, a, b) => d >= a && d <= b;
-  const isReal = (e) => e.onbudget && (e.kind === 'spend' || e.kind === 'uncat');
+  const isReal = (e) => e.onbudget && (e.kind === 'spend' || (e.kind === 'uncat' && e.amount < 0));
   const catKey = (e) => (e.kind === 'uncat' ? 'Uncategorized' : e.catName);
 
   function week(a, b) {
@@ -88,12 +73,17 @@ const TRANSFER_PAYEE = /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i;
     return { realCents, byCat, byPayee, income, payeeSet: new Set(real.filter((e) => e.amount < 0).map((e) => e.payee)) };
   }
   const T = week(thisStart, thisEnd), L = week(lastStart, lastEnd);
+  const incomplete = incompleteTransferLeaves(classified);
 
   const out = [];
   out.push(`FINANCE WEEKLY (deterministic; numbers are EXACT - format verbatim, do not recompute)`);
-  out.push(`generated=${today} tz=${TZ} this_week=${thisStart}..${thisEnd} last_week=${lastStart}..${lastEnd}`);
+  out.push(`generated=${today} tz=${FINANCE_TIME_ZONE} this_week=${thisStart}..${thisEnd} last_week=${lastStart}..${lastEnd}`);
   out.push('');
-  out.push(`[REAL SPEND] this=${money(T.realCents)} last=${money(L.realCents)} change=${signed(T.realCents - L.realCents)}`);
+  if (incomplete.length) {
+    out.push(`[REAL SPEND — INCOMPLETE] this_known_lower_bound=${money(T.realCents)} last_known_lower_bound=${money(L.realCents)} authoritative_total=UNAVAILABLE`);
+  } else {
+    out.push(`[REAL SPEND] this=${money(T.realCents)} last=${money(L.realCents)} change=${signed(T.realCents - L.realCents)}`);
+  }
   out.push('');
   out.push(`[BY CATEGORY this vs last] (spent)`);
   const cats = [...new Set([...Object.keys(T.byCat), ...Object.keys(L.byCat)])];
@@ -114,7 +104,13 @@ const TRANSFER_PAYEE = /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i;
   out.push(`[OFF-TREND] biggest category changes (this vs last)`);
   const trend = catRows.map((r) => ({ n: r.n, d: r.t - r.l })).filter((r) => Math.abs(r.d) >= 1).sort((a, b) => Math.abs(b.d) - Math.abs(a.d)).slice(0, 4);
   if (trend.length) for (const r of trend) out.push(`- ${r.n} | ${signed(r.d)}`); else out.push('- none');
+  if (incomplete.length) {
+    out.push('');
+    const reasons = [...new Set(incomplete.map((leaf) => leaf.transferReason || leaf.reason).filter(Boolean))].sort();
+    out.push(`[INCOMPLETE TRANSFER IDENTITY] count=${incomplete.length} reasons=${reasons.join(',')}`);
+  }
 
   console.log(out.join('\n'));
   await api.shutdown();
+  if (process.env.DIGEST_STRICT === '1' && incomplete.length) process.exit(2);
 })().catch((e) => { console.error('WEEKLY_ERR', (e && e.stack) || e); process.exit(1); });

@@ -26,6 +26,8 @@ Important guarantees:
 - A failed rebuild attempts rollback instead of leaving half-applied state.
 - JSON sidecars use atomic replacement, last-good copies, and corruption quarantine.
 - Finance date-only calculations use `FINANCE_TIME_ZONE` (default: `America/Los_Angeles`).
+- Demo mode derives every finance month/day from the same date-only helpers (`demoData.js`); tests may freeze time with `DEMO_FINANCE_NOW`.
+- Cross-runtime parity with mobile and actual-tools is checked by `test/finance-date-parity.test.js`.
 
 ## Requirements
 
@@ -76,6 +78,7 @@ Recommended:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `5007` | Loopback listener port. |
+| `FINANCE_TRUST_PROXY_HOPS` | `0` when unset | Trusted reverse-proxy hop count for `req.ip` and rate limiting (`0` = ignore `X-Forwarded-For`; `1` = one trusted proxy that overwrites/appends the real client address). |
 | `SESSION_DIR` | `finance-dashboard/.sessions` | Persistent file-backed browser sessions. |
 | `FINANCE_TIME_ZONE` | `TZ`, then `America/Los_Angeles` | Timezone for financial date boundaries. |
 | `WEBAUTHN_RP_ID` | Hostname from `PUBLIC_ORIGIN` | Passkey relying-party ID. |
@@ -157,6 +160,14 @@ file can lock browser users out.
 - Browser writes reject requests that carry an `Origin` different from the configured origin; session
   cookies are `SameSite=Lax`, secure outside loopback, and HTTP-only.
 - CORS allows only the configured browser origin; native requests do not need a browser origin.
+- Rate limits key clients by socket address when `FINANCE_TRUST_PROXY_HOPS` is unset or `0`. Set
+  `FINANCE_TRUST_PROXY_HOPS=1` when a trusted HTTPS reverse proxy is the sole ingress and
+  overwrites/appends `X-Forwarded-For` with the real client address.
+- Every authenticated `/api/v1` write requires a unique `Idempotency-Key`. Completed results replay
+  safely; an operation left `started` after a crash remains outcome-unknown and is inspectable at
+  `GET /api/v1/operations/:key` rather than being applied twice.
+- Bank sync and `/refresh` import/read data only. They return previews for split deltas and stale pending
+  charges; categorization, cleanup, reimbursement, and Splitwise-mirror writes require explicit actions.
 
 ## Demo mode
 
@@ -188,6 +199,8 @@ Depending on enabled features, runtime state can include:
 - `events.json`
 - `receipts.json` and `receipts/`
 - rules, reconciliation, reimbursement-link, override, and goal stores
+- `review-state.json` and `operation-journal.json`
+- `transaction-sagas.json`, `transaction-deletion-sagas.json`, and `repayment-confirmation-sagas.json`
 - `passkey-credentials.json` and `.sessions/`
 
 These files may contain sensitive financial or identity information. Keep them private and never commit
@@ -204,13 +217,30 @@ npm test
 npm run lint
 ```
 
+`npm test` is read-only. It verifies the committed Chart.js vendor asset against
+`public/vendor/chart-js.manifest.json`, the repository-root lockfile entry, and the installed
+package when present. It does not rewrite vendor files.
+
+Maintainers pin or regenerate the browser Chart.js bundle after changing the locked package
+version:
+
+```bash
+npm run vendor:chart-js:pin
+```
+
+That command copies `node_modules/chart.js/dist/chart.umd.js` into `public/vendor/`, refreshes
+the manifest and MIT notice, and must be run from a repository-root install where `chart.js` is
+present.
+
 The tests cover request security, enrollment, demo isolation, schemas, dates, reports, snapshot
-validation, JSON recovery, serial execution, and transaction replacement/rollback.
+validation, JSON recovery, serial execution, transaction replacement/rollback, crash-convergent
+transaction deletion, and crash-convergent repayment confirmation.
 
 For a destructive mutation smoke test, use an isolated Actual clone only:
 
 ```bash
 CONFIRM=1 \
+CLONE_MUTATION_TEST=1 \
 ACTUAL_SERVER_URL=http://127.0.0.1:15006 \
 ACTUAL_PASSWORD=... \
 ACTUAL_SYNC_ID=... \
@@ -220,6 +250,21 @@ node scripts/actual-clone-smoke.js
 
 The script creates, splits, edits, unsplits, and deletes test transactions. Never point it at the
 production budget.
+
+## Graceful shutdown
+
+On `SIGTERM` or `SIGINT` the dashboard aborts accepted ledger reads, stops HTTP admission,
+**awaits the HTTP close/drain callback** (including active Actual-backed GET responses),
+drains the mutation queue, then calls `data.shutdownApi()` / coordinator `shutdownHandoff`.
+See [`ACTUAL_COORDINATOR.md`](./ACTUAL_COORDINATOR.md) for the full ordering contract.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FINANCE_SHUTDOWN_TIMEOUT_MS` | `15000` | Hard cap from first signal to process exit. |
+| `FINANCE_MUTATION_DRAIN_TIMEOUT_MS` | `10000` | Sub-budget for mutation-queue drain after HTTP drain. |
+
+On timeout the process logs redacted socket diagnostics, force-closes remaining connections when
+supported, exits nonzero, and skips Actual shutdown while HTTP work could still reach Actual.
 
 ## Production operations
 

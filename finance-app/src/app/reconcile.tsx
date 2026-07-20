@@ -1,14 +1,20 @@
-import React, { useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useReconciliation, useSetReconcileItem, useSetReconcileMonth } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
+import { QueryScreenBody } from '@/components/query-display';
 import { Card, EmptyState, ErrorState } from '@/components/ui';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { SkeletonList } from '@/components/skeleton';
+import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
+import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
+import { useMutationScreen } from '@/hooks/useMutationScreen';
 import { ReconItem } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
-import { currentMonthKey } from '@/lib/selectedMonth';
+import { useCurrentMonthKey } from '@/lib/selectedMonth';
 import { colors, fmtDate, fmtSignedMoney, monthLabel } from '@/theme/colors';
 
 const stepMonth = (key: string, delta: number) => {
@@ -19,30 +25,50 @@ const stepMonth = (key: string, delta: number) => {
 
 export default function Reconcile() {
   const params = useLocalSearchParams<{ month?: string }>();
-  const initialMonth = params.month || stepMonth(currentMonthKey(), -1);
+  const curKey = useCurrentMonthKey();
+  const initialMonth = params.month || stepMonth(curKey, -1);
   return <ReconcileContent key={initialMonth} initialMonth={initialMonth} />;
 }
 
 function ReconcileContent({ initialMonth }: { initialMonth: string }) {
   const router = useRouter();
-  const curKey = currentMonthKey();
+  const curKey = useCurrentMonthKey();
   // Deep-link (from the nag banner) wins; otherwise default to last month.
   const [month, setMonth] = useState(initialMonth);
 
   const recon = useReconciliation(month);
   const setItem = useSetReconcileItem();
   const closeMonth = useSetReconcileMonth();
+  const admissionRef = useMutationScreenAdmission();
+  const screen = useMutationScreen({ onRefetchStale: () => recon.refetch(), admissionRef });
+  const closeAction = useMutationAction({
+    mutation: closeMonth,
+    mutationLabel: 'Close month',
+    admissionRef,
+    onActivate: () => screen.clear(),
+    onRefetch: () => recon.refetch(),
+    onSuccess: () => screen.clear(),
+  });
+  const toggleAction = screen.bind({ key: 'toggle', mutation: setItem, mutationLabel: 'Update reconciliation' });
+  const banner = useMutationBannerCoordinator(useMemo(() => [
+    { key: 'toggle', outcome: screen.outcome, retry: screen.retry, announce: screen.announce, isLocked: screen.isLocked, activitySeq: screen.activitySeq },
+    { key: 'close', outcome: closeAction.outcome, retry: closeAction.retry, announce: closeAction.announce, isLocked: closeAction.isLocked, activitySeq: closeAction.activitySeq },
+  ], [
+    closeAction.activitySeq, closeAction.announce, closeAction.isLocked, closeAction.outcome, closeAction.retry,
+    screen.activitySeq, screen.announce, screen.isLocked, screen.outcome, screen.retry,
+  ]));
+
+  const toggle = (it: ReconItem) => {
+    if (banner.isLocked) return;
+    haptics.tap();
+    toggleAction.run({ month, id: it.id, reconciled: !it.reconciled });
+  };
 
   const data = recon.data;
-  const items = data?.items ?? [];
-  const total = data?.total ?? 0;
-  const done = data?.reconciledCount ?? 0;
-  const allDone = total > 0 && done >= total;
-  const monthClosed = !!data?.done;
-  const pct = total > 0 ? (done / total) * 100 : 0;
+  const itemsKnown = Array.isArray(data?.items);
+  const itemCount = itemsKnown ? data.items.length : 0;
   const canNext = month < curKey;
 
-  const toggle = (it: ReconItem) => { haptics.tap(); setItem.mutate({ month, id: it.id, reconciled: !it.reconciled }); };
   const openTxn = (it: ReconItem) => {
     haptics.tap();
     router.push({
@@ -51,14 +77,29 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
     });
   };
   const doClose = () => {
-    if (!allDone || monthClosed) return;
-    closeMonth.mutate({ month, done: true }, {
-      onSuccess: () => Alert.alert('Month reconciled', `${monthLabel(month)} is all checked off. Nice work.`),
-    });
+    const reconData = recon.data;
+    const reconItems = reconData?.items ?? [];
+    const reconTotal = Math.max(
+      Number.isFinite(reconData?.total) ? reconData!.total : 0,
+      reconItems.length,
+    );
+    const reconDone = Number.isFinite(reconData?.reconciledCount)
+      ? reconData!.reconciledCount
+      : reconItems.filter((item) => item.reconciled).length;
+    const reconAllDone = reconTotal > 0 && reconDone >= reconTotal;
+    const reconMonthClosed = !!reconData?.done;
+    if (!reconAllDone || reconMonthClosed || banner.isLocked) return;
+    closeAction.run({ month, done: true });
   };
 
   return (
-    <PushScreen testID="reconcile-screen" refreshing={recon.isFetching} onRefresh={recon.refetch}>
+    <PushScreen testID="reconcile-screen" onRefresh={recon.refetch}>
+      <MutationLiveRegion message={banner.announce} />
+      <MutationFormBanner
+        outcome={banner.outcome}
+        onRetry={banner.retry}
+        onRefetch={() => { void screen.refetchStale(); recon.refetch(); }}
+      />
       <View style={styles.nav}>
         <Pressable testID="reconcile-prev-month" onPress={() => { haptics.tap(); setMonth(stepMonth(month, -1)); }} hitSlop={12} style={({ pressed }) => [styles.navBtn, pressed && { opacity: 0.5 }]}>
           <Text style={styles.navArrow}>‹</Text>
@@ -73,29 +114,46 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
         <SkeletonList rows={8} />
       ) : recon.isError && !data ? (
         <ErrorState error={recon.error?.error} onRetry={recon.refetch} />
-      ) : total === 0 ? (
-        <EmptyState icon="checkmark.circle">No transactions to reconcile in {monthLabel(month)}</EmptyState>
       ) : (
-        <>
+        <QueryScreenBody
+          query={recon}
+          loading={null}
+          empty={<EmptyState icon={itemsKnown ? 'checkmark.circle' : 'exclamationmark.triangle'}>{itemsKnown ? `No transactions to reconcile in ${monthLabel(month)}` : 'Reconciliation details unavailable'}</EmptyState>}
+          hasContent={itemCount > 0}
+          refetchBannerTestID="reconcile-refetch-banner"
+          renderContent={(reconData) => {
+            const reconItems = reconData.items ?? [];
+            const reconTotal = Math.max(
+              Number.isFinite(reconData.total) ? reconData.total : 0,
+              reconItems.length,
+            );
+            const reconDone = Number.isFinite(reconData.reconciledCount)
+              ? reconData.reconciledCount
+              : reconItems.filter((item) => item.reconciled).length;
+            const reconAllDone = reconTotal > 0 && reconDone >= reconTotal;
+            const reconMonthClosed = !!reconData.done;
+            const reconPct = reconTotal > 0 ? (reconDone / reconTotal) * 100 : 0;
+            return (
+            <>
           <Card style={styles.head}>
-            {monthClosed ? (
+            {reconMonthClosed ? (
               <View style={styles.closedRow}>
                 <SymbolView name="checkmark.seal.fill" tintColor={colors.green} size={22} resizeMode="scaleAspectFit" />
                 <Text style={styles.closedText}>{monthLabel(month)} reconciled</Text>
               </View>
             ) : (
               <>
-                <Text style={styles.headTitle}>{done} of {total} reviewed</Text>
-                <View style={styles.track}><View style={[styles.fill, { width: `${pct}%` }]} /></View>
-                <Text style={styles.headSub}>{allDone ? 'All transactions reviewed — close the month below.' : `${total - done} left to review`}</Text>
+                <Text style={styles.headTitle}>{reconDone} of {reconTotal} reviewed</Text>
+                <View style={styles.track}><View style={[styles.fill, { width: `${reconPct}%` }]} /></View>
+                <Text style={styles.headSub}>{reconAllDone ? 'All transactions reviewed — close the month below.' : `${reconTotal - reconDone} left to review`}</Text>
               </>
             )}
           </Card>
 
           <Card style={styles.list}>
-            {items.map((it, i) => (
+            {reconItems.map((it, i) => (
               <View key={it.id} testID={`reconcile-item-${i}`} style={[styles.row, i > 0 && styles.rowDiv]}>
-                <Pressable testID={`reconcile-item-toggle-${i}`} onPress={() => toggle(it)} hitSlop={8} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+                <Pressable testID={`reconcile-item-toggle-${i}`} onPress={() => toggle(it)} hitSlop={8} disabled={banner.isLocked} style={({ pressed }) => [pressed && !banner.isLocked && { opacity: 0.6 }, banner.isLocked && { opacity: 0.5 }]}>
                   <SymbolView name={it.reconciled ? 'checkmark.circle.fill' : 'circle'} tintColor={it.reconciled ? colors.green : colors.muted} size={26} resizeMode="scaleAspectFit" />
                 </Pressable>
                 <Pressable testID={`reconcile-item-row-${i}`} style={styles.rowBody} onPress={() => openTxn(it)}>
@@ -109,16 +167,19 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
             ))}
           </Card>
 
-          {!monthClosed ? (
-            <Pressable testID="reconcile-close-month-button" onPress={doClose} disabled={!allDone || closeMonth.isPending} style={({ pressed }) => [styles.closeBtn, (!allDone || closeMonth.isPending) && styles.closeBtnOff, pressed && allDone && { opacity: 0.8 }]}>
-              {closeMonth.isPending ? (
+          {!reconMonthClosed ? (
+            <Pressable testID="reconcile-close-month-button" onPress={doClose} disabled={!reconAllDone || banner.isLocked} style={({ pressed }) => [styles.closeBtn, (!reconAllDone || banner.isLocked) && styles.closeBtnOff, pressed && reconAllDone && !banner.isLocked && { opacity: 0.8 }]}>
+              {closeAction.isLocked ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.closeBtnText}>{allDone ? `Reconcile ${monthLabel(month)}` : `${total - done} left to review`}</Text>
+                <Text style={styles.closeBtnText}>{reconAllDone ? `Reconcile ${monthLabel(month)}` : `${reconTotal - reconDone} left to review`}</Text>
               )}
             </Pressable>
           ) : null}
-        </>
+            </>
+            );
+          }}
+        />
       )}
     </PushScreen>
   );

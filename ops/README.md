@@ -16,6 +16,11 @@ reverse-proxy settings, and alert delivery before installation.
 | `systemd/actual-sync.timer` | Twice-daily Pacific-time bank-sync schedule. |
 | `systemd/finance-sync-failure@.service` | `OnFailure` bridge to the alert script. |
 | `bin/backup-dashboard-runtime.sh` | Private archive of dashboard JSON sidecars and receipts. |
+| `bin/build-backup-bundle.sh` | Relocatable runtime backup bundle with embedded verification tooling. |
+| `bin/backup-coordinated.sh` | Quiesced PR-16 bundle backup with writer inventory, run journal, generation manifest, and restore admission token. |
+| `bin/write-dashboard-release-manifest.sh` | Content-address the reviewed files in a dashboard deployment. |
+| `bin/verify-backup.sh` | Schema/checksum/receipt validation for a runtime archive. |
+| `bin/verify-backup-bundle.sh` | Read-only validation for a relocatable runtime backup bundle. |
 | `bin/restore-dashboard-runtime.sh` | Dry-run-first, CONFIRM-gated sidecar restore. |
 | `bin/finance-sync-alert.sh` | Telegram alert delivery through an existing OpenClaw destination. |
 | `logrotate-darkfinances.conf` | Rotation policy for finance logs that may contain transaction metadata. |
@@ -24,7 +29,9 @@ reverse-proxy settings, and alert delivery before installation.
 
 - Services run as an unprivileged dedicated user.
 - Actual and Finance Dashboard listen on loopback and are exposed only through a trusted HTTPS reverse
-  proxy/private access layer.
+  proxy/private access layer. Set `FINANCE_TRUST_PROXY_HOPS=1` in the dashboard environment so
+  rate limits and forwarded client addresses honor the proxy hop. The trusted proxy must be the sole
+  ingress to Node and must overwrite or append `X-Forwarded-For` with the real client address.
 - The repository is deployed as `~/finance-dashboard` and supporting tools as `~/actual-tools`.
 - Service secrets live in `~/.openclaw/finance-dashboard.env` with mode `0600`.
 - User systemd is available and, if needed after logout, lingering is enabled for the service account.
@@ -67,6 +74,7 @@ ACTUAL_DATA_DIR=/home/<user>/.cache/actual-dashboard
 FINANCE_API_TOKEN=...
 SESSION_SECRET=...
 PUBLIC_ORIGIN=https://finances.example.com
+FINANCE_TRUST_PROXY_HOPS=1
 FINANCE_TIME_ZONE=America/Los_Angeles
 TZ=America/Los_Angeles
 ```
@@ -81,6 +89,29 @@ install -m 600 /path/to/finance-dashboard.env "$HOME/.openclaw/finance-dashboard
 Set `SESSION_DIR` and sidecar paths in the environment if they do not live under
 `$HOME/finance-dashboard`. Configure first-passkey enrollment only for the short provisioning window
 described in [`../finance-dashboard/README.md`](../finance-dashboard/README.md).
+
+### Trust-proxy migration checklist (pre-restart)
+
+When upgrading to dashboard code with fail-safe trust-proxy defaults (absent
+`FINANCE_TRUST_PROXY_HOPS` defaults to `0`), edit
+`~/.openclaw/finance-dashboard.env` **before** restarting `finance-dashboard.service`:
+
+1. If the dashboard sits behind the normal trusted HTTPS reverse proxy on loopback, add
+   `FINANCE_TRUST_PROXY_HOPS=1`.
+2. Confirm the reverse proxy is the **sole ingress** to `127.0.0.1:5007` and overwrites or appends
+   `X-Forwarded-For` with the real client address. Do not expose Node directly to the internet.
+3. Leave `FINANCE_TRUST_PROXY_HOPS` unset or set it to `0` only when Node is reached without a
+   trusted proxy (direct exposure). This is fail-safe: spoofed `X-Forwarded-For` values are ignored,
+   but all proxied clients may share one rate-limit bucket until step 1 is applied.
+4. Restart the dashboard service after saving the environment file:
+
+```bash
+systemctl --user restart finance-dashboard.service
+journalctl --user -u finance-dashboard.service --since "5 min ago" | rg trust-proxy
+```
+
+Look for `[trust-proxy]` in the journal when hops remain at `0` on a non-loopback deployment; that
+warning means per-client rate limits still key on the proxy connection address.
 
 ## 3. Install the dashboard service
 
@@ -102,8 +133,33 @@ curl -fsS -H "X-Finance-Token: $FINANCE_API_TOKEN" \
   http://127.0.0.1:5007/api/v1/ping
 ```
 
+The unit sets `TimeoutStopSec=25`, aligned with the dashboard's 15s graceful-shutdown hard cap
+(`FINANCE_SHUTDOWN_TIMEOUT_MS`) plus margin for journal flush and systemd SIGKILL escalation. PR-18
+coordinated backup polls dashboard quiescence within its own stop deadline; do not raise
+`TimeoutStopSec` above the coordinator's writer stop budget without updating both contracts.
+
 An HTTP `503` from ping means the process is reachable but Actual data is not ready. Investigate the
 journal before restarting repeatedly.
+
+After each code deployment and before relying on `/ping` release identity, hash the files actually
+present in the deployment:
+
+```bash
+FINANCE_DASHBOARD_DIR="$HOME/finance-dashboard" \
+  ops/bin/write-dashboard-release-manifest.sh
+node scripts/release-manifest.js \
+  --verify="$HOME/finance-dashboard/release-manifest.json"
+```
+
+The helper uses a fixed reviewed runtime-file allowlist and does not enumerate ignored sidecars,
+receipts, environment files, sessions, or dependencies. `DARKFINANCES_REPO_ROOT` must point to the
+repository containing the exact source copied into `FINANCE_DASHBOARD_DIR`; generation fails if any
+allowlisted source/deployment file differs. Set it explicitly when the helper is installed outside
+the repository, and set `RELEASE_MANIFEST_PATH` when the service uses a non-default manifest
+location. The standalone `--verify` command checks manifest structure and its canonical
+content digest. Dashboard `/ping` additionally rehashes every allowlisted file against the running
+dashboard directory; it reports `release: null` if deployed code or assets drift afterward. Schema-v1
+manifests remain readable for migration but do not claim this live deployed-file verification.
 
 ## 4. Install scheduled bank sync
 
@@ -200,9 +256,105 @@ invalidates any browser sessions preserved elsewhere.
 Verify an archive:
 
 ```bash
+ops/bin/verify-backup.sh /path/to/dashboard-runtime-<timestamp>.tgz
 sha256sum -c dashboard-runtime-<timestamp>.tgz.sha256
 tar -tzf dashboard-runtime-<timestamp>.tgz
 ```
+
+Each archive embeds `.backup-manifest.json` with per-file SHA-256 checksums, schema version, git
+commit, and recovery metadata. A matching `dashboard-runtime-<timestamp>.tgz.manifest.json` is
+written beside the archive.
+
+### Relocatable runtime backup bundle (PR-16)
+
+For off-host verification drills without a repository checkout, build a self-contained bundle:
+
+```bash
+install -m 700 ops/bin/build-backup-bundle.sh \
+  "$HOME/.local/bin/build-backup-bundle.sh"
+FINANCE_DASHBOARD_DIR="$HOME/finance-dashboard" \
+  "$HOME/.local/bin/build-backup-bundle.sh"
+```
+
+Defaults match the runtime archive helper (`FINANCE_DASHBOARD_DIR`, `DARKFINANCES_BACKUP_DIR`).
+Each bundle includes:
+
+- `runtime/` — all registry `backup:true` sidecars present at build time, optional eligible
+  `.last-good` sidecars, and receipt bytes referenced by `receipts.json`
+- `tooling/` — embedded Node verification tooling (authoritative runtime-state schemas, inventory
+  snapshot, read-only verifier entrypoint)
+- `bundle-manifest.json` — artifact identity, provenance, file inventory (relative safe paths,
+  SHA-256, bytes, mode), runtime-state inventory digest, and required restore tooling identity
+
+Verify on any host with Node 24+ and `tar`:
+
+```bash
+ops/bin/verify-backup-bundle.sh /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
+sha256sum -c dashboard-runtime-backup-bundle-<timestamp>.tgz.sha256
+```
+
+The shell verifier runs the full archive trust chain: archive checksum sidecar, embedded/sidecar
+manifest parity, tar member/type/closed-world parity, bounded preflight, private temp extraction,
+extracted-tree verification, and optional publish to `DARKFINANCES_BUNDLE_EXTRACT_DIR` only after
+success. Untrusted archives are never certified by merely extracting and invoking the standalone tree
+verifier.
+
+For trusted pre-extracted bundle trees (for example after a successful archive verify), use the
+embedded `tooling/ops/bin/verify-backup-bundle.js`. That entrypoint skips archive checksum,
+sidecar/embedded parity, and tar member checks; do not use it as the first verifier for untrusted
+`.tgz` input.
+
+The verifier is read-only. It rejects symlinks, path traversal, duplicate paths, unexpected
+members, digest/size/mode mismatch, future bundle schema versions, missing required runtime stores,
+tampered provenance fields, archive bombs, and unsafe private modes.
+Passkey credential payloads are validated but never logged.
+
+Regenerate the committed inventory snapshot after registry changes:
+
+```bash
+node ops/lib/generate-backup-state-inventory.js
+```
+
+PR-17 adds staged live swap/generation-bound restore; PR-18 adds writer quiescence. Do not treat
+bundle verification as evidence of a successful production restore.
+
+### Coordinated quiesced backup (PR-18)
+
+`backup-coordinated.sh` delegates to the PR-18 coordinator (`ops/lib/coordinated-backup-cli.js`). It:
+
+- Takes an exclusive lock under `$DARKFINANCES_BACKUP_DIR/.darkfinances-coordinated/` so backup, restore, and sync cannot overlap.
+- Captures an immutable run journal with pre-mutation writer `active`/`enabled`/`running` snapshots from the authoritative inventory (`ops/lib/writer-inventory.json`).
+- Stops writers in order: timers → active jobs → dashboard (systemd `SIGTERM` graceful drain via PR-14) → Actual container when `BACKUP_INCLUDE_ACTUAL_DATA=1` → restore-lock check.
+- Verifies quiescence with bounded polling; a successful stop command alone is not proof.
+- Builds a PR-16 relocatable bundle, optional Actual data archive, release manifest, coordinated generation manifest, and short-TTL restore admission token bound to artifact/destination/generation evidence.
+- Restarts only originally active/enabled components in safe order (Actual → dashboard health → jobs/timers), then runs source-fresh health checks.
+- On failure/interrupt, cleans run-owned staging only, preserves prior backups, and leaves `recovery_required` journal state when restart or health checks fail.
+
+Verify each coordinated bundle before off-host storage or restore drills:
+
+```bash
+ops/bin/verify-backup-bundle.sh /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
+```
+
+Dry run (`BACKUP_DRY_RUN=1` or `--dry-run`) performs discovery/preflight/stop-order planning only and exits `2` without mutating services or destination bytes.
+
+```bash
+install -m 700 ops/bin/backup-coordinated.sh \
+  "$HOME/.local/bin/backup-coordinated.sh"
+DARKFINANCES_REPO_ROOT=/path/to/darkfinances \
+  "$HOME/.local/bin/backup-coordinated.sh"
+```
+
+Environment:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BACKUP_INCLUDE_ACTUAL_DATA` | `0` | Also archive `ACTUAL_DATA_DIR` and bind Actual generation |
+| `BACKUP_PRE_QUIESCED` | unset | Verify-only mode when writers were stopped out-of-band (never skips verification or mints restore authority) |
+| `BACKUP_DRY_RUN` | `0` | Discovery/plan only |
+| `FINANCE_EVENT_SYNC_CONFIGURED` | unset | Include optional event-sync writers when `1` |
+
+`BACKUP_QUIESCE=0` is forbidden. Restore admission tokens are Ed25519-signed, short-lived, and issued only by the coordinated restore session while it holds the exclusive coordination lock — never during backup.
 
 ## Restore dashboard runtime state
 
@@ -213,30 +365,78 @@ install -m 700 ops/bin/restore-dashboard-runtime.sh \
   "$HOME/.local/bin/restore-dashboard-runtime.sh"
 ```
 
-Preview first:
+Preview first (PR-16 archive trust chain, generation-binding validation, preflight space, and
+read-only writer discovery — **not** live all-writer quiescence proof). Default invocation is
+dry-run (`--dry-run`); live swap requires `CONFIRM=1`. `RESTORE_DRY_RUN=1` applies only to
+`restore-coordinated.sh`, not this standalone helper.
 
 ```bash
-"$HOME/.local/bin/restore-dashboard-runtime.sh" /path/to/dashboard-runtime-<timestamp>.tgz
+RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
+  "$HOME/.local/bin/restore-dashboard-runtime.sh" \
+  /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
 ```
 
-Dry run prints archive contents and exits without writing. To restore:
+Dry run exits `2` on success. Active writers may appear as warnings only; do not treat a successful
+preview as evidence that production is safe to mutate. Live swap requires PR-18 writer quiescence
+evidence plus `CONFIRM=1`:
 
 ```bash
-systemctl --user stop finance-dashboard.service
-CONFIRM=1 "$HOME/.local/bin/restore-dashboard-runtime.sh" \
-  /path/to/dashboard-runtime-<timestamp>.tgz
-systemctl --user start finance-dashboard.service
+RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
+  CONFIRM=1 "$HOME/.local/bin/restore-dashboard-runtime.sh" \
+  /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
 ```
 
 The helper:
 
-- Refuses to restore while the dashboard service is active.
-- Rejects absolute paths and path traversal in the archive.
-- Creates a fresh pre-restore backup.
-- Restores private modes on JSON and receipt files.
+- Accepts only PR-16 verified backup bundles (sidecar manifest, checksum, embedded manifest, closed-world inventory).
+- Validates generation binding for active operation-journal entries and saga stores before swap.
+- Builds a complete replacement tree in private staging; destination-only stale files are removed.
+- Refuses unknown destination files outside the documented narrow exclusions.
+- Uses a fixed control directory under the destination (`.darkfinances-restore/`) with journal schema v2,
+  pre-restore snapshot manifest, and private work staging. Interrupted restores resume on the next invocation
+  without an explicit work root; symlinked destination/control paths are rejected.
+- Performs crash-convergent per-file same-filesystem rename replacement (not a single globally atomic swap),
+  with journaled rollback phases (`rollback_in_progress`, `rollback_failed`, `rolled_back`) driven by the
+  snapshot manifest rather than post-mutation live-tree enumeration.
+- Re-verifies archive SHA-256 and manifest artifact ID before treating a `complete` journal as idempotent.
+- Re-verifies the full installed destination closed-world tree (bytes, modes, sidecar schemas, receipt
+  references) against the bound manifest before returning `complete`; destination drift fails closed.
+- Serializes live restores with an atomic `restore.lock` in the control root (`O_EXCL`); concurrent
+  invocations fail with `restore already in progress`.
+- Requires a PR-18 quiescence admission token with TTL and bindings to archive SHA-256 and destination path;
+  generation evidence is re-read immediately before the first mutation.
+- Fsyncs journals (write-temp-then-rename), staged files, and parent directories at mutation boundaries where
+  the platform supports it.
+- Refuses restore without a PR-18 quiescence admission token (this script does not stop/start services).
+- Dry-run uses temporary staging only and must not create the destination tree or persistent control paths.
+- Dry-run writer preview is read-only discovery; live restore re-verifies all inventoried writers
+  immediately before the first destination mutation (`assertAllWritersQuiescentForAdmission`).
 
 Afterward, verify `/api/v1/ping`, browser passkey login, the app, receipts, reimbursements, and
 reconciliation state.
+
+## Graceful shutdown verification
+
+PR-14 graceful shutdown is covered on every PR by dashboard integration tests (including in-flight
+read abort during `SIGTERM`). Full bounded stress is opt-in or scheduled so routine CI stays fast:
+
+```bash
+# Deterministic gate (runs via npm run check / check:dashboard):
+npm --prefix finance-dashboard test -- --test-name-pattern 'graceful shutdown during in-flight read'
+
+# Bounded scheduled/manual stress (dedicated file only; 100 serial + 100 parallel by default):
+npm run check:shutdown-stress
+
+# Reduced local/CI profile example:
+FINANCE_QUERY_SHUTDOWN_STRESS_SERIAL=5 FINANCE_QUERY_SHUTDOWN_STRESS_PARALLEL=5 \
+  FINANCE_QUERY_SHUTDOWN_STRESS_WORKERS=2 npm run check:shutdown-stress
+```
+
+`check:shutdown-stress` sets `FINANCE_QUERY_SHUTDOWN_STRESS=1` and `ALLOW_RAW_ACTUAL_API=1`, then
+runs `node --test finance-dashboard/test/query-scaling-shutdown-stress.test.js` (Node flags precede
+the file path; it does not invoke the full dashboard `npm test` harness). Tune volume with
+`FINANCE_QUERY_SHUTDOWN_STRESS_SERIAL`, `_PARALLEL`, and `_WORKERS`. The scheduled GitHub workflow
+runs a reduced bounded profile nightly via the same script.
 
 ## Log rotation
 

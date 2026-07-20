@@ -5,10 +5,85 @@ const session = require('express-session');
 const FileStore = require('session-file-store')(session);
 const fs = require('fs');
 const crypto = require('crypto');
-const { AppError, classifyError } = require('./lib/errors');
+const {
+  AccountNotFoundError,
+  AppError,
+  KnownPreApplyError,
+  TransactionNotFoundError,
+  classifyError,
+} = require('./lib/errors');
 const { FINANCE_TIME_ZONE, todayYMD } = require('./lib/date-only');
 const { SerialQueue } = require('./lib/serial-queue');
+const { bindGracefulShutdownSignals } = require('./lib/graceful-shutdown');
+const {
+  createBrowserStaticMiddleware,
+  isPublicBrowserAsset,
+  loadBrowserAssetInventory,
+  sendBrowserAsset,
+} = require('./lib/browser-static');
+const { getActualCoordinator } = require('./lib/actual-coordinator');
+const { loadAdmissionLimitsConfig } = require('./lib/admission-limits-config');
+const {
+  resetRequestAdmissionController,
+} = require('./lib/request-admission');
+const {
+  createClientAbortSignal,
+  withMutationAdmission,
+  withOperationStatusAdmission,
+  withReadAdmission,
+} = require('./lib/request-admission-runtime');
+const { OperationJournal } = require('./lib/operation-journal');
+const { executeJournaledOperation } = require('./lib/operation-executor');
+const { reconcileOperationJournalFromProof } = require('./lib/operation-reconciliation');
+const { composeTerminalProofResolver } = require('./lib/operation-journal-proof');
+const {
+  MUTATION_ROUTES,
+  getMutationRoute,
+  routeKey,
+} = require('./lib/mutation-route-registry');
 const { parse, schemas } = require('./lib/validation');
+const { createReconnectFreshnessProbeService } = require('./lib/reconnect-freshness-probe');
+const { deriveRequestPrincipal } = require('./lib/request-principal');
+const { readReleaseIdentity } = require('./lib/release-identity');
+const {
+  exportExitCode,
+  buildReimbursementExportV1Envelope,
+  formatReimbursementExportCsv,
+  formatReimbursementExportHuman,
+  stableStringify,
+} = require('./lib/reimbursement-export-ledger');
+const { boundedJsonMiddleware } = require('./lib/bounded-json');
+const {
+  attachQueryStatsHeaders,
+  assertCursorSigningConfigured,
+  buildQueryCacheFingerprint,
+  runWithQueryInstrumentation,
+} = require('./lib/bounded-ledger-access');
+const { loadQueryScalingConfig } = require('./lib/query-scaling-config');
+const {
+  applyExpressTrustProxy,
+  formatTrustProxyStartupWarning,
+  loadTrustProxyConfig,
+  rateLimitClientKey,
+} = require('./lib/trust-proxy-config');
+const {
+  DEFAULT_MAX_JSON_BYTES,
+  RECEIPT_MAX_JSON_BYTES,
+} = require('./lib/receipt-limits');
+const {
+  apiErrorMiddleware,
+  sendApiError,
+  sendApiErrorCode,
+} = require('./lib/request-envelope');
+const {
+  findMutationContract,
+  parsePhantomCleanupRequest,
+  parseReceiptRequest,
+  parseRecurringOverrideRequest,
+  validateLegacyMutationRequest,
+  validateVersionedMutationRequest,
+  versionedRouteExists,
+} = require('./lib/request-contract');
 
 const {
   generateRegistrationOptions,
@@ -18,12 +93,52 @@ const {
 } = require('@simplewebauthn/server');
 
 const app = express();
+const PUBLIC_DIR = path.join(__dirname, 'public');
+let browserAssetInventory;
+try {
+  browserAssetInventory = loadBrowserAssetInventory({ publicRoot: PUBLIC_DIR });
+} catch (error) {
+  console.error('browser asset inventory failed:', error.message);
+  process.exit(1);
+}
 const cache = new NodeCache({ stdTTL: 300 }); // 5 min cache
-const mutationQueue = new SerialQueue('finance-mutations');
+const actualCoordinator = getActualCoordinator();
+actualCoordinator.bindCache(cache);
+const admissionLimitsConfig = loadAdmissionLimitsConfig();
+const requestAdmission = resetRequestAdmissionController(admissionLimitsConfig);
+const mutationQueue = new SerialQueue('finance-mutations', {
+  maxPending: admissionLimitsConfig.mutationGlobalPending,
+});
+const operationJournal = new OperationJournal();
+const RELEASE_MANIFEST_PATH = process.env.RELEASE_MANIFEST_PATH || path.join(__dirname, 'release-manifest.json');
+
+function queryFingerprintBase() {
+  const c = loadQueryScalingConfig();
+  return {
+    maxLedgerDays: c.maxLedgerQueryDays,
+    maxLedgerRows: c.maxLedgerRowsPerRead,
+    maxTxnList: c.maxTransactionListRows,
+    maxSearchLimit: c.maxSearchLimit,
+    maxSearchRange: c.maxSearchRangeDays,
+    maxMerchantMonths: c.maxMerchantHistoryMonths,
+    ledgerChunkDays: c.ledgerChunkDays,
+  };
+}
 const runtimeHealth = {
   startedAt: new Date().toISOString(),
   fatalErrorAt: null,
 };
+
+function releaseIdentity() {
+  return readReleaseIdentity(RELEASE_MANIFEST_PATH, __dirname);
+}
+
+const reconnectFreshnessProbe = createReconnectFreshnessProbeService({
+  coordinator: actualCoordinator,
+  readAccountsProbe: () => data.getAccounts(),
+  financeTimeZone: FINANCE_TIME_ZONE,
+  deployIdentity: releaseIdentity,
+});
 
 // Defense-in-depth: the Actual API occasionally rejects a batch write out-of-band
 // (a promise that escapes the awaited call). Continuing after an unknown write
@@ -38,16 +153,24 @@ process.on('unhandledRejection', (err) => {
   }
 });
 
-const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || `http://localhost:${process.env.PORT || 5007}`;
+const configuredPublicOrigin = process.env.PUBLIC_ORIGIN || `http://localhost:${process.env.PORT || 5007}`;
+const PUBLIC_ORIGIN = configuredPublicOrigin;
 const RP_NAME = process.env.WEBAUTHN_RP_NAME || 'DarkFinances';
 const RP_ID = process.env.WEBAUTHN_RP_ID || (() => {
   try { return new URL(PUBLIC_ORIGIN).hostname; }
   catch (_) { return 'localhost'; }
 })();
-const ORIGIN = process.env.WEBAUTHN_ORIGIN || PUBLIC_ORIGIN;
+let allowedOrigin = process.env.WEBAUTHN_ORIGIN || configuredPublicOrigin;
+function webAuthnExpectedOrigin() {
+  return allowedOrigin;
+}
 const PASSKEY_USER_NAME = process.env.PASSKEY_USER_NAME || 'owner';
 const PASSKEY_USER_DISPLAY_NAME = process.env.PASSKEY_USER_DISPLAY_NAME || PASSKEY_USER_NAME;
 const CREDS_FILE = process.env.PASSKEY_CREDENTIALS_FILE || path.join(__dirname, 'passkey-credentials.json');
+const {
+  loadPasskeyCredentials,
+  savePasskeyCredentials,
+} = require('./lib/passkey-credentials-store');
 const SESSION_DIR = process.env.SESSION_DIR || path.join(__dirname, '.sessions');
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const ENROLLMENT_TOKEN_HASH = String(process.env.PASSKEY_ENROLLMENT_TOKEN_HASH || '').toLowerCase();
@@ -61,24 +184,29 @@ const localOrigin = publicHostname === 'localhost' || publicHostname === '127.0.
 if (!process.env.SESSION_SECRET && !localOrigin) {
   throw new Error('SESSION_SECRET is required for a non-local deployment');
 }
+const trustProxyConfig = loadTrustProxyConfig(process.env);
+const trustProxyStartupWarning = formatTrustProxyStartupWarning(trustProxyConfig, { localOrigin });
+if (!localOrigin && process.env.DEMO_ONLY !== '1') {
+  assertCursorSigningConfigured();
+}
 if (SELFTEST && !localOrigin) {
   throw new Error('SELFTEST may only be used with a loopback PUBLIC_ORIGIN');
 }
 
 function loadCreds() {
-  if (!fs.existsSync(CREDS_FILE)) return [];
-  const parsed = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8'));
-  if (!Array.isArray(parsed)) throw new Error('Passkey credential store is invalid');
-  return parsed;
+  return loadPasskeyCredentials(CREDS_FILE);
 }
 function saveCreds(creds) {
-  const tmp = `${CREDS_FILE}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
-  fs.chmodSync(tmp, 0o600);
-  fs.renameSync(tmp, CREDS_FILE);
+  savePasskeyCredentials(creds, CREDS_FILE);
 }
 function requestClaimsDemo(req) {
   return req.get('X-Demo-Mode') === '1' || req.query.demo === '1' || req.query.demo === 'true';
+}
+
+function exposeTestServerInstanceId() {
+  return process.env.NODE_ENV === 'test' && process.env.TEST_SERVER_INSTANCE_ID
+    ? process.env.TEST_SERVER_INSTANCE_ID
+    : null;
 }
 function safeEqualHex(actual, expected) {
   if (!/^[a-f0-9]{64}$/.test(actual) || !/^[a-f0-9]{64}$/.test(expected)) return false;
@@ -98,7 +226,7 @@ const rateBuckets = new Map();
 function rateLimit(name, max, windowMs) {
   return (req, res, next) => {
     const now = Date.now();
-    const key = `${name}:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+    const key = `${name}:${rateLimitClientKey(req, trustProxyConfig.hops)}`;
     let bucket = rateBuckets.get(key);
     if (!bucket || bucket.resetAt <= now) bucket = { count: 0, resetAt: now + windowMs };
     bucket.count += 1;
@@ -107,15 +235,26 @@ function rateLimit(name, max, windowMs) {
       for (const [k, value] of rateBuckets) if (value.resetAt <= now) rateBuckets.delete(k);
     }
     if (bucket.count > max) {
-      res.setHeader('Retry-After', String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
+      const retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSeconds));
+      if (req.path.startsWith('/api/')) {
+        const error = new AppError('Too many requests', {
+          code: 'RATE_LIMITED',
+          status: 429,
+          expose: true,
+        });
+        error.retryAfterSeconds = retryAfterSeconds;
+        return sendApiError(req, res, error);
+      }
       return res.status(429).json({ error: 'Too many requests' });
     }
     return next();
   };
 }
 
-app.set('trust proxy', 1);
+applyExpressTrustProxy(app, trustProxyConfig);
 app.disable('x-powered-by');
+app.disable('etag');
 fs.mkdirSync(SESSION_DIR, { recursive: true, mode: 0o700 });
 fs.chmodSync(SESSION_DIR, 0o700);
 app.use((req, res, next) => {
@@ -125,21 +264,24 @@ app.use((req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; " +
-      "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
-      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-      "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'"
+      "script-src 'self'; " +
+      "style-src 'self'; " +
+      "font-src 'self'; img-src 'self' data:; connect-src 'self'"
   );
   next();
 });
 
-const defaultJsonParser = express.json({ limit: '1mb' });
-const receiptJsonParser = express.json({ limit: '25mb' });
+const isVersionedApiPath = (value) => /^\/api\/v1(?:\/|$)/i.test(value || '');
+const isVersionedApiRequest = (req) => isVersionedApiPath(req.baseUrl) || isVersionedApiPath(req.originalUrl);
 const isReceiptUpload = (req) =>
-  req.method === 'POST' && (req.path === '/api/receipts' || req.path === '/api/v1/receipts');
-app.use((req, res, next) => isReceiptUpload(req) ? next() : defaultJsonParser(req, res, next));
+  req.method === 'POST' && /^\/api(?:\/v1)?\/receipts\/?$/i.test(req.path);
+const defaultJsonMiddleware = boundedJsonMiddleware({ limit: DEFAULT_MAX_JSON_BYTES });
+const receiptJsonMiddleware = boundedJsonMiddleware({ limit: RECEIPT_MAX_JSON_BYTES });
+app.use((req, res, next) => (isReceiptUpload(req) ? receiptJsonMiddleware : defaultJsonMiddleware)(req, res, next));
 app.use(session({
   store: new FileStore({
     path: SESSION_DIR,
@@ -156,7 +298,8 @@ app.use(session({
 
 app.use((req, res, next) => {
   const origin = req.get('Origin');
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && origin !== ORIGIN) {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && origin && origin !== allowedOrigin) {
+    if (req.path.startsWith('/api/')) return sendApiErrorCode(req, res, 'CORS_ORIGIN_REJECTED');
     return res.status(403).json({ error: 'Origin not allowed' });
   }
   next();
@@ -172,9 +315,7 @@ function requireAuth(req, res, next) {
 }
 
 // Auth routes
-app.get('/login', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'login.html'));
-});
+app.get('/login', (req, res) => sendBrowserAsset(req, res, browserAssetInventory, 'login.html'));
 
 app.get('/auth/status', (req, res) => {
   const creds = loadCreds();
@@ -236,7 +377,7 @@ app.post('/auth/register/finish', enrollmentLimiter, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: req.session.regChallenge,
-      expectedOrigin: ORIGIN,
+      expectedOrigin: webAuthnExpectedOrigin(),
       expectedRPID: RP_ID,
     });
     if (!verification.verified) return res.status(400).json({ error: 'Verification failed' });
@@ -291,7 +432,7 @@ app.post('/auth/login/finish', loginLimiter, async (req, res) => {
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: req.session.authChallenge,
-      expectedOrigin: ORIGIN,
+      expectedOrigin: webAuthnExpectedOrigin(),
       expectedRPID: RP_ID,
       credential: {
         id: cred.credentialID,
@@ -326,15 +467,53 @@ const data = require('./dataModule');
 // request flagged demo (header X-Demo-Mode:1 or ?demo=1) before the resolvers run.
 const demo = require('./demoData');
 function isDemo(req) { return requestClaimsDemo(req); }
+function validateLegacyMutationBoundary(req, res, next) {
+  if (!['POST', 'DELETE', 'PATCH'].includes(req.method)) return next();
+  // Versioned real writes validate inside their admitted operation so a known
+  // pre-effect rejection is durable and replayable. Demo and legacy requests
+  // retain this outer boundary because they are not operation-journaled.
+  if (isVersionedApiRequest(req) && !isDemo(req)) return next();
+  const contract = findMutationContract(req);
+  if (!contract) return next();
+  try {
+    validateLegacyMutationRequest(req);
+    return next();
+  } catch (error) {
+    return sendApiError(req, res, error);
+  }
+}
 function demoMiddleware(v1mode) {
   return (req, res, next) => {
     if (!isDemo(req)) return next();
-    if (!v1mode && req.path.startsWith('/api/v1')) return next(); // let the v1 router envelope it
+    if (!v1mode && isVersionedApiPath(req.path)) return next(); // let the v1 router envelope it
     const send = (payload) => res.json(v1mode ? { data: payload } : payload);
-    const p = req.path.replace(/^\/api\/v1\//, '').replace(/^\/api\//, '').replace(/^\//, '');
+    const p = req.path.replace(/^\/api\/v1\//i, '').replace(/^\/api\//i, '').replace(/^\//, '');
     if (req.method === 'POST' || req.method === 'DELETE') {
       // Public demo writes are intentionally non-persistent. This keeps showcase
       // flows harmless and prevents cross-user state, OCR, or HTML injection.
+      const knownWrite = [
+        /^transactions$/i,
+        /^transactions\/[^/]+(?:\/(?:category|notes|date|payee|split|unsplit))?$/i,
+        /^bank-sync$/i,
+        /^reimbursements\/sweep$/i,
+        /^phantom\/cleanup$/i,
+        /^receipts(?:\/[^/]+)?$/i,
+        /^rules(?:\/apply|\/[^/]+)?$/i,
+        /^splitwise\/sync-shares$/i,
+        /^events(?:\/[^/]+)?$/i,
+        /^accounts\/[^/]+\/override$/i,
+        /^manual-assets(?:\/[^/]+)?$/i,
+        /^recurring\/(?:mark|[^/]+\/override)$/i,
+        /^bills\/paid$/i,
+        /^owes-config$/i,
+        /^reimb-links$/i,
+        /^repayments\/[^/]+\/(?:confirm|dismiss)$/i,
+        /^reconciliation\/(?:item|month|enabled)$/i,
+        /^review\/dispositions$/i,
+        /^goals(?:\/[^/]+)?$/i,
+        /^refresh$/i,
+      ].some((pattern) => pattern.test(p));
+      if (!knownWrite) return sendApiErrorCode(req, res, 'NOT_FOUND');
       return send({ ok: true, demo: true });
     }
     if (p === 'report.csv') {
@@ -351,11 +530,37 @@ function demoMiddleware(v1mode) {
     if (p === 'reconciliation/pending') return send(demo.reconcilePending());
     if (p === 'repayments/suggestions') return send(demo.repaymentSuggestions());
     if (p === 'reimbursement-ledger') return send(demo.reimbursementLedger ? demo.reimbursementLedger(req.query.month) : { month: new Date().toISOString().slice(0, 7), range: {}, totals: {}, people: [], months: [] });
+    if (p === 'reimbursement-export') {
+      const format = String(req.query.format || 'json').toLowerCase();
+      const payload = demo.reimbursementExport();
+      if (format === 'csv') {
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        return res.send(formatReimbursementExportCsv(payload));
+      }
+      if (format === 'human') {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        return res.send(formatReimbursementExportHuman(payload));
+      }
+      if (v1mode) {
+        return res.type('application/json').send(`${buildReimbursementExportV1Envelope(payload)}\n`);
+      }
+      res.setHeader('X-Reimbursement-Export-Status', payload.completeness.status);
+      res.setHeader('X-Reimbursement-Export-Exit-Code', String(exportExitCode(payload)));
+      res.setHeader('X-Reimbursement-Export-Authoritative', String(payload.totals.authoritative));
+      return res.type('application/json').send(stableStringify(payload));
+    }
     if (p === 'events') return send(demo.events());
     if (p === 'receipts') return send(demo.receipts(req.query.txnId ? String(req.query.txnId) : undefined));
     switch (p) {
       case 'ping': return send({ ok: true, ts: Date.now() });
+      case 'reconnect-freshness':
+        return sendApiError(req, res, new AppError('Reconnect freshness probe is not supported in demo mode', {
+          code: 'RECONNECT_FRESHNESS_DEMO_UNSUPPORTED',
+          status: 404,
+          expose: true,
+        }));
       case 'accounts': return send(demo.accounts());
+      case 'today': return send(demo.today());
       case 'transactions': {
         let r = demo.transactions();
         const { category, bucket, start, end } = req.query;
@@ -420,16 +625,88 @@ function demoMiddleware(v1mode) {
       case 'owes-config': return send({ expected: {}, debtorPatterns: {}, tripStart: {}, swNet: [], settledExt: [] });
       case 'reimb-links': return send(demo.reimbLinks(req.query.id ? String(req.query.id) : undefined));
       default: {
-        return res.status(404).json({ error: 'Demo endpoint not found' });
+        return sendApiErrorCode(req, res, 'NOT_FOUND');
       }
     }
   };
 }
 
-function cached(key, fn, ttl = 300) {
+function invalidateHttpCache() {
+  actualCoordinator.invalidateGeneration();
+}
+
+// Generation-bound keys are filled via cachedActual and must never be evicted with
+// plain cache.del — always use invalidateActualProjection so generation advances.
+// Local keys (rules, manual-assets, investments) use cachedLocal / invalidateLocalCache.
+function invalidateActualProjection(...keys) {
+  const list = keys.flat().filter(Boolean);
+  actualCoordinator.invalidateGeneration(list.length > 0 ? { keys: list } : {});
+}
+
+// Sidecar writes that change Actual-derived HTTP projections must hold the
+// coordinator write lane through persistence and invalidation so overlapping
+// cachedActual fills cannot publish under a post-mutation generation while the
+// sidecar is still pre-mutation.
+function runActualProjectionMutation(task, ...keys) {
+  const list = keys.flat().filter(Boolean);
+  const label = list.length > 0 ? list.join(',') : 'all';
+  return actualCoordinator.runWrite(async () => {
+    try {
+      return await task();
+    } finally {
+      // Sidecar persistence may succeed before journal local_applied throws
+      // (OUTCOME_UNKNOWN). Invalidate so cachedActual cannot serve pre-mutation
+      // projections after durable sidecar writes. Pre-effect task errors are
+      // safe to invalidate — no durable mutation occurred.
+      if (list.length > 0) invalidateActualProjection(...list);
+      else invalidateActualProjection();
+    }
+  }, { invalidateBefore: false, label: `projection:${label}` });
+}
+
+function invalidateLocalCache(...keys) {
+  const list = keys.flat().filter(Boolean);
+  if (list.length === 0) cache.flushAll();
+  else cache.del(list);
+}
+
+function cachedLocal(key, fn, ttl = 300) {
   const hit = cache.get(key);
   if (hit !== undefined) return Promise.resolve(hit);
-  return fn().then(d => { cache.set(key, d, ttl); return d; });
+  return fn().then((value) => {
+    cache.set(key, value, ttl);
+    return value;
+  });
+}
+
+function cachedActual(key, fn, ttl = 300) {
+  return actualCoordinator.cachedRead(key, fn, ttl);
+}
+
+function publicReviewInbox(inbox) {
+  if (!inbox || typeof inbox !== 'object') return inbox;
+  const { _allTasks, _maintenance, ...rest } = inbox;
+  return rest;
+}
+
+async function loadReviewInbox(req) {
+  const month = monthOf(req);
+  const inbox = await cachedActual(
+    `review-${month || 'current'}`,
+    () => data.getReview({ month }),
+    120,
+  );
+  const maintenance = inbox._maintenance;
+  if (maintenance?.expiredSnoozeKeys?.length) {
+    await actualCoordinator.runWrite(
+      () => data.persistReviewStateMaintenance({
+        expectedRevision: maintenance.expectedRevision,
+        expiredSnoozeKeys: maintenance.expiredSnoozeKeys,
+      }),
+      { label: 'review:maintenance' },
+    );
+  }
+  return publicReviewInbox(inbox);
 }
 
 // Hot cache keys the app + dashboard hit on load. Keys MUST match the strings the
@@ -438,43 +715,54 @@ function cached(key, fn, ttl = 300) {
 // request to recompute the heavy 18-month aggregations from scratch.
 const WARM_TARGETS = [
   { key: 'accounts', ttl: 300, fn: () => data.getAccounts() },
-  { key: 'spending-current', ttl: 180, fn: () => data.getSpending({ month: undefined }) },
-  { key: 'trends-12', ttl: 600, fn: () => data.getTrends({ months: 12 }) },
-  { key: 'trends-60', ttl: 600, fn: () => data.getTrends({ months: 60 }) },
-  { key: 'recurring-18', ttl: 600, fn: () => data.getRecurring({ window: 18 }) },
-  { key: 'income-12', ttl: 600, fn: () => data.getIncome({ window: 12 }) },
-  { key: 'bills-45', ttl: 600, fn: () => data.getBills({ days: 45 }) },
-  { key: 'reimb-d-d-false', ttl: 300, fn: () => data.getReimbursement({}) },
+  { key: buildQueryCacheFingerprint({ kind: 'spending', month: 'current', start: '', end: '', ...queryFingerprintBase() }), ttl: 180, fn: () => data.getSpending({ month: undefined }) },
+  { key: buildQueryCacheFingerprint({ kind: 'trends', months: 12, endMonth: 'current', ...queryFingerprintBase() }), ttl: 600, fn: () => data.getTrends({ months: 12 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'trends', months: 60, endMonth: 'current', ...queryFingerprintBase() }), ttl: 600, fn: () => data.getTrends({ months: 60 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'recurring', window: 18, ...queryFingerprintBase() }), ttl: 600, fn: () => data.getRecurring({ window: 18 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'income', window: 12, ...queryFingerprintBase() }), ttl: 600, fn: () => data.getIncome({ window: 12 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'bills', days: 45, ...queryFingerprintBase() }), ttl: 600, fn: () => data.getBills({ days: 45 }) },
+  { key: buildQueryCacheFingerprint({ kind: 'reimb', from: 'd', to: 'd', openOnly: false, ...queryFingerprintBase() }), ttl: 300, fn: () => data.getReimbursement({}) },
   { key: 'categories', ttl: 300, fn: () => data.getCategories() },
 ];
+
 async function warmCache() {
-  await Promise.allSettled(
-    WARM_TARGETS.map(async ({ key, ttl, fn }) => {
-      try {
-        cache.set(key, await fn(), ttl);
-      } catch (e) {
-        console.error(`warmCache ${key} failed:`, e.message);
-      }
-    })
-  );
+  for (const { key, ttl, fn } of WARM_TARGETS) {
+    try {
+      await cachedActual(key, fn, ttl);
+    } catch (e) {
+      console.error(`warmCache ${key} failed:`, e.message);
+    }
+  }
 }
 
 // Session-only gate for the web app + static assets. /api/v1/* runs its own
 // (session-OR-token) auth below so native clients can use a bearer token.
 app.use((req, res, next) => {
-  if (req.path.startsWith('/login') || req.path.startsWith('/auth/') || req.path.startsWith('/api/v1')) return next();
+  if (
+    req.path === '/demo'
+    || req.path.startsWith('/login')
+    || req.path.startsWith('/auth/')
+    || isVersionedApiPath(req.path)
+    || isPublicBrowserAsset(req.path)
+  ) return next();
   requireAuth(req, res, next);
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.get('/demo', (req, res) => sendBrowserAsset(req, res, browserAssetInventory, 'index.html'));
+app.get('/', (req, res) => sendBrowserAsset(req, res, browserAssetInventory, 'index.html'));
+app.use(createBrowserStaticMiddleware({ inventory: browserAssetInventory }));
 
 // Demo mode for the legacy web API (runs after the passkey gate above).
+app.use((req, res, next) => isVersionedApiPath(req.path)
+  ? next()
+  : validateLegacyMutationBoundary(req, res, next));
 app.use(demoMiddleware(false));
 
 // ---- Endpoint resolvers (shared by legacy /api and versioned /api/v1) -------
 const monthOf = (req) => req.query.month;
 const resolvers = {
-  accounts: () => cached('accounts', () => data.getAccounts()),
+  accounts: () => cachedActual('accounts', () => data.getAccounts()),
+  today: () => cachedActual('today', () => data.getToday(), 30),
   transactions: (req) => {
     const { accountId, start, end, category, bucket } = req.query;
     const budgetOnly = req.query.budgetOnly === '1' || req.query.budgetOnly === 'true';
@@ -482,347 +770,668 @@ const resolvers = {
     const today = todayYMD();
     const startDate = start || `${today.slice(0, 7)}-01`;
     const endDate = end || today;
-    const key = `txns-${accountId || 'all'}-${startDate}-${endDate}-${category || 'all'}-${bucket || 'none'}-${budgetOnly ? 'budget' : 'all'}-${collapse ? 'c' : 'x'}`;
-    return cached(key, () => data.getTransactions({ accountId, start: startDate, end: endDate, category, bucket, budgetOnly, collapse }), 120);
+    const key = buildQueryCacheFingerprint({
+      kind: 'txns',
+      accountId: accountId || 'all',
+      startDate,
+      endDate,
+      category: category || 'all',
+      bucket: bucket || 'none',
+      budgetOnly: budgetOnly ? 'budget' : 'all',
+      collapse: collapse ? 'c' : 'x',
+      ...queryFingerprintBase(),
+    });
+    return cachedActual(key, () => data.getTransactions({ accountId, start: startDate, end: endDate, category, bucket, budgetOnly, collapse }), 120);
   },
   txnById: (req) => {
     const { id } = req.params;
     const { accountId, date } = req.query;
-    return data.getTransactionById({ id, accountId, date });
+    return actualCoordinator.runRead(() => data.getTransactionById({ id, accountId, date }), { label: 'txnById' });
   },
   merchantHistory: (req) => {
     const { payee, months } = req.query;
-    return cached(`mhist-${(payee || '').toLowerCase()}-${months || 12}`, () => data.getMerchantHistory({ payee, months: months ? Number(months) : 12 }), 180);
+    const span = months ? Number(months) : 12;
+    const key = buildQueryCacheFingerprint({ kind: 'mhist', payee: (payee || '').toLowerCase(), months: span, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getMerchantHistory({ payee, months: span }), 180);
   },
   spending: (req) => {
     const start = req.query.start ? String(req.query.start) : undefined;
     const end = req.query.end ? String(req.query.end) : undefined;
-    const key = start && end ? `spending-${start}-${end}` : `spending-${monthOf(req) || 'current'}`;
-    return cached(key, () => data.getSpending({ month: monthOf(req), start, end }), 180);
+    const key = buildQueryCacheFingerprint({
+      kind: 'spending',
+      month: monthOf(req) || 'current',
+      start: start || '',
+      end: end || '',
+      ...queryFingerprintBase(),
+    });
+    return cachedActual(key, () => data.getSpending({ month: monthOf(req), start, end }), 180);
   },
   trends: (req) => {
     const months = Math.min(60, Math.max(3, parseInt(req.query.months, 10) || 12));
-    return cached(`trends-${months}`, () => data.getTrends({ months }), 600);
+    const endMonth = req.query.endMonth ? String(req.query.endMonth) : '';
+    const key = buildQueryCacheFingerprint({ kind: 'trends', months, endMonth: endMonth || 'current', ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getTrends({ months, endMonth: endMonth || undefined }), 600);
   },
-  budgets: (req) => cached(`budgets-${monthOf(req) || 'current'}`, () => data.getBudgets({ month: monthOf(req) }), 300),
+  budgets: (req) => cachedActual(`budgets-${monthOf(req) || 'current'}`, () => data.getBudgets({ month: monthOf(req) }), 300),
   reimbursement: (req) => {
     const { from, to } = req.query;
     const openOnly = req.query.openOnly === '1' || req.query.openOnly === 'true';
-    return cached(`reimb-${from || 'd'}-${to || 'd'}-${openOnly}`, () => data.getReimbursement({ from, to, openOnly }), 300);
+    const key = buildQueryCacheFingerprint({ kind: 'reimb', from: from || 'd', to: to || 'd', openOnly, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getReimbursement({ from, to, openOnly }), 300);
   },
-  review: (req) => cached(`review-${monthOf(req) || 'current'}`, () => data.getReview({ month: monthOf(req) }), 120),
-  reimbursementLedger: (req) => cached(`reimb-ledger-${monthOf(req) || 'current'}`, () => data.getReimbursementLedger({ month: monthOf(req) }), 180),
+  review: (req) => loadReviewInbox(req),
+  reimbursementLedger: (req) => cachedActual(`reimb-ledger-${monthOf(req) || 'current'}`, () => data.getReimbursementLedger({ month: monthOf(req) }), 180),
   repaymentSuggestions: (req) => {
     const { from, to } = req.query;
-    return cached(`reimb-suggest-${from || 'd'}-${to || 'd'}`, () => data.suggestRepayments({ from, to }), 120);
+    const key = buildQueryCacheFingerprint({
+      kind: 'reimb-suggest',
+      from: from || 'd',
+      to: to || 'd',
+      ...queryFingerprintBase(),
+    });
+    return cachedActual(key, () => data.suggestRepayments({ from, to }), 120);
   },
-  insights: (req) => cached(`insights-${monthOf(req) || 'current'}`, () => data.getInsights({ month: monthOf(req) }), 300),
-  categories: () => cached('categories', () => data.getCategories()),
+  insights: (req) => cachedActual(`insights-${monthOf(req) || 'current'}`, () => data.getInsights({ month: monthOf(req) }), 300),
+  categories: () => cachedActual('categories', () => data.getCategories()),
   recurring: (req) => {
     const window = Math.min(36, Math.max(6, parseInt(req.query.window, 10) || 18));
     if (req.query.debug === '1') return data.getRecurring({ window, debug: true, minDates: Math.max(1, parseInt(req.query.minDates, 10) || 3) });
-    return cached(`recurring-${window}`, () => data.getRecurring({ window }), 600);
+    const key = buildQueryCacheFingerprint({ kind: 'recurring', window, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getRecurring({ window }), 600);
   },
   bills: (req) => {
     const days = Math.min(120, Math.max(7, parseInt(req.query.days, 10) || 45));
-    return cached(`bills-${days}`, () => data.getBills({ days }), 600);
+    const key = buildQueryCacheFingerprint({ kind: 'bills', days, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getBills({ days }), 600);
   },
   forecast: (req) => {
     const days = Math.min(180, Math.max(30, parseInt(req.query.days, 10) || 90));
-    return cached(`forecast-${days}`, () => data.getForecast({ days }), 300);
+    const key = buildQueryCacheFingerprint({ kind: 'forecast', days, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getForecast({ days }), 300);
   },
   income: (req) => {
     const window = Math.min(24, Math.max(6, parseInt(req.query.window, 10) || 12));
-    return cached(`income-${window}`, () => data.getIncome({ window }), 600);
+    const key = buildQueryCacheFingerprint({ kind: 'income', window, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getIncome({ window }), 600);
   },
   search: (req) => {
     const q = (req.query.q || '').toString();
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
-    const { start, end } = req.query;
-    return cached(`search-${q}-${start || ''}-${end || ''}-${limit}`, () => data.searchTransactions({ q, start, end, limit }), 120);
+    const { start, end, cursor } = req.query;
+    const key = buildQueryCacheFingerprint({
+      kind: 'search',
+      q,
+      start: start || '',
+      end: end || '',
+      limit,
+      cursor: cursor || '',
+      generation: actualCoordinator.generation,
+      ...queryFingerprintBase(),
+    });
+    return cachedActual(key, () => data.searchTransactions({ q, start, end, limit, cursor }), 120);
   },
-  goals: () => cached('goals', () => data.getGoals(), 120),
-  tags: () => cached('tags', () => data.getTags(), 120),
-  rules: () => cached('rules', () => Promise.resolve({ ...data.getRules(), catalog: data.getCatalogDisplay() }), 120),
-  manualAssets: () => cached('manual-assets', () => Promise.resolve(data.getManualAssets()), 120),
-  investments: () => cached('investments', () => Promise.resolve(data.getInvestments()), 120),
-  reports: (req) => cached(`reports-${monthOf(req) || 'current'}`, () => data.getReports({ month: monthOf(req) }), 300),
+  goals: () => cachedActual('goals', () => data.getGoals(), 120),
+  tags: (req) => {
+    const start = req.query.start ? String(req.query.start) : '';
+    const end = req.query.end ? String(req.query.end) : '';
+    const key = buildQueryCacheFingerprint({ kind: 'tags', start, end, ...queryFingerprintBase() });
+    return cachedActual(key, () => data.getTags({ start: start || undefined, end: end || undefined }), 120);
+  },
+  rules: () => cachedLocal('rules', () => Promise.resolve({ ...data.getRules(), catalog: data.getCatalogDisplay() }), 120),
+  manualAssets: () => cachedLocal('manual-assets', () => Promise.resolve(data.getManualAssets()), 120),
+  investments: () => cachedLocal('investments', () => Promise.resolve(data.getInvestments()), 120),
+  reports: (req) => cachedActual(`reports-${monthOf(req) || 'current'}`, () => data.getReports({ month: monthOf(req) }), 300),
 };
 
-async function setRecurring(req) {
-  const { key } = parse(schemas.keyParam, req.params, 'recurring key');
-  const { status, hidden, forced, isBill, cancellation } = parse(schemas.recurringOverride, req.body, 'recurring override');
-  const result = data.setRecurringOverride({ key, status, hidden, forced, isBill, cancellation });
-  cache.flushAll();
-  return result;
+const applyLocal = (operation, mutation) => operation
+  ? operation.applyLocal(mutation)
+  : mutation();
+const syncAfterLocal = (operation) => operation
+  ? operation.sync(() => data.syncNow())
+  : data.syncNow();
+
+async function finalizeBulkMutation(operation, mutate, { kind } = {}) {
+  if (operation?.key && operation?.journalBinding?.fingerprint) {
+    data.assertBulkOperationJournalAdmission({
+      operationKey: operation.key,
+      journalBinding: { ...operation.journalBinding, kind },
+      kind,
+    });
+  }
+  const localResult = await applyLocal(operation, mutate);
+  if (localResult?.needsSync) {
+    await syncAfterLocal(operation);
+  }
+  invalidateHttpCache();
+  if (!operation?.key) return localResult;
+  return data.getBulkOperationResult(operation.key) || localResult;
 }
-async function markRecurring(req) {
-  const { payee, isBill } = parse(schemas.markRecurring, req.body, 'recurring merchant');
-  const result = data.markRecurring({ payee, isBill });
-  cache.flushAll();
-  return result;
+
+async function setRecurring(req, operation) {
+  const { key, status, hidden, forced, isBill, categoryId, cancellation } = parseRecurringOverrideRequest(req);
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () =>
+      data.setRecurringOverride({ key, status, hidden, forced, isBill, categoryId, cancellation })),
+  );
 }
-async function splitTxn(req) {
+async function markRecurring(req, operation) {
+  const { payee, isBill } = parse(schemas.markRecurring, req.body, 'recurring mark');
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.markRecurring({ payee, isBill })),
+  );
+}
+async function splitTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date, legs } = parse(schemas.splitTransaction, req.body, 'transaction split');
-  const result = await data.splitTransaction({ id, accountId, date, legs });
-  await data.syncNow();
-  cache.flushAll();
+  data.assertTransactionMutationAvailable({
+    ids: [id, ...legs.map((leg) => leg.id).filter(Boolean)],
+  });
+  const result = await applyLocal(operation, () => data.splitTransaction({ id, accountId, date, legs }));
+  await syncAfterLocal(operation);
+  invalidateHttpCache();
   return result;
 }
-async function unsplitTxn(req) {
+async function unsplitTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
-  const { accountId, date, categoryId } = parse(schemas.unsplitTransaction, req.body, 'remove split');
-  const result = await data.removeSplit({ id, accountId, date, categoryId });
-  await data.syncNow();
-  cache.flushAll();
+  const { accountId, date, categoryId } = parse(schemas.unsplitTransaction, req.body, 'transaction unsplit');
+  data.assertTransactionMutationAvailable({ ids: [id] });
+  const result = await applyLocal(operation, () => data.removeSplit({ id, accountId, date, categoryId }));
+  await syncAfterLocal(operation);
+  invalidateHttpCache();
   return result;
 }
-async function setPayeeH(req) {
+async function setPayeeH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
-  const { payee, isLeg, parentId, accountId, date } = parse(schemas.setPayee, req.body, 'transaction payee');
-  const result = await data.setPayee({ id, payee, isLeg, parentId, accountId, date });
-  await data.syncNow();
-  cache.flushAll();
+  const { payee, isLeg, parentId, accountId, date } = parse(schemas.setPayee, req.body, 'payee update');
+  data.assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
+  const result = await applyLocal(operation, () =>
+    data.setPayee({ id, payee, isLeg, parentId, accountId, date }));
+  await syncAfterLocal(operation);
+  invalidateHttpCache();
   return result;
 }
-async function bankSyncH() {
-  const result = await data.bankSync();
+async function bankSyncH(_req, operation) {
+  let result;
+  if (operation) {
+    // There is no pre-sync domain write for this action. Advance through a
+    // durable no-op local checkpoint so sync_unknown precedes runBankSync too.
+    operation.localApplied({ ok: true, bankSyncPending: true });
+    await operation.sync(async () => {
+      result = await data.bankSync({ throwOnBankError: true });
+    });
+  } else {
+    result = await data.bankSync();
+  }
   if (!result.ok) {
-    cache.flushAll();
+    invalidateHttpCache();
     return { ...result, phantom: { skipped: true, reason: 'bank sync did not complete' } };
   }
-  await data.applyRules(); // categorize anything newly pulled
-  await data.sweepReimbursementTags(); // file configured reimbursement tags into Reimbursement
-  const phantom = await data.cleanupPhantoms();
-  await data.syncNow(); // persist any phantom deletes to the Actual server
-  cache.flushAll();
-  return { ...result, phantom };
+  const phantom = await data.cleanupPhantoms({ dryRun: true });
+  invalidateHttpCache();
+  return {
+    ...result,
+    phantom,
+    automation: {
+      applied: false,
+      reason: 'bank sync imports data only; categorization and cleanup require explicit confirmation',
+    },
+  };
 }
-async function phantomCleanupH(req) {
-  const query = parse(schemas.phantomCleanupQuery, req.query, 'phantom cleanup query');
+async function phantomCleanupH(req, operation) {
+  const query = parsePhantomCleanupRequest(req);
   const dryRun = query.dryRun === '1' || query.dryRun === 'true';
-  const r = await data.cleanupPhantoms({
-    dryRun,
+  if (dryRun) {
+    return applyLocal(operation, () => data.cleanupPhantoms({
+      dryRun: true,
+      window: query.window,
+      agedDays: query.agedDays,
+      observeDays: query.observeDays,
+      holdAgedDays: query.holdAgedDays,
+      holdObserveDays: query.holdObserveDays,
+    }));
+  }
+  return finalizeBulkMutation(operation, () => data.cleanupPhantoms({
     window: query.window,
     agedDays: query.agedDays,
     observeDays: query.observeDays,
     holdAgedDays: query.holdAgedDays,
     holdObserveDays: query.holdObserveDays,
-  });
-  if (!dryRun) { await data.syncNow(); cache.flushAll(); }
-  return r;
+    operationKey: operation.key,
+    journalBinding: operation.journalBinding,
+  }), { kind: 'phantom_cleanup' });
 }
 const phantomLogH = (req) => Promise.resolve(data.getPhantomLog({ limit: Number(req.query.limit) || 100 }));
 // Receipts
-async function addReceiptH(req) {
-  const receipt = parse(schemas.receipt, req.body, 'receipt');
-  await data.getTransactionById({ id: receipt.txnId, accountId: receipt.accountId, date: receipt.transactionDate });
-  return data.addReceipt(receipt);
+async function addReceiptH(req, operation) {
+  const receipt = parseReceiptRequest(req);
+  data.assertTransactionMutationAvailable({
+    ids: [receipt.txnId],
+  });
+  try {
+    await data.getTransactionById({
+      id: receipt.txnId,
+      accountId: receipt.accountId,
+      date: receipt.transactionDate,
+    });
+  } catch (error) {
+    if (operation && error instanceof AccountNotFoundError) {
+      throw new KnownPreApplyError('Account not found', {
+        code: 'ACCOUNT_NOT_FOUND',
+        status: 404,
+        cause: error,
+      });
+    }
+    if (operation && error instanceof TransactionNotFoundError) {
+      throw new KnownPreApplyError('Transaction not found', {
+        code: 'TRANSACTION_NOT_FOUND',
+        status: 404,
+        cause: error,
+      });
+    }
+    throw error;
+  }
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.addReceipt(receipt)),
+    'today', 'review-current',
+  );
 }
 const receiptsH = (req) => Promise.resolve(data.getReceipts({ txnId: req.query.txnId }));
-async function deleteReceiptH(req) {
+async function deleteReceiptH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'receipt id');
-  return data.deleteReceipt({ id });
+  data.assertReceiptMutationAvailable({ id });
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteReceipt({ id })),
+    'today', 'review-current',
+  );
 }
 // Raw image stream (auth already enforced by the router). expo-image sends the
 // token via headers, so this just serves the file bytes with the right type.
-function receiptImageH(req, res) {
+async function receiptImageH(req, res) {
   try {
-    const f = data.getReceiptFile({ id: req.params.id });
-    if (!f) return res.status(404).json({ error: 'not found' });
-    const mime = String(f.mime || '').toLowerCase();
-    const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
-    if (!allowed.has(mime)) return res.status(415).json({ error: 'unsupported receipt image type' });
-    res.type(mime);
-    res.setHeader('Content-Disposition', 'inline; filename="receipt-image"');
-    res.setHeader('Cache-Control', 'private, max-age=86400');
-    return res.sendFile(f.path);
-  } catch (e) { return sendApiError(req, res, e); }
+    await withReadAdmission(req, res, actualCoordinator, async () => {
+      const f = await Promise.resolve(data.getReceiptFile({ id: req.params.id }));
+      if (!f) {
+        sendApiErrorCode(req, res, 'NOT_FOUND');
+        return;
+      }
+      const mime = String(f.mime || '').toLowerCase();
+      const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
+      if (!allowed.has(mime)) {
+        sendApiError(req, res, new AppError('unsupported receipt image type', {
+          code: 'UNSUPPORTED_MEDIA_TYPE',
+          status: 415,
+          expose: true,
+        }));
+        return;
+      }
+      res.type(mime);
+      res.setHeader('Content-Disposition', 'inline; filename="receipt-image"');
+      res.setHeader('Cache-Control', 'private, max-age=86400');
+      await new Promise((resolve, reject) => {
+        res.sendFile(f.path, (error) => (error ? reject(error) : resolve()));
+      });
+    }, { admission: requestAdmission });
+  } catch (e) {
+    if (!res.headersSent) return sendApiError(req, res, e);
+  }
 }
-async function sweepReimbH(req) {
+async function sweepReimbH(req, operation) {
   const { tags, from, to } = parse(schemas.reimbursementSweep, req.body, 'reimbursement sweep');
-  const result = await data.sweepReimbursementTags({ tags, from, to });
-  await data.syncNow();
-  cache.flushAll();
+  const result = await applyLocal(operation, () => data.sweepReimbursementTags({ tags, from, to }));
+  await syncAfterLocal(operation);
+  invalidateHttpCache();
   return result;
 }
-async function deleteTxn(req) {
+async function deleteTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date } = parse(schemas.deleteTransactionQuery, req.query, 'transaction delete query');
-  const result = await data.deleteTransaction({ id, accountId, date });
-  await data.syncNow(); // persist the delete back to the Actual server
-  cache.flushAll(); // removing a transaction shifts balances/spending/insights
+  data.assertTransactionMutationAvailable({ ids: [id] });
+  const result = await applyLocal(operation, () => data.deleteTransaction({ id, accountId, date }));
+  await syncAfterLocal(operation); // persist the delete back to the Actual server
+  invalidateHttpCache(); // removing a transaction shifts balances/spending/insights
   return result;
 }
-async function saveRuleH(req) {
-  const result = await data.saveRule(parse(schemas.rule, req.body, 'categorization rule'));
-  cache.flushAll();
-  return result;
+async function saveRuleH(req, operation) {
+  const rule = parse(schemas.rule, req.body, 'categorization rule');
+  return finalizeBulkMutation(operation, () => data.saveRule(rule, {
+    sync: false,
+    operationKey: operation.key,
+    journalBinding: operation.journalBinding,
+  }), { kind: 'rules_save' });
 }
-async function deleteRuleH(req) {
+async function deleteRuleH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'rule id');
-  const result = data.deleteRule({ id });
-  cache.flushAll();
+  const result = await applyLocal(operation, () => data.deleteRule({ id }));
+  invalidateLocalCache('rules');
   return result;
 }
-async function applyRulesH() {
-  const result = await data.applyRules();
-  cache.flushAll();
-  return result;
+async function applyRulesH(_req, operation) {
+  return finalizeBulkMutation(operation, () => data.applyRules({
+    sync: false,
+    operationKey: operation.key,
+    journalBinding: operation.journalBinding,
+  }), { kind: 'rules_apply' });
 }
-async function syncSharesH() {
-  const result = await data.syncSplitwiseShareExpenses();
-  cache.flushAll();
-  return result;
+async function syncSharesH(_req, operation) {
+  await data.preflightSplitwiseMirrorShareSync();
+  return finalizeBulkMutation(operation, () => data.syncSplitwiseShareExpenses({
+    sync: false,
+    operationKey: operation.key,
+    journalBinding: { ...operation.journalBinding, kind: 'splitwise_mirror' },
+  }), { kind: 'splitwise_mirror' });
 }
 async function eventsH() {
-  return cached('events', () => data.getEvents(), 60);
+  return cachedActual('events', () => data.getEvents(), 60);
 }
-async function saveEventH(req) {
-  const result = data.saveEvent(parse(schemas.event, req.body, 'event'));
-  cache.del('events');
-  return result;
+async function saveEventH(req, operation) {
+  const event = parse(schemas.event, req.body, 'event');
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.saveEvent(event)),
+    'events',
+  );
 }
-async function deleteEventH(req) {
+async function deleteEventH(req, operation) {
   const { slug } = parse(schemas.slugParam, req.params, 'event slug');
-  const result = data.deleteEvent({ slug });
-  cache.del('events');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteEvent({ slug })),
+    'events',
+  );
 }
-async function setAccountOverrideH(req) {
+async function setAccountOverrideH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'account id');
-  const { name, hidden } = parse(schemas.accountOverride, req.body, 'account override');
-  const result = data.setAccountOverride({ id, name, hidden });
-  cache.del('accounts');
+  const body = parse(schemas.accountOverride, req.body, 'account override');
+  const {
+    name,
+    hidden,
+    role,
+    creditLiabilityCoverage,
+    paymentRecurringKey,
+    fundingAccountId,
+    statement,
+    clearCreditLiability,
+  } = body;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setAccountOverride({
+      id,
+      name,
+      hidden,
+      role,
+      creditLiabilityCoverage,
+      paymentRecurringKey,
+      fundingAccountId,
+      statement,
+      clearCreditLiability,
+    })),
+    'accounts', 'today', 'forecast', 'trends', 'spending', 'goals', 'review', 'reports', 'insights',
+  );
+}
+async function setReviewDispositionH(req, operation) {
+  const disposition = parse(schemas.reviewDisposition, req.body, 'review disposition');
+  return runActualProjectionMutation(async () => {
+    const admission = await data.prepareReviewDispositionAdmission(disposition);
+    return applyLocal(operation, () => data.commitReviewDisposition(admission));
+  }, 'today', 'review-current');
+}
+async function saveManualAssetH(req, operation) {
+  const asset = parse(schemas.manualAsset, req.body, 'manual asset');
+  const result = await applyLocal(operation, () => data.saveManualAsset(asset));
+  invalidateLocalCache('manual-assets');
   return result;
 }
-async function saveManualAssetH(req) {
-  const result = data.saveManualAsset(parse(schemas.manualAsset, req.body, 'manual asset'));
-  cache.del('manual-assets');
-  return result;
-}
-async function deleteManualAssetH(req) {
+async function deleteManualAssetH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'manual asset id');
-  const result = data.deleteManualAsset({ id });
-  cache.del('manual-assets');
+  const result = await applyLocal(operation, () => data.deleteManualAsset({ id }));
+  invalidateLocalCache('manual-assets');
   return result;
 }
-async function setNotes(req) {
+async function setNotes(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
-  const { notes, isLeg, parentId, accountId, date } = parse(schemas.setNotes, req.body, 'transaction notes');
-  const result = await data.setTransactionNotes({ id, notes, isLeg, parentId, accountId, date });
-  await data.syncNow();
-  cache.flushAll();
+  const { notes, isLeg, parentId, accountId, date } = parse(schemas.setNotes, req.body, 'notes update');
+  data.assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
+  const result = await applyLocal(operation, () =>
+    data.setTransactionNotes({ id, notes, isLeg, parentId, accountId, date }));
+  await syncAfterLocal(operation);
+  invalidateHttpCache();
   return result;
 }
-async function setDateH(req) {
+async function setDateH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
-  const { date, isLeg } = parse(schemas.setDate, req.body, 'transaction date');
-  const result = await data.setTransactionDate({ id, date, isLeg });
-  await data.syncNow();
-  cache.flushAll();
+  const { date, isLeg } = parse(schemas.setDate, req.body, 'date update');
+  data.assertTransactionMutationAvailable({ ids: [id] });
+  const result = await applyLocal(operation, () => data.setTransactionDate({ id, date, isLeg }));
+  await syncAfterLocal(operation);
+  invalidateHttpCache();
   return result;
 }
-async function saveGoal(req) {
-  const result = data.saveGoal(parse(schemas.goal, req.body, 'goal'));
-  cache.del('goals');
-  return result;
+async function saveGoal(req, operation) {
+  const goal = parse(schemas.goal, req.body, 'goal');
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.saveGoal(goal)),
+    'goals', 'today',
+  );
 }
-async function deleteGoal(req) {
+async function deleteGoal(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'goal id');
-  const result = data.deleteGoal(id);
-  cache.del('goals');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteGoal(id)),
+    'goals', 'today',
+  );
 }
 
-async function setCategory(req) {
+async function setCategory(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
-  const { categoryId, isLeg, parentId, accountId, date } = parse(schemas.setCategory, req.body, 'transaction category');
-  const result = await data.setTransactionCategory({ id, categoryId, isLeg, parentId, accountId, date });
-  await data.syncNow(); // persist the write back to the Actual server
-  cache.flushAll();
+  const { categoryId, isLeg, parentId, accountId, date } = parse(schemas.setCategory, req.body, 'category update');
+  data.assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
+  const result = await applyLocal(operation, () =>
+    data.setTransactionCategory({ id, categoryId, isLeg, parentId, accountId, date }));
+  await syncAfterLocal(operation); // persist the write back to the Actual server
+  invalidateHttpCache();
   return result;
 }
 // Manual refresh: pull the latest deltas from the Actual server, clear stale
 // HTTP cache, then immediately re-warm the hot keys so the UI repopulates fast.
-async function doRefresh() {
-  await data.syncNow();
-  // A pending split that posted at a new amount: absorb the delta into its master leg.
+async function doRefresh(operation) {
+  // Refresh has no domain mutation. A durable no-op local checkpoint still
+  // precedes sync so a crash or timeout cannot cause an automatic second sync.
+  if (operation) operation.localApplied({ ok: true, refreshPending: true });
+  await syncAfterLocal(operation);
+  // Detect split deltas without changing the user's allocation.
   const splits = await data.reconcileSplits();
-  // Auto-categorize any newly-pulled transactions that match a saved rule.
-  const rules = await data.applyRules();
-  // Mirror my share of friend-paid Splitwise items into the spend ledger.
-  const splitwise = await data.syncSplitwiseShareExpenses();
-  cache.flushAll();
+  const phantom = await data.cleanupPhantoms({ dryRun: true });
   await warmCache();
-  return { ok: true, splits, rules, splitwise };
+  return {
+    ok: true,
+    splits,
+    phantom,
+    automation: {
+      applied: false,
+      reason: 'refresh is read-only; financial mutations require explicit endpoints',
+    },
+  };
 }
 
-async function markBill(req) {
+async function markBill(req, operation) {
   const { id, key, dueDate, paid } = parse(schemas.markBill, req.body, 'bill state');
-  const result = data.setBillPaid({ id, key, dueDate, paid });
-  cache.flushAll(); // bills are cached per horizon
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setBillPaid({ id, key, dueDate, paid })),
+  );
+}
+
+async function setOwes(req, operation) {
+  const config = parse(schemas.owesConfig, req.body, 'reimbursement configuration');
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setOwesConfig(config)),
+  );
+}
+
+async function createTxn(req, operation) {
+  const transaction = parse(schemas.createTransaction, req.body, 'transaction');
+  const result = await applyLocal(operation, () => data.createTransaction(transaction, { sync: false }));
+  await syncAfterLocal(operation);
+  invalidateHttpCache(); // a new transaction shifts balances/spending/insights
   return result;
 }
 
-async function setOwes(req) {
-  const result = data.setOwesConfig(req.body || {});
-  cache.flushAll(); // reimbursement aggregations depend on this config
-  return result;
-}
-
-async function createTxn(req) {
-  const result = await data.createTransaction(parse(schemas.createTransaction, req.body, 'transaction'));
-  cache.flushAll(); // a new transaction shifts balances/spending/insights
-  return result;
-}
-
-async function setBudget(req) {
+async function setBudget(req, operation) {
   const { month, categoryId, amount } = parse(schemas.budget, req.body, 'budget amount');
-  const result = await data.setBudgetAmount({ month, categoryId, amount });
-  await data.syncNow(); // persist the write back to the Actual server
-  cache.flushAll(); // budget targets feed budgets + insights
+  const result = await applyLocal(operation, () => data.setBudgetAmount({ month, categoryId, amount }));
+  await syncAfterLocal(operation); // persist the write back to the Actual server
+  invalidateHttpCache(); // budget targets feed budgets + insights
   return result;
 }
 
-const reimbLinks = (req) => Promise.resolve(data.getReimbLinks({ id: req.query.id }));
-async function addLink(req) {
-  const r = data.addReimbLink(parse(schemas.reimbLink, req.body, 'reimbursement link'));
-  cache.flushAll(); // suggestions net against links
-  return r;
+const reimbLinks = (req) => data.getReimbLinks({ id: req.query.id });
+async function addLink(req, operation) {
+  const link = parse(schemas.reimbLink, req.body, 'reimbursement link');
+  data.assertTransactionMutationAvailable({ ids: [link.inflow?.id, link.expense?.id] });
+  if (operation?.key && operation?.journalBinding?.fingerprint) {
+    data.assertReimbursementLinkJournalAdmission({
+      operationKey: operation.key,
+      journalBinding: operation.journalBinding,
+      action: 'link',
+    });
+  }
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.addReimbLink({
+      ...link,
+      operationIdentity: operation?.key,
+      journalBinding: operation?.journalBinding,
+    })),
+  );
 }
-async function confirmRepaymentH(req) {
+async function confirmRepaymentH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'repayment id');
-  const r = await data.confirmRepayment({ id, from: req.query.from, to: req.query.to });
-  await data.syncNow(); // persist the inflow's new category to the Actual server
-  cache.flushAll();
+  const from = req.query.from;
+  const to = req.query.to;
+  data.assertTransactionMutationAvailable({ ids: [id.startsWith('sg_') ? id.slice(3) : null] });
+  if (operation?.key && operation?.journalBinding?.fingerprint) {
+    data.assertRepaymentConfirmationJournalAdmission({
+      operationKey: operation.key,
+      journalBinding: operation.journalBinding,
+    });
+  }
+  const admission = await data.validateRepaymentConfirmationAdmission({ id, from, to });
+  const r = await applyLocal(operation, () =>
+    data.confirmRepayment({
+      id,
+      from,
+      to,
+      operationIdentity: operation?.key,
+      journalBinding: operation?.journalBinding,
+      admission,
+    }));
+  await syncAfterLocal(operation); // persist the inflow's new category to the Actual server
+  invalidateHttpCache();
   return r;
 }
-async function dismissRepaymentH(req) {
+async function dismissRepaymentH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'repayment id');
   const inflowId = req.body?.inflowId == null
     ? undefined
     : parse(schemas.idParam, { id: req.body.inflowId }, 'repayment inflow id').id;
-  const r = data.dismissRepayment({ id, inflowId });
-  cache.flushAll();
-  return r;
+  data.assertTransactionMutationAvailable({
+    ids: [inflowId || (id.startsWith('sg_') ? id.slice(3) : null)],
+  });
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.dismissRepayment({ id, inflowId })),
+  );
 }
-async function delLink(req) {
+async function delLink(req, operation) {
   const inflowId = (req.body && req.body.inflowId) || req.query.inflowId;
   const expenseId = (req.body && req.body.expenseId) || req.query.expenseId;
-  const parsed = parse(schemas.deleteReimbLink, { inflowId, expenseId }, 'reimbursement unlink');
-  const r = data.deleteReimbLink(parsed);
-  cache.flushAll();
-  return r;
+  const expectedVersionRaw = (req.body && req.body.expectedVersion) ?? req.query.expectedVersion;
+  const parsed = parse(schemas.deleteReimbLink, {
+    inflowId,
+    expenseId,
+    ...(expectedVersionRaw != null && expectedVersionRaw !== ''
+      ? { expectedVersion: Number(expectedVersionRaw) }
+      : {}),
+  }, 'reimbursement unlink');
+  data.assertTransactionMutationAvailable({ ids: [parsed.inflowId, parsed.expenseId] });
+  if (operation?.key && operation?.journalBinding?.fingerprint) {
+    data.assertReimbursementLinkJournalAdmission({
+      operationKey: operation.key,
+      journalBinding: operation.journalBinding,
+      action: 'unlink',
+    });
+  }
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteReimbLink({
+      ...parsed,
+      operationIdentity: operation?.key,
+      journalBinding: operation?.journalBinding,
+    })),
+  );
 }
 
 // Reconciliation — read fresh (not cached) so checkboxes reflect instantly.
 const reconciliationH = (req) => data.getReconciliation({ month: monthOf(req) });
 const reconcilePendingH = () => data.getReconcilePending();
-const setReconItemH = (req) => Promise.resolve(data.setReconcileItem(parse(schemas.reconcileItem, req.body, 'reconciliation item')));
-const setReconMonthH = (req) => Promise.resolve(data.setReconcileMonth(parse(schemas.reconcileMonth, req.body, 'reconciliation month')));
-const setReconEnabledH = (req) => Promise.resolve(data.setReconcileEnabled(parse(schemas.reconcileEnabled, req.body, 'reconciliation setting')));
+const setReconItemH = (req, operation) => {
+  const item = parse(schemas.reconcileItem, req.body, 'reconciliation item');
+  data.assertTransactionMutationAvailable({ ids: [item.id] });
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setReconcileItem(item)),
+    'today', 'review-current',
+  );
+};
+const setReconMonthH = (req, operation) => {
+  const month = parse(schemas.reconcileMonth, req.body, 'reconciliation month');
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setReconcileMonth(month)),
+    'today', 'review-current',
+  );
+};
+const setReconEnabledH = (req, operation) => {
+  const setting = parse(schemas.reconcileEnabled, req.body, 'reconciliation setting');
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.setReconcileEnabled(setting)),
+    'today', 'review-current',
+  );
+};
+
+async function reimbursementExport(req, res) {
+  try {
+    await withReadAdmission(req, res, actualCoordinator, async () => {
+      const { from, to } = req.query;
+      const strict = req.query.strict === '1' || req.query.strict === 'true';
+      const format = String(req.query.format || 'json').toLowerCase();
+      const payload = await data.buildReimbursementExport({
+        from,
+        to,
+        strict,
+        releaseManifestPath: RELEASE_MANIFEST_PATH,
+      });
+      const exitCode = exportExitCode(payload);
+      if (format === 'csv') {
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="reimbursement-export.csv"');
+        res.send(formatReimbursementExportCsv(payload));
+        return;
+      }
+      if (format === 'human') {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.send(formatReimbursementExportHuman(payload));
+        return;
+      }
+      const isV1 = req.baseUrl === '/api/v1';
+      if (isV1) {
+        res.type('application/json').send(`${buildReimbursementExportV1Envelope(payload)}\n`);
+        return;
+      }
+      res.setHeader('X-Reimbursement-Export-Status', payload.completeness.status);
+      res.setHeader('X-Reimbursement-Export-Exit-Code', String(exitCode));
+      res.setHeader('X-Reimbursement-Export-Authoritative', String(payload.totals.authoritative));
+      res.type('application/json').send(stableStringify(payload));
+    }, { admission: requestAdmission });
+  } catch (e) { sendApiError(req, res, e); }
+}
 
 // Monthly CSV export (raw text/csv, used by web download + app share sheet).
 function csvEscape(v) {
@@ -831,49 +1440,153 @@ function csvEscape(v) {
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 async function reportCsv(req, res) {
+  const abort = createClientAbortSignal(req, res);
   try {
-    const rep = await data.getMonthlyReport({ month: req.query.month });
-    const net = Math.round((rep.summary.totalIncome - rep.summary.totalSpend) * 100) / 100;
-    const lines = [
-      `Monthly report,${rep.month}`,
-      `Total income,${rep.summary.totalIncome}`,
-      `Total spend,${rep.summary.totalSpend}`,
-      `Net,${net}`,
-      '',
-      'Date,Payee,Account,Category,Amount,Notes',
-    ];
-    for (const t of rep.transactions) {
-      lines.push([t.date, csvEscape(t.payee), csvEscape(t.account), csvEscape(t.category || ''), t.amount, csvEscape(t.notes || '')].join(','));
-    }
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="finance-${rep.month}.csv"`);
-    res.send(lines.join('\n'));
-  } catch (e) { sendApiError(req, res, e); }
+    let stats;
+    await runWithQueryInstrumentation(async (activeStats) => {
+      stats = activeStats;
+      await withReadAdmission(req, res, actualCoordinator, async () => {
+        const rep = await data.getMonthlyReport({ month: req.query.month });
+        const net = Math.round((rep.summary.totalIncome - rep.summary.totalSpend) * 100) / 100;
+        const lines = [
+          `Monthly report,${rep.month}`,
+          `Total income,${rep.summary.totalIncome}`,
+          `Total spend,${rep.summary.totalSpend}`,
+          `Net,${net}`,
+          '',
+          'Date,Payee,Account,Category,Amount,Notes',
+        ];
+        for (const t of rep.transactions) {
+          lines.push([t.date, csvEscape(t.payee), csvEscape(t.account), csvEscape(t.category || ''), t.amount, csvEscape(t.notes || '')].join(','));
+        }
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="finance-${rep.month}.csv"`);
+        res.send(lines.join('\n'));
+      }, { admission: requestAdmission, signal: abort.signal });
+    }, { signal: abort.signal });
+    attachQueryStatsHeaders(res, stats);
+  } catch (e) {
+    if (!res.headersSent) sendApiError(req, res, e);
+  } finally {
+    abort.dispose();
+  }
+}
+
+function isTestIdentityPing(req) {
+  return exposeTestServerInstanceId() != null
+    && req.method === 'GET'
+    && req.path === '/ping';
 }
 
 // Raw responders for the legacy web API; enveloped {data}/{error} responders for v1.
-function sendApiError(req, res, error) {
-  const classified = classifyError(error);
-  if (classified.status >= 500) {
-    console.error(`[request:${req.requestId}]`, (error && error.stack) || error);
+const runHandler = (req, res, fn, operation, { signal } = {}) => {
+  if (operation) return fn(req, operation);
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    return withMutationAdmission(req, res, operationJournal, mutationQueue, () => fn(req), {
+      isDemo,
+      admission: requestAdmission,
+    });
   }
-  const body = {
-    error: classified.expose ? classified.message : 'Request failed',
-    code: classified.code,
-    requestId: req.requestId,
-  };
-  if (error && Array.isArray(error.issues)) body.issues = error.issues;
-  return res.status(classified.status).json(body);
-}
-const runHandler = (req, fn) =>
-  ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)
-    ? mutationQueue.run(() => fn(req))
-    : fn(req);
-const raw = (fn) => async (req, res) => {
-  try { res.json(await runHandler(req, fn)); } catch (e) { sendApiError(req, res, e); }
+  if (isTestIdentityPing(req)) {
+    return fn(req);
+  }
+  return withReadAdmission(req, res, actualCoordinator, () => fn(req), { admission: requestAdmission, signal });
 };
-const env = (fn) => async (req, res) => {
-  try { res.json({ data: await runHandler(req, fn) }); } catch (e) { sendApiError(req, res, e); }
+async function executeReadWithQueryStats(req, res, fn) {
+  const abort = createClientAbortSignal(req, res);
+  let stats;
+  try {
+    const payload = await runWithQueryInstrumentation(async (activeStats) => {
+      stats = activeStats;
+      return runHandler(req, res, fn, undefined, { signal: abort.signal });
+    }, { signal: abort.signal });
+    return { payload, stats };
+  } finally {
+    abort.dispose();
+  }
+}
+const raw = (fn) => async (req, res) => {
+  try {
+    const { payload, stats } = await executeReadWithQueryStats(req, res, fn);
+    attachQueryStatsHeaders(res, stats);
+    res.json(payload);
+  } catch (e) {
+    if (!res.headersSent) sendApiError(req, res, e);
+  }
+};
+function operationJournalError(error, phase) {
+  runtimeHealth.fatalErrorAt = new Date().toISOString();
+  console.error(`[operation-journal:${phase}]`, error);
+}
+
+const terminalProofResolver = composeTerminalProofResolver([
+  (key, journalOperation) => data.proveBulkOperationJournalCompletion(key, journalOperation),
+  (key, journalOperation) => data.proveReimbursementLinkJournalCompletion(key, journalOperation),
+  (key, journalOperation) => data.proveRepaymentConfirmationJournalCompletion(key, journalOperation),
+]);
+
+async function readOperationStatus(req, res, key) {
+  return withOperationStatusAdmission(req, res, mutationQueue, () => reconcileOperationJournalFromProof(operationJournal, key, {
+    proofResolver: terminalProofResolver,
+    onJournalError: operationJournalError,
+  }), { admission: requestAdmission });
+}
+
+async function executeVersionedMutation(req, fn, mutationRoute) {
+  const idempotencyKey = req.get('Idempotency-Key');
+  return executeJournaledOperation({
+    journal: operationJournal,
+    key: idempotencyKey,
+    request: {
+      method: req.method,
+      path: `${req.baseUrl || ''}${req.path || ''}` || req.path,
+      url: req.originalUrl,
+      body: req.body,
+    },
+    preApplyValidate: () => validateVersionedMutationRequest(req),
+    handler: (operation) => fn(req, operation),
+    requiresCheckpoint: mutationRoute.requiresCheckpoint,
+    onJournalError: operationJournalError,
+    terminalProofResolver,
+  });
+}
+const env = (fn, mutationRoute = null) => async (req, res) => {
+  const mutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+  const versioned = isVersionedApiRequest(req);
+  try {
+    if (mutation && versioned && !isDemo(req)) {
+      if (!mutationRoute) {
+        throw new AppError('Versioned mutation route is missing lifecycle classification', {
+          code: 'MUTATION_LIFECYCLE_UNCLASSIFIED',
+          status: 500,
+          expose: true,
+        });
+      }
+      const execution = await withMutationAdmission(
+        req,
+        res,
+        operationJournal,
+        mutationQueue,
+        () => executeVersionedMutation(req, fn, mutationRoute),
+        { isDemo, isVersioned: true, admission: requestAdmission },
+      );
+      return res.json({ data: execution.result, operation: execution.operation });
+    }
+    let stats;
+    const abort = createClientAbortSignal(req, res);
+    try {
+      const result = await runWithQueryInstrumentation(async (activeStats) => {
+        stats = activeStats;
+        return runHandler(req, res, fn, undefined, { signal: abort.signal });
+      }, { signal: abort.signal });
+      attachQueryStatsHeaders(res, stats);
+      return res.json({ data: result });
+    } finally {
+      abort.dispose();
+    }
+  } catch (e) {
+    if (!res.headersSent) return sendApiError(req, res, e);
+  }
 };
 
 // ---- Legacy unversioned API (web dashboard, passkey session) ----------------
@@ -886,6 +1599,7 @@ app.get('/api/budgets', raw(resolvers.budgets));
 app.post('/api/budgets', raw(setBudget));
 app.get('/api/reimbursement', raw(resolvers.reimbursement));
 app.get('/api/reimbursement-ledger', raw(resolvers.reimbursementLedger));
+app.get('/api/reimbursement-export', reimbursementExport);
 app.get('/api/insights', raw(resolvers.insights));
 app.get('/api/merchant-history', raw(resolvers.merchantHistory));
 app.get('/api/categories', raw(resolvers.categories));
@@ -908,7 +1622,7 @@ app.post('/api/bank-sync', raw(bankSyncH));
 app.post('/api/reimbursements/sweep', raw(sweepReimbH));
 app.post('/api/phantom/cleanup', raw(phantomCleanupH));
 app.get('/api/phantom/log', raw(phantomLogH));
-app.post('/api/receipts', receiptJsonParser, raw(addReceiptH));
+app.post('/api/receipts', raw(addReceiptH));
 app.get('/api/receipts', raw(receiptsH));
 app.get('/api/receipts/:id/image', receiptImageH);
 app.delete('/api/receipts/:id', raw(deleteReceiptH));
@@ -953,23 +1667,77 @@ function v1Auth(req, res, next) {
   if (req.session && req.session.authenticated) return next(); // browser (passkey)
   const headerTok = req.get('X-Finance-Token') || (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
   if (tokenOk(headerTok)) return next(); // native app (token)
-  return res.status(401).json({ error: 'UNAUTHENTICATED' });
+  return sendApiErrorCode(req, res, 'UNAUTHENTICATED');
 }
 
 const v1 = express.Router();
 v1.use((req, res, next) => {
   const origin = req.get('Origin');
-  if (origin && origin !== ORIGIN) return res.status(403).json({ error: 'Origin not allowed' });
-  if (origin === ORIGIN) res.header('Access-Control-Allow-Origin', ORIGIN);
+  if (origin && origin !== allowedOrigin) return sendApiErrorCode(req, res, 'CORS_ORIGIN_REJECTED');
+  if (origin === allowedOrigin) res.header('Access-Control-Allow-Origin', allowedOrigin);
   res.header('Vary', 'Origin');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Finance-Token, X-Demo-Mode');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Finance-Token, X-Demo-Mode, Idempotency-Key');
   res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 v1.use(v1Auth);
+v1.use((req, res, next) => {
+  if (!isDemo(req) || !['POST', 'DELETE'].includes(req.method)) return next();
+  try {
+    validateVersionedMutationRequest(req);
+    return next();
+  } catch (error) {
+    return sendApiError(req, res, error);
+  }
+});
 v1.use(demoMiddleware(true)); // demo mode for native clients (after token/session auth)
+const registeredV1MutationRoutes = new Set();
+function registerV1Mutation(method, route, handler) {
+  const definition = getMutationRoute(method, route);
+  if (!definition) throw new Error(`Unclassified versioned mutation route: ${method} ${route}`);
+  const key = routeKey(method, route);
+  if (registeredV1MutationRoutes.has(key)) throw new Error(`Duplicate versioned mutation route: ${key}`);
+  registeredV1MutationRoutes.add(key);
+  v1[method.toLowerCase()](route, env(handler, definition));
+}
+v1.get('/operations/:key', env(async (req, res) => {
+  const operation = await readOperationStatus(req, res, req.params.key);
+  if (!operation) {
+    throw new AppError('Operation not found', {
+      code: 'OPERATION_NOT_FOUND',
+      status: 404,
+      expose: true,
+    });
+  }
+  return operation;
+}));
 v1.get('/ping', env(async () => {
+  const actual = data.getHealth();
+  const testInstanceId = exposeTestServerInstanceId();
+  if (runtimeHealth.fatalErrorAt || !actual.ready) {
+    const notReady = new AppError('Finance data is not ready', {
+      code: 'NOT_READY',
+      status: 503,
+      expose: true,
+    });
+    if (testInstanceId) notReady.testInstanceId = testInstanceId;
+    throw notReady;
+  }
+  return {
+    ok: true,
+    ts: Date.now(),
+    startedAt: runtimeHealth.startedAt,
+    financeTimeZone: FINANCE_TIME_ZONE,
+    actual,
+    actualCoordinator: actualCoordinator.getHealth(),
+    requestAdmission: requestAdmission.getHealth(),
+    queuedMutations: mutationQueue.size,
+    release: releaseIdentity(),
+    ...(testInstanceId ? { testInstanceId } : {}),
+  };
+}));
+v1.get('/reconnect-freshness', env(async (req) => {
   const actual = data.getHealth();
   if (runtimeHealth.fatalErrorAt || !actual.ready) {
     throw new AppError('Finance data is not ready', {
@@ -978,25 +1746,25 @@ v1.get('/ping', env(async () => {
       expose: true,
     });
   }
-  return {
-    ok: true,
-    ts: Date.now(),
-    startedAt: runtimeHealth.startedAt,
-    financeTimeZone: FINANCE_TIME_ZONE,
-    actual,
-    queuedMutations: mutationQueue.size,
-  };
+  const principal = deriveRequestPrincipal(req, {
+    apiToken: process.env.FINANCE_API_TOKEN || '',
+    selftest: SELFTEST,
+  });
+  return reconnectFreshnessProbe.runProbe(principal);
 }));
 v1.get('/accounts', env(resolvers.accounts));
+v1.get('/today', env(resolvers.today));
 v1.get('/transactions', env(resolvers.transactions));
-v1.post('/transactions', env(createTxn));
+registerV1Mutation('POST', '/transactions', createTxn);
 v1.get('/spending', env(resolvers.spending));
 v1.get('/trends', env(resolvers.trends));
 v1.get('/budgets', env(resolvers.budgets));
-v1.post('/budgets', env(setBudget));
+registerV1Mutation('POST', '/budgets', setBudget);
 v1.get('/reimbursement', env(resolvers.reimbursement));
 v1.get('/review', env(resolvers.review));
+registerV1Mutation('POST', '/review/dispositions', setReviewDispositionH);
 v1.get('/reimbursement-ledger', env(resolvers.reimbursementLedger));
+v1.get('/reimbursement-export', reimbursementExport);
 v1.get('/insights', env(resolvers.insights));
 v1.get('/merchant-history', env(resolvers.merchantHistory));
 v1.get('/categories', env(resolvers.categories));
@@ -1009,55 +1777,116 @@ v1.get('/tags', env(resolvers.tags));
 v1.get('/report.csv', reportCsv);
 v1.get('/goals', env(resolvers.goals));
 v1.get('/transactions/:id', env(resolvers.txnById));
-v1.post('/transactions/:id/category', env(setCategory));
-v1.post('/transactions/:id/notes', env(setNotes));
-v1.post('/transactions/:id/date', env(setDateH));
-v1.post('/transactions/:id/payee', env(setPayeeH));
-v1.post('/transactions/:id/split', env(splitTxn));
-v1.post('/transactions/:id/unsplit', env(unsplitTxn));
-v1.delete('/transactions/:id', env(deleteTxn));
-v1.post('/bank-sync', env(bankSyncH));
-v1.post('/reimbursements/sweep', env(sweepReimbH));
-v1.post('/phantom/cleanup', env(phantomCleanupH));
+registerV1Mutation('POST', '/transactions/:id/category', setCategory);
+registerV1Mutation('POST', '/transactions/:id/notes', setNotes);
+registerV1Mutation('POST', '/transactions/:id/date', setDateH);
+registerV1Mutation('POST', '/transactions/:id/payee', setPayeeH);
+registerV1Mutation('POST', '/transactions/:id/split', splitTxn);
+registerV1Mutation('POST', '/transactions/:id/unsplit', unsplitTxn);
+registerV1Mutation('DELETE', '/transactions/:id', deleteTxn);
+registerV1Mutation('POST', '/bank-sync', bankSyncH);
+registerV1Mutation('POST', '/reimbursements/sweep', sweepReimbH);
+registerV1Mutation('POST', '/phantom/cleanup', phantomCleanupH);
 v1.get('/phantom/log', env(phantomLogH));
-v1.post('/receipts', receiptJsonParser, env(addReceiptH));
+registerV1Mutation('POST', '/receipts', addReceiptH);
 v1.get('/receipts', env(receiptsH));
 v1.get('/receipts/:id/image', receiptImageH); // raw bytes (auth via router)
-v1.delete('/receipts/:id', env(deleteReceiptH));
+registerV1Mutation('DELETE', '/receipts/:id', deleteReceiptH);
 v1.get('/rules', env(resolvers.rules));
-v1.post('/rules', env(saveRuleH));
-v1.post('/rules/apply', env(applyRulesH));
-v1.delete('/rules/:id', env(deleteRuleH));
-v1.post('/splitwise/sync-shares', env(syncSharesH));
+registerV1Mutation('POST', '/rules', saveRuleH);
+registerV1Mutation('POST', '/rules/apply', applyRulesH);
+registerV1Mutation('DELETE', '/rules/:id', deleteRuleH);
+registerV1Mutation('POST', '/splitwise/sync-shares', syncSharesH);
 v1.get('/events', env(eventsH));
-v1.post('/events', env(saveEventH));
-v1.delete('/events/:slug', env(deleteEventH));
-v1.post('/accounts/:id/override', env(setAccountOverrideH));
+registerV1Mutation('POST', '/events', saveEventH);
+registerV1Mutation('DELETE', '/events/:slug', deleteEventH);
+registerV1Mutation('POST', '/accounts/:id/override', setAccountOverrideH);
 v1.get('/manual-assets', env(resolvers.manualAssets));
 v1.get('/investments', env(resolvers.investments));
 v1.get('/reports', env(resolvers.reports));
-v1.post('/manual-assets', env(saveManualAssetH));
-v1.delete('/manual-assets/:id', env(deleteManualAssetH));
-v1.post('/recurring/:key/override', env(setRecurring));
-v1.post('/recurring/mark', env(markRecurring));
-v1.post('/bills/paid', env(markBill));
+registerV1Mutation('POST', '/manual-assets', saveManualAssetH);
+registerV1Mutation('DELETE', '/manual-assets/:id', deleteManualAssetH);
+registerV1Mutation('POST', '/recurring/:key/override', setRecurring);
+registerV1Mutation('POST', '/recurring/mark', markRecurring);
+registerV1Mutation('POST', '/bills/paid', markBill);
 v1.get('/owes-config', env(async () => data.getOwesConfig()));
-v1.post('/owes-config', env(setOwes));
+registerV1Mutation('POST', '/owes-config', setOwes);
 v1.get('/reimb-links', env(reimbLinks));
-v1.post('/reimb-links', env(addLink));
-v1.delete('/reimb-links', env(delLink));
+registerV1Mutation('POST', '/reimb-links', addLink);
+registerV1Mutation('DELETE', '/reimb-links', delLink);
 v1.get('/repayments/suggestions', env(resolvers.repaymentSuggestions));
-v1.post('/repayments/:id/confirm', env(confirmRepaymentH));
-v1.post('/repayments/:id/dismiss', env(dismissRepaymentH));
+registerV1Mutation('POST', '/repayments/:id/confirm', confirmRepaymentH);
+registerV1Mutation('POST', '/repayments/:id/dismiss', dismissRepaymentH);
 v1.get('/reconciliation', env(reconciliationH));
 v1.get('/reconciliation/pending', env(reconcilePendingH));
-v1.post('/reconciliation/item', env(setReconItemH));
-v1.post('/reconciliation/month', env(setReconMonthH));
-v1.post('/reconciliation/enabled', env(setReconEnabledH));
-v1.post('/goals', env(saveGoal));
-v1.delete('/goals/:id', env(deleteGoal));
-v1.post('/refresh', env(async () => doRefresh()));
+registerV1Mutation('POST', '/reconciliation/item', setReconItemH);
+registerV1Mutation('POST', '/reconciliation/month', setReconMonthH);
+registerV1Mutation('POST', '/reconciliation/enabled', setReconEnabledH);
+registerV1Mutation('POST', '/goals', saveGoal);
+registerV1Mutation('DELETE', '/goals/:id', deleteGoal);
+registerV1Mutation('POST', '/refresh', (_req, operation) => doRefresh(operation));
+if (process.env.NODE_ENV === 'test') {
+  const {
+    getQueryAbortSentinelSnapshot,
+    resetQueryAbortSentinel,
+  } = require('./lib/query-abort-sentinel');
+  v1.get('/test/query-scaling-state', env(async () => {
+    let callLog = [];
+    try {
+      const fixturePath = process.env.ACTUAL_API_PATH;
+      if (fixturePath) {
+        const fixture = require(fixturePath);
+        if (Array.isArray(fixture.state?.callLog)) {
+          callLog = fixture.state.callLog.map((entry) => ({ ...entry }));
+        }
+      }
+    } catch (_) { /* fixture unavailable */ }
+    const { getProcessShutdownAbortSignal, isProcessShutdownAborted } = require('./lib/process-shutdown-abort');
+    return {
+      callLog,
+      abortSentinel: getQueryAbortSentinelSnapshot(),
+      shutdownAbortSignalAborted: isProcessShutdownAborted(),
+    };
+  }));
+  v1.get('/test/query-scaling-events', env(async () => data.getEvents()));
+  v1.get('/test/query-scaling-reset', env(async () => {
+    try {
+      const fixturePath = process.env.ACTUAL_API_PATH;
+      if (fixturePath) {
+        const fixture = require(fixturePath);
+        if (typeof fixture.reset === 'function') {
+          fixture.reset({
+            accountCount: Number(process.env.FINANCE_QUERY_TEST_ACCOUNT_COUNT || 6),
+            rowsPerAccount: Number(process.env.FINANCE_QUERY_TEST_ROWS_PER_ACCOUNT || 40),
+            anchorMonth: '2024-06',
+            yearSpan: 1,
+          });
+        }
+      }
+    } catch (_) { /* fixture unavailable */ }
+    resetQueryAbortSentinel();
+    require('./lib/process-shutdown-abort').resetProcessShutdownAbortForTests();
+    return { ok: true };
+  }));
+  v1.get('/test/query-scaling-throw', env(async () => {
+    throw new AppError('Intentional handler failure', {
+      code: 'TEST_HANDLER_ERROR',
+      status: 500,
+      expose: true,
+    });
+  }));
+}
+const missingV1MutationRoutes = MUTATION_ROUTES
+  .filter(({ method, path: route }) => !registeredV1MutationRoutes.has(routeKey(method, route)));
+if (missingV1MutationRoutes.length) {
+  throw new Error(`Unregistered versioned mutation routes: ${missingV1MutationRoutes.map(({ method, path: route }) => `${method} ${route}`).join(', ')}`);
+}
+v1.use((req, res) => {
+  if (versionedRouteExists(req)) return sendApiErrorCode(req, res, 'METHOD_NOT_ALLOWED');
+  return sendApiErrorCode(req, res, 'NOT_FOUND');
+});
 app.use('/api/v1', v1);
+app.use(apiErrorMiddleware());
 
 // ---- Freshness: keep the local Actual cache in sync with the server ---------
 const SYNC_INTERVAL_MS = 10 * 60 * 1000; // every 10 min
@@ -1065,7 +1894,6 @@ async function periodicSync() {
   try {
     await mutationQueue.run(async () => {
       await data.syncNow();
-      cache.flushAll();
       await warmCache(); // repopulate hot keys so the next request isn't a cold recompute
     });
   } catch (e) {
@@ -1073,10 +1901,21 @@ async function periodicSync() {
   }
 }
 
-const PORT = parseInt(process.env.PORT, 10) || 5007;
+const configuredPort = Number.parseInt(process.env.PORT ?? '', 10);
+const PORT = Number.isInteger(configuredPort) ? configuredPort : 5007;
 const DEMO_ONLY = process.env.DEMO_ONLY === '1';
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`Finance dashboard running on http://127.0.0.1:${PORT}`);
+let periodicSyncTimer;
+const httpServer = app.listen(PORT, '127.0.0.1', () => {
+  const boundPort = httpServer.address().port;
+  if (String(allowedOrigin).endsWith(':0')) {
+    allowedOrigin = `http://127.0.0.1:${boundPort}`;
+  }
+  console.log(`Finance dashboard running on http://127.0.0.1:${boundPort}`);
+  if (trustProxyStartupWarning) console.warn(`[trust-proxy] ${trustProxyStartupWarning}`);
+  const testInstanceId = exposeTestServerInstanceId();
+  if (testInstanceId) {
+    console.log(`FINANCE_TEST_SERVER_READY ${boundPort} ${testInstanceId}`);
+  }
   if (DEMO_ONLY) {
     console.log('Demo-only mode enabled; skipping Actual startup sync');
     setInterval(() => {}, 60 * 60 * 1000);
@@ -1085,11 +1924,21 @@ app.listen(PORT, '127.0.0.1', () => {
   data.initApi()
     .then(async () => {
       await warmCache(); // pre-warm once at startup so the first page loads are fast
-      setInterval(periodicSync, SYNC_INTERVAL_MS);
+      periodicSyncTimer = setInterval(periodicSync, SYNC_INTERVAL_MS);
     })
     .catch(e => {
       runtimeHealth.fatalErrorAt = new Date().toISOString();
       console.error('Initial API load failed:', e.message);
       if (process.env.NODE_ENV !== 'test') process.exit(1);
     });
+});
+
+bindGracefulShutdownSignals({
+  httpServer,
+  mutationQueue,
+  requestAdmission,
+  shutdownApi: () => data.shutdownApi(),
+  stopPeriodicSync: () => {
+    if (periodicSyncTimer) clearInterval(periodicSyncTimer);
+  },
 });

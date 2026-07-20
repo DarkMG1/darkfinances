@@ -18,31 +18,12 @@ function cloneFallback(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function writePrivateFileAtomic(file, contents) {
-  const dir = path.dirname(file);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
-  let fd;
+const { writePrivateFileAtomic } = require('./private-durable-io');
+
+function writePrivateFileAtomicWrapped(file, contents) {
   try {
-    fd = fs.openSync(tmp, 'wx', 0o600);
-    fs.writeFileSync(fd, contents, 'utf8');
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    fd = undefined;
-    fs.renameSync(tmp, file);
-    fs.chmodSync(file, 0o600);
-    try {
-      const dirFd = fs.openSync(dir, 'r');
-      fs.fsyncSync(dirFd);
-      fs.closeSync(dirFd);
-    } catch (_) {
-      // Some filesystems do not support fsync on directories.
-    }
+    writePrivateFileAtomic(file, contents);
   } catch (cause) {
-    if (fd !== undefined) {
-      try { fs.closeSync(fd); } catch (_) {}
-    }
-    try { fs.unlinkSync(tmp); } catch (_) {}
     throw new JsonStoreError(`Could not atomically write ${path.basename(file)}`, {
       code: 'JSON_WRITE_FAILED',
       file,
@@ -121,7 +102,7 @@ function writeJsonFile(file, value) {
     try {
       const current = fs.readFileSync(file, 'utf8');
       JSON.parse(current);
-      writePrivateFileAtomic(`${file}.last-good`, current);
+      writePrivateFileAtomicWrapped(`${file}.last-good`, current);
     } catch (cause) {
       if (cause instanceof SyntaxError) quarantineCorruptFile(file);
       throw new JsonStoreError(`Refusing to replace unreadable JSON in ${path.basename(file)}`, {
@@ -132,11 +113,12 @@ function writeJsonFile(file, value) {
     }
   }
 
-  writePrivateFileAtomic(file, `${serialized}\n`);
+  writePrivateFileAtomicWrapped(file, `${serialized}\n`);
 }
 
 module.exports = {
   JsonStoreError,
+  quarantineCorruptFile,
   readJsonFile,
   writeJsonFile,
 };

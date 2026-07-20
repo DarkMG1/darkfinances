@@ -1,0 +1,72 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0a0a0f; --surface: #111118; --border: rgba(255,255,255,0.07);
+  --text: #f0f0f5; --muted: #6b6b80; --accent: #7c6ef7; --accent-light: #a898ff;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-font-smoothing: antialiased;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 2.5rem;
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
+}
+.logo { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 2rem; }
+.logo span { color: var(--accent-light); }
+h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.5px; margin-bottom: 6px; }
+.sub { font-size: 14px; color: var(--muted); margin-bottom: 2rem; }
+.passkey-btn {
+  width: 100%;
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  padding: 14px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  transition: opacity 0.15s;
+}
+.passkey-btn:hover { opacity: 0.9; }
+.passkey-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.passkey-icon { font-size: 18px; }
+.status {
+  margin-top: 1rem;
+  font-size: 13px;
+  color: var(--muted);
+  min-height: 20px;
+}
+.status.error { color: #f87171; }
+.status.success { color: #4ade80; }
+.register-link {
+  display: none;
+  margin-top: 1.5rem;
+  font-size: 12px;
+  color: var(--muted);
+}
+.register-link a {
+  color: var(--accent-light);
+  cursor: pointer;
+  text-decoration: none;
+}
+.register-link a:hover { text-decoration: underline; }
+.noscript-banner { padding: 2rem; text-align: center; font-family: system-ui, sans-serif; }
+body.login-enroll .register-link { display: block; }
+body.login-enroll #signInBtn { display: none; }
+body.login-closed #signInBtn { display: none; }

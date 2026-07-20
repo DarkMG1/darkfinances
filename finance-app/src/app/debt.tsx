@@ -2,27 +2,44 @@ import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { useInvestments } from '@/api/hooks/finance.hooks';
 import { PushScreen } from '@/components/screen';
-import { Avatar, Card, CardTitle, EmptyState, ErrorState, Loading } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { Avatar, Card, CardTitle, EmptyState, Loading } from '@/components/ui';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { formatOptionalPos, isKnownMoney } from '@/lib/money-display.js';
 import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
 
 export default function DebtScreen() {
   const investments = useInvestments();
-  const data = investments.data;
 
   return (
-    <PushScreen testID="debt-screen" refreshing={investments.isFetching} onRefresh={investments.refetch}>
-      {investments.isLoading && !data ? (
-        <Loading />
-      ) : investments.isError && !data ? (
-        <ErrorState error={investments.error?.error} onRetry={investments.refetch} />
-      ) : !data || data.debts.length === 0 ? (
-        <EmptyState icon="creditcard">No debt plan configured</EmptyState>
-      ) : (
-        <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>DEBT PAYOFF</Text>
-            <Text style={styles.heroValue}>{fmtMoney(-data.debtTotals.balance)}</Text>
-            <Text style={styles.heroSub}>{fmtPos(data.debtTotals.minPayment)}/mo minimum · {data.debtTotals.weightedApr}% weighted APR</Text>
+    <PushScreen testID="debt-screen" onRefresh={investments.refetch}>
+      <QueryScreenBody
+        query={investments}
+        loading={<Loading />}
+        empty={<EmptyState icon="creditcard">No debt plan configured</EmptyState>}
+        hasContent={Boolean(investments.data?.debts?.length)}
+        refetchBannerTestID="debt-refetch-banner"
+        renderContent={(data) => {
+          const balance = data.debtTotals?.balance;
+          const minPayment = data.debtTotals?.minPayment;
+          const weightedApr = data.debtTotals?.weightedApr;
+          const heroBalance = isKnownMoney(balance) ? fmtMoney(-balance) : 'Unavailable';
+          const heroMin = formatOptionalPos(minPayment, fmtPos);
+          const heroApr = isKnownMoney(weightedApr) ? `${weightedApr}%` : 'Unavailable';
+          return (
+          <>
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              'Debt payoff',
+              heroBalance,
+              `${heroMin} per month minimum · ${heroApr} weighted APR`,
+            )}
+          >
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">DEBT PAYOFF</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{heroBalance}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{heroMin}/mo minimum · {heroApr} weighted APR</Text>
           </View>
 
           <Card style={{ marginBottom: 16 }}>
@@ -31,20 +48,22 @@ export default function DebtScreen() {
           </Card>
 
           <Card>
-            {data.debts.map((d) => (
+            {(data.debts ?? []).map((d) => (
               <View key={d.id} testID={`debt-row-${d.id}`} style={styles.row}>
                 <Avatar label={d.name} size={36} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.name}>{d.name}</Text>
-                  <Text style={styles.sub}>{d.apr}% APR · {fmtPos(d.minPayment)}/mo · {d.strategy}</Text>
-                  <Text style={styles.sub}>{d.payoffDate ? `Payoff ${fmtDate(d.payoffDate)} · ${d.months} months · ${fmtPos(d.totalInterest ?? 0)} interest` : 'Payment too low to project payoff'}</Text>
+                  <Text style={styles.sub}>{isKnownMoney(d.apr) ? `${d.apr}% APR` : 'APR unavailable'} · {formatOptionalPos(d.minPayment, fmtPos)}/mo · {d.strategy}</Text>
+                  <Text style={styles.sub}>{d.payoffDate ? `Payoff ${fmtDate(d.payoffDate)} · ${d.months} months · ${formatOptionalPos(d.totalInterest, fmtPos)} interest` : 'Payment too low to project payoff'}</Text>
                 </View>
-                <Text style={styles.amt}>{fmtPos(d.balance)}</Text>
+                <Text style={styles.amt}>{formatOptionalPos(d.balance, fmtPos)}</Text>
               </View>
             ))}
           </Card>
-        </>
-      )}
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }

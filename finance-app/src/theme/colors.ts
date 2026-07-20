@@ -1,4 +1,6 @@
 // Shared dark palette, mirrors the web dashboard (darkfinances).
+import { daysUntilDateOnly } from '@/lib/finance-date-core.js';
+
 export const colors = {
   bg: '#0a0a0f',
   surface: '#111118',
@@ -6,6 +8,8 @@ export const colors = {
   border: 'rgba(255,255,255,0.08)',
   text: '#f0f0f5',
   muted: '#6b6b80',
+  // Secondary labels (e.g. Not tracked) — matches PR-38 muted for future theme union.
+  untrackedLabel: '#9494a8',
   accent: '#7c6ef7',
   accentLight: '#a898ff',
   green: '#22c55e',
@@ -51,21 +55,20 @@ export const monthLabel = (key: string): string => {
   const [y, m] = key.split('-').map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
 };
-export const fmtDay = (d: string): string => {
-  if (!d) return '';
+export const fmtDay = (d: string | null | undefined): string => {
+  if (!d) return 'Date uncertain';
   const [y, m, day] = d.split('-').map(Number);
   if (!y) return d;
   return new Date(y, m - 1, day).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 };
-export const daysUntil = (d: string): number => {
-  if (!d) return 0;
-  const now = new Date();
-  now.setHours(0, 0, 0, 0);
-  const [y, m, day] = d.split('-').map(Number);
-  return Math.round((new Date(y, m - 1, day).getTime() - now.getTime()) / 86400000);
+export const daysUntil = (d: string | null | undefined, anchor?: string): number | null => {
+  if (!d) return null;
+  return daysUntilDateOnly(d, anchor);
 };
-export const dueLabel = (d: string): string => {
-  const n = daysUntil(d);
+export const dueLabel = (d: string | null | undefined, anchor?: string): string => {
+  if (!d) return 'date uncertain';
+  const n = daysUntil(d, anchor);
+  if (n == null) return 'date uncertain';
   if (n < 0) return `${-n}d overdue`;
   if (n === 0) return 'today';
   if (n === 1) return 'tomorrow';

@@ -1,24 +1,32 @@
 import React, { useMemo, useState } from 'react';
-import { Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { SymbolView } from 'expo-symbols';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTransactions } from '@/api/hooks/finance.hooks';
 import { DemoRibbon } from '@/components/screen';
+import { GestureRefreshControl } from '@/components/gesture-refresh-control';
 import { Avatar, EmptyState, ErrorState, PendingPill } from '@/components/ui';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { resolveQueryDisplay } from '@/components/query-display';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
+import {
+  calendarMonthWindow,
+  categoryRangeWindow,
+  monthsThrough,
+  relativePeriodLabel,
+  sixMonthChartWindow,
+  type CategoryRangeKey,
+  useFinanceToday,
+} from '@/lib/date-only';
 import { categoryIcon } from '@/theme/categoryIcons';
 import { colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
 
-const pad = (n: number) => String(n).padStart(2, '0');
-const ymd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-
-type CatRange = 'month' | '3m' | 'year' | 'all';
 type SortKey = 'newest' | 'oldest' | 'amountHigh' | 'amountLow';
 type BucketKey = 'spending' | 'bills' | 'subscriptions';
-const RANGES: { key: CatRange; label: string }[] = [
+const RANGES: { key: CategoryRangeKey; label: string }[] = [
   { key: 'month', label: 'Month' },
   { key: '3m', label: '3M' },
   { key: 'year', label: 'Year' },
@@ -31,46 +39,25 @@ const SORTS: { key: SortKey; label: string }[] = [
   { key: 'amountLow', label: 'Amount: Lowest' },
 ];
 
-function rangeWindow(key: CatRange, month?: string, explicitStart?: string, explicitEnd?: string, explicitLabel?: string): { start: string; end: string; label: string } {
-  if (explicitStart && explicitEnd) return { start: explicitStart, end: explicitEnd, label: relativePeriodLabel(explicitStart, explicitEnd, explicitLabel) };
-  const now = new Date();
-  const end = ymd(now);
-  if (key === 'month') {
-    if (month) {
-      const [y, m] = month.split('-').map(Number);
-      const last = new Date(y, m, 0).getDate();
-      return { start: `${month}-01`, end: `${month}-${pad(last)}`, label: monthLabel(month) };
-    }
-    return { start: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`, end, label: 'This month' };
+function rangeWindow(
+  key: CategoryRangeKey,
+  anchor: string,
+  month?: string,
+  explicitStart?: string,
+  explicitEnd?: string,
+  explicitLabel?: string,
+): { start: string; end: string; label: string } {
+  if (explicitStart && explicitEnd) {
+    return {
+      start: explicitStart,
+      end: explicitEnd,
+      label: relativePeriodLabel(explicitStart, explicitEnd, explicitLabel, anchor),
+    };
   }
-  if (key === '3m') { const d = new Date(now); d.setMonth(d.getMonth() - 2); return { start: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`, end, label: 'Last 3 months' }; }
-  if (key === 'year') return { start: `${now.getFullYear()}-01-01`, end, label: 'This year' };
-  return { start: '2000-01-01', end, label: 'All time' };
-}
-
-function relativePeriodLabel(start: string, end: string, fallback?: string) {
-  const now = new Date();
-  const currentMonth = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
-  const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const prevMonth = `${prev.getFullYear()}-${pad(prev.getMonth() + 1)}`;
-  const fullMonth = (month: string, s: string, e: string) => {
-    const [y, m] = month.split('-').map(Number);
-    const last = `${month}-${pad(new Date(y, m, 0).getDate())}`;
-    return s === `${month}-01` && (e === last || month === currentMonth);
-  };
-  const month = start.slice(0, 7);
-  if (month === currentMonth && fullMonth(month, start, end)) return 'This month';
-  if (month === prevMonth && fullMonth(month, start, end)) return 'Last month';
-  return fallback || 'Selected period';
-}
-
-function monthWindow(month: string) {
-  const now = new Date();
-  const currentMonth = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
-  const [year, m] = month.split('-').map(Number);
-  const start = `${month}-01`;
-  const end = month === currentMonth ? ymd(now) : `${month}-${pad(new Date(year, m, 0).getDate())}`;
-  return { start, end, label: relativePeriodLabel(start, end, monthLabel(month)) };
+  if (key === 'month' && month) {
+    return calendarMonthWindow(month, anchor);
+  }
+  return categoryRangeWindow(key, anchor);
 }
 
 function compactMoney(n: number) {
@@ -82,29 +69,29 @@ function compactMoney(n: number) {
 export default function CategoryDetail() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const financeToday = useFinanceToday();
   const params = useLocalSearchParams<{ name: string; month?: string; range?: string; start?: string; end?: string; label?: string; bucket?: BucketKey }>();
-  // expo-router already decodes route params; use as-is.
   const name = params.name ?? '';
   const isAllSpending = /^(spending|total spend)$/i.test(name);
   const isIncome = /^(income|earnings)$/i.test(name);
-  const [range] = useState<CatRange>(
-    (RANGES.some((r) => r.key === params.range) ? (params.range as CatRange) : 'month')
+  const [range] = useState<CategoryRangeKey>(
+    (RANGES.some((r) => r.key === params.range) ? (params.range as CategoryRangeKey) : 'month')
   );
   const [sort, setSort] = useState<SortKey>('newest');
   const [sortOpen, setSortOpen] = useState(false);
-  const baseWindow = rangeWindow(range, params.month, params.start, params.end, params.label);
+  const baseWindow = useMemo(
+    () => rangeWindow(range, financeToday, params.month, params.start, params.end, params.label),
+    [range, financeToday, params.month, params.start, params.end, params.label],
+  );
   const windowKey = `${name}-${params.bucket || ''}-${baseWindow.start}-${baseWindow.end}`;
   const [monthOverride, setMonthOverride] = useState<{ key: string; month: string } | null>(null);
-  const activeWindow = monthOverride?.key === windowKey ? monthWindow(monthOverride.month) : baseWindow;
+  const activeWindow = useMemo(() => {
+    if (monthOverride?.key === windowKey) return calendarMonthWindow(monthOverride.month, financeToday);
+    return baseWindow;
+  }, [monthOverride, windowKey, baseWindow, financeToday]);
   const { start, end, label } = activeWindow;
   const chartAnchorMonth = params.month || baseWindow.end.slice(0, 7);
-  const chartWindow = useMemo(() => {
-    const [y, m] = chartAnchorMonth.split('-').map(Number);
-    const base = new Date(y, m - 1, 1);
-    const first = new Date(base.getFullYear(), base.getMonth() - 5, 1);
-    const last = new Date(base.getFullYear(), base.getMonth() + 1, 0);
-    return { start: ymd(first), end: ymd(last) };
-  }, [chartAnchorMonth]);
+  const chartWindow = useMemo(() => sixMonthChartWindow(chartAnchorMonth), [chartAnchorMonth]);
 
   const selectedMonth = end.slice(0, 7);
   const queryCategory = params.bucket || isAllSpending ? undefined : name;
@@ -132,12 +119,7 @@ export default function CategoryDetail() {
   }, 0), [rows, isIncome]);
   const refunds = useMemo(() => rows.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0), [rows]);
   const chartMonths = useMemo(() => {
-    const [y, m] = chartAnchorMonth.split('-').map(Number);
-    const base = new Date(y, m - 1, 1);
-    const months = Array.from({ length: 6 }, (_, i) => {
-      const d = new Date(base.getFullYear(), base.getMonth() - 5 + i, 1);
-      return ymd(d).slice(0, 7);
-    });
+    const months = monthsThrough(chartAnchorMonth, 6);
     const totals = new Map(months.map((m) => [m, 0]));
     (allTxns.data ?? []).forEach((t) => {
       const ok = isAllSpending ? t.amount < 0 && !/^reimbursement$/i.test(t.category || '') : isIncome ? t.amount > 0 : isUncat ? !t.category : true;
@@ -149,9 +131,8 @@ export default function CategoryDetail() {
   }, [allTxns.data, chartAnchorMonth, isAllSpending, isIncome, isUncat]);
   const displayName = isAllSpending ? 'Spending' : isIncome ? 'Earnings' : name;
   const icon = categoryIcon(displayName);
-  const loading = allTxns.isLoading && !allTxns.data;
-  const refreshing = allTxns.isFetching;
-  const refresh = () => { haptics.light(); allTxns.refetch(); };
+  const txDisplay = resolveQueryDisplay(allTxns);
+  const refresh = () => allTxns.refetch();
 
   return (
     <View style={styles.root} testID="category-detail-screen">
@@ -182,14 +163,19 @@ export default function CategoryDetail() {
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={{ paddingBottom: insets.bottom + 86 }}
-        refreshControl={<RefreshControl tintColor={colors.accent} refreshing={refreshing} onRefresh={refresh} />}
+        refreshControl={<GestureRefreshControl onRefresh={refresh} />}
       >
-        {loading ? (
+        {txDisplay.initialLoad ? (
           <View style={{ padding: 18 }}><SkeletonList hero rows={7} /></View>
-        ) : allTxns.isError && !allTxns.data ? (
-          <View style={{ padding: 18 }}><ErrorState error={allTxns.error?.error} onRetry={refresh} /></View>
+        ) : txDisplay.fatalError ? (
+          <View style={{ padding: 18 }}><ErrorState error={txDisplay.errorMessage} onRetry={refresh} /></View>
         ) : (
           <>
+            {txDisplay.refetchError ? (
+              <View style={{ paddingHorizontal: 18, paddingTop: 12 }}>
+                <QueryRefetchBanner onRetry={refresh} testID="category-refetch-banner" />
+              </View>
+            ) : null}
             <View style={styles.chartPanel}>
               <Text style={styles.chartTitle}>{label}</Text>
               <MiniCategoryBars
@@ -212,7 +198,7 @@ export default function CategoryDetail() {
                 }}
                 style={({ pressed }) => [styles.sortPill, pressed && { opacity: 0.7 }]}
               >
-                <Text style={styles.sortText}>{SORTS.find((s) => s.key === sort)?.label ?? 'Date: Newest'}</Text>
+                <Text testID="category-sort-control-label" style={styles.sortText}>{SORTS.find((s) => s.key === sort)?.label ?? 'Date: Newest'}</Text>
                 <SymbolView name="chevron.down" tintColor={colors.text} size={10} resizeMode="scaleAspectFit" />
               </Pressable>
             </View>
@@ -321,20 +307,38 @@ function MiniCategoryBars({ months, selected, onSelect }: { months: { month: str
 }
 
 function SortSheet({ visible, value, onSelect, onClose }: { visible: boolean; value: SortKey; onSelect: (key: SortKey) => void; onClose: () => void }) {
+  const insets = useSafeAreaInsets();
+  if (!visible) return null;
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable testID="category-sort-sheet-backdrop" style={styles.sheetBackdrop} onPress={onClose}>
-        <Pressable testID="category-sort-sheet" style={styles.sheetCard} onPress={() => undefined}>
+    <Modal visible transparent animationType="fade" onRequestClose={onClose} accessibilityViewIsModal>
+      <View style={styles.sheetRoot}>
+        <View pointerEvents="none" style={styles.sheetDim} />
+        <Pressable
+          testID="category-sort-sheet-backdrop"
+          style={styles.sheetBackdrop}
+          onPress={onClose}
+          accessibilityRole="button"
+          accessibilityLabel="Dismiss sort sheet"
+        />
+        <View
+          testID="category-sort-sheet"
+          accessible={false}
+          importantForAccessibility="no"
+          style={[styles.sheetCard, { paddingBottom: insets.bottom + 16 }]}
+        >
           <View style={styles.sheetHandle} />
-          <Text style={styles.sheetTitle}>Sort transactions</Text>
+          <Text accessibilityRole="header" style={styles.sheetTitle}>Sort transactions</Text>
           {SORTS.map((option) => {
             const selected = option.key === value;
             return (
               <Pressable
                 key={option.key}
                 testID={`category-sort-option-${option.key}`}
+                accessibilityRole="button"
                 accessibilityLabel={option.label}
+                accessibilityState={{ selected }}
                 onPress={() => onSelect(option.key)}
+                hitSlop={4}
                 style={({ pressed }) => [styles.sheetOption, pressed && { opacity: 0.7 }]}
               >
                 <Text style={[styles.sheetOptionText, selected && styles.sheetOptionTextOn]}>{option.label}</Text>
@@ -342,8 +346,8 @@ function SortSheet({ visible, value, onSelect, onClose }: { visible: boolean; va
               </Pressable>
             );
           })}
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
@@ -381,8 +385,10 @@ const styles = StyleSheet.create({
   footer: { position: 'absolute', left: 14, right: 14, minHeight: 50, paddingHorizontal: 16, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16 },
   footerLabel: { color: colors.muted, fontSize: 13, fontWeight: '700' },
   footerValue: { color: colors.text, fontSize: 17, fontWeight: '900' },
-  sheetBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.48)' },
-  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, borderColor: colors.border, borderWidth: 1, paddingHorizontal: 18, paddingTop: 10, paddingBottom: 28 },
+  sheetRoot: { flex: 1, justifyContent: 'flex-end' },
+  sheetDim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.48)' },
+  sheetBackdrop: { flex: 1, alignSelf: 'stretch' },
+  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, borderColor: colors.border, borderWidth: 1, paddingHorizontal: 18, paddingTop: 10 },
   sheetHandle: { alignSelf: 'center', width: 42, height: 4, borderRadius: 2, backgroundColor: colors.border, marginBottom: 16 },
   sheetTitle: { color: colors.text, fontSize: 18, fontWeight: '800', marginBottom: 10 },
   sheetOption: { minHeight: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },

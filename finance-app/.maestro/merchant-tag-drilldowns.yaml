@@ -1,10 +1,13 @@
-appId: dev.darkmg1.finances
+appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
+- assertVisible:
+    id: home-screen
 - openLink: darkfinances:///merchant/Amazon
 - tapOn:
     text: Open

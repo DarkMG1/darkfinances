@@ -1,0 +1,30 @@
+name: Shutdown stress
+
+on:
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: shutdown-stress
+  cancel-in-progress: true
+
+jobs:
+  bounded-stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: node scripts/ensure-declared-npm.js
+      - run: npm ci
+      - name: Bounded graceful-shutdown stress
+        env:
+          FINANCE_QUERY_SHUTDOWN_STRESS: '1'
+          FINANCE_QUERY_SHUTDOWN_STRESS_SERIAL: '25'
+          FINANCE_QUERY_SHUTDOWN_STRESS_PARALLEL: '25'
+          FINANCE_QUERY_SHUTDOWN_STRESS_WORKERS: '4'
+        run: npm run check:shutdown-stress

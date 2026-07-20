@@ -1,0 +1,338 @@
+{
+  "schemaVersion": 1,
+  "generatedFrom": "finance-dashboard/lib/state-registry.js",
+  "storeCount": 29,
+  "stores": [
+    {
+      "name": "accountOverrides",
+      "filename": "account-overrides.json",
+      "schemaVersion": 2,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "account ids"
+    },
+    {
+      "name": "billsPaid",
+      "filename": "bills-paid.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "recurring keys"
+    },
+    {
+      "name": "budgetSettings",
+      "filename": "budget-settings.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "category ids"
+    },
+    {
+      "name": "bulkOperationSagas",
+      "filename": "bulk-operation-sagas.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": true,
+      "references": "bulk rule, phantom, and splitwise mirror Actual transaction ids plus Splitwise source ids"
+    },
+    {
+      "name": "debtPlanner",
+      "filename": "debt-planner.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": null
+    },
+    {
+      "name": "events",
+      "filename": "events.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "event slugs and transaction ids"
+    },
+    {
+      "name": "goals",
+      "filename": "goals.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "account ids"
+    },
+    {
+      "name": "investmentHoldings",
+      "filename": "investment-holdings.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "account ids"
+    },
+    {
+      "name": "manualAssets",
+      "filename": "manual-assets.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": null
+    },
+    {
+      "name": "operationJournal",
+      "filename": "operation-journal.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "idempotency keys"
+    },
+    {
+      "name": "owesConfig",
+      "filename": "owes-config.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": true,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "person identities"
+    },
+    {
+      "name": "owesTruth",
+      "filename": "owes-truth.json",
+      "schemaVersion": 2,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": true,
+      "unknownFieldPolicy": "preserve-top-level",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "Splitwise pairwise identities"
+    },
+    {
+      "name": "passkeyCredentials",
+      "filename": "passkey-credentials.json",
+      "schemaVersion": 1,
+      "durability": "passkey-server-writer",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "never",
+      "sagaSemantics": false,
+      "references": "passkey credential ids"
+    },
+    {
+      "name": "personalConfig",
+      "filename": "personal-config.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": true,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": null
+    },
+    {
+      "name": "phantomLog",
+      "filename": "phantom-log.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "transaction imported ids"
+    },
+    {
+      "name": "phantomSeen",
+      "filename": "phantom-seen.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "transaction imported ids"
+    },
+    {
+      "name": "receipts",
+      "filename": "receipts.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "preserve-top-level",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "transaction ids and receipt files"
+    },
+    {
+      "name": "reconciliation",
+      "filename": "reconciliation.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "transaction ids"
+    },
+    {
+      "name": "recurringOverrides",
+      "filename": "recurring-overrides.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "recurring keys"
+    },
+    {
+      "name": "reimbursementLinks",
+      "filename": "reimb-links.json",
+      "schemaVersion": 2,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "preserve-top-level",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "transaction ids"
+    },
+    {
+      "name": "reimbursementLinkSagas",
+      "filename": "reimbursement-link-sagas.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": true,
+      "references": "reimbursement link inflow and expense transaction ids"
+    },
+    {
+      "name": "reimbursementSuggestions",
+      "filename": "reimb-suggest.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "preserve-top-level",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "transaction ids"
+    },
+    {
+      "name": "repaymentConfirmationSagas",
+      "filename": "repayment-confirmation-sagas.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": true,
+      "references": "repayment confirmation inflow and expense transaction ids"
+    },
+    {
+      "name": "reviewState",
+      "filename": "review-state.json",
+      "schemaVersion": 2,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "stable review fingerprints"
+    },
+    {
+      "name": "rules",
+      "filename": "rules.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "rule ids"
+    },
+    {
+      "name": "splitwiseMirrorResolutions",
+      "filename": "splitwise-mirror-resolutions.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "preserve-top-level",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "Splitwise mirror duplicate source ids"
+    },
+    {
+      "name": "transactionDeletionSagas",
+      "filename": "transaction-deletion-sagas.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": true,
+      "references": "deleted Actual and sidecar transaction ids"
+    },
+    {
+      "name": "transactionSagas",
+      "filename": "transaction-sagas.json",
+      "schemaVersion": 1,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": false,
+      "unknownFieldPolicy": "reject",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": true,
+      "references": "Actual and sidecar transaction ids"
+    },
+    {
+      "name": "venmoTruth",
+      "filename": "venmo-truth.json",
+      "schemaVersion": 2,
+      "durability": "atomic-json-last-good",
+      "optionalMissing": true,
+      "unknownFieldPolicy": "preserve-top-level",
+      "lastGoodPolicy": "allow-on-primary-invalid",
+      "sagaSemantics": false,
+      "references": "Venmo transaction ids"
+    }
+  ],
+  "auxiliary": {
+    "receiptsDirectory": "receipts",
+    "lastGoodSuffix": ".last-good",
+    "excludedBasenames": [
+      ".env",
+      ".backup-manifest.json",
+      "bundle-manifest.json"
+    ],
+    "excludedPatterns": [
+      "*.corrupt-*"
+    ]
+  }
+}

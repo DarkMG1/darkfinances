@@ -1,10 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCategories, useSplitTransaction, useTransaction, useUnsplitTransaction } from '@/api/hooks/finance.hooks';
-import { Avatar } from '@/components/ui';
+import { Avatar, ErrorState } from '@/components/ui';
+import { QueryRefetchBanner } from '@/components/query-refetch-banner';
+import { QueryRefetchBanners } from '@/components/query-display';
+import { shouldShowFatalError, shouldShowRefetchError } from '@/lib/query-display-state.js';
+import { buildSplitEditorAuxiliaryRefetchQueries } from '@/lib/editor-refetch-queries.js';
+import { MutationFormBanner, MutationFieldError, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationAction } from '@/hooks/useMutationAction';
+import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinator';
+import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { haptics } from '@/lib/haptics';
+import { isSplitEditorDirty, seedSplitEditorBaseline } from '@/lib/split-editor-dirty';
 import { colors, fmtPos } from '@/theme/colors';
 
 type Mode = 'equal' | 'specific' | 'percent';
@@ -46,6 +55,7 @@ function computeAmounts(legs: Leg[], mode: Mode, total: number): number[] {
 export default function SplitEditor() {
   const p = useLocalSearchParams<{ id: string; accountId: string; date: string }>();
   const router = useRouter();
+  const navigation = useNavigation();
   const insets = useSafeAreaInsets();
 
   const detail = useTransaction(p.id, p.accountId, p.date);
@@ -59,17 +69,45 @@ export default function SplitEditor() {
   const [catPick, setCatPick] = useState<number | null>(null);
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const inited = useRef(false);
+  const [baselineSnapshot, setBaselineSnapshot] = useState<string | null>(null);
+  const allowExitRef = useRef(false);
+  const admissionRef = useMutationScreenAdmission();
+
+  const legFieldOrder = useMemo(() => legs.map((_, i) => `leg-${i}`), [legs]);
+  const unsplitAction = useMutationAction({
+    mutation: unsplit,
+    mutationLabel: 'Remove split',
+    admissionRef,
+    onRefetch: () => detail.refetch(),
+  });
+  const splitAction = useMutationAction({
+    mutation: split,
+    mutationLabel: 'Save split',
+    admissionRef,
+    onActivate: () => unsplitAction.clear(),
+    onRefetch: () => detail.refetch(),
+    fieldOrder: legFieldOrder,
+  });
+  const banner = useMutationBannerCoordinator(useMemo(() => [
+    { key: 'split', outcome: splitAction.outcome, retry: splitAction.retry, announce: splitAction.announce, isLocked: splitAction.isLocked, activitySeq: splitAction.activitySeq },
+    { key: 'unsplit', outcome: unsplitAction.outcome, retry: unsplitAction.retry, announce: unsplitAction.announce, isLocked: unsplitAction.isLocked, activitySeq: unsplitAction.activitySeq },
+  ], [
+    splitAction.activitySeq, splitAction.announce, splitAction.isLocked, splitAction.outcome, splitAction.retry,
+    unsplitAction.activitySeq, unsplitAction.announce, unsplitAction.isLocked, unsplitAction.outcome, unsplitAction.retry,
+  ]));
+  const mutationLocked = banner.isLocked;
+  const legFieldError = (i: number) => splitAction.outcome?.fieldErrors?.[`leg-${i}`];
 
   const d = detail.data;
   const total = d ? Math.abs(d.amount) : 0;
   const sign = d && d.amount < 0 ? -1 : 1;
 
-  // Seed the editor once the transaction loads.
+  // Seed the editor once the transaction loads — baseline is set atomically with mode/legs.
   useEffect(() => {
     if (!d || inited.current) return;
     inited.current = true;
-    const nextMode = d.isSplit && d.legs.length ? 'specific' : mode;
-    const nextLegs = d.isSplit && d.legs.length
+    const nextMode: Mode = d.isSplit && d.legs.length ? 'specific' : 'equal';
+    const nextLegs: Leg[] = d.isSplit && d.legs.length
       ? d.legs.map((l) => ({
           key: nk(),
           id: l.id,
@@ -82,37 +120,132 @@ export default function SplitEditor() {
           pct: total ? String(r2((Math.abs(l.amount) / total) * 100)) : '',
         }))
       : [
-          // First split: master carries the whole amount + inherits the category.
           { key: nk(), catId: d.categoryId, catName: d.category || '', name: '', notes: '', showNote: false, amt: total.toFixed(2), pct: '100' },
         ];
-    const timer = setTimeout(() => {
-      setMode(nextMode);
-      setLegs(nextLegs);
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [d, mode, total]);
+    setMode(nextMode);
+    setLegs(nextLegs);
+    setBaselineSnapshot(seedSplitEditorBaseline(nextMode, nextLegs));
+  }, [d, total]);
+
+  useEffect(() => {
+    const first = splitAction.outcome?.firstField;
+    if (!first || !first.startsWith('leg-')) return;
+    const idx = Number(first.replace('leg-', ''));
+    if (!Number.isFinite(idx) || !legs[idx]) return;
+    const key = legs[idx].key;
+    const frame = requestAnimationFrame(() => setFocusKey(key));
+    return () => cancelAnimationFrame(frame);
+  }, [legs, splitAction.outcome]);
+
+  const isDirty = isSplitEditorDirty(mode, legs, baselineSnapshot);
+  const splitErrorBaselineRef = useRef<ReturnType<typeof seedSplitEditorBaseline> | null>(null);
+
+  useEffect(() => {
+    if (!splitAction.outcome) {
+      splitErrorBaselineRef.current = null;
+      return;
+    }
+    splitErrorBaselineRef.current = seedSplitEditorBaseline(mode, legs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- snapshot at error time only
+  }, [splitAction.outcome]);
+
+  useEffect(() => {
+    const snap = splitErrorBaselineRef.current;
+    if (!snap || !splitAction.outcome) return;
+    if (isSplitEditorDirty(mode, legs, snap)) {
+      splitAction.clear();
+      unsplitAction.clear();
+      splitErrorBaselineRef.current = null;
+    }
+  // splitAction/unsplitAction clear helpers are stable for this invalidation pass
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [legs, mode, splitAction.outcome]);
+
+  const requestSplitExit = (exit: () => void) => {
+    if (mutationLocked) return;
+    if (!isDirty) {
+      exit();
+      return;
+    }
+    Alert.alert(
+      'Discard unsaved changes?',
+      'Your split edits will be lost.',
+      [
+        { text: 'Keep editing', style: 'cancel' },
+        {
+          text: 'Discard',
+          style: 'destructive',
+          onPress: () => {
+            allowExitRef.current = true;
+            exit();
+          },
+        },
+      ],
+    );
+  };
+
+  useEffect(() => {
+    const unsub = navigation.addListener('beforeRemove', (e) => {
+      if (allowExitRef.current) {
+        allowExitRef.current = false;
+        return;
+      }
+      if (mutationLocked) {
+        e.preventDefault();
+        return;
+      }
+      if (!isDirty) return;
+      e.preventDefault();
+      Alert.alert(
+        'Discard unsaved changes?',
+        'Your split edits will be lost.',
+        [
+          { text: 'Keep editing', style: 'cancel' },
+          {
+            text: 'Discard',
+            style: 'destructive',
+            onPress: () => {
+              allowExitRef.current = true;
+              navigation.dispatch(e.data.action);
+            },
+          },
+        ],
+      );
+    });
+    return unsub;
+  }, [isDirty, mutationLocked, navigation]);
 
   const amounts = useMemo(() => computeAmounts(legs, mode, total), [legs, mode, total]);
+  const auxiliaryRefetchQueries = useMemo(
+    () => buildSplitEditorAuxiliaryRefetchQueries({ categories }),
+    [categories],
+  );
   const master = amounts[0] ?? 0;
   const balanced = Math.abs(amounts.reduce((s, v) => s + v, 0) - total) < 0.005;
   const allPositive = amounts.every((v) => v > 0.0049);
   const canSave = legs.length >= 2 && balanced && allPositive && master > 0.0049;
 
-  const setLeg = (i: number, patch: Partial<Leg>) => setLegs((ls) => ls.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
+  const setLeg = (i: number, patch: Partial<Leg>) => {
+    if (mutationLocked) return;
+    setLegs((ls) => ls.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
+  };
 
   const addLeg = () => {
+    if (mutationLocked) return;
     haptics.tap();
     const key = nk();
     setLegs((ls) => [...ls, { key, catId: null, catName: '', name: '', notes: '', showNote: false, amt: '', pct: '' }]);
     if (mode === 'specific' || mode === 'percent') setFocusKey(key);
   };
   const removeLeg = (i: number) => {
+    if (mutationLocked) return;
     if (i === 0) return; // master is not removable
     haptics.tap();
     setLegs((ls) => ls.filter((_, idx) => idx !== i));
   };
 
   const changeMode = (m: Mode) => {
+    if (mutationLocked) return;
     setModePick(false);
     setLegs((ls) => {
       const amts = computeAmounts(ls, ls.length ? mode : m, total);
@@ -132,7 +265,7 @@ export default function SplitEditor() {
   };
 
   const doSave = () => {
-    if (!d || !canSave) return;
+    if (!d || !canSave || mutationLocked) return;
     const payload = legs.map((l, i) => ({
       id: l.id,
       amount: sign * (amounts[i] ?? 0),
@@ -140,41 +273,37 @@ export default function SplitEditor() {
       name: l.name.trim() || undefined,
       notes: l.notes.trim() || undefined,
     }));
-    split.mutate(
+    splitAction.run(
       { id: d.id, accountId: d.accountId, date: d.date, legs: payload },
       {
         onSuccess: (result) => {
-          haptics.success();
           router.replace({
             pathname: '/transaction/[id]',
-            params: { id: result?.id || d.id, accountId: d.accountId, date: d.date },
+            params: { id: (result as { id?: string })?.id || d.id, accountId: d.accountId, date: d.date },
           });
         },
-        onError: (e) => Alert.alert('Could not save split', e.error || 'Please try again.'),
-      }
+      },
     );
   };
 
   const doUnsplit = () => {
-    if (!d) return;
+    if (!d || mutationLocked) return;
     Alert.alert('Remove split?', 'This merges the legs back into a single transaction.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Remove split',
         style: 'destructive',
         onPress: () =>
-          unsplit.mutate(
+          unsplitAction.run(
             { id: d.id, accountId: d.accountId, date: d.date, categoryId: legs[0]?.catId ?? null },
             {
               onSuccess: (result) => {
-                haptics.success();
                 router.replace({
                   pathname: '/transaction/[id]',
-                  params: { id: result?.id || d.id, accountId: d.accountId, date: d.date },
+                  params: { id: (result as { id?: string })?.id || d.id, accountId: d.accountId, date: d.date },
                 });
               },
-              onError: (e) => Alert.alert('Could not remove split', e.error || 'Please try again.'),
-            }
+            },
           ),
       },
     ]);
@@ -186,20 +315,39 @@ export default function SplitEditor() {
           light "glass" capsules on iOS 26; this keeps the app's dark styling. */}
       <Stack.Screen options={{ headerShown: false }} />
       <View style={[styles.topBar, { paddingTop: Math.max(insets.top, 8) + 6 }]}>
-        <Pressable testID="split-cancel-button" onPress={() => router.back()} hitSlop={12} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+        <Pressable testID="split-cancel-button" onPress={() => requestSplitExit(() => router.back())} disabled={mutationLocked} hitSlop={12} style={({ pressed }) => [pressed && !mutationLocked && { opacity: 0.6 }, mutationLocked && { opacity: 0.35 }]}>
           <Text style={styles.topCancel}>Cancel</Text>
         </Pressable>
         <Text style={styles.topTitle}>Split</Text>
-        <Pressable testID="split-save-button" onPress={doSave} disabled={!canSave || split.isPending} hitSlop={12} style={({ pressed }) => pressed && { opacity: 0.6 }}>
-          <Text style={[styles.topSave, (!canSave || split.isPending) && { opacity: 0.4 }]}>{split.isPending ? 'Saving…' : 'Save'}</Text>
+        <Pressable testID="split-save-button" onPress={doSave} disabled={!canSave || mutationLocked} hitSlop={12} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+          <Text style={[styles.topSave, (!canSave || mutationLocked) && { opacity: 0.4 }]}>{splitAction.isLocked ? 'Saving…' : 'Save'}</Text>
         </Pressable>
       </View>
 
+      <MutationLiveRegion message={banner.announce} />
+
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 40 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
+        <MutationFormBanner
+          outcome={banner.outcome}
+          onRetry={banner.retry}
+          onRefetch={() => detail.refetch()}
+        />
         {!d ? (
-          <Text style={styles.loading}>{detail.isError ? 'Could not load transaction.' : 'Loading…'}</Text>
+          shouldShowFatalError(detail.isError, detail.data) ? (
+            <ErrorState error={detail.error?.error} onRetry={() => detail.refetch()} retryLabel="Try again" />
+          ) : (
+            <Text style={styles.loading}>Loading…</Text>
+          )
         ) : (
           <>
+            {shouldShowRefetchError(detail.isError, detail.data) ? (
+              <QueryRefetchBanner onRetry={() => detail.refetch()} testID="split-refetch-banner" />
+            ) : null}
+            <QueryRefetchBanners
+              queries={auxiliaryRefetchQueries}
+              testID="split-aux-refetch-banner"
+              message="Some sections could not refresh · showing cached data · tap to retry"
+            />
             <View style={styles.hero}>
               <Avatar label={d.payee} category={d.category || undefined} size={44} style={{ marginBottom: 8 }} />
               <Text style={styles.heroPayee} numberOfLines={1}>{d.payee || '(no payee)'}</Text>
@@ -215,7 +363,7 @@ export default function SplitEditor() {
               </View>
             ) : null}
 
-            <Pressable testID="split-mode-picker" style={styles.modeRow} onPress={() => setModePick(true)}>
+            <Pressable testID="split-mode-picker" style={[styles.modeRow, mutationLocked && { opacity: 0.5 }]} onPress={() => { if (mutationLocked) return; setModePick(true); }} disabled={mutationLocked}>
               <Text style={styles.modeLead}>Split this transaction</Text>
               <View style={styles.modePill}>
                 <Text style={styles.modePillText}>{MODE_LABEL[mode]}</Text>
@@ -224,7 +372,7 @@ export default function SplitEditor() {
             </Pressable>
 
             {legs.map((l, i) => (
-              <View key={l.key} testID={`split-leg-${i}`} style={styles.legCard}>
+              <View key={l.key} testID={`split-leg-${i}`} style={[styles.legCard, legFieldError(i) && styles.legCardError]}>
                 <View style={styles.legTop}>
                   <View style={styles.amtWrap}>
                     {mode === 'percent' ? (
@@ -234,7 +382,7 @@ export default function SplitEditor() {
                           style={styles.amtInput}
                           value={i === 0 ? String(r2(total ? (master / total) * 100 : 0)) : l.pct}
                           onChangeText={(v) => setLeg(i, { pct: v.replace(/[^0-9.]/g, '') })}
-                          editable={i !== 0}
+                          editable={!mutationLocked && i !== 0}
                           keyboardType="decimal-pad"
                           placeholder="0"
                           placeholderTextColor={colors.muted}
@@ -250,7 +398,7 @@ export default function SplitEditor() {
                           style={styles.amtInput}
                           value={i === 0 || mode === 'equal' ? (amounts[i] ?? 0).toFixed(2) : l.amt}
                           onChangeText={(v) => setLeg(i, { amt: v.replace(/[^0-9.]/g, '') })}
-                          editable={i !== 0 && mode === 'specific'}
+                          editable={!mutationLocked && i !== 0 && mode === 'specific'}
                           keyboardType="decimal-pad"
                           placeholder="0.00"
                           placeholderTextColor={colors.muted}
@@ -262,13 +410,14 @@ export default function SplitEditor() {
                   {i === 0 ? (
                     <View style={styles.masterBadge}><Text style={styles.masterBadgeText}>REMAINDER</Text></View>
                   ) : (
-                    <Pressable testID={`split-leg-${i}-remove-button`} hitSlop={10} onPress={() => removeLeg(i)} style={({ pressed }) => pressed && { opacity: 0.5 }}>
+                    <Pressable testID={`split-leg-${i}-remove-button`} hitSlop={10} onPress={() => removeLeg(i)} disabled={mutationLocked} style={({ pressed }) => [pressed && !mutationLocked && { opacity: 0.5 }, mutationLocked && { opacity: 0.35 }]}>
                       <Text style={styles.legRemove}>✕</Text>
                     </Pressable>
                   )}
                 </View>
+                <MutationFieldError error={legFieldError(i)} testID={`split-leg-${i}-error`} />
 
-                <Pressable testID={`split-leg-${i}-category-picker`} style={styles.legField} onPress={() => setCatPick(i)}>
+                <Pressable testID={`split-leg-${i}-category-picker`} style={[styles.legField, legFieldError(i) && styles.legFieldError, mutationLocked && { opacity: 0.5 }]} onPress={() => { if (mutationLocked) return; setCatPick(i); }} disabled={mutationLocked}>
                   <Text style={styles.legFieldLabel}>Category</Text>
                   <Text style={[styles.legFieldValue, !l.catName && { color: colors.muted }]} numberOfLines={1}>{l.catName || 'Choose'}</Text>
                 </Pressable>
@@ -280,6 +429,7 @@ export default function SplitEditor() {
                     style={styles.legFieldInput}
                     value={l.name}
                     onChangeText={(v) => setLeg(i, { name: v })}
+                    editable={!mutationLocked}
                     placeholder={d.payee || 'Optional'}
                     placeholderTextColor={colors.muted}
                   />
@@ -293,19 +443,20 @@ export default function SplitEditor() {
                       style={styles.legFieldInput}
                       value={l.notes}
                       onChangeText={(v) => setLeg(i, { notes: v })}
+                      editable={!mutationLocked}
                       placeholder="Add a note"
                       placeholderTextColor={colors.muted}
                     />
                   </View>
                 ) : (
-                  <Pressable testID={`split-leg-${i}-add-note-button`} onPress={() => setLeg(i, { showNote: true })} style={({ pressed }) => [styles.addNote, pressed && { opacity: 0.6 }]}>
+                  <Pressable testID={`split-leg-${i}-add-note-button`} onPress={() => setLeg(i, { showNote: true })} disabled={mutationLocked} style={({ pressed }) => [styles.addNote, pressed && !mutationLocked && { opacity: 0.6 }, mutationLocked && { opacity: 0.4 }]}>
                     <Text style={styles.addNoteText}>+ add note</Text>
                   </Pressable>
                 )}
               </View>
             ))}
 
-            <Pressable testID="split-add-leg-button" onPress={addLeg} style={({ pressed }) => [styles.addSplit, pressed && { opacity: 0.85 }]}>
+            <Pressable testID="split-add-leg-button" onPress={addLeg} disabled={mutationLocked} style={({ pressed }) => [styles.addSplit, pressed && !mutationLocked && { opacity: 0.85 }, mutationLocked && { opacity: 0.4 }]}>
               <Text style={styles.addSplitText}>Add Split</Text>
             </Pressable>
 
@@ -316,20 +467,20 @@ export default function SplitEditor() {
             ) : null}
 
             {d.isSplit ? (
-              <Pressable testID="split-unsplit-button" onPress={doUnsplit} disabled={unsplit.isPending} style={({ pressed }) => [styles.unsplitBtn, pressed && { opacity: 0.7 }]}>
-                <Text style={styles.unsplitText}>{unsplit.isPending ? 'Removing…' : 'Remove split'}</Text>
+              <Pressable testID="split-unsplit-button" onPress={doUnsplit} disabled={mutationLocked} style={({ pressed }) => [styles.unsplitBtn, pressed && { opacity: 0.7 }]}>
+                <Text style={styles.unsplitText}>{unsplitAction.isLocked ? 'Removing…' : 'Remove split'}</Text>
               </Pressable>
             ) : null}
           </>
         )}
       </ScrollView>
 
-      <Modal visible={modePick} transparent animationType="fade" onRequestClose={() => setModePick(false)}>
-        <Pressable style={styles.modalBg} onPress={() => setModePick(false)}>
+      <Modal visible={modePick} transparent animationType="fade" onRequestClose={() => { if (mutationLocked) return; setModePick(false); }}>
+        <Pressable style={styles.modalBg} onPress={() => { if (mutationLocked) return; setModePick(false); }} disabled={mutationLocked}>
           <View testID="split-mode-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Split method</Text>
             {(['equal', 'specific', 'percent'] as Mode[]).map((m) => (
-              <Pressable testID={`split-mode-${m}${mode === m ? '-selected' : ''}`} key={m} style={({ pressed }) => [styles.modeOption, pressed && { opacity: 0.6 }]} onPress={() => changeMode(m)}>
+              <Pressable testID={`split-mode-${m}${mode === m ? '-selected' : ''}`} key={m} style={({ pressed }) => [styles.modeOption, pressed && !mutationLocked && { opacity: 0.6 }, mutationLocked && { opacity: 0.45 }]} onPress={() => changeMode(m)} disabled={mutationLocked}>
                 <Text style={styles.modeOptionText}>{MODE_LABEL[m]}</Text>
                 {mode === m ? <Text style={styles.modeCheck}>✓</Text> : null}
               </Pressable>
@@ -338,8 +489,8 @@ export default function SplitEditor() {
         </Pressable>
       </Modal>
 
-      <Modal visible={catPick !== null} transparent animationType="slide" onRequestClose={() => setCatPick(null)}>
-        <Pressable style={styles.modalBg} onPress={() => setCatPick(null)}>
+      <Modal visible={catPick !== null} transparent animationType="slide" onRequestClose={() => { if (mutationLocked) return; setCatPick(null); }}>
+        <Pressable style={styles.modalBg} onPress={() => { if (mutationLocked) return; setCatPick(null); }} disabled={mutationLocked}>
           <View testID="split-category-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
             <Text style={styles.sheetTitle}>Category for this split</Text>
             <FlatList
@@ -348,7 +499,7 @@ export default function SplitEditor() {
               style={{ maxHeight: 420 }}
               keyboardShouldPersistTaps="handled"
               renderItem={({ item }) => (
-                <Pressable testID={`split-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && { opacity: 0.6 }]} onPress={() => pickCat(item.id, item.name)}>
+                <Pressable testID={`split-category-option-${item.id}`} style={({ pressed }) => [styles.catOption, pressed && !mutationLocked && { opacity: 0.6 }, mutationLocked && { opacity: 0.45 }]} onPress={() => pickCat(item.id, item.name)} disabled={mutationLocked}>
                   <Text style={styles.catOptionText}>{item.name}</Text>
                   <Text style={styles.catOptionGroup}>{item.group}</Text>
                 </Pressable>
@@ -372,6 +523,7 @@ const styles = StyleSheet.create({
   modePillText: { color: colors.accentLight, fontSize: 14, fontWeight: '700' },
   modeCaret: { color: colors.accentLight, fontSize: 12, fontWeight: '700' },
   legCard: { backgroundColor: colors.surface, borderRadius: 14, padding: 14, marginBottom: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  legCardError: { borderColor: '#ff6b6b' },
   legTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   amtWrap: { flexDirection: 'row', alignItems: 'center', flex: 1 },
   amtDollar: { color: colors.text, fontSize: 22, fontWeight: '700', marginRight: 2 },
@@ -381,6 +533,7 @@ const styles = StyleSheet.create({
   masterBadgeText: { color: colors.muted, fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
   legRemove: { color: colors.red, fontSize: 16, fontWeight: '700', paddingHorizontal: 4 },
   legField: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingVertical: 9, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  legFieldError: { backgroundColor: 'rgba(255, 107, 107, 0.08)' },
   legFieldLabel: { color: colors.muted, fontSize: 13 },
   legFieldValue: { color: colors.accentLight, fontSize: 14, fontWeight: '600', flexShrink: 1, textAlign: 'right' },
   legFieldInput: { color: colors.text, fontSize: 14, flex: 1, textAlign: 'right', paddingVertical: 2 },

@@ -1,36 +1,53 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useRecurring, useSetRecurringOverride } from '@/api/hooks/finance.hooks';
 import { RecurringItem } from '@/api/generated/types';
 import { PushScreen } from '@/components/screen';
-import { Avatar, Card, EmptyState, ErrorState, SectionLabel } from '@/components/ui';
+import { QueryScreenBody } from '@/components/query-display';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { Avatar, Card, EmptyState, SectionLabel } from '@/components/ui';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { useMutationAction } from '@/hooks/useMutationAction';
 import { SkeletonList } from '@/components/skeleton';
+import { useFinanceToday } from '@/lib/date-only';
+import { formatOptionalMoney, formatOptionalPos, isKnownMoney } from '@/lib/money-display.js';
 import { cadenceLabel, colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const sid = (s: string) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+
+function subscriptionTotals(data: NonNullable<ReturnType<typeof useRecurring>['data']>) {
+  const subs = (data.items ?? []).filter((i) => !i.isBill);
+  const active = subs.filter((i) => i.status === 'active');
+  const monthlyKnown = isKnownMoney(data.subMonthlyTotal)
+    ? data.subMonthlyTotal
+    : isKnownMoney(data.monthlyTotal)
+      ? data.monthlyTotal
+      : null;
+  const monthlyFromItems = active.reduce((s, i) => s + i.monthlyEquivalent, 0);
+  const monthlyDisplay = monthlyKnown ?? (active.length ? monthlyFromItems : null);
+  return {
+    active,
+    inactive: subs.filter((i) => i.status !== 'active'),
+    hidden: data.hiddenItems ?? [],
+    monthlyDisplay,
+    annual: monthlyDisplay != null && Number.isFinite(monthlyDisplay) ? monthlyDisplay * 12 : null,
+  };
+}
 
 // Subscriptions = discretionary recurring charges (streaming, software, gym,
 // cloud). True must-pay bills (rent/utilities/phone/loan) live in the Bills
 // calendar instead, so the two views don't overlap.
 export default function Subscriptions() {
+  const financeToday = useFinanceToday();
   const router = useRouter();
   const recurring = useRecurring();
   const override = useSetRecurringOverride();
-  const data = recurring.data;
-
-  const { active, inactive, hidden, monthly, annual } = useMemo(() => {
-    const subs = (data?.items ?? []).filter((i) => !i.isBill);
-    const act = subs.filter((i) => i.status === 'active');
-    const monthlyTotal = data?.subMonthlyTotal ?? act.reduce((s, i) => s + i.monthlyEquivalent, 0);
-    return {
-      active: act,
-      inactive: subs.filter((i) => i.status !== 'active'),
-      hidden: data?.hiddenItems ?? [],
-      monthly: monthlyTotal,
-      annual: monthlyTotal * 12,
-    };
-  }, [data]);
+  const restoreAction = useMutationAction({
+    mutation: override,
+    mutationLabel: 'Restore subscription',
+    onRefetch: () => recurring.refetch(),
+  });
 
   const Row = ({ item }: { item: RecurringItem }) => {
     const dim = item.status !== 'active';
@@ -41,7 +58,7 @@ export default function Subscriptions() {
           <Text style={[styles.payee, dim && styles.dim]} numberOfLines={1}>{item.payee}</Text>
           <Text style={styles.sub} numberOfLines={1}>
             {cadenceLabel(item.cadence)}
-            {item.status === 'active' ? ` · ${dueLabel(item.nextRenewal)}` : item.status === 'cancelled' ? ' · cancelled' : ' · inactive'}
+            {item.status === 'active' ? ` · ${dueLabel(item.nextRenewal, financeToday)}` : item.status === 'cancelled' ? ' · cancelled' : ' · inactive'}
             {item.confidence ? ` · ${item.confidence}% confidence` : ''}
             {item.cancellation?.watchNextRenewal ? ' · watching renewal' : ''}
           </Text>
@@ -59,20 +76,34 @@ export default function Subscriptions() {
   };
 
   return (
-    <PushScreen testID="subscriptions-screen" refreshing={recurring.isFetching} onRefresh={recurring.refetch}>
-      {recurring.isLoading && !data ? (
-        <SkeletonList hero rows={6} />
-      ) : recurring.isError && !data ? (
-        <ErrorState error={recurring.error?.error} onRetry={recurring.refetch} />
-      ) : !active.length && !inactive.length && !hidden.length ? (
-        <EmptyState icon="repeat">No subscriptions detected yet</EmptyState>
-      ) : (
-        <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>MONTHLY SUBSCRIPTIONS</Text>
-            <Text style={styles.heroValue}>{fmtMoney(monthly)}</Text>
-            <Text style={styles.heroSub}>
-              {active.length} active · {fmtPos(annual)}/yr
+    <PushScreen testID="subscriptions-screen" onRefresh={recurring.refetch}>
+      <MutationLiveRegion message={restoreAction.announce} />
+      <MutationFormBanner outcome={restoreAction.outcome} onRetry={restoreAction.retry} onRefetch={() => recurring.refetch()} />
+      <QueryScreenBody
+        query={recurring}
+        loading={<SkeletonList hero rows={6} />}
+        empty={<EmptyState icon="repeat">No subscriptions detected yet</EmptyState>}
+        hasContent={Boolean(recurring.data?.items?.some((i) => !i.isBill))}
+        refetchBannerTestID="subscriptions-refetch-banner"
+        renderContent={(data) => {
+          const { active, inactive, hidden, monthlyDisplay, annual } = subscriptionTotals(data);
+          const monthlyLabel = formatOptionalMoney(monthlyDisplay, fmtMoney);
+          const annualLabel = formatOptionalPos(annual, fmtPos);
+          return (
+          <>
+          <View
+            style={styles.hero}
+            accessible
+            accessibilityLabel={heroMetricAccessibilityLabel(
+              'Monthly subscriptions',
+              monthlyLabel,
+              `${active.length} active · ${annualLabel} per year`,
+            )}
+          >
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">MONTHLY SUBSCRIPTIONS</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{monthlyLabel}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
+              {active.length} active · {annualLabel}/yr
             </Text>
           </View>
 
@@ -110,8 +141,8 @@ export default function Subscriptions() {
                     </View>
                     <Pressable
                       accessibilityRole="button"
-                      disabled={override.isPending}
-                      onPress={() => override.mutate({ key: item.key, hidden: false })}
+                      disabled={restoreAction.isLocked}
+                      onPress={() => restoreAction.run({ key: item.key, hidden: false })}
                       style={({ pressed }) => [styles.restoreButton, pressed && { opacity: 0.7 }]}
                     >
                       <Text style={styles.restoreText}>Restore</Text>
@@ -127,8 +158,10 @@ export default function Subscriptions() {
               Recurring memberships & apps only. Utilities, rent & internet are tracked as Bills ›
             </Text>
           </Pressable>
-        </>
-      )}
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }

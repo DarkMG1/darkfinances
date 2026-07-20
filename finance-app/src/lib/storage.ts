@@ -1,4 +1,5 @@
 import { createMMKV } from 'react-native-mmkv';
+import { bindNotificationScopeSuspensionPersistence } from '@/lib/notification-scope-suspension';
 
 // Non-secret persistence (server URL, UI prefs). The auth token lives in SecureStore.
 export const storage = createMMKV({ id: 'darkfinances' });
@@ -14,3 +15,5 @@ export const kv = {
   getNum: (key: string, fallback = 0): number => storage.getNumber(key) ?? fallback,
   setNum: (key: string, value: number) => storage.set(key, value),
 };
+
+bindNotificationScopeSuspensionPersistence({ kv, storage });

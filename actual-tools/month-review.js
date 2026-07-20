@@ -3,70 +3,47 @@
    category so the owner can verify categorization. Money Movement / Reimbursement / Income
    are summarized (net) rather than line-listed. */
 const api = require('@actual-app/api');
-const TZ = process.env.FINANCE_TIME_ZONE || process.env.TZ || 'America/Los_Angeles';
-const c2 = (c) => (Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const money = (c) => (c < 0 ? '-$' : '$') + c2(c);
-const financeToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+const { todayYMD } = require('./lib/date-only');
+const { buildToolCategoryInfo, classifiedLeavesForAccounts, incompleteTransferLeaves } = require('./lib/transfer-classification');
+const { monthReviewRealSpendTotalLine } = require('./lib/real-spend-total-line');
+const money = (c) => (c < 0 ? '-$' : '$') + (Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const MM_CAT = /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i;
 const REIMB_CAT = /^reimbursement$/i;
-const TRANSFER_PAYEE = /\btransfer\s*:?\s*(to|from)\b/i;
 
-(async () => {
+async function main() {
   await api.init({ dataDir: process.env.FIX_DATA_DIR, serverURL: process.env.ACTUAL_SERVER_URL, password: process.env.ACTUAL_PASSWORD });
   await api.downloadBudget(process.env.ACTUAL_SYNC_ID);
 
-  const today = financeToday();
+  const today = todayYMD();
   const monthStart = today.slice(0, 8) + '01';
 
   const groups = await api.getCategoryGroups();
-  const catInfo = {};
-  for (const g of groups) {
-    const inc = g.is_income === true || /^income$/i.test(g.name || '');
-    const mm = /money\s*movement/i.test(g.name || '');
-    for (const c of g.categories || []) {
-      let k = 'spend';
-      if (inc) k = 'income';
-      else if (REIMB_CAT.test(c.name || '')) k = 'reimb';
-      else if (mm || MM_CAT.test(c.name || '')) k = 'mm';
-      catInfo[c.id] = { name: c.name, kind: k };
-    }
-  }
+  const catInfo = buildToolCategoryInfo(groups);
   const nameOf = (id) => (id && catInfo[id] ? catInfo[id].name : '(uncategorized)');
-  const kindOf = (id) => (id && catInfo[id] ? catInfo[id].kind : 'uncat');
 
   const payees = await api.getPayees();
   const pn = {}; for (const p of payees) pn[p.id] = p.name || '';
   const accounts = await api.getAccounts();
   const an = {}; for (const a of accounts) an[a.id] = a.name;
-
-  const rows = [];
+  const transactionsByAccountId = new Map();
   for (const a of accounts) {
-    const tx = await api.getTransactions(a.id, monthStart, today);
-    for (const t of tx) {
-      const payeeName = pn[t.payee] || '';
-      const pTransfer = !!(t.transfer_id || t.transferred_id) || TRANSFER_PAYEE.test(payeeName);
-      const isSplit = t.subtransactions && t.subtransactions.length;
-      const legs = isSplit
-        ? t.subtransactions.map((s) => ({ amount: s.amount, catId: s.category, notes: s.notes || t.notes, transfer: !!s.transfer_id }))
-        : [{ amount: t.amount, catId: t.category, notes: t.notes, transfer: pTransfer }];
-      for (const lf of legs) {
-        let kind = kindOf(lf.catId);
-        if (kind === 'uncat' && (lf.transfer || pTransfer)) kind = 'mm';
-        rows.push({
-          date: t.date,
-          payee: payeeName || '(no payee)',
-          acct: (an[a.id] || '').replace(/\s*\(.*$/, '').slice(0, 18),
-          amount: lf.amount,
-          catName: lf.catId ? nameOf(lf.catId) : kind === 'mm' ? 'Transfer' : '(uncategorized)',
-          kind,
-          notes: (lf.notes || '').replace(/\s+/g, ' ').slice(0, 44),
-          onbudget: !a.offbudget,
-          split: !!isSplit,
-        });
-      }
-    }
+    transactionsByAccountId.set(a.id, await api.getTransactions(a.id, monthStart, today));
   }
+  const classified = classifiedLeavesForAccounts(accounts, transactionsByAccountId, catInfo, (t) => pn[t.payee] || '');
+  const rows = classified.map((lf) => ({
+    date: lf.date,
+    payee: lf.payee || '(no payee)',
+    acct: (an[lf.accountId] || '').replace(/\s*\(.*$/, '').slice(0, 18),
+    amount: lf.amount,
+    catName: lf.kind === 'transfer' ? 'Transfer' : lf.catId ? nameOf(lf.catId) : '(uncategorized)',
+    kind: lf.kind,
+    notes: (lf.notes || '').replace(/\s+/g, ' ').slice(0, 44),
+    onbudget: lf.onbudget,
+    split: !!lf.isLeg,
+    transferReason: lf.transferReason || lf.reason,
+  }));
+  const incomplete = incompleteTransferLeaves(classified);
 
   const byCat = {};
   for (const r of rows) {
@@ -93,7 +70,7 @@ const TRANSFER_PAYEE = /\btransfer\s*:?\s*(to|from)\b/i;
     }
   }
   out.push('');
-  out.push(`### REAL SPEND TOTAL: ${money(grand)}`);
+  out.push(monthReviewRealSpendTotalLine(grand, { incomplete: incomplete.length > 0 }));
 
   for (const kind of ['mm', 'reimb']) {
     const kk = keys.filter((k) => k.startsWith(kind + '::'));
@@ -116,7 +93,20 @@ const TRANSFER_PAYEE = /\btransfer\s*:?\s*(to|from)\b/i;
       out.push(`  ${cat}: net ${money(net)}  (${byCat[k].length} txn)`);
     }
   }
+  if (incomplete.length) {
+    out.push('');
+    const reasons = [...new Set(incomplete.map((leaf) => leaf.transferReason || leaf.reason).filter(Boolean))].sort();
+    out.push(`### [INCOMPLETE TRANSFER IDENTITY] count=${incomplete.length} reasons=${reasons.join(',')}`);
+    for (const leaf of incomplete.sort((a, b) => String(a.date).localeCompare(String(b.date)))) {
+      out.push(`  ${leaf.date} | ${money(leaf.amount).padStart(11)} | ${leaf.payee || '(no payee)'} | ${an[leaf.accountId] || ''} | ${leaf.transferReason || leaf.reason}`);
+    }
+  }
 
   console.log(out.join('\n'));
   await api.shutdown();
-})().catch((e) => { console.error('REVIEW_ERR', (e && e.stack) || e); process.exit(1); });
+  if (process.env.DIGEST_STRICT === '1' && incomplete.length) process.exit(2);
+}
+
+if (require.main === module) {
+  main().catch((e) => { console.error('REVIEW_ERR', (e && e.stack) || e); process.exit(1); });
+}

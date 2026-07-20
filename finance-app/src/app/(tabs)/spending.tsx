@@ -3,13 +3,18 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
 import { useRouter } from 'expo-router';
 import Svg, { Circle } from 'react-native-svg';
-import { useBudgets, useInsights, useSpending, useTags, useTrends } from '@/api/hooks/finance.hooks';
+import { useBudgets, useInsights, useReimbursement, useSpending, useTags, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { Screen } from '@/components/screen';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, PendingPill } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { haptics } from '@/lib/haptics';
-import { addDateOnlyDays, financeToday, monthEnd } from '@/lib/date-only';
-import { currentMonthKey, useSelectedMonth } from '@/lib/selectedMonth';
+import { addDateOnlyDays, monthEnd, useFinanceToday } from '@/lib/date-only';
+import { QueryRefetchBanners } from '@/components/query-display';
+import { buildBudgetMetrics, buildNonSpendingMetrics } from '@/lib/spending-metrics.js';
+import { buildSpendingRefetchQueries } from '@/lib/screen-query-display-config.js';
+import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
+import { useSelectedMonth } from '@/lib/selectedMonth';
+import { trendPeriodComplete } from '@/components/charts';
 import { categoryColors, colors, fmtDate, fmtPos, monthLabel } from '@/theme/colors';
 
 type Period = 'week' | 'month' | 'quarter' | 'year';
@@ -21,9 +26,9 @@ const PERIODS: { key: Period; label: string }[] = [
   { key: 'year', label: 'Year' },
 ];
 
-function periodWindow(period: Period, month: string, currentMonth: string) {
+function periodWindow(period: Period, month: string, currentMonth: string, financeTodayAnchor: string) {
   const selectedIsCurrent = month === currentMonth;
-  const anchorYmd = selectedIsCurrent ? financeToday() : monthEnd(month);
+  const anchorYmd = selectedIsCurrent ? financeTodayAnchor : monthEnd(month);
   const [anchorYear, anchorMonth, anchorDay] = anchorYmd.split('-').map(Number);
 
   if (period === 'week') {
@@ -59,9 +64,14 @@ function totalSpendBucket(category: string, group?: string) {
   return 'spending';
 }
 
+function spendingMetricA11y(rowLabel: string, metric: { display: string; accessibilityLabel?: string; accessibilityValue?: string }) {
+  return metric.accessibilityLabel ?? `${rowLabel}, ${metric.accessibilityValue ?? metric.display}`;
+}
+
 export default function Spending() {
   const router = useRouter();
-  const curKey = currentMonthKey();
+  const financeToday = useFinanceToday();
+  const curKey = financeToday.slice(0, 7);
   const [month, setMonth] = useSelectedMonth();
   const [period, setPeriod] = useState<Period>('month');
   const [totalExpanded, setTotalExpanded] = useState(false);
@@ -69,25 +79,45 @@ export default function Spending() {
   const [breakdownMode, setBreakdownMode] = useState<BreakdownMode>('categories');
   // Current month keeps hitting the warmed `spending-current` cache (month=undefined).
   const apiMonth = month === curKey ? undefined : month;
-  const selectedWindow = useMemo(() => periodWindow(period, month, curKey), [period, month, curKey]);
+  const selectedWindow = useMemo(() => periodWindow(period, month, curKey, financeToday), [period, month, curKey, financeToday]);
   const spendingParams = period === 'month' ? apiMonth : { start: selectedWindow.start, end: selectedWindow.end };
+  const useCurrentToday = period === 'month' && apiMonth === undefined;
+  const today = useToday();
   const trends = useTrends(60);
-  const spending = useSpending(spendingParams);
+  const spending = useSpending(spendingParams, { enabled: !useCurrentToday });
   const budgets = useBudgets(apiMonth);
+  const reimb = useReimbursement({ from: selectedWindow.start, to: selectedWindow.end });
   const insights = useInsights(apiMonth);
   const tags = useTags();
-  const cur = spending.data?.current;
+  const spendingQuery = useCurrentToday ? today : spending;
+  const spendingPayload = useCurrentToday ? today.data : spending.data;
+  const cur = useCurrentToday ? today.data?.spending?.current : spending.data?.current;
+  const spendingLoading = shouldShowInitialLoad(spendingQuery.isLoading, spendingPayload);
+  const spendingError = spendingQuery.error;
+  const spendingFatal = shouldShowFatalError(spendingQuery.isError, spendingPayload);
+  const spendingRefetchQueries = useMemo(
+    () => buildSpendingRefetchQueries({ spendingQuery, trends, budgets, reimb, insights, tags }),
+    [budgets, insights, reimb, spendingQuery, tags, trends],
+  );
+  const largestCharges = insights.data?.largestCharges ?? [];
+  const spendingComplete = cur?.completeness?.complete !== false;
+  const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
+  const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
+  const netIncome = totalSpend != null && totalIncome != null ? totalIncome - totalSpend : null;
 
   // Bars/navigation span exactly as far back as there's data: trim leading
   // buckets with no spend and no income from the (ascending) trends series.
   const availMonths = useMemo(() => {
     const ms = trends.data?.months ?? [];
     let i = 0;
-    while (i < ms.length && ms[i].spend === 0 && ms[i].income === 0) i++;
+    while (i < ms.length && (ms[i].spend == null || ms[i].spend === 0) && (ms[i].income == null || ms[i].income === 0)) i++;
     const trimmed = ms.slice(i);
-    return trimmed.length ? trimmed : [{ month: curKey, spend: cur?.totalSpend ?? 0, income: cur?.totalIncome ?? 0, net: 0, netWorth: 0 }];
-  }, [trends.data, curKey, cur]);
+    const fallbackSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
+    const fallbackIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
+    return trimmed.length ? trimmed : [{ month: curKey, spend: fallbackSpend, income: fallbackIncome, net: fallbackSpend != null && fallbackIncome != null ? fallbackIncome - fallbackSpend : null, netWorth: 0 }];
+  }, [trends.data, curKey, cur, spendingComplete]);
   const chartMonths = useMemo(() => availMonths.slice(-6), [availMonths]);
+  const chartHasIncomplete = chartMonths.some((m) => !trendPeriodComplete(m));
 
   const entries = useMemo(
     () => (cur ? Object.entries(cur.spending).sort((a, b) => b[1] - a[1]) : []),
@@ -124,21 +154,41 @@ export default function Spending() {
       { key: 'subscriptions', label: 'Subscriptions', amount: subscriptions, target: 'Subscriptions' },
     ].filter((row) => row.amount > 0.005);
   }, [groupByCategory, spendEntries]);
-  const totalSpend = cur?.totalSpend ?? 0;
-  const totalIncome = cur?.totalIncome ?? 0;
-  const netIncome = totalIncome - totalSpend;
-  const reimbursementTotal = Math.abs(entries.find(([cat]) => /^reimbursement$/i.test(cat))?.[1] ?? 0);
+
   const refundTotal = refundEntries.reduce((sum, [, amt]) => sum + Math.abs(amt), 0);
-  const budgetLeft = budgets.data?.totalRemaining ?? 0;
-  const budgetTarget = budgets.data?.totalTarget || budgets.data?.totalBudgeted || 0;
-  const budgetSpent = budgets.data?.totalSpent ?? totalSpend;
-  const budgetPct = budgetTarget > 0 ? Math.min(100, Math.max(0, (budgetSpent / budgetTarget) * 100)) : 0;
+  const nonSpending = useMemo(
+    () => buildNonSpendingMetrics({
+      reimbursement: {
+        fronted: reimb.data?.summary?.fronted,
+        isLoading: reimb.isLoading,
+        isError: reimb.isError,
+        hasData: reimb.data != null,
+      },
+      refundTotal,
+    }),
+    [reimb.data, reimb.isLoading, reimb.isError, refundTotal],
+  );
+  const budgetMetrics = useMemo(
+    () => buildBudgetMetrics({
+      data: budgets.data,
+      isLoading: budgets.isLoading,
+      isError: budgets.isError,
+      totalSpend,
+    }),
+    [budgets.data, budgets.isLoading, budgets.isError, totalSpend],
+  );
 
   // Real-spend merchants come from the backend (excludes transfers/investments/
   // CC payments/reimbursement), so savings moves and brokerage buys never show up.
   const topMerchants = insights.data?.topMerchants ?? [];
-  const refreshing = spending.isFetching || insights.isFetching || trends.isFetching || budgets.isFetching;
-  const refresh = () => { spending.refetch(); insights.refetch(); trends.refetch(); budgets.refetch(); };
+  const refresh = () => Promise.all([
+    useCurrentToday ? today.refetch() : spending.refetch(),
+    insights.refetch(),
+    trends.refetch(),
+    budgets.refetch(),
+    reimb.refetch(),
+    tags.refetch(),
+  ]);
   const categoryParams = (name: string, bucket?: string) => ({
     name,
     start: selectedWindow.start,
@@ -156,23 +206,26 @@ export default function Spending() {
   );
 
   return (
-    <Screen title="Spending" right={headerRight} refreshing={refreshing} onRefresh={refresh} testID="spending-screen">
+    <Screen title="Spending" right={headerRight} onRefresh={refresh} testID="spending-screen">
       <View style={styles.controlsCard}>
         <PeriodChips value={period} onChange={setPeriod} />
+        {chartHasIncomplete ? <Text style={styles.incompleteNote} accessibilityRole="text">Some months unavailable — transfer identity unresolved</Text> : null}
         <DualMonthBars months={chartMonths} selected={month} onSelect={setMonth} />
       </View>
 
-      {spending.isLoading ? (
+      <QueryRefetchBanners queries={spendingRefetchQueries} testID="spending-refetch-banner" />
+
+      {spendingLoading ? (
         <SkeletonList rows={8} />
-      ) : spending.isError ? (
-        <ErrorState error={spending.error?.error} onRetry={refresh} />
+      ) : spendingFatal ? (
+        <ErrorState error={spendingError?.error} onRetry={refresh} />
       ) : !spendEntries.length && !refundEntries.length ? (
         <EmptyState icon="creditcard">{month === curKey ? 'No spending this month' : `No spending in ${monthLabel(month)}`}</EmptyState>
       ) : (
         <>
           <SummaryCard>
-            <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={fmtPos(totalIncome)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Income') })} />
-            <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={fmtPos(totalSpend)} expanded={totalExpanded} onPress={() => { haptics.tap(); setTotalExpanded((v) => !v); }} />
+            <SummaryRow testID="spending-income-row" icon="dollarsign.circle" label="Income" value={totalIncome != null ? fmtPos(totalIncome) : 'Unavailable'} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Income') })} />
+            <SummaryRow testID="spending-total-row" icon="banknote" label="Total Spend" value={totalSpend != null ? fmtPos(totalSpend) : 'Unavailable'} expanded={totalExpanded} onPress={() => { haptics.tap(); setTotalExpanded((v) => !v); }} />
             {totalExpanded ? totalSpendRows.map((row, i) => (
               <SummaryRow
                 key={row.key}
@@ -185,7 +238,7 @@ export default function Spending() {
                 onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(row.target, row.key) })}
               />
             )) : null}
-            <SummaryRow icon="minus.circle" label="Net Income" value={`${netIncome < 0 ? '-' : ''}${fmtPos(Math.abs(netIncome))}`} muted last />
+            <SummaryRow icon="minus.circle" label="Net Income" value={netIncome != null ? `${netIncome < 0 ? '-' : ''}${fmtPos(Math.abs(netIncome))}` : 'Unavailable'} muted last />
           </SummaryCard>
 
           <SectionTitle>Your Budget</SectionTitle>
@@ -200,16 +253,34 @@ export default function Spending() {
             <View style={styles.budgetBody}>
               <View style={styles.budgetMain}>
                 <Text style={styles.mutedLabel}>Left for spending</Text>
-                <Text style={styles.budgetValue}>{budgetLeft < 0 ? '-' : ''}{fmtPos(Math.abs(budgetLeft))}</Text>
+                {budgetMetrics.showRetry ? (
+                  <Pressable
+                    testID="spending-budget-retry"
+                    accessibilityRole="button"
+                    accessibilityLabel="Budget unavailable, tap to retry"
+                    onPress={() => { haptics.tap(); budgets.refetch(); }}
+                    style={({ pressed }) => [pressed && { opacity: 0.65 }]}
+                  >
+                    <Text style={[styles.budgetValue, styles.budgetValueMuted]} accessibilityElementsHidden importantForAccessibility="no">{budgetMetrics.left.display}</Text>
+                  </Pressable>
+                ) : (
+                  <Text
+                    testID="spending-budget-left"
+                    style={[styles.budgetValue, budgetMetrics.left.kind !== 'computed' && styles.budgetValueMuted]}
+                    accessibilityLabel={spendingMetricA11y('Left for spending', budgetMetrics.left)}
+                  >
+                    {budgetMetrics.left.display}
+                  </Text>
+                )}
               </View>
-              <View style={styles.ringRow}>
-                <Ring label="$" pct={budgetPct} />
-                <Ring label="!" pct={Math.min(100, (refundTotal / Math.max(1, totalSpend)) * 100)} warn />
-                <Ring label="∞" pct={100 - budgetPct} />
+              <View style={styles.budgetFacts}>
+                <Text style={styles.budgetFact} testID="spending-budget-pct-label">{budgetMetrics.pctLabel}</Text>
+                {refundTotal > 0.005 ? <Text style={styles.budgetFact}>{fmtPos(refundTotal)} refunds shown separately</Text> : null}
+                {budgetMetrics.showRetry ? <Text style={styles.budgetFact}>Tap amount to retry</Text> : null}
               </View>
             </View>
             <View style={styles.progressTrack}>
-              <View style={[styles.progressFill, { width: `${budgetPct}%` }]} />
+              {budgetMetrics.showProgress ? <View style={[styles.progressFill, { width: `${budgetMetrics.progressPct}%` }]} /> : null}
             </View>
           </Card>
 
@@ -239,7 +310,7 @@ export default function Spending() {
                     key={cat}
                     category={cat}
                     amount={amt}
-                    pct={totalSpend > 0 ? amt / totalSpend : 0}
+                    pct={totalSpend != null && totalSpend > 0 ? amt / totalSpend : 0}
                     color={categoryColors[i % categoryColors.length]}
                     onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams(cat) })}
                   />
@@ -288,12 +359,12 @@ export default function Spending() {
             </>
           ) : null}
 
-          {insights.data?.largestCharges.length ? (
+          {largestCharges.length ? (
             <>
               <SectionTitle>Largest Purchases</SectionTitle>
               <Card style={styles.groupCard}>
                 <Text style={styles.cardCopy}>Tap a transaction to edit its details.</Text>
-                {insights.data.largestCharges.slice(0, 3).map((c, i) => (
+                {largestCharges.slice(0, 3).map((c, i) => (
                   <PurchaseRow
                     key={c.id ?? i}
                     payee={c.payee}
@@ -301,7 +372,7 @@ export default function Spending() {
                     date={c.date}
                     pending={c.cleared === false}
                     amount={Math.abs(c.amount)}
-                    last={i === Math.min(insights.data!.largestCharges.length, 3) - 1}
+                    last={i === Math.min(largestCharges.length, 3) - 1}
                     onPress={() => {
                       haptics.tap();
                       if (c.id) {
@@ -322,10 +393,40 @@ export default function Spending() {
 
           <SectionTitle>Non-Spending</SectionTitle>
           <Card style={styles.groupCard}>
-            <PlainRow icon="cross.case" label="Tax Deductible" value="$0" />
-            <PlainRow icon="arrow.uturn.backward.circle" label="Reimbursements" value={fmtPos(reimbursementTotal)} onPress={() => router.push({ pathname: '/category/[name]', params: categoryParams('Reimbursement') })} />
-            <PlainRow icon="minus.circle" label="Refunds & Credits" value={refundTotal ? `-${fmtPos(refundTotal)}` : '$0'} />
-            <PlainRow icon="arrow.left.arrow.right.circle" label="Transfers" value="0" last />
+            <PlainRow
+              testID="spending-non-spending-tax-deductible"
+              icon="cross.case"
+              label="Tax Deductible"
+              value={nonSpending.taxDeductible.display}
+              untracked={nonSpending.taxDeductible.kind === 'untracked'}
+              accessibilityLabel={nonSpending.taxDeductible.accessibilityLabel}
+            />
+            <PlainRow
+              testID="spending-non-spending-reimbursements"
+              icon="arrow.uturn.backward.circle"
+              label="Reimbursements"
+              value={nonSpending.reimbursements.display}
+              untracked={nonSpending.reimbursements.kind !== 'computed'}
+              accessibilityLabel={spendingMetricA11y('Reimbursements', nonSpending.reimbursements)}
+              onPress={() => router.push('/reimbursement' as never)}
+            />
+            <PlainRow
+              testID="spending-non-spending-refunds"
+              icon="minus.circle"
+              label="Refunds & Credits"
+              value={nonSpending.refunds.display}
+              untracked={nonSpending.refunds.kind !== 'computed'}
+              accessibilityLabel={spendingMetricA11y('Refunds & Credits', nonSpending.refunds)}
+            />
+            <PlainRow
+              testID="spending-non-spending-transfers"
+              icon="arrow.left.arrow.right.circle"
+              label="Transfers"
+              value={nonSpending.transfers.display}
+              untracked={nonSpending.transfers.kind === 'untracked'}
+              accessibilityLabel={nonSpending.transfers.accessibilityLabel}
+              last
+            />
           </Card>
         </>
       )}
@@ -348,19 +449,39 @@ function PeriodChips({ value, onChange }: { value: Period; onChange: (p: Period)
   );
 }
 
-function DualMonthBars({ months, selected, onSelect }: { months: { month: string; spend: number; income: number }[]; selected: string; onSelect: (m: string) => void }) {
-  const max = Math.max(1, ...months.map((m) => Math.max(m.spend, m.income)));
+function DualMonthBars({ months, selected, onSelect }: { months: { month: string; spend: number | null; income: number | null }[]; selected: string; onSelect: (m: string) => void }) {
+  const values = months.flatMap((m) => [m.spend, m.income].filter((v): v is number => v != null));
+  const max = Math.max(1, ...values);
   const barMax = 48;
   return (
-    <View style={styles.monthWrap}>
+    <View style={styles.monthWrap} accessibilityRole="adjustable" accessibilityLabel={`Monthly income and spending chart${months.some((m) => m.spend == null || m.income == null) ? ', some months unavailable' : ''}`}>
       <View style={styles.monthBars}>
         {months.map((m) => {
           const on = m.month === selected;
+          const incomeVal = m.income;
+          const spendVal = m.spend;
+          const incomeUnavailable = incomeVal == null;
+          const spendUnavailable = spendVal == null;
           return (
-            <Pressable key={m.month} onPress={() => { haptics.tap(); onSelect(m.month); }} style={[styles.monthCell, on && styles.monthCellOn]}>
+            <Pressable
+              key={m.month}
+              accessibilityRole="button"
+              accessibilityState={{ selected: on }}
+              accessibilityLabel={`${monthLabel(m.month)}${incomeUnavailable || spendUnavailable ? ', unavailable' : `, income ${fmtPos(incomeVal ?? 0)}, spend ${fmtPos(spendVal ?? 0)}`}`}
+              onPress={() => { haptics.tap(); onSelect(m.month); }}
+              style={[styles.monthCell, on && styles.monthCellOn]}
+            >
               <View style={styles.barStage}>
-                <View style={[styles.incomeBar, { height: Math.max(2, (m.income / max) * barMax) }]} />
-                <View style={[styles.spendBar, { height: Math.max(2, (m.spend / max) * barMax) }]} />
+                {incomeUnavailable ? (
+                  <View style={[styles.unavailableBar, { height: 10 }]} />
+                ) : (
+                  <View style={[styles.incomeBar, { height: Math.max(incomeVal === 0 ? 0 : 2, (incomeVal / max) * barMax) }]} />
+                )}
+                {spendUnavailable ? (
+                  <View style={[styles.unavailableBar, { height: 10 }]} />
+                ) : (
+                  <View style={[styles.spendBar, { height: Math.max(spendVal === 0 ? 0 : 2, (spendVal / max) * barMax) }]} />
+                )}
               </View>
               <Text style={[styles.monthText, on && styles.monthTextOn]}>{monthLabel(m.month).split(' ')[0]}</Text>
             </Pressable>
@@ -402,20 +523,12 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <CardTitle style={styles.section}>{children}</CardTitle>;
 }
 
-function Ring({ label, pct, warn }: { label: string; pct: number; warn?: boolean }) {
-  return (
-    <View style={[styles.ring, { borderColor: warn ? colors.yellow : colors.accent }]}>
-      <Text style={[styles.ringText, warn && { color: colors.yellow }]}>{label}</Text>
-    </View>
-  );
-}
-
-function BreakdownCircle({ entries, total }: { entries: [string, number][]; total: number }) {
+function BreakdownCircle({ entries, total }: { entries: [string, number][]; total: number | null }) {
   const size = 118;
   const stroke = 14;
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
-  const pcts = entries.map(([, amount]) => (total > 0 ? Math.max(0.025, amount / total) : 0));
+  const pcts = entries.map(([, amount]) => (total != null && total > 0 ? Math.max(0.025, amount / total) : 0));
   const segments = entries.map(([cat], i) => ({
     cat,
     pct: pcts[i],
@@ -450,7 +563,7 @@ function BreakdownCircle({ entries, total }: { entries: [string, number][]; tota
         </Svg>
         <View style={styles.breakdownRingCenter}>
           <Text style={styles.breakdownCenterLabel}>Spend</Text>
-          <Text style={styles.breakdownCenterValue}>{fmtPos(total).replace('.00', '')}</Text>
+          <Text style={styles.breakdownCenterValue}>{total != null ? fmtPos(total).replace('.00', '') : 'Unavailable'}</Text>
         </View>
       </View>
       <View style={styles.breakdownLegend}>
@@ -529,16 +642,31 @@ function TagBreakdownRow({ label, count, kind, onPress, testID }: { label: strin
   );
 }
 
-function PlainRow({ icon, label, value, onPress, last }: { icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; last?: boolean }) {
+function PlainRow({ icon, label, value, onPress, last, testID, untracked, accessibilityLabel }: {
+  icon: SymbolViewProps['name']; label: string; value: string; onPress?: () => void; last?: boolean; testID?: string; untracked?: boolean; accessibilityLabel?: string;
+}) {
+  const a11yLabel = accessibilityLabel ?? `${label}, ${value}`;
   const inner = (
     <>
       <SymbolView name={icon} tintColor={colors.text} size={18} resizeMode="scaleAspectFit" style={styles.plainIcon} />
       <Text style={styles.plainTitle}>{label}</Text>
-      <Text style={styles.plainValue}>{value}</Text>
+      <Text style={[styles.plainValue, untracked && styles.plainValueUntracked]} accessibilityElementsHidden importantForAccessibility="no">{value}</Text>
     </>
   );
-  if (onPress) return <Pressable accessibilityRole="button" accessibilityLabel={`${label}, ${value}`} onPress={onPress} style={({ pressed }) => [styles.plainRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}>{inner}</Pressable>;
-  return <View style={[styles.plainRow, last && styles.lastRow]}>{inner}</View>;
+  if (onPress) {
+    return (
+      <Pressable
+        testID={testID}
+        accessibilityRole="button"
+        accessibilityLabel={a11yLabel}
+        onPress={onPress}
+        style={({ pressed }) => [styles.plainRow, last && styles.lastRow, pressed && { opacity: 0.65 }]}
+      >
+        {inner}
+      </Pressable>
+    );
+  }
+  return <View testID={testID} accessible accessibilityLabel={a11yLabel} style={[styles.plainRow, last && styles.lastRow]}>{inner}</View>;
 }
 
 function OutlineButton({ label, onPress }: { label: string; onPress: () => void }) {
@@ -558,6 +686,7 @@ const styles = StyleSheet.create({
   periodChipOn: { backgroundColor: 'rgba(124,110,247,0.18)', borderColor: 'rgba(168,152,255,0.55)' },
   periodText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
   periodTextOn: { color: colors.accentLight },
+  incompleteNote: { color: colors.muted, fontSize: 11, marginBottom: 8 },
   monthWrap: { marginBottom: 0 },
   monthBars: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
   monthCell: { flex: 1, minHeight: 82, borderRadius: 12, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 7, borderWidth: 1, borderColor: 'transparent' },
@@ -565,6 +694,7 @@ const styles = StyleSheet.create({
   barStage: { height: 56, flexDirection: 'row', alignItems: 'flex-end', gap: 5 },
   incomeBar: { width: 7, borderRadius: 4, backgroundColor: colors.green },
   spendBar: { width: 7, borderRadius: 4, backgroundColor: colors.accentLight },
+  unavailableBar: { width: 7, borderRadius: 4, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.muted },
   monthText: { color: colors.muted, fontSize: 11, marginTop: 5, fontWeight: '600' },
   monthTextOn: { color: colors.text, fontWeight: '800' },
   legendRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10 },
@@ -584,9 +714,9 @@ const styles = StyleSheet.create({
   budgetMain: { flex: 1, minWidth: 0 },
   mutedLabel: { color: colors.muted, fontSize: 12, fontWeight: '600' },
   budgetValue: { color: colors.text, fontSize: 24, fontWeight: '800', marginTop: 4, letterSpacing: -0.5 },
-  ringRow: { flexDirection: 'row', gap: 8 },
-  ring: { width: 36, height: 36, borderRadius: 18, borderWidth: 2, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface2 },
-  ringText: { color: colors.accentLight, fontSize: 13, fontWeight: '800' },
+  budgetValueMuted: { color: colors.untrackedLabel, fontSize: 20, fontWeight: '700' },
+  budgetFacts: { alignItems: 'flex-end', gap: 3, maxWidth: '48%' },
+  budgetFact: { color: colors.muted, fontSize: 11, textAlign: 'right' },
   progressTrack: { height: 5, borderRadius: 3, backgroundColor: colors.surface2, margin: 16, marginTop: 14, overflow: 'hidden' },
   progressFill: { height: 5, borderRadius: 3, backgroundColor: colors.accent },
   breakdownCard: { padding: 0, overflow: 'hidden', marginBottom: 16 },
@@ -623,6 +753,7 @@ const styles = StyleSheet.create({
   plainIcon: { width: 30 },
   plainTitle: { color: colors.text, fontSize: 14, fontWeight: '600', flex: 1 },
   plainValue: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  plainValueUntracked: { color: colors.untrackedLabel, fontSize: 13, fontWeight: '600' },
   outlineBtn: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, borderRadius: 10, alignItems: 'center', paddingVertical: 10, marginHorizontal: 16, marginVertical: 14 },
   outlineText: { color: colors.accentLight, fontSize: 13, fontWeight: '700' },
   emptyCopy: { color: colors.muted, fontSize: 13, padding: 16 },

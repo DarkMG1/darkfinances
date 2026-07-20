@@ -25,42 +25,245 @@ const {
   monthRange: calendarMonthRange,
   todayYMD,
 } = require('./lib/date-only');
-const { readJsonFile, writeJsonFile } = require('./lib/json-store');
-const { rewriteTransactionReferences } = require('./lib/transaction-references');
+const {
+  CADENCE_DAYS,
+  classifyCadence,
+  inactiveGapDays,
+  inferRecurrenceSchedule,
+  monthlyEquivalentAmount,
+  nextOccurrenceAfter,
+  paidMatchWindow,
+  projectOccurrences,
+  projectionConfidencePenalty,
+  renewalWindow,
+  rollToOnOrAfter,
+} = require('./lib/recurrence');
+const { readJsonFile, writeJsonFile, JsonStoreError } = require('./lib/json-store');
+const { readRuntimeStateByPath, writeRuntimeStateByPath, RuntimeStateError } = require('./lib/runtime-state-store');
+const {
+  RECEIPT_MAX_DECODED_BYTES,
+  exactBase64DecodedBytes,
+  stripBase64Envelope,
+} = require('./lib/receipt-limits');
+const {
+  REFERENCE_STEPS: TRANSACTION_DELETION_REFERENCE_STEPS,
+  rewriteTransactionDeletionReferences,
+} = require('./lib/transaction-deletion-references');
+const {
+  createTransactionDeletionSaga,
+} = require('./lib/transaction-deletion-saga');
+const {
+  createRepaymentConfirmationSaga,
+} = require('./lib/repayment-confirmation-saga');
+const {
+  createReimbursementLinkSaga,
+} = require('./lib/reimbursement-link-saga');
+const {
+  admitManualLink,
+  locateTransactionLive,
+  revalidateLinkApply,
+  revalidateUnlinkApply,
+  resolveManualLinkEndpoints,
+} = require('./lib/reimbursement-link-admission');
+const {
+  buildLegacyMigrationReport,
+  classifyStoredLink,
+  endpointAdmissionFingerprint,
+  enrichEndpointForRead,
+  liveEndpointIdentityFingerprint,
+  summarizeEndpointCapacity,
+  sumTrustedAllocationsForExpense,
+  sumTrustedAllocationsForInflow,
+  trustedLinkedCents,
+} = require('./lib/reimbursement-allocation');
+const {
+  ExportSourceChangedError,
+  MAX_SNAPSHOT_ATTEMPTS,
+  buildTrustedAllocationIndex,
+  digestStableJson,
+  prepareExportForPublish,
+  projectAllocationLedger,
+  sortLinks,
+} = require('./lib/reimbursement-export-ledger');
+const {
+  acquireExportSnapshotLock,
+  assertExportLockAvailable,
+  assertSnapshotUnchanged,
+  sidecarSnapshotDigest,
+} = require('./lib/reimbursement-export-snapshot');
+const { readReleaseIdentity } = require('./lib/release-identity');
+const {
+  BulkOperationInProgressError,
+  createBulkOperationSaga,
+} = require('./lib/bulk-operation-saga');
+const {
+  buildAdmissionPayload,
+  RepaymentSuggestionInvalidError,
+  resolveRepaymentEndpoints,
+} = require('./lib/repayment-confirmation-admission');
+const {
+  rewriteTransactionReplacementReferences,
+} = require('./lib/transaction-replacement-references');
+const {
+  applyReviewDisposition,
+  buildReviewTaskIndex,
+  collectExpiredSnoozeKeys,
+  compareAndSwapReviewStateMaintenance,
+  countMigrationRequired,
+  filterVisibleReviewTasks,
+  invalidateReviewDispositionsForTargets,
+  normalizeReviewState,
+  preflightReviewDispositionAdmission,
+  reviewStateRevision,
+} = require('./lib/review-disposition');
+const { buildImportedIdCounts, enrichReviewTask, reviewTaskStableKey } = require('./lib/review-task-fingerprint');
+const {
+  SagaInterruption,
+  addableTransaction,
+  assertReconstructableTransaction,
+  createTransactionReplacementSaga,
+  transactionReplacementMap,
+} = require('./lib/transaction-replacement-saga');
+const {
+  buildCategoryInfo,
+  buildTransferIndex,
+  classifyLeaf,
+  classifyTransactionLeaves,
+  hasActualTransferIdentity,
+  incompleteTransferReviewFingerprint,
+  leafCountsAsRealIncome,
+  leafCountsAsRealSpend,
+  normalizeTransferId,
+  PROVENANCE,
+  summarizeCents,
+  summarizeClassifiedLeaves,
+  transactionLeaves,
+  TRANSFER_REASON,
+} = require('./lib/domain/classification');
+const {
+  mergeProjectionCompleteness,
+  merchantTrendsConservationOk,
+  merchantTrendsFromClassifiedLeaves,
+  projectionCompletenessFromLeaves,
+  spendSummaryFromClassifiedLeaves,
+} = require('./lib/domain/projection-completeness');
+const {
+  buildForecastProjectionContainment,
+  buildForecastStsContainment,
+  forecastContainmentWarnings,
+} = require('./lib/domain/forecast-containment');
+const { fromCents, sumCents, toCents } = require('./lib/domain/money');
+const { categoryEnvelopeFields, isRolloverTreatmentResolved } = require('./lib/domain/budget-envelope');
+const { enrichGoalsResponse } = require('./lib/domain/goal-feasibility');
+const {
+  buildForecastBudgetDailyCents,
+  buildForecastGenericBudgetContext,
+} = require('./lib/domain/cent-allocation');
+const {
+  forecastBillEventCents,
+  forecastIncomeEventCents,
+  sumOperatingCashBalanceCents,
+} = require('./lib/domain/forecast-money');
+const { accountsForMetric, readAccountOverrides, writeAccountOverrides } = require('./lib/account-overrides');
+const {
+  ACCOUNT_METRIC,
+  ACCOUNT_PROJECTION_REASON,
+  attachInclusionToAccountRow,
+  buildBalanceMetric,
+  buildNetWorthMetric,
+  detectDuplicateAccountIds,
+  NET_WORTH_ROLES,
+  normalizeBalanceCents,
+  projectAccounts,
+  sumIncludedBalanceCents,
+} = require('./lib/account-projection');
+const { resolveSplitwiseMirrorIdentity } = require('./lib/splitwise-mirror-account');
+const { validateManualAssetsStore } = require('./lib/manual-assets-projection');
+const {
+  mergeAccountOverrideEntry,
+  validEntry,
+  validateCreditOverrideCrossFields,
+} = require('./lib/account-overrides-schema');
+const { resolveAccountCreditPolicy, COVERAGE_MODE } = require('./lib/domain/credit-liability-policy');
+const { resolveRecurringCategoryIdentity } = require('./lib/domain/obligation-identities');
+const { metricValue } = require('./lib/metric-provenance');
+const {
+  SAFE_TO_SPEND_INPUTS,
+  safeToSpendIncompleteReasons,
+} = require('./lib/safe-to-spend');
+const {
+  buildObligationGraph,
+  billsFromGraph,
+  forecastCashEventsFromGraph,
+  graphSummary,
+  safeToSpendFromGraph,
+} = require('./lib/domain/obligation-graph');
+const { assembleObligationGraphInputs, buildGraphTransactionInputs, collectBillCategoryIds } = require('./lib/obligation-graph-bridge');
+const { verifyCyclePartitionInvariants } = require('./lib/domain/liability-cycle-partition');
+const {
+  AccountNotFoundError,
+  TransactionNotFoundError,
+  QueryAbortedError,
+  QueryResultLimitExceededError,
+  QueryRangeExceededError,
+  isQueryAbortedError,
+} = require('./lib/errors');
+const { statePath } = require('./lib/state-registry');
+const { myShareExpenseCents, loadSplitwiseMirrorResolutions, owesSnapshotMaxAgeMs, preflightSplitwiseMirrorAdmission, SplitwiseMirrorSnapshotError } = require('./lib/splitwise-mirror');
+const { BulkOperationOutcomeUnknownError } = require('./lib/bulk-operation-saga');
+const { getActualCoordinator } = require('./lib/actual-coordinator');
+const {
+  LEDGER_EPOCH,
+  fetchAccountTransactionsBounded,
+  getActiveQueryAbortSignal,
+  loadLedgerReadContext,
+  resolveBoundedLedgerStart,
+  resolveNetWorthQueryStart,
+  resolveSearchWindow,
+  validateCanonicalDateRange,
+  encodeSearchCursor,
+  decodeSearchCursor,
+  compareSearchRowsDesc,
+  rowBeforeSearchAnchor,
+  buildClearedSupersederIndex,
+  findSupersedingCleared,
+} = require('./lib/bounded-ledger-access');
+const { loadQueryScalingConfig } = require('./lib/query-scaling-config');
+const { boundedLifetimeMetric, QUERY_INCOMPLETE_REASON } = require('./lib/query-completeness');
 const ACTUAL_API_PATH = process.env.ACTUAL_API_PATH || '@actual-app/api';
 const api = require(ACTUAL_API_PATH);
 
 // Sidecar JSON for per-user state Actual Budget can't hold (subscription
 // overrides, savings goals). Lives next to this module; the systemd service
 // user owns ~/finance-dashboard so these are writable.
-const OVERRIDES_PATH = process.env.RECURRING_OVERRIDES_PATH || path.join(__dirname, 'recurring-overrides.json');
-const GOALS_PATH = process.env.GOALS_PATH || path.join(__dirname, 'goals.json');
-const BILLS_PAID_PATH = process.env.BILLS_PAID_PATH || path.join(__dirname, 'bills-paid.json');
+const OVERRIDES_PATH = statePath('recurringOverrides');
+const GOALS_PATH = statePath('goals');
+const BILLS_PAID_PATH = statePath('billsPaid');
 // Optional richer budgeting metadata keyed by category id or category name.
-const BUDGET_SETTINGS_PATH = process.env.BUDGET_SETTINGS_PATH || path.join(__dirname, 'budget-settings.json');
+const BUDGET_SETTINGS_PATH = statePath('budgetSettings');
 // "Who owes me" ground truth (Splitwise expected amounts, trips, debtor name
 // patterns). Editable by deployment tooling or the user without a code change.
-const OWES_CONFIG_PATH = process.env.OWES_CONFIG_PATH || path.join(__dirname, 'owes-config.json');
+const OWES_CONFIG_PATH = statePath('owesConfig');
 // Authoritative "who owes me" snapshot (Splitwise pairwise truth) produced by
 // actual-tools/owes-snapshot.js. The dashboard READS this; it never recomputes
 // per-person trip debts from line items (that approach always drifted — see
 // the project reimbursement docs). Missing file => fall back to the legacy baseline.
-const OWES_TRUTH_PATH = process.env.OWES_TRUTH_PATH || path.join(__dirname, 'owes-truth.json');
+const OWES_TRUTH_PATH = statePath('owesTruth');
 // Venmo debts imported from a statement CSV (actual-tools/venmo-import.js). Same
 // { bySlug: { slug: [{event, amount}] } } shape as owes-truth, merged into
 // who-owes-me alongside Splitwise. Absent => Venmo simply contributes nothing.
-const VENMO_TRUTH_PATH = process.env.VENMO_TRUTH_PATH || path.join(__dirname, 'venmo-truth.json');
+const VENMO_TRUTH_PATH = statePath('venmoTruth');
 // Events / trips: user-created groupings (name, members, Splitwise group) that a
 // transaction tag (#ev-<slug>) ties into. owes-snapshot.js reads this same file so
 // a trip created in the app auto-pulls its Splitwise group into who-owes-me.
-const EVENTS_PATH = process.env.EVENTS_PATH || path.join(__dirname, 'events.json');
+const EVENTS_PATH = statePath('events');
 // Manual reimbursement links: maps a repayment inflow (e.g. a Zelle payback) to
 // the expense(s) it repays. Actual has no native txn-to-txn link, so we store
 // display snapshots of both sides here.
-const REIMB_LINKS_PATH = process.env.REIMB_LINKS_PATH || path.join(__dirname, 'reimb-links.json');
+const REIMB_LINKS_PATH = statePath('reimbursementLinks');
 // Auto-matcher: suggested repayment→expense matches awaiting your confirmation,
 // plus a dismissed set so we never re-surface ones you've waved off.
-const REIMB_SUGGEST_PATH = process.env.REIMB_SUGGEST_PATH || path.join(__dirname, 'reimb-suggest.json');
+const REIMB_SUGGEST_PATH = statePath('reimbursementSuggestions');
 // Optional deployment-specific cutoffs. By default the app behaves normally:
 // direct reimbursement debt scans all history, and suggestions start Jan 1 of
 // the current year. Personal deployments can set these env vars to hide already
@@ -71,28 +274,52 @@ const REIMB_LEDGER_CUTOFF_ACTIVE = !!process.env.REIMB_LEDGER_FROM;
 // Phantom pending cleanup: a strike ledger of pending imported charges we've seen
 // (so aged-out deletes only fire after we've watched one linger), plus an audit log
 // of everything the cleanup has removed.
-const PHANTOM_SEEN_PATH = process.env.PHANTOM_SEEN_PATH || path.join(__dirname, 'phantom-seen.json');
-const PHANTOM_LOG_PATH = process.env.PHANTOM_LOG_PATH || path.join(__dirname, 'phantom-log.json');
+const PHANTOM_SEEN_PATH = statePath('phantomSeen');
+const PHANTOM_LOG_PATH = statePath('phantomLog');
 // Receipts: metadata index (per transaction) + a directory of the raw image files,
 // so scanned receipts survive an app reinstall (server is the durable copy).
-const RECEIPTS_PATH = process.env.RECEIPTS_PATH || path.join(__dirname, 'receipts.json');
+const RECEIPTS_PATH = statePath('receipts');
 const RECEIPTS_DIR = process.env.RECEIPTS_DIR || path.join(__dirname, 'receipts');
 // Categorization rules ("always categorize payee X as Y"). Applied to
 // uncategorized transactions on create + on each SimpleFIN refresh.
-const RULES_PATH = process.env.RULES_PATH || path.join(__dirname, 'rules.json');
+const RULES_PATH = statePath('rules');
 // Per-account display overrides (rename / hide) — never touches Actual itself.
-const ACCOUNT_OVERRIDES_PATH = process.env.ACCOUNT_OVERRIDES_PATH || path.join(__dirname, 'account-overrides.json');
+const ACCOUNT_OVERRIDES_PATH = statePath('accountOverrides');
 // User-entered assets/liabilities that live outside Actual (car, home, cash,
 // crypto) and roll into net worth.
-const MANUAL_ASSETS_PATH = process.env.MANUAL_ASSETS_PATH || path.join(__dirname, 'manual-assets.json');
-const INVESTMENT_HOLDINGS_PATH = process.env.INVESTMENT_HOLDINGS_PATH || path.join(__dirname, 'investment-holdings.json');
-const DEBT_PLANNER_PATH = process.env.DEBT_PLANNER_PATH || path.join(__dirname, 'debt-planner.json');
+const MANUAL_ASSETS_PATH = statePath('manualAssets');
+const INVESTMENT_HOLDINGS_PATH = statePath('investmentHoldings');
+const DEBT_PLANNER_PATH = statePath('debtPlanner');
 // Monthly reconciliation: opt-in month-end review where each expense is checked
 // off and then the whole month is closed. Stores the enabled flag + per-month,
 // per-transaction reconcile marks so the app can nag until a month is cleared.
-const RECON_PATH = process.env.RECON_PATH || path.join(__dirname, 'reconciliation.json');
-const readJsonSafe = (p, fallback, validate) => readJsonFile(p, fallback, validate);
-const writeJsonSafe = (p, obj) => writeJsonFile(p, obj);
+const RECON_PATH = statePath('reconciliation');
+const REVIEW_STATE_PATH = statePath('reviewState');
+const TRANSACTION_SAGAS_PATH = statePath('transactionSagas');
+const TRANSACTION_DELETION_SAGAS_PATH = statePath('transactionDeletionSagas');
+const REPAYMENT_CONFIRMATION_SAGAS_PATH = statePath('repaymentConfirmationSagas');
+const REIMBURSEMENT_LINK_SAGAS_PATH = statePath('reimbursementLinkSagas');
+const BULK_OPERATION_SAGAS_PATH = statePath('bulkOperationSagas');
+const SPLITWISE_MIRROR_RESOLUTIONS_PATH = statePath('splitwiseMirrorResolutions');
+const readJsonSafe = (p, fallback, validate) => {
+  try {
+    const managed = readRuntimeStateByPath(p, { fallback, validate });
+    if (managed.meta.source !== 'unmanaged') return managed.value;
+    return readJsonFile(p, fallback, validate);
+  } catch (cause) {
+    if (cause instanceof RuntimeStateError) {
+      if (cause.code === 'RUNTIME_STATE_INVALID_SHAPE' || cause.code === 'RUNTIME_STATE_CORRUPT') {
+        throw new JsonStoreError(cause.message, {
+          code: cause.code === 'RUNTIME_STATE_CORRUPT' ? 'JSON_CORRUPT' : 'JSON_INVALID_SHAPE',
+          file: cause.file,
+          cause,
+        });
+      }
+    }
+    throw cause;
+  }
+};
+const writeJsonSafe = (p, obj) => writeRuntimeStateByPath(p, obj);
 
 const config = {
   dataDir: process.env.ACTUAL_DATA_DIR || '/tmp/actual-dashboard-cache',
@@ -113,91 +340,304 @@ const apiHealth = {
   lastError: null,
 };
 
-async function initApi() {
-  if (apiReady) return;
-  if (initPromise) return initPromise;
-  initPromise = (async () => {
+let sagaRecoverCompleted = false;
+const TERMINAL_TRANSACTION_REPLACEMENT = new Set(['completed', 'rolled_back', 'legacy_unresolved', 'aborted']);
+const TERMINAL_TRANSACTION_DELETION = new Set(['completed']);
+const TERMINAL_REPAYMENT_CONFIRMATION = new Set(['completed']);
+const TERMINAL_REIMBURSEMENT_LINK = new Set(['completed']);
+const TERMINAL_BULK_OPERATION = new Set(['completed', 'unresolved']);
+let operationalSagaHealth = {
+  recoveryCompleted: false,
+  lastRecoveryAt: null,
+  lastCheckedAt: null,
+  nonterminal: { byStore: {}, total: 0 },
+  errors: [],
+  needsSync: false,
+  ready: false,
+};
+
+function normalizeOperationalRecoveryError(store, entry, caught = null) {
+  if (caught) {
+    return {
+      store,
+      sagaId: null,
+      message: String(caught?.message || caught),
+      code: caught?.code || null,
+    };
+  }
+  return {
+    store,
+    sagaId: entry?.sagaId ?? null,
+    message: String(entry?.error?.message || entry?.error),
+    code: entry?.error?.code || null,
+  };
+}
+
+function countOperationalSagaNonterminal() {
+  const byStore = {
+    transactionReplacement: countNonterminalSagas(TRANSACTION_SAGAS_PATH, TERMINAL_TRANSACTION_REPLACEMENT),
+    transactionDeletion: countNonterminalSagas(TRANSACTION_DELETION_SAGAS_PATH, TERMINAL_TRANSACTION_DELETION),
+    repaymentConfirmation: countNonterminalSagas(REPAYMENT_CONFIRMATION_SAGAS_PATH, TERMINAL_REPAYMENT_CONFIRMATION),
+    reimbursementLinks: countNonterminalSagas(REIMBURSEMENT_LINK_SAGAS_PATH, TERMINAL_REIMBURSEMENT_LINK),
+    bulkOperations: countNonterminalSagas(BULK_OPERATION_SAGAS_PATH, TERMINAL_BULK_OPERATION),
+  };
+  const total = Object.values(byStore).reduce((sum, count) => sum + count, 0);
+  return { byStore, total };
+}
+
+function countNonterminalSagas(storePath, terminalPhases) {
+  const state = readJsonSafe(storePath, { sagas: {} });
+  return Object.values(state.sagas || {}).filter((saga) => !terminalPhases.has(saga?.phase)).length;
+}
+
+function refreshOperationalSagaHealth({ recovery } = {}) {
+  const nonterminal = countOperationalSagaNonterminal();
+  if (recovery?.errors) operationalSagaHealth.errors = recovery.errors;
+  if (recovery && Object.prototype.hasOwnProperty.call(recovery, 'needsSync')) {
+    operationalSagaHealth.needsSync = recovery.needsSync;
+  }
+  operationalSagaHealth = {
+    recoveryCompleted: sagaRecoverCompleted,
+    lastRecoveryAt: operationalSagaHealth.lastRecoveryAt,
+    lastCheckedAt: new Date().toISOString(),
+    nonterminal,
+    errors: operationalSagaHealth.errors,
+    needsSync: operationalSagaHealth.needsSync,
+    ready: apiReady
+      && sagaRecoverCompleted
+      && operationalSagaHealth.errors.length === 0
+      && nonterminal.total === 0,
+  };
+  return operationalSagaHealth;
+}
+
+async function driveOperationalSagaRecovery(actualApi, { deferSync = true } = {}) {
+  let needsSync = false;
+  const errors = [];
+  const recoverers = [
+    ['transactionReplacement', () => recoverTransactionSagas(actualApi, { deferSync })],
+    ['transactionDeletion', () => recoverTransactionDeletionSagas(actualApi, { deferSync })],
+    ['repaymentConfirmation', () => recoverRepaymentConfirmationSagas(actualApi, { deferSync })],
+    ['reimbursementLinks', () => recoverReimbursementLinkSagas(actualApi)],
+    ['bulkOperations', () => recoverBulkOperationSagas(actualApi, { deferSync })],
+  ];
+  for (const [store, recover] of recoverers) {
     try {
-      await loadBudgetResilient();
-      apiReady = true;
-      apiHealth.initializedAt = new Date().toISOString();
-      apiHealth.lastError = null;
+      const result = await recover();
+      needsSync ||= Boolean(result?.needsSync);
+      for (const entry of result?.errors || []) {
+        errors.push(normalizeOperationalRecoveryError(store, entry));
+      }
+    } catch (error) {
+      errors.push(normalizeOperationalRecoveryError(store, null, error));
+    }
+  }
+  return { needsSync, errors };
+}
+
+async function recoverOperationalSagas() {
+  if (sagaRecoverCompleted) return operationalSagaHealth;
+  const recovery = await driveOperationalSagaRecovery(api, { deferSync: false });
+  sagaRecoverCompleted = true;
+  operationalSagaHealth.lastRecoveryAt = new Date().toISOString();
+  refreshOperationalSagaHealth({ recovery });
+  const blockingBulk = recovery.errors.find((entry) => entry.code === 'BULK_OPERATION_OUTCOME_UNKNOWN');
+  if (blockingBulk) {
+    throw new BulkOperationOutcomeUnknownError(blockingBulk.message);
+  }
+  return operationalSagaHealth;
+}
+
+async function ensureApiReady({ skipRecover = false } = {}) {
+  if (!apiReady) {
+    if (!initPromise) {
+      initPromise = (async () => {
+        try {
+          await loadBudgetResilient();
+          apiReady = true;
+          apiHealth.initializedAt = new Date().toISOString();
+          apiHealth.lastError = null;
+        } catch (error) {
+          apiHealth.lastErrorAt = new Date().toISOString();
+          apiHealth.lastError = String(error?.message || error);
+          throw error;
+        }
+      })();
+    }
+    await initPromise;
+  }
+  if (!skipRecover) {
+    await recoverOperationalSagas();
+  }
+}
+
+async function initApi({ skipRecover = false } = {}) {
+  return getActualCoordinator().runRecover(async () => {
+    try {
+      await ensureApiReady({ skipRecover });
     } catch (error) {
       apiHealth.lastErrorAt = new Date().toISOString();
       apiHealth.lastError = String(error?.message || error);
       throw error;
     }
-  })();
-  return initPromise;
+  }, { label: 'initApi' });
 }
 
-// Self-heal a diverged/corrupt local cache. An Actual `out-of-sync` dataDir
-// previously crash-looped the service forever. The Actual API can't re-init
-// cleanly within one process, so we don't retry in-process: we wipe the cache
-// (it's just a reconstructable mirror of the Actual server at config.serverURL)
-// and exit, letting systemd restart us once with a clean dir and a single fresh
-// download. A genuinely unreachable server simply keeps retrying until it's back.
+function isRecoverableActualCacheError(error) {
+  const message = String(error?.message || error || '');
+  return /out[\s_-]*of[\s_-]*sync|invalid[\s_-]*schema|SQLITE_CORRUPT|database disk image is malformed|no such table|migration.*(?:failed|mismatch)/i.test(message);
+}
+
+async function resetOwnedActualCache(dataDir) {
+  const resolved = path.resolve(dataDir || '');
+  const home = path.resolve(process.env.HOME || '');
+  if (!resolved || resolved === '/' || resolved === home || resolved.split(path.sep).filter(Boolean).length < 3) {
+    throw new Error(`Refusing unsafe Actual cache reset: ${resolved || '(empty)'}`);
+  }
+  const stat = await fs.promises.lstat(resolved);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid()) {
+    throw new Error(`Refusing unowned or non-directory Actual cache reset: ${resolved}`);
+  }
+  await fs.promises.rm(resolved, { recursive: true, force: true });
+  await fs.promises.mkdir(resolved, { recursive: true, mode: 0o700 });
+}
+
+// Self-heal only errors known to describe a disposable local cache. Auth,
+// connectivity, server, and configuration failures must preserve the cache for
+// diagnosis rather than deleting potentially useful state.
 async function loadBudgetResilient() {
   try {
     await api.init({ dataDir: config.dataDir, serverURL: config.serverURL, password: config.password });
     await api.downloadBudget(config.syncId);
   } catch (e) {
-    console.error('Budget load failed; wiping cache and restarting clean:', (e && e.message) || e);
-    try { await fs.promises.rm(config.dataDir, { recursive: true, force: true }); } catch (_) {}
-    try { await fs.promises.mkdir(config.dataDir, { recursive: true }); } catch (_) {}
-    process.exit(1);
+    if (!isRecoverableActualCacheError(e)) throw e;
+    console.error('Recoverable Actual cache failure; resetting owned cache:', (e && e.message) || e);
+    await resetOwnedActualCache(config.dataDir);
+    throw new Error('Actual cache was reset after a recoverable startup failure; restart required', { cause: e });
   }
 }
 
-async function withApi(fn) {
-  await initApi();
-  return fn(api);
+async function withApi(fn, { mode = 'read', skipRecover = false } = {}) {
+  const coordinator = getActualCoordinator();
+  const body = async () => {
+    await ensureApiReady({ skipRecover });
+    return fn(api);
+  };
+  if (mode === 'write') return coordinator.runWrite(body, { label: 'withApi:write' });
+  return coordinator.runRead(body, { label: 'withApi:read' });
+}
+
+function runActualRead(fn, options = {}) {
+  return withApi(fn, { mode: 'read', ...options });
+}
+
+function runActualWrite(fn) {
+  return withApi(fn, { mode: 'write' });
+}
+
+function runActualRecover(fn, options = {}) {
+  return getActualCoordinator().runRecover(fn, options);
 }
 
 // Pull the latest changes from the Actual server into the local cache. Used by a
 // periodic timer in server.js so the dashboard never serves stale post-sync data.
 async function syncNow() {
-  try {
-    await initApi();
-    await api.sync();
-    apiHealth.lastSyncAt = new Date().toISOString();
-    apiHealth.lastError = null;
-  } catch (error) {
-    apiHealth.lastErrorAt = new Date().toISOString();
-    apiHealth.lastError = String(error?.message || error);
-    throw error;
-  }
+  const coordinator = getActualCoordinator();
+  return coordinator.runRecover(async () => {
+    try {
+      await ensureApiReady();
+      const recovery = await syncTransactionSagas(api);
+      refreshOperationalSagaHealth({
+        recovery: {
+          needsSync: recovery.needsSync,
+          errors: recovery.errors.map((entry) => ({
+            store: entry.store || 'unknown',
+            sagaId: entry.sagaId ?? null,
+            message: String(entry.error?.message || entry.error),
+          })),
+        },
+      });
+      coordinator.invalidateGeneration();
+      apiHealth.lastSyncAt = new Date().toISOString();
+      apiHealth.lastError = null;
+    } catch (error) {
+      refreshOperationalSagaHealth();
+      apiHealth.lastErrorAt = new Date().toISOString();
+      apiHealth.lastError = String(error?.message || error);
+      throw error;
+    }
+  }, { label: 'syncNow' });
 }
 
 // Manual "Sync with bank": fetch fresh transactions from linked banks (SimpleFIN)
 // then pull deltas. Resilient — even if the bank fetch fails (provider down), we
 // still sync the ledger and report the warning instead of throwing.
-async function bankSync() {
-  await initApi();
-  let warning = null;
-  try {
-    await api.runBankSync();
-  } catch (e) {
-    warning = (e && e.message) || 'bank fetch failed';
-  }
-  await syncNow();
-  return { ok: !warning, warning, at: new Date().toISOString() };
+async function bankSync({ sync = true, throwOnBankError = false } = {}) {
+  return withApi(async (actualApi) => {
+    let warning = null;
+    try {
+      await actualApi.runBankSync();
+    } catch (e) {
+      if (throwOnBankError) throw e;
+      warning = (e && e.message) || 'bank fetch failed';
+    }
+    if (sync) await syncTransactionSagas(actualApi);
+    return { ok: !warning, warning, at: new Date().toISOString() };
+  }, { mode: 'write' });
 }
 
 // Force a full re-download on next access (used by /api/refresh).
 function resetApi() {
   apiReady = false;
   initPromise = null;
+  sagaRecoverCompleted = false;
+  operationalSagaHealth = {
+    recoveryCompleted: false,
+    lastRecoveryAt: null,
+    lastCheckedAt: null,
+    nonterminal: { byStore: {}, total: 0 },
+    errors: [],
+    needsSync: false,
+    ready: false,
+  };
+}
+
+async function performActualShutdown() {
+  if (apiReady) {
+    let recoveryError = null;
+    let shutdownError = null;
+    try {
+      await syncTransactionSagas(api);
+    } catch (error) {
+      recoveryError = error;
+    }
+    try {
+      if (typeof api.shutdown === 'function') await api.shutdown();
+    } catch (error) {
+      shutdownError = error;
+    }
+    resetApi();
+    if (recoveryError) throw recoveryError;
+    if (shutdownError) throw shutdownError;
+    return;
+  }
+  resetApi();
+}
+
+async function shutdownApi() {
+  return getActualCoordinator().shutdownHandoff(() => performActualShutdown());
 }
 
 function getHealth() {
+  if (sagaRecoverCompleted) refreshOperationalSagaHealth();
   return {
-    ready: apiReady,
+    ready: apiReady && sagaRecoverCompleted && operationalSagaHealth.ready,
     initializing: !!initPromise && !apiReady,
     initializedAt: apiHealth.initializedAt,
     lastSyncAt: apiHealth.lastSyncAt,
     lastErrorAt: apiHealth.lastErrorAt,
     lastError: apiHealth.lastError,
+    operationalSagas: { ...operationalSagaHealth },
   };
 }
 
@@ -237,23 +677,7 @@ function stddev(arr) {
   return Math.sqrt(arr.reduce((s, x) => s + (x - m) ** 2, 0) / arr.length);
 }
 
-// Recurring cadence buckets keyed by typical day-period; the classifier maps a
-// median inter-charge gap into one of these named cadences (null = irregular).
-const CADENCE_DAYS = { weekly: 7, biweekly: 14, semimonthly: 15.22, monthly: 30.44, bimonthly: 60.88, quarterly: 91.3, semiannual: 182.6, annual: 365.25 };
-function classifyCadence(gap) {
-  if (gap >= 5 && gap <= 9) return 'weekly';
-  if (gap >= 12 && gap <= 14) return 'biweekly';
-  // Twice-a-month payroll (e.g. 15th + month-end) alternates ~13–17 day gaps,
-  // landing in the dead zone between biweekly and monthly. Treat 15–18 as
-  // semimonthly so a paycheck isn't dropped as "irregular".
-  if (gap >= 15 && gap <= 18) return 'semimonthly';
-  if (gap >= 25 && gap <= 35) return 'monthly';
-  if (gap >= 55 && gap <= 70) return 'bimonthly';
-  if (gap >= 80 && gap <= 100) return 'quarterly';
-  if (gap >= 170 && gap <= 200) return 'semiannual';
-  if (gap >= 330 && gap <= 400) return 'annual';
-  return null;
-}
+// Recurring cadence classification and calendar-safe projection live in lib/recurrence.js.
 // Normalize a payee into a stable subscription key (drops store numbers / punctuation).
 function recurringKey(payee) {
   return (payee || '')
@@ -329,84 +753,320 @@ const INCOME_GROUP = envRegex('INCOME_GROUP_PATTERN', /^income$/i);
 const MONEY_MOVEMENT_GROUP = envRegex('MONEY_MOVEMENT_GROUP_PATTERN', /money\s*movement/i);
 const MM_CAT = envRegex('MONEY_MOVEMENT_CATEGORY_PATTERN', /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i);
 const REIMB_CAT = envRegex('REIMBURSEMENT_CATEGORY_PATTERN', /^reimbursement$/i);
-const TRANSFER_PAYEE = envRegex('TRANSFER_PAYEE_PATTERN', /^transfer\s*:?\s*(to|from)\b|\btransfer (to|from)\b/i);
 // Peer settle-ups (Splitwise/Venmo/etc.) frequently import as "Other Income",
 // which inflates real income. They're a payback (money movement), not earnings,
 // so they get refiled under Reimbursement — see refileSettleUps().
 const SETTLE_UP_PAYEE = envRegex('SETTLE_UP_PAYEE_PATTERN', /splitwise|venmo|cash\s?app|zelle|paypal/i);
 
 function buildCatInfo(groups) {
-  const catInfo = {}; // id -> { name, group, kind, isIncome, isMovement }
-  for (const g of groups) {
-    const incomeGroup = g.is_income === true || INCOME_GROUP.test(g.name || '');
-    const mmGroup = MONEY_MOVEMENT_GROUP.test(g.name || '');
-    for (const c of g.categories || []) {
-      let kind = 'spend';
-      if (incomeGroup) kind = 'income';
-      else if (REIMB_CAT.test(c.name || '')) kind = 'reimb';
-      else if (mmGroup || MM_CAT.test(c.name || '')) kind = 'mm';
-      catInfo[c.id] = { name: c.name, group: g.name, kind, isIncome: incomeGroup, isMovement: mmGroup };
-    }
-  }
-  return catInfo;
+  return buildCategoryInfo(groups, {
+    incomeGroup: INCOME_GROUP,
+    moneyMovementGroup: MONEY_MOVEMENT_GROUP,
+    moneyMovementCategory: MM_CAT,
+    reimbursementCategory: REIMB_CAT,
+  });
 }
 
-// Flatten a transaction into classified leaves (split-aware). Drops parent shells.
-function leavesOf(t, parentTransfer) {
-  if (t.is_parent && Array.isArray(t.subtransactions) && t.subtransactions.length) {
-    return t.subtransactions.map((s, i) => ({
-      amount: s.amount, catId: s.category, notes: s.notes, transfer: !!s.transfer_id,
-      id: s.id || `${t.id}-${i}`, parentId: t.id, isLeg: true,
-    }));
+// Flatten a transaction into leaves (split-aware). Drops parent shells.
+function leavesOf(t) {
+  return transactionLeaves(t);
+}
+
+function classifyLeavesForRows(rows, catInfo, { transferIndex: providedIndex } = {}) {
+  const transferIndex = providedIndex ?? buildTransferIndex(rows);
+  const out = [];
+  for (const row of rows) {
+    for (const leaf of transactionLeaves(row.transaction)) {
+      out.push(classifyLeaf(leaf, catInfo, {
+        transactionId: leaf.id,
+        accountId: row.accountId,
+        transferIndex,
+      }));
+    }
   }
-  if (!t.is_parent) return [{
-    amount: t.amount, catId: t.category, notes: t.notes, transfer: parentTransfer,
-    id: t.id, parentId: null, isLeg: false,
-  }];
-  return [];
+  return out;
+}
+
+function classifyLeavesInDateRange(rows, catInfo, start, end, transferIndex) {
+  const out = [];
+  for (const row of rows) {
+    const date = row.transaction.date;
+    if (date < start || date > end) continue;
+    for (const leaf of transactionLeaves(row.transaction)) {
+      out.push(classifyLeaf(leaf, catInfo, {
+        transactionId: leaf.id,
+        accountId: row.accountId,
+        transferIndex,
+      }));
+    }
+  }
+  return out;
+}
+
+function enrichCurrentLeavesWithPayee(leaves, rows, payeeMap) {
+  const payeeByTxnId = new Map();
+  for (const row of rows || []) {
+    const t = row.transaction;
+    payeeByTxnId.set(
+      String(t.id),
+      displayPayeeName(payeeMap[t.payee] || t.imported_payee, t.notes, '(no payee)'),
+    );
+  }
+  return (leaves || []).map((leaf) => ({
+    ...leaf,
+    payee: payeeByTxnId.get(String(leaf.parentId || leaf.id)) || '(no payee)',
+  }));
+}
+
+function rowsWithinDateEnvelope(rows, start, end) {
+  return (rows || []).filter((row) => {
+    const date = row.transaction?.date;
+    return date && date >= start && date <= end;
+  });
+}
+
+/**
+ * Safe-to-Spend transfer quarantine uses spending.current.completeness semantics:
+ * classify month-to-date leaves with a transfer index built only from the Today
+ * bounded row envelope (prev.start through monthEndDate). Prior-month leaves may
+ * participate in pairing but their completeness never quarantines STS.
+ */
+function currentMonthSpendingCompletenessForSts({
+  rows,
+  catInfo,
+  envelopeStart,
+  envelopeEnd,
+  curStart,
+  curEnd,
+  spendingProjection,
+}) {
+  const stsRows = rowsWithinDateEnvelope(rows, envelopeStart, envelopeEnd);
+  const transferIndex = buildTransferIndex(stsRows);
+  const currentLeaves = classifyLeavesInDateRange(stsRows, catInfo, curStart, curEnd, transferIndex);
+  let completeness = summarize(currentLeaves).completeness;
+  if (spendingProjection.incompleteReasons.length) {
+    completeness = {
+      ...completeness,
+      complete: false,
+      incompleteReasons: [
+        ...new Set([...(completeness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+      ],
+    };
+  }
+  return completeness;
+}
+
+async function fetchOnBudgetRows(api, start, end, { accountFilter, config } = {}) {
+  const effectiveConfig = config || loadQueryScalingConfig();
+  validateCanonicalDateRange(start, end, {
+    config: effectiveConfig,
+    purpose: 'on-budget ledger rows',
+  });
+  const ctx = await loadLedgerReadContext(api, {
+    accountFilter: (a) => !a.closed && !a.offbudget && (!accountFilter || accountFilter(a)),
+    includeClosed: false,
+  });
+  const rows = [];
+  const batches = await fetchAccountTransactionsBounded(api, {
+    accounts: ctx.accounts,
+    start,
+    end,
+    config: effectiveConfig,
+  });
+  for (const { account: acct, transactions: txns } of batches) {
+    for (const t of txns) rows.push({ transaction: t, accountId: acct.id, account: acct });
+  }
+  return rows;
+}
+
+async function classifiedOnBudgetLeavesForWindows(api, windows, catInfo, { accountFilter } = {}) {
+  const start = windows.reduce((min, window) => (window.start < min ? window.start : min), windows[0].start);
+  const end = windows.reduce((max, window) => (window.end > max ? window.end : max), windows[0].end);
+  const rows = await fetchOnBudgetRows(api, start, end, { accountFilter });
+  const transferIndex = buildTransferIndex(rows);
+  return windows.map(({ start: windowStart, end: windowEnd }) => (
+    classifyLeavesInDateRange(rows, catInfo, windowStart, windowEnd, transferIndex)
+  ));
+}
+
+async function classifiedOnBudgetLeaves(api, start, end, catInfo, { accountFilter } = {}) {
+  const [leaves] = await classifiedOnBudgetLeavesForWindows(api, [{ start, end }], catInfo, { accountFilter });
+  return leaves;
+}
+
+async function loadAccountBalancesById(api, accountsRaw) {
+  const balancesById = {};
+  const balanceUnavailableIds = new Set();
+  const hasBalanceApi = typeof api.getAccountBalance === 'function';
+  let abortError = null;
+  await Promise.all((accountsRaw || []).map(async (account) => {
+    try {
+      let raw;
+      if (hasBalanceApi) {
+        raw = await api.getAccountBalance(account.id);
+      } else if (account.balance !== undefined && account.balance !== null) {
+        raw = account.balance;
+      } else {
+        balanceUnavailableIds.add(account.id);
+        balancesById[account.id] = null;
+        return;
+      }
+      const normalized = normalizeBalanceCents(raw);
+      if (normalized.ok) {
+        balancesById[account.id] = normalized.cents;
+      } else {
+        balanceUnavailableIds.add(account.id);
+        balancesById[account.id] = null;
+      }
+    } catch (error) {
+      if (isQueryAbortedError(error) || error instanceof QueryRangeExceededError) {
+        abortError = error;
+        return;
+      }
+      balanceUnavailableIds.add(account.id);
+      balancesById[account.id] = null;
+    }
+  }));
+  if (abortError) throw abortError;
+  return { balancesById, balanceUnavailableIds };
+}
+
+function resolveSplitwiseMirrorAccountIdentity(accountsRaw) {
+  return resolveSplitwiseMirrorIdentity({
+    accountsRaw,
+    bulkSagasPath: BULK_OPERATION_SAGAS_PATH,
+    owesConfigPath: OWES_CONFIG_PATH,
+    env: process.env,
+    accountName: process.env.SPLITWISE_ACCOUNT_NAME || 'Splitwise',
+  });
+}
+
+async function loadAccountProjectionInputs(api) {
+  const accountsRaw = await api.getAccounts();
+  const overrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
+  const splitwiseMirrorIdentity = resolveSplitwiseMirrorAccountIdentity(accountsRaw);
+  const splitwiseMirrorAccountId = splitwiseMirrorIdentity.status === 'valid'
+    ? splitwiseMirrorIdentity.accountId
+    : null;
+  const duplicateAccountIds = detectDuplicateAccountIds(accountsRaw);
+  const { balancesById, balanceUnavailableIds } = await loadAccountBalancesById(api, accountsRaw);
+  return {
+    accountsRaw,
+    overrides,
+    splitwiseMirrorAccountId,
+    splitwiseMirrorIdentity,
+    balancesById,
+    balanceUnavailableIds,
+    duplicateAccountIds,
+  };
+}
+
+async function buildAccountProjection(api, metric, { financeDate = todayYMD(), inputs = null } = {}) {
+  const base = inputs || await loadAccountProjectionInputs(api);
+  return projectAccounts({
+    accountsRaw: base.accountsRaw,
+    balancesById: base.balancesById,
+    balanceUnavailableIds: base.balanceUnavailableIds,
+    duplicateAccountIds: base.duplicateAccountIds,
+    overrides: base.overrides,
+    metric,
+    splitwiseMirrorAccountId: base.splitwiseMirrorAccountId,
+    splitwiseMirrorIdentity: base.splitwiseMirrorIdentity,
+    financeDate,
+  });
+}
+
+function accountDisplayNamesFromOverrides(overrides = {}) {
+  return Object.fromEntries(
+    Object.entries(overrides)
+      .filter(([, entry]) => typeof entry?.name === 'string' && entry.name.trim())
+      .map(([id, entry]) => [id, entry.name.trim()]),
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Core getters (mirror legacy endpoints)
 // ---------------------------------------------------------------------------
-async function getAccounts() {
+async function getAccounts({ projectionInputs = null } = {}) {
   return withApi(async (api) => {
-    // Hide the "Splitwise" spend-attribution ledger: its expenses count as spend
-    // (read straight from Actual), but it isn't real cash, so it must stay out of
-    // the account list + the app's net-worth sum.
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed && (a.name || '').toLowerCase() !== SW_ACCOUNT_NAME.toLowerCase());
-    const overrides = readJsonSafe(ACCOUNT_OVERRIDES_PATH, {});
+    const projection = await buildAccountProjection(api, ACCOUNT_METRIC.displayList, { inputs: projectionInputs });
+    const overrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
+    const financeDate = todayYMD();
     return Promise.all(
-      accounts.map(async (a) => {
-        const ov = overrides[a.id] || {};
-        return {
-          id: a.id,
-          name: ov.name || a.name, // display rename (Actual name untouched)
-          offbudget: !!a.offbudget,
-          balance: (await api.getAccountBalance(a.id)) / 100,
-          hidden: !!ov.hidden,
-        };
-      })
+      projection.accounts
+        .filter((row) => projection.includedIds.has(row.id))
+        .map(async (row) => {
+          const ov = overrides[row.id] || {};
+          const rawAccount = { id: row.id, name: row.actualName, offbudget: row.offbudget, closed: row.closed };
+          const creditPolicy = resolveAccountCreditPolicy({
+            ...rawAccount,
+            financeDate,
+            role: row.role,
+            hidden: row.hidden,
+            balance: row.balance,
+          }, ov);
+          const creditExtras = {
+            creditLiability: ov.creditLiabilityCoverage || ov.paymentRecurringKey || ov.fundingAccountId || ov.statement
+              ? {
+                coverage: ov.creditLiabilityCoverage || null,
+                paymentRecurringKey: ov.paymentRecurringKey || null,
+                fundingAccountId: ov.fundingAccountId || null,
+                statement: ov.statement || null,
+              }
+              : null,
+            creditLiabilityPolicy: creditPolicy.excluded && creditPolicy.mode === COVERAGE_MODE.EXCLUDE
+              ? { mode: 'exclude', eligible: false, quarantineReasons: [] }
+              : {
+                mode: creditPolicy.mode,
+                eligible: creditPolicy.eligible,
+                coverageKind: creditPolicy.coverageKind || null,
+                paymentRecurringKey: creditPolicy.paymentRecurringKey || null,
+                fundingAccountId: creditPolicy.fundingAccountId || null,
+                obligationCents: creditPolicy.obligationCents ?? null,
+                paymentDueDate: creditPolicy.paymentDueDate || null,
+                observedAt: creditPolicy.observedAt || null,
+                quarantineReasons: creditPolicy.quarantineReasons || [],
+              },
+          };
+          return attachInclusionToAccountRow(row, creditExtras);
+        }),
     );
   });
 }
 
-function setAccountOverride({ id, name, hidden } = {}) {
+function setAccountOverride({
+  id,
+  name,
+  hidden,
+  role,
+  creditLiabilityCoverage,
+  paymentRecurringKey,
+  fundingAccountId,
+  statement,
+  clearCreditLiability,
+} = {}) {
   if (!id) throw new Error('id required');
-  const overrides = readJsonSafe(ACCOUNT_OVERRIDES_PATH, {});
-  const cur = overrides[id] || {};
-  if (name !== undefined) {
-    const trimmed = (name || '').trim();
-    if (trimmed) cur.name = trimmed;
-    else delete cur.name; // empty resets to the Actual name
+  const store = readAccountOverrides(ACCOUNT_OVERRIDES_PATH);
+  const overrides = store.accounts;
+  const cur = mergeAccountOverrideEntry(overrides[id] || {}, {
+    name,
+    hidden,
+    role,
+    creditLiabilityCoverage,
+    paymentRecurringKey,
+    fundingAccountId,
+    statement,
+    clearCreditLiability,
+  });
+  if (Object.keys(cur).length) {
+    const cross = validateCreditOverrideCrossFields(cur);
+    if (!cross.ok) throw new Error(cross.issues.join('; '));
+    if (!validEntry(cur)) throw new Error('invalid account override');
+    overrides[id] = cur;
+  } else {
+    delete overrides[id];
   }
-  if (hidden !== undefined) {
-    if (hidden) cur.hidden = true;
-    else delete cur.hidden;
-  }
-  if (Object.keys(cur).length) overrides[id] = cur;
-  else delete overrides[id];
-  writeJsonSafe(ACCOUNT_OVERRIDES_PATH, overrides);
+  writeAccountOverrides(ACCOUNT_OVERRIDES_PATH, store);
   return { ok: true, id, override: overrides[id] || null };
 }
 
@@ -414,16 +1074,23 @@ function setAccountOverride({ id, name, hidden } = {}) {
 // Manual (off-Actual) assets & liabilities that roll into net worth
 // ---------------------------------------------------------------------------
 function getManualAssets() {
-  const store = readJsonSafe(MANUAL_ASSETS_PATH, { items: [] });
-  const items = Array.isArray(store.items) ? store.items : [];
-  const assets = round2(items.filter((i) => i.kind !== 'liability').reduce((s, i) => s + (Number(i.value) || 0), 0));
-  const liabilities = round2(items.filter((i) => i.kind === 'liability').reduce((s, i) => s + (Number(i.value) || 0), 0));
-  return { items, assets, liabilities, net: round2(assets - liabilities) };
+  const store = readJsonSafe(MANUAL_ASSETS_PATH, null);
+  const validated = validateManualAssetsStore(store);
+  return {
+    items: validated.items,
+    assets: validated.assets,
+    liabilities: validated.liabilities,
+    net: validated.net,
+    complete: validated.complete,
+    incompleteReasons: validated.incompleteReasons,
+    assetCents: validated.assetCents,
+    liabilityCents: validated.liabilityCents,
+  };
 }
 
 function saveManualAsset({ id, name, value, kind } = {}) {
   const nm = (name || '').trim();
-  const val = Math.abs(Number(value) || 0);
+  const val = fromCents(Math.abs(toCents(value)));
   if (!nm) throw new Error('name required');
   if (!val) throw new Error('value must be greater than 0');
   const k = kind === 'liability' ? 'liability' : 'asset';
@@ -542,36 +1209,51 @@ function spendBucketFor(info) {
 }
 
 async function getTransactions({ accountId, start, end, category, bucket, budgetOnly, collapse } = {}) {
+  const config = loadQueryScalingConfig();
+  const startDate = start || firstOfThisMonth();
+  const endDate = end || todayYMD();
+  validateCanonicalDateRange(startDate, endDate, {
+    config,
+    purpose: 'transaction list',
+    maxSpanDays: config.maxLedgerQueryDays,
+  });
   return withApi(async (api) => {
-    const startDate = start || firstOfThisMonth();
-    const endDate = end || todayYMD();
     const wantCat = category ? String(category).toLowerCase() : null;
     const wantBucket = bucket ? String(bucket).toLowerCase() : null;
-    const accountsFull = await api.getAccounts();
-    const acctMap = Object.fromEntries(accountsFull.map((a) => [a.id, a.name]));
-    const targetAccts = accountId
-      ? accountsFull.filter((a) => a.id === accountId)
-      : accountsFull.filter((a) => !a.closed && ((!wantBucket && !budgetOnly) || !a.offbudget));
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (a) => {
+        if (accountId && a.id !== accountId) return false;
+        if (a.closed) return false;
+        if ((wantBucket || budgetOnly) && a.offbudget) return false;
+        return true;
+      },
+      includeClosed: false,
+    });
+    const { accounts, catInfo, payeeMap, accountMap: rawAccountMap } = ctx;
+    const displayNames = accountDisplayNamesFromOverrides(readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts);
+    const accountMap = { ...rawAccountMap, ...displayNames };
     const catMap = Object.fromEntries(Object.entries(catInfo).map(([id, info]) => [id, info.name]));
-    const payees = await api.getPayees();
-    const payeeMap = Object.fromEntries(payees.map((p) => [p.id, p.name]));
 
     let all = [];
-    for (const acct of targetAccts) {
-      const txns = await api.getTransactions(acct.id, startDate, endDate);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: startDate,
+      end: endDate,
+      maxRows: config.maxLedgerRowsPerRead,
+      config,
+    });
+    for (const { account: acct, transactions: txns } of batches) {
       for (const t of txns) {
         const rawParentPayee = payeeMap[t.payee] || t.imported_payee || '';
         const parentPayee = displayPayeeName(rawParentPayee, t.notes, '');
         const base = {
           date: t.date,
           payee: parentPayee,
-          account: acctMap[acct.id] || acct.id,
+          account: accountMap[acct.id] || acct.id,
           accountId: acct.id,
           cleared: t.cleared,
           imported: !!t.imported_id, // bank-imported rows aren't user-deletable (see delete guard)
-          transfer: !!t.transfer_id,
+          transfer: hasActualTransferIdentity(t),
         };
         const subs = Array.isArray(t.subtransactions) ? t.subtransactions : [];
         if (t.is_parent && subs.length) {
@@ -599,7 +1281,7 @@ async function getTransactions({ accountId, start, end, category, bucket, budget
                 id: s.id || `${t.id}-${i}`,
                 parentId: t.id,
                 isLeg: true,
-                transfer: !!s.transfer_id,
+                transfer: !!(normalizeTransferId(s.transfer_id) || normalizeTransferId(s.transferred_id)),
                 amount: s.amount / 100,
                 category: catMap[s.category] || null,
                 categoryId: s.category || null,
@@ -638,6 +1320,11 @@ async function getTransactions({ accountId, start, end, category, bucket, budget
         return spendBucketFor(info) === wantBucket;
       });
     }
+    if (all.length > config.maxTransactionListRows) {
+      throw new QueryResultLimitExceededError(
+        `Transaction list returned ${all.length} rows, exceeding the maximum of ${config.maxTransactionListRows}`,
+      );
+    }
     all.sort((a, b) => b.date.localeCompare(a.date));
     return all;
   });
@@ -647,68 +1334,61 @@ async function getTransactions({ accountId, start, end, category, bucket, budget
 // in dollars (negative = expense, positive = income); resolves/creates the payee
 // by name. addTransactions (not importTransactions) so Actual's import dedup
 // can't silently drop a legitimate manual entry.
-async function createTransaction({ accountId, amount, payee, date, categoryId, notes } = {}) {
+async function createTransaction({ accountId, amount, payee, date, categoryId, notes } = {}, { sync = true } = {}) {
+  if (!accountId) throw new Error('accountId required');
+  const cents = toCents(amount);
+  if (cents === 0) throw new Error('a non-zero amount is required');
+  const name = (payee || '').trim();
   return withApi(async (api) => {
-    if (!accountId) throw new Error('accountId required');
-    const amt = Number(amount);
-    if (!isFinite(amt) || amt === 0) throw new Error('a non-zero amount is required');
-    const name = (payee || '').trim();
     let payeeId;
     if (name) {
-      try {
-        const payees = await api.getPayees();
-        const found = payees.find((p) => (p.name || '').toLowerCase() === name.toLowerCase());
-        payeeId = found ? found.id : await api.createPayee({ name });
-      } catch (_) { /* payee best-effort; keep the name in notes below if unresolved */ }
+      const payees = await api.getPayees();
+      const found = payees.find((p) => (p.name || '').toLowerCase() === name.toLowerCase());
+      payeeId = found ? found.id : await api.createPayee({ name });
     }
     const txn = {
       date: date || todayYMD(),
-      amount: Math.round(amt * 100), // dollars -> integer cents
+      amount: cents,
       payee: payeeId || undefined,
       category: categoryId || undefined,
       notes: notes || (payeeId ? undefined : name) || undefined,
       cleared: false,
     };
     const res = await api.addTransactions(accountId, [txn], { learnCategories: false, runTransfers: false });
-    await syncNow(); // persist the write back to the Actual server
+    if (sync) await syncNow(); // persist the write back to the Actual server
     const id = Array.isArray(res) ? res[0] : res && Array.isArray(res.added) ? res.added[0] : null;
     return { ok: true, id: id || null };
-  });
+  }, { mode: 'write' });
 }
 
-function summarize(leaves, catInfo) {
-  const spending = {};
-  let totalSpend = 0;
-  let totalIncome = 0;
-  for (const t of leaves) {
-    const meta = catInfo[t.catId];
-    const kind = meta ? meta.kind : 'uncat';
-    if (kind === 'mm' || kind === 'reimb') continue; // not spending
-    const amt = t.amount / 100;
-    if (kind === 'income') {
-      totalIncome += amt;
-      continue;
-    }
-    // Uncategorized inflows are almost always income/transfers that simply
-    // haven't been filed under an Income category — never let them net against
-    // (and deflate) real spending. Categorized refunds still net per-category.
-    if (kind === 'uncat' && amt > 0) continue;
-    const name = meta ? meta.name : 'Uncategorized';
-    totalSpend += -amt;
-    spending[name] = (spending[name] || 0) - amt;
-  }
-  for (const k of Object.keys(spending)) if (Math.abs(spending[k]) < 0.005) delete spending[k];
-  return { spending, totalSpend, totalIncome };
+function summarize(classifiedLeaves) {
+  return spendSummaryFromClassifiedLeaves(classifiedLeaves);
 }
 
 async function onBudgetLeaves(api, start, end, catInfo) {
-  const accounts = (await api.getAccounts()).filter((a) => !a.closed && !a.offbudget);
-  const out = [];
-  for (const acct of accounts) {
-    const txns = await api.getTransactions(acct.id, start, end);
-    for (const t of txns) for (const lf of leavesOf(t, false)) out.push(lf);
-  }
-  return out;
+  return classifiedOnBudgetLeaves(api, start, end, catInfo);
+}
+
+async function onBudgetLeavesPartitioned(api, {
+  scanStart: _scanStart,
+  scanEnd: _scanEnd,
+  curStart,
+  curEnd,
+  prevStart,
+  prevEnd,
+  catInfo,
+  ctx,
+  accountFilter,
+}) {
+  const [current, previous] = await classifiedOnBudgetLeavesForWindows(api, [
+    { start: curStart, end: curEnd },
+    { start: prevStart, end: prevEnd },
+  ], catInfo, { accountFilter });
+  const context = ctx || await loadLedgerReadContext(api, {
+    accountFilter: accountFilter || ((a) => !a.closed && !a.offbudget),
+    includeClosed: false,
+  });
+  return { current, previous, context };
 }
 
 async function getSpending({ month, start, end } = {}) {
@@ -746,14 +1426,35 @@ async function getSpending({ month, start, end } = {}) {
 
     const groups = await api.getCategoryGroups();
     const catInfo = buildCatInfo(groups);
-    const [current, previous] = await Promise.all([
-      onBudgetLeaves(api, cur.start, curEnd, catInfo),
-      onBudgetLeaves(api, prev.start, prev.end, catInfo),
-    ]);
+    const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution);
+    const { current: currentLeaves, previous: previousLeaves } = await onBudgetLeavesPartitioned(api, {
+      scanStart: prev.start,
+      scanEnd: curEnd,
+      curStart: cur.start,
+      curEnd,
+      prevStart: prev.start,
+      prevEnd: prev.end,
+      catInfo,
+      accountFilter: spendingProjection.accountFilter,
+    });
+    const current = summarize(currentLeaves);
+    const previous = summarize(previousLeaves);
+    const spendingCompleteness = mergeProjectionCompleteness([current.completeness, previous.completeness]);
+    if (spendingProjection.incompleteReasons.length) {
+      spendingCompleteness.complete = false;
+      spendingCompleteness.incompleteReasons = [
+        ...new Set([...(spendingCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+      ];
+    }
     return {
-      current: summarize(current, catInfo),
-      prev: summarize(previous, catInfo),
+      current,
+      prev: previous,
       month: monthKey,
+      completeness: spendingCompleteness,
+      scope: {
+        accountProjectionRevision: spendingProjection.revision,
+        spendingIncludedAccountIds: [...spendingProjection.includedIds],
+      },
     };
   });
 }
@@ -762,43 +1463,80 @@ async function getSpending({ month, start, end } = {}) {
 // Trends — net worth / spend / income by month
 // ---------------------------------------------------------------------------
 async function getTrends({ months = 12, endMonth } = {}) {
+  const config = loadQueryScalingConfig();
+  const boundedMonths = Math.max(3, Math.min(config.maxTrendsMonths, Number(months) || 12));
   return withApi(async (api) => {
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
-    const accountOverrides = readJsonSafe(ACCOUNT_OVERRIDES_PATH, {});
-    const accounts = (await api.getAccounts()).filter((account) => !accountOverrides[account.id]?.hidden);
+    const projectionInputs = await loadAccountProjectionInputs(api);
+    const nwProjection = await buildAccountProjection(api, ACCOUNT_METRIC.netWorthHistory, { inputs: projectionInputs });
+    const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution, { inputs: projectionInputs });
+    const ledgerAccountIds = new Set([
+      ...nwProjection.includedIds,
+      ...spendingProjection.includedIds,
+    ]);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (account) => ledgerAccountIds.has(account.id),
+      includeClosed: true,
+    });
+    const { catInfo, accounts } = ctx;
+    const splitwiseMirrorAccountId = nwProjection.splitwiseMirrorAccountId;
     const [financeYear, financeMonth] = String(endMonth || todayYMD().slice(0, 7)).split('-').map(Number);
 
     const buckets = [];
-    for (let i = months - 1; i >= 0; i--) {
+    for (let i = boundedMonths - 1; i >= 0; i--) {
       const r = monthRange(financeYear, financeMonth - 1 - i);
-      buckets.push({ ...r, income: 0, expense: 0 });
+      buckets.push({ ...r, income: 0, expense: 0, knownIncome: 0, knownExpense: 0, transferIncompleteCount: 0, transferIncompleteLeaves: [] });
     }
     const byKey = Object.fromEntries(buckets.map((b) => [b.key, b]));
     const lastEnd = buckets[buckets.length - 1].end;
+    const windowStart = buckets[0].start;
+    validateCanonicalDateRange(windowStart, lastEnd, {
+      config,
+      purpose: 'trends window',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
+    const netWorthWindow = resolveNetWorthQueryStart({ windowStart, end: lastEnd, config });
+    validateCanonicalDateRange(netWorthWindow.start, lastEnd, {
+      config,
+      purpose: 'trends net worth',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
 
     const contributions = []; // {date, amount} parent totals across ALL accounts (net worth)
-    const accountTransactions = await Promise.all(accounts.map(async (account) => ({
-      account,
-      transactions: await api.getTransactions(account.id, '2000-01-01', lastEnd),
-    })));
-    for (const { account: a, transactions: txns } of accountTransactions) {
-      // The "Splitwise" account is a spend-attribution ledger (my share of items a
-      // friend paid), not real cash — count its expenses toward monthly spend but
-      // keep it out of net worth so a growing share balance can't sink it.
-      const isSwLedger = (a.name || '').toLowerCase() === SW_ACCOUNT_NAME.toLowerCase();
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: netWorthWindow.start,
+      end: lastEnd,
+      config,
+    });
+    const trendRows = [];
+    for (const { account: a, transactions: txns } of batches) {
+      for (const t of txns) trendRows.push({ transaction: t, accountId: a.id });
+    }
+    const trendTransferIndex = buildTransferIndex(trendRows);
+    for (const { account: a, transactions: txns } of batches) {
+      const countsForNetWorth = nwProjection.includedIds.has(a.id);
+      const countsForSpend = spendingProjection.includedIds.has(a.id);
       for (const t of txns) {
-        if (!isSwLedger) contributions.push({ date: t.date, amount: t.amount });
-        if (a.offbudget) continue;
+        if (countsForNetWorth) contributions.push({ date: t.date, amount: t.amount });
+        if (!countsForSpend || a.offbudget) continue;
         const b = byKey[t.date.slice(0, 7)];
         if (!b) continue;
-        for (const lf of leavesOf(t, false)) {
-          const meta = catInfo[lf.catId];
-          const kind = meta ? meta.kind : 'uncat';
-          if (kind === 'mm' || kind === 'reimb') continue;
-          if (kind === 'income') b.income += lf.amount;
-          else if (kind === 'uncat' && lf.amount > 0) continue; // uncategorized income, not negative spend
-          else b.expense += -lf.amount;
+        for (const lf of classifyTransactionLeaves(t, catInfo, {
+          accountId: a.id,
+          transferIndex: trendTransferIndex,
+        })) {
+          if (lf.kind === 'incomplete' && lf.provenance === PROVENANCE.TRANSFER_IDENTITY) {
+            b.transferIncompleteCount += 1;
+            b.transferIncompleteLeaves.push(lf);
+            continue;
+          }
+          if (lf.countsAsIncome) {
+            b.income += lf.amount;
+            b.knownIncome += lf.amount;
+          } else if (lf.countsAsSpending) {
+            b.expense += -lf.amount;
+            b.knownExpense += -lf.amount;
+          }
         }
       }
     }
@@ -806,25 +1544,60 @@ async function getTrends({ months = 12, endMonth } = {}) {
     contributions.sort((x, y) => (x.date < y.date ? -1 : 1));
     let idx = 0;
     let run = 0;
+    const nwHistoryComplete = netWorthWindow.complete && nwProjection.incompleteReasons.length === 0;
+    const spendingSeriesComplete = spendingProjection.incompleteReasons.length === 0;
     const series = buckets.map((b) => {
       while (idx < contributions.length && contributions[idx].date <= b.end) {
         run += contributions[idx].amount;
         idx++;
       }
+      const transferComplete = b.transferIncompleteCount === 0;
+      const monthSeriesComplete = transferComplete && spendingSeriesComplete;
+      const monthCompleteness = projectionCompletenessFromLeaves(b.transferIncompleteLeaves);
+      if (!nwHistoryComplete && nwProjection.incompleteReasons.length) {
+        monthCompleteness.complete = false;
+        monthCompleteness.incompleteReasons = [
+          ...new Set([...(monthCompleteness.incompleteReasons || []), ...nwProjection.incompleteReasons]),
+        ];
+      }
+      if (!spendingSeriesComplete && spendingProjection.incompleteReasons.length) {
+        monthCompleteness.complete = false;
+        monthCompleteness.incompleteReasons = [
+          ...new Set([...(monthCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+        ];
+      }
       return {
         month: b.key,
-        netWorth: d2(run),
-        spend: d2(b.expense),
-        income: d2(b.income),
-        net: d2(b.income - b.expense),
+        netWorth: nwHistoryComplete ? d2(run) : null,
+        complete: transferComplete && spendingSeriesComplete,
+        spend: monthSeriesComplete ? d2(b.expense) : null,
+        income: monthSeriesComplete ? d2(b.income) : null,
+        knownSpendSubtotal: monthSeriesComplete ? undefined : d2(b.knownExpense),
+        knownIncomeSubtotal: monthSeriesComplete ? undefined : d2(b.knownIncome),
+        net: monthSeriesComplete ? d2(b.income - b.expense) : null,
+        completeness: monthCompleteness,
       };
     });
     return {
       months: series,
+      completeness: mergeProjectionCompleteness(series.map((entry) => entry.completeness)),
       scope: {
         includesClosedAccountHistory: true,
         includesManualAssets: false,
         excludedHiddenAccounts: true,
+        excludedRoles: ['excluded'],
+        queriedFrom: netWorthWindow.start,
+        queriedTo: lastEnd,
+        netWorthHistoryComplete: nwHistoryComplete,
+        netWorthIncludedRoles: [...NET_WORTH_ROLES],
+        months: boundedMonths,
+        accountProjectionRevision: nwProjection.revision,
+        netWorthIncludedAccountIds: [...nwProjection.includedIds],
+        spendingIncludedAccountIds: [...spendingProjection.includedIds],
+        spendingProjectionComplete: spendingSeriesComplete,
+        splitwiseMirrorAccountId,
+        splitwiseMirrorExcludedFromNetWorth: !!splitwiseMirrorAccountId,
+        splitwiseMirrorIdentity: nwProjection.scope?.splitwiseMirrorIdentity || null,
       },
     };
   });
@@ -849,6 +1622,7 @@ function monthProgress(m) {
   return { days, elapsed: Math.max(0, elapsed) };
 }
 
+
 async function getBudgets({ month } = {}) {
   return withApi(async (api) => {
     const m = month || todayYMD().slice(0, 7);
@@ -858,8 +1632,21 @@ async function getBudgets({ month } = {}) {
     try {
       bm = await api.getBudgetMonth(m);
     } catch (e) {
-      return { month: m, supported: false, groups: [], totalBudgeted: 0, totalSpent: 0 };
+      return {
+        month: m,
+        supported: false,
+        groups: [],
+        totalBudgeted: 0,
+        totalSpent: 0,
+        [SAFE_TO_SPEND_INPUTS]: null,
+      };
     }
+    const decisionInputs = {
+      eligibleCategoryCount: 0,
+      targetedCategoryCount: 0,
+      targetlessSpentCategoryCount: 0,
+      unresolvedRolloverCategoryCount: 0,
+    };
     const groups = [];
     for (const g of bm.categoryGroups || []) {
       if (g.is_income) continue;
@@ -867,17 +1654,36 @@ async function getBudgets({ month } = {}) {
       const cats = (g.categories || [])
         .filter((c) => !REIMB_CAT.test(c.name || '')) // peer debts aren't spend
         .map((c) => {
-          const meta = { ...settings.defaults, ...(settings.categories[c.id] || {}), ...(settings.categories[c.name] || {}) };
+          const idSettings = settings.categories[c.id] || {};
+          const nameSettings = settings.categories[c.name] || {};
+          const meta = { ...settings.defaults, ...idSettings, ...nameSettings };
           const budgeted = (c.budgeted || 0) / 100;
           const spent = Math.max(0, -(c.spent || 0) / 100);
           const legacyTarget = Number(meta.monthlyTarget);
           const target = budgeted > 0 ? budgeted : (Number.isFinite(legacyTarget) && legacyTarget > 0 ? legacyTarget : 0);
           const annualTarget = Number(meta.annualTarget || 0) || null;
           const remaining = round2(Math.max(0, target - spent));
+          const rolloverMode = meta.rolloverMode || 'none';
+          const rolloverConfigured = [settings.defaults, idSettings, nameSettings]
+            .some((source) => Object.prototype.hasOwnProperty.call(source, 'rolloverMode'));
+          const envelope = categoryEnvelopeFields({
+            balance: (c.balance || 0) / 100,
+            spent,
+            target,
+            rolloverMode,
+            rolloverConfigured,
+          });
           const projected = progress.elapsed > 0 ? round2((spent / progress.elapsed) * progress.days) : spent;
           const expectedToDate = target > 0 ? round2((target / progress.days) * progress.elapsed) : null;
-          const rolloverMode = meta.rolloverMode || 'none';
           const rolloverAmount = rolloverMode === 'none' ? 0 : round2((c.balance || 0) / 100);
+          if (!BILL_CAT.test(`${g.name || ''} ${c.name || ''}`)) {
+            decisionInputs.eligibleCategoryCount++;
+            if (target > 0) decisionInputs.targetedCategoryCount++;
+            if (target <= 0 && spent > 0) decisionInputs.targetlessSpentCategoryCount++;
+            if (!isRolloverTreatmentResolved(meta.rolloverMode, rolloverConfigured)) {
+              decisionInputs.unresolvedRolloverCategoryCount++;
+            }
+          }
           const snoozed = meta.snoozedMonth === m;
           const status = snoozed
             ? 'snoozed'
@@ -897,12 +1703,20 @@ async function getBudgets({ month } = {}) {
             target,
             annualTarget,
             remaining,
+            reserve: envelope.resolved && envelope.reserveCents != null ? fromCents(envelope.reserveCents) : null,
+            envelope: envelope.resolved && envelope.envelopeCents != null ? fromCents(envelope.envelopeCents) : null,
+            envelopeDebt: envelope.envelopeDebtCents != null ? fromCents(envelope.envelopeDebtCents) : null,
+            reserveCents: envelope.resolved ? envelope.reserveCents : null,
+            envelopeCents: envelope.resolved ? envelope.envelopeCents : null,
+            envelopeDebtCents: envelope.envelopeDebtCents,
             projected,
             expectedToDate,
             dailyPace: target > 0 ? round2(target / progress.days) : 0,
             status,
             rolloverMode,
             rolloverAmount,
+            rolloverConfigured,
+            resolved: envelope.resolved,
             trueExpenseCadence: meta.trueExpenseCadence || null,
             snoozedMonth: meta.snoozedMonth || null,
             priority: meta.priority || null,
@@ -940,6 +1754,7 @@ async function getBudgets({ month } = {}) {
       daysElapsed: progress.elapsed,
       status: totalTarget > 0 && totalSpent > totalTarget ? 'over' : totalTarget > 0 && totalProjected > totalTarget * 1.05 ? 'watch' : 'on_track',
       groups,
+      [SAFE_TO_SPEND_INPUTS]: decisionInputs,
     };
   });
 }
@@ -949,8 +1764,8 @@ async function getBudgets({ month } = {}) {
 async function setBudgetAmount({ month, categoryId, amount } = {}) {
   if (!categoryId) throw new Error('categoryId required');
   const m = month || todayYMD().slice(0, 7);
-  const cents = Math.round(Number(amount) * 100);
-  if (!Number.isFinite(cents) || cents < 0) throw new Error('amount must be a number >= 0');
+  const cents = toCents(amount);
+  if (cents < 0) throw new Error('amount must be a number >= 0');
   return withApi(async (api) => {
     await api.setBudgetAmount(m, categoryId, cents);
     const settings = loadBudgetSettings();
@@ -958,8 +1773,8 @@ async function setBudgetAmount({ month, categoryId, amount } = {}) {
       delete settings.categories[categoryId].monthlyTarget;
       writeJsonSafe(BUDGET_SETTINGS_PATH, settings);
     }
-    return { ok: true, month: m, categoryId, amount: cents / 100 };
-  });
+    return { ok: true, month: m, categoryId, amount: fromCents(cents) };
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
@@ -970,7 +1785,7 @@ async function setBudgetAmount({ month, categoryId, amount } = {}) {
 // personal-config.json (gitignored); see personal-config.example.json for the shape.
 // Absent => harmless generic placeholders (attribution simply won't match real people
 // until you add your own config). loadOwesConfig() also folds in owes-config.json.
-const PERSONAL_CONFIG_PATH = process.env.PERSONAL_CONFIG_PATH || path.join(__dirname, 'personal-config.json');
+const PERSONAL_CONFIG_PATH = statePath('personalConfig');
 const _roster = readJsonSafe(PERSONAL_CONFIG_PATH, null) || {};
 const PEOPLE = new Set(
   (Array.isArray(_roster.people) && _roster.people.length ? _roster.people : ['alex', 'sam', 'jordan', 'taylor'])
@@ -1012,8 +1827,9 @@ function attribute(label, notes) {
 }
 
 // Defaults preserve prior hardcoded behavior when owes-config.json is absent.
-// Amounts are in integer cents (e.g. 25488 = $254.88). Debtor patterns are
-// stored as strings (case-insensitive) so the config stays plain JSON.
+// Expected baseline amounts are in integer cents (e.g. 25488 = $254.88).
+// Debtor patterns are stored as strings (case-insensitive) so the config stays
+// plain JSON.
 // Generic fallback used only when owes-config.json is absent (public repo). Your
 // real amounts/patterns/trips live in the gitignored owes-config.json; see
 // owes-config.example.json. Keeping this empty means no personal data ships in code.
@@ -1049,7 +1865,8 @@ function loadOwesConfig() {
   const autoReimbTags = (Array.isArray(cfg.autoReimbTags) ? cfg.autoReimbTags : DEFAULT_OWES.autoReimbTags).map((s) => String(s).toLowerCase());
   // Manual per-person trip overrides that WIN over the auto Splitwise snapshot
   // (which can lag or miss a group — e.g. a settle-up that wasn't actually paid).
-  // Shape: { slug: [{ event, amount }] }. amount 0 clears that event's debt.
+  // Shape: { slug: [{ event, amount }] }. Amounts are dollars, matching the
+  // owes-truth bySlug contract; amount 0 clears that event's debt.
   const manualTrips = cfg.manualTrips && typeof cfg.manualTrips === 'object' ? cfg.manualTrips : {};
   const debtorRe = {};
   for (const [slug, src] of Object.entries(patterns)) {
@@ -1062,17 +1879,42 @@ function loadOwesConfig() {
   return { expected, debtorRe, tripStart, swNet, settledExt, autoReimbTags, manualTrips, eventStatus, autoDetectExcludeEvents };
 }
 
-// Read the authoritative who-owes-me snapshot (Splitwise pairwise). Returns null
-// when absent/invalid so callers fall back to the legacy baseline. Shape:
-//   { generatedAt, source, events:[...], bySlug:{ slug:[{event,amount}] }, total }
-function loadOwesTruth() {
-  const t = readJsonSafe(OWES_TRUTH_PATH, null);
-  if (!t || typeof t !== 'object' || !t.bySlug || typeof t.bySlug !== 'object') return null;
-  const src = String(t.source || '');
-  if (src && !/^splitwise-pairwise\b/i.test(src)) {
-    return { ...t, warning: 'non-pairwise-snapshot-source' };
+// Only a complete, fresh schema-v2 pairwise snapshot can contribute current
+// Splitwise debt. A structurally valid stale snapshot is returned separately as
+// last-known context and is never substituted into current totals.
+function classifyOwesTruth(t, { now = Date.now(), maxAgeMs = owesSnapshotMaxAgeMs() } = {}) {
+  if (!t || typeof t !== 'object' || !t.bySlug || typeof t.bySlug !== 'object') {
+    return { current: null, lastKnown: null, warning: 'splitwise-snapshot-missing' };
   }
-  return t;
+  const src = String(t.source || '');
+  const manifest = t.manifest;
+  const complete = t.schemaVersion === 2 &&
+    /^splitwise-pairwise\b/i.test(src) &&
+    manifest &&
+    manifest.complete === true &&
+    manifest.itemizedComplete === true &&
+    manifest.resolvedEvents === manifest.expectedEvents &&
+    Array.isArray(manifest.failedEvents) &&
+    manifest.failedEvents.length === 0 &&
+    manifest.currency === (process.env.SPLITWISE_CURRENCY || 'USD');
+  if (!complete) {
+    return { current: null, lastKnown: null, warning: 'splitwise-snapshot-incomplete' };
+  }
+  const generatedAt = Date.parse(t.generatedAt || '');
+  if (!Number.isFinite(generatedAt) || generatedAt > now + 5 * 60 * 1000) {
+    return { current: null, lastKnown: null, warning: 'splitwise-snapshot-invalid-time' };
+  }
+  if (now - generatedAt > maxAgeMs) {
+    return { current: null, lastKnown: t, warning: 'splitwise-snapshot-stale' };
+  }
+  return { current: t, lastKnown: null, warning: null };
+}
+function loadOwesTruth(options) {
+  return classifyOwesTruth(readJsonSafe(OWES_TRUTH_PATH, null), options);
+}
+
+function directReimbursementLegs(legs) {
+  return (Array.isArray(legs) ? legs : []).filter((leg) => !(leg.event || /splitwise/i.test(leg.label || '')));
 }
 // Venmo sidecar — same shape as owes-truth. Null when absent/invalid.
 function loadVenmoTruth() {
@@ -1092,16 +1934,33 @@ function readEvents() {
   return { events: s && Array.isArray(s.events) ? s.events : [] };
 }
 async function getEvents() {
+  const config = loadQueryScalingConfig();
   const { events } = readEvents();
   // Enrich each event with its tagged-charge count + total from the ledger window.
   let tagCounts = {};
   try {
     tagCounts = await withApi(async (api) => {
-      const accts = (await api.getAccounts()).filter((a) => !a.closed);
-      const from = addDays(todayYMD(), -400);
+      const activeSignal = getActiveQueryAbortSignal();
+      if (activeSignal?.aborted) {
+        throw new QueryAbortedError('Ledger query was aborted (before event tag enrichment)');
+      }
+      const from = addDays(todayYMD(), -(config.maxEventsTagLookbackDays - 1));
+      const to = todayYMD();
+      validateCanonicalDateRange(from, to, {
+        config,
+        purpose: 'event tag enrichment',
+        maxSpanDays: config.maxEventsTagLookbackDays,
+      });
+      const ctx = await loadLedgerReadContext(api, { includeClosed: false });
       const counts = {};
-      for (const a of accts) {
-        const tx = await api.getTransactions(a.id, from, todayYMD());
+      const batches = await fetchAccountTransactionsBounded(api, {
+        accounts: ctx.accounts.filter((a) => !a.closed),
+        start: from,
+        end: to,
+        config,
+        signal: activeSignal || undefined,
+      });
+      for (const { transactions: tx } of batches) {
         for (const t of tx) {
           const scan = (notes) => { const m = (notes || '').match(/#ev-([a-z0-9-]+)/gi) || []; for (const tag of m) { const slug = tag.slice(4).toLowerCase(); counts[slug] = counts[slug] || { count: 0, spent: 0 }; counts[slug].count++; } };
           scan(t.notes);
@@ -1110,7 +1969,10 @@ async function getEvents() {
       }
       return counts;
     });
-  } catch (_) { /* best-effort enrichment */ }
+  } catch (error) {
+    if (isQueryAbortedError(error)) throw error;
+    /* best-effort enrichment */
+  }
   return {
     events: events
       .slice()
@@ -1185,8 +2047,16 @@ function setOwesConfig(next) {
 // Reimbursement links — connect a repayment inflow to the expense(s) it repays
 // ---------------------------------------------------------------------------
 function readReimbLinks() {
-  const store = readJsonSafe(REIMB_LINKS_PATH, { links: [] });
-  return store && Array.isArray(store.links) ? store : { links: [] };
+  const store = readJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, links: [], revision: 0 });
+  if (!store || !Array.isArray(store.links)) return { schemaVersion: 2, links: [], revision: 0 };
+  if (!Number.isSafeInteger(store.revision) || store.revision < 0) store.revision = 0;
+  return store;
+}
+function writeReimbLinks(store) {
+  assertExportLockAvailable(REIMB_LINKS_PATH);
+  const revision = (Number.isSafeInteger(store.revision) ? store.revision : 0) + 1;
+  writeJsonSafe(REIMB_LINKS_PATH, { schemaVersion: 2, ...store, revision });
+  getActualCoordinator().invalidateGeneration();
 }
 function txnRef(t) {
   if (!t || t.id == null) throw new Error('transaction id required');
@@ -1194,51 +2064,229 @@ function txnRef(t) {
     id: String(t.id),
     date: t.date || null,
     payee: t.payee || '',
-    amount: Number(t.amount) || 0,
+    amount: fromCents(toCents(t.amount)),
     accountId: t.accountId || null,
     account: t.account || '',
     imported: !!t.imported,
   };
 }
-// Given a transaction id, return both directions: the expenses an inflow repays
-// (asInflow) and the inflows that repaid an expense (asExpense). Each returned ref
-// carries `allocated` — the dollars of the repayment applied to that expense (for
-// amount-allocated / partial links; falls back to the full amount for legacy links).
-function getReimbLinks({ id } = {}) {
-  const { links } = readReimbLinks();
-  if (!id) return { links };
-  const withAlloc = (ref, l) => ({ ...ref, allocated: l.amount != null ? l.amount : Math.abs(ref.amount) });
-  return {
-    asInflow: links.filter((l) => l.inflow && l.inflow.id === id).map((l) => withAlloc(l.expense, l)),
-    asExpense: links.filter((l) => l.expense && l.expense.id === id).map((l) => withAlloc(l.inflow, l)),
+async function prepareReimbLinkAdmission(request, api) {
+  const run = async (actualApi) => {
+    const groups = await actualApi.getCategoryGroups();
+    const reimbId = reimbCategoryId(groups);
+    const payees = await actualApi.getPayees();
+    const pn = Object.fromEntries(payees.map((p) => [p.id, p.name || '']));
+    const { links } = readReimbLinks();
+    return admitManualLink(actualApi, request, {
+      existingLinks: links,
+      reimbCategoryId: reimbId,
+      payeeNames: pn,
+    });
   };
+  if (api) return run(api);
+  return withApi(run, { mode: 'write' });
 }
-// Link a repayment inflow to an expense, optionally allocating a specific dollar
-// amount (partial repayments) and tagging the person. Re-linking the same pair
-// updates the allocation rather than duplicating.
-function addReimbLink({ inflow, expense, amount, person } = {}) {
-  const inf = txnRef(inflow);
-  const exp = txnRef(expense);
-  if (inf.id === exp.id) throw new Error('cannot link a transaction to itself');
-  const store = readReimbLinks();
-  const alloc = amount != null && Number.isFinite(Number(amount)) ? round2(Math.abs(Number(amount))) : null;
-  const existing = store.links.find((l) => l.inflow.id === inf.id && l.expense.id === exp.id);
-  if (existing) {
-    if (alloc != null) existing.amount = alloc;
-    if (person) existing.person = person;
-  } else {
-    store.links.push({ inflow: inf, expense: exp, amount: alloc, person: person || null, createdAt: new Date().toISOString() });
-  }
-  writeJsonSafe(REIMB_LINKS_PATH, store);
-  return { ok: true, inflowId: inf.id, expenseId: exp.id, amount: alloc };
+async function getReimbLinks({ id } = {}) {
+  const { links } = readReimbLinks();
+  const legacyReport = buildLegacyMigrationReport(links);
+  if (!id) return { links, legacyReport };
+  return withApi(async (api) => {
+    const payees = await api.getPayees();
+    const pn = Object.fromEntries(payees.map((p) => [p.id, p.name || '']));
+    const txnLive = await locateTransactionLive(api, id, {}, pn);
+    const withAlloc = (ref, link, role) => enrichEndpointForRead(ref, link, role);
+    const asInflow = links
+      .filter((l) => l.inflow && l.inflow.id === id)
+      .map((l) => withAlloc(l.expense, l, 'expense'));
+    const asExpense = links
+      .filter((l) => l.expense && l.expense.id === id)
+      .map((l) => withAlloc(l.inflow, l, 'inflow'));
+    let capacity = null;
+    if (txnLive?.amountCents > 0) {
+      capacity = summarizeEndpointCapacity({
+        txnId: id,
+        txnAmountCents: txnLive.amountCents,
+        links,
+        role: 'inflow',
+      });
+    } else if (txnLive?.amountCents < 0) {
+      capacity = summarizeEndpointCapacity({
+        txnId: id,
+        txnAmountCents: txnLive.amountCents,
+        links,
+        role: 'expense',
+      });
+    }
+    return {
+      asInflow,
+      asExpense,
+      capacity,
+      legacyReport,
+    };
+  });
 }
-function deleteReimbLink({ inflowId, expenseId } = {}) {
+async function addReimbLink(request = {}) {
+  const {
+    inflow,
+    expense,
+    person,
+    operationIdentity,
+    journalBinding,
+    faultInjector,
+    admission: preAdmission,
+  } = request;
+  if (!inflow?.id || !expense?.id) throw new Error('inflow and expense ids required');
+  assertTransactionMutationAvailable({ ids: [inflow.id, expense.id] });
+  return withApi(async (api) => {
+    assertTransactionMutationAvailable({ ids: [inflow.id, expense.id] });
+    const prepared = preAdmission || await prepareReimbLinkAdmission({ ...request, person }, api);
+    return getReimbursementLinkSagaManager().link(api, prepared, {
+      operationIdentity,
+      journalBinding,
+      faultInjector,
+    });
+  }, { mode: 'write' });
+}
+async function deleteReimbLink({
+  inflowId,
+  expenseId,
+  expectedVersion,
+  operationIdentity,
+  journalBinding,
+  faultInjector,
+} = {}) {
   if (!inflowId || !expenseId) throw new Error('inflowId and expenseId required');
-  const store = readReimbLinks();
-  const before = store.links.length;
-  store.links = store.links.filter((l) => !(l.inflow.id === inflowId && l.expense.id === expenseId));
-  if (store.links.length !== before) writeJsonSafe(REIMB_LINKS_PATH, store);
-  return { ok: true, removed: before - store.links.length };
+  assertTransactionMutationAvailable({ ids: [inflowId, expenseId] });
+  return withApi(async (api) => {
+    assertTransactionMutationAvailable({ ids: [inflowId, expenseId] });
+    const existing = readReimbLinks().links.find(
+      (link) => String(link?.inflow?.id) === String(inflowId)
+        && String(link?.expense?.id) === String(expenseId),
+    );
+    return getReimbursementLinkSagaManager().unlink(api, {
+      inflowId,
+      expenseId,
+      accountId: existing?.inflow?.accountId || null,
+      expectedVersion,
+      operationIdentity,
+      journalBinding,
+      faultInjector,
+    });
+  }, { mode: 'write' });
+}
+function exportReimbursementLegacyReport() {
+  return buildLegacyMigrationReport(readReimbLinks().links);
+}
+
+async function resolveReimbursementExportLive(api, links) {
+  const payees = await api.getPayees();
+  const pn = Object.fromEntries(payees.map((p) => [p.id, p.name || '']));
+  const ids = new Set();
+  for (const link of links) {
+    if (link?.inflow?.id != null) ids.add(String(link.inflow.id));
+    if (link?.expense?.id != null) ids.add(String(link.expense.id));
+  }
+  const liveById = {};
+  let scanIncomplete = false;
+  for (const id of [...ids].sort()) {
+    try {
+      const live = await locateTransactionLive(api, id, {}, pn);
+      if (live) liveById[id] = live;
+    } catch (_) {
+      scanIncomplete = true;
+    }
+  }
+  return { liveById, scanIncomplete };
+}
+
+async function buildReimbursementExport({
+  from,
+  to,
+  strict = false,
+  releaseManifestPath,
+  operationBinding = null,
+} = {}) {
+  const coordinator = getActualCoordinator();
+  const manifestPath = releaseManifestPath
+    || process.env.RELEASE_MANIFEST_PATH
+    || path.join(__dirname, 'release-manifest.json');
+  const release = readReleaseIdentity(manifestPath);
+
+  for (let attempt = 1; attempt <= MAX_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    const captureGeneration = coordinator.generation;
+    let lock;
+    try {
+      const initialStore = readReimbLinks();
+      const linksRevision = initialStore.revision;
+      lock = acquireExportSnapshotLock(REIMB_LINKS_PATH, linksRevision);
+      const preStore = readReimbLinks();
+      if (preStore.revision !== linksRevision) throw new ExportSourceChangedError();
+      const links = sortLinks(preStore.links);
+      const activeSagas = getReimbursementLinkSagaManager().listNonterminalSagas();
+      const preDigest = sidecarSnapshotDigest({
+        linksRevision: preStore.revision,
+        links,
+        activeSagas,
+      });
+
+      const payload = await coordinator.runRead(async () => {
+        if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+        return withApi(async (api) => {
+          if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+          const groups = await api.getCategoryGroups();
+          const reimbId = reimbCategoryId(groups);
+          const { liveById, scanIncomplete } = await resolveReimbursementExportLive(api, links);
+          const postStore = readReimbLinks();
+          const postSagas = getReimbursementLinkSagaManager().listNonterminalSagas();
+          const postDigest = sidecarSnapshotDigest({
+            linksRevision: postStore.revision,
+            links: sortLinks(postStore.links),
+            activeSagas: postSagas,
+          });
+          assertSnapshotUnchanged(preDigest, postDigest);
+          if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+          const linksSidecarDigest = digestStableJson({
+            schemaVersion: postStore.schemaVersion || 2,
+            revision: postStore.revision,
+            links: sortLinks(postStore.links),
+          });
+          return projectAllocationLedger({
+            links,
+            liveById,
+            activeSagas,
+            reimbCategoryId: reimbId,
+            window: { from: from || null, to: to || null },
+            generatedAt: new Date().toISOString(),
+            scanIncomplete,
+            provenance: {
+              actualGeneration: captureGeneration,
+              linksRevision: postStore.revision,
+              release,
+              linksSidecarDigest,
+              inputDigests: {
+                linksSidecar: linksSidecarDigest,
+                sidecarSnapshot: preDigest,
+                liveEndpoints: digestStableJson(Object.keys(liveById).sort().map((id) => ({
+                  id,
+                  identityFingerprint: liveEndpointIdentityFingerprint(liveById[id]),
+                }))),
+              },
+              operationBinding,
+            },
+          });
+        }, { skipRecover: true });
+      }, { label: 'reimbursement-export' });
+
+      if (coordinator.generation !== captureGeneration) throw new ExportSourceChangedError();
+      return prepareExportForPublish(payload, { strict });
+    } catch (error) {
+      if (error instanceof ExportSourceChangedError && attempt < MAX_SNAPSHOT_ATTEMPTS) continue;
+      throw error;
+    } finally {
+      lock?.release();
+    }
+  }
+  throw new ExportSourceChangedError();
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,11 +2295,17 @@ function deleteReimbLink({ inflowId, expenseId } = {}) {
 // amount-allocated links. Trip/Splitwise debts stay owned by the snapshot engine.
 // ---------------------------------------------------------------------------
 function readReimbSuggest() {
-  const s = readJsonSafe(REIMB_SUGGEST_PATH, { confirmed: {}, dismissed: [] });
-  return {
-    confirmed: s && s.confirmed && typeof s.confirmed === 'object' ? s.confirmed : {},
-    dismissed: Array.isArray(s && s.dismissed) ? s.dismissed : [],
-  };
+  const store = readJsonSafe(REIMB_SUGGEST_PATH, { confirmed: {}, dismissed: [] });
+  if (!store || typeof store !== 'object' || Array.isArray(store)) {
+    return { confirmed: {}, dismissed: [] };
+  }
+  if (!store.confirmed || typeof store.confirmed !== 'object' || Array.isArray(store.confirmed)) {
+    store.confirmed = {};
+  }
+  if (!Array.isArray(store.dismissed)) {
+    store.dismissed = [];
+  }
+  return store;
 }
 function writeReimbSuggest(s) { writeJsonSafe(REIMB_SUGGEST_PATH, s); }
 
@@ -1328,30 +2382,47 @@ async function suggestRepayments({ from, to } = {}) {
   return withApi(async (api) => {
     from = from || REIMB_SUGGEST_FROM;
     to = to || todayYMD();
+    validateCanonicalDateRange(from, to, {
+      purpose: 'repayment suggestions',
+      maxSpanDays: loadQueryScalingConfig().maxLedgerQueryDays,
+    });
 
     // Who currently owes (authoritative net from the tuned engine).
     const reimb = await getReimbursement({ from, to });
+    if (!reimb.ledgerScan?.complete) {
+      return {
+        suggestions: [],
+        count: 0,
+        complete: false,
+        incompleteReasons: [
+          QUERY_INCOMPLETE_REASON.repaymentSuggestionsUnavailable,
+          QUERY_INCOMPLETE_REASON.ledgerScanIncomplete,
+        ],
+        generatedAt: new Date().toISOString(),
+        range: { from, to },
+      };
+    }
     const owedBySlug = {};
     for (const o of reimb.owes || []) owedBySlug[o.slug] = o.owed;
 
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
+    const ctx = await loadLedgerReadContext(api, { includeClosed: false });
+    const { catInfo, payeeMap: pn, groups } = ctx;
     let reimbId = null;
     for (const g of groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) reimbId = c.id;
     if (!reimbId) throw new Error('Reimbursement category not found');
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accts = (await api.getAccounts()).filter((a) => !a.closed);
 
     const inflows = [];        // candidate repayments
     const expByPerson = {};    // slug -> [{id,date,payee,amount<0,person}]
-    for (const a of accts) {
-      const tx = await api.getTransactions(a.id, from, to);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts: ctx.accounts.filter((a) => !a.closed),
+      start: from,
+      end: to,
+    });
+    for (const { transactions: tx } of batches) {
       for (const t of tx) {
         const parentPayee = pn[t.payee] || t.imported_payee || '';
         const isSplit = t.is_parent && Array.isArray(t.subtransactions) && t.subtransactions.length;
-        const parentTransfer = !!(t.transfer_id || t.transferred_id);
+        const parentTransfer = hasActualTransferIdentity(t);
         // Fronted reimbursement expenses (with ids) — the settle-able side.
         const pushExp = (id, amount, notes, payeeName) => {
           const at = attribute(`${payeeName} ${notes || ''}`.trim(), notes || '');
@@ -1384,7 +2455,12 @@ async function suggestRepayments({ from, to } = {}) {
     const linkedInflow = new Set();
     for (const l of links) {
       if (l.inflow) linkedInflow.add(l.inflow.id);
-      if (l.expense) allocByExp[l.expense.id] = round2((allocByExp[l.expense.id] || 0) + (l.amount != null ? l.amount : Math.abs(l.expense.amount || 0)));
+      if (l.expense) {
+        const trusted = trustedLinkedCents(l);
+        if (trusted > 0) {
+          allocByExp[l.expense.id] = round2((allocByExp[l.expense.id] || 0) + fromCents(trusted));
+        }
+      }
     }
     for (const slug of Object.keys(expByPerson))
       for (const e of expByPerson[slug]) e.remaining = round2(Math.max(0, -e.amount - (allocByExp[e.id] || 0)));
@@ -1401,8 +2477,9 @@ async function suggestRepayments({ from, to } = {}) {
       const tooLargeForCurrentDebt = inf.amount > owed + Math.max(10, owed * 0.2);
       if (alloc.kind === 'over' && tooLargeForCurrentDebt) continue;
       // Reserve the allocated remaining so a later inflow doesn't double-book it.
+      const expIndex = new Map((expByPerson[inf.person] || []).map((entry) => [entry.id, entry]));
       for (const a of alloc.allocations) {
-        const e = (expByPerson[inf.person] || []).find((x) => x.id === a.expense.id);
+        const e = expIndex.get(a.expense.id);
         if (e) e.remaining = round2(Math.max(0, e.remaining - a.amount));
       }
       suggestions.push({
@@ -1420,24 +2497,67 @@ async function suggestRepayments({ from, to } = {}) {
       });
     }
     suggestions.sort((a, b) => b.score - a.score || (a.inflow.date < b.inflow.date ? 1 : -1));
-    return { suggestions, count: suggestions.length, generatedAt: new Date().toISOString(), range: { from, to } };
+    return {
+      suggestions,
+      count: suggestions.length,
+      complete: true,
+      incompleteReasons: [],
+      generatedAt: new Date().toISOString(),
+      range: { from, to },
+    };
   });
 }
 
 // Confirm a suggestion: file the inflow under Reimbursement (so it nets against what
 // the person owes — the "zero out" flow) and write amount-allocated provenance links.
 // Re-derives the suggestion so a stale client can't act on a vanished match.
-async function confirmRepayment({ id, from, to } = {}) {
+async function prepareRepaymentConfirmationAdmission({ id, from, to } = {}) {
   if (!id) throw new Error('suggestion id required');
+  const requestedInflowId = id.startsWith('sg_') ? id.slice(3) : null;
+  assertTransactionMutationAvailable({ ids: [requestedInflowId] });
   const { suggestions } = await suggestRepayments({ from, to });
   const sg = suggestions.find((s) => s.id === id);
-  if (!sg) throw new Error('suggestion no longer valid (already linked or changed) — refresh and retry');
-  await setTransactionCategory({ id: sg.inflow.id, categoryId: reimbCategoryId(await withApi((api) => api.getCategoryGroups())) });
-  for (const a of sg.allocations) addReimbLink({ inflow: sg.inflow, expense: a.expense, amount: a.amount, person: sg.person });
-  const store = readReimbSuggest();
-  store.confirmed[id] = { at: new Date().toISOString(), inflowId: sg.inflow.id, allocations: sg.allocations.length };
-  writeReimbSuggest(store);
-  return { ok: true, categorized: true, linked: sg.allocations.length, inflowId: sg.inflow.id };
+  if (!sg) throw new RepaymentSuggestionInvalidError();
+  assertTransactionMutationAvailable({
+    ids: [sg.inflow.id, ...sg.allocations.map((allocation) => allocation.expense?.id)],
+  });
+  return withApi(async (api) => {
+    const groups = await api.getCategoryGroups();
+    const reimbId = reimbCategoryId(groups);
+    const payees = await api.getPayees();
+    const pn = Object.fromEntries(payees.map((p) => [p.id, p.name || '']));
+    const resolved = await resolveRepaymentEndpoints(api, sg, pn);
+    const { links } = readReimbLinks();
+    return buildAdmissionPayload({
+      suggestionId: id,
+      suggestion: sg,
+      reimbCategoryId: reimbId,
+      resolved,
+      existingLinks: links,
+    });
+  });
+}
+
+async function validateRepaymentConfirmationAdmission(options) {
+  return prepareRepaymentConfirmationAdmission(options);
+}
+
+async function confirmRepayment({
+  id,
+  from,
+  to,
+  operationIdentity,
+  journalBinding,
+  faultInjector,
+  admission,
+} = {}) {
+  const prepared = admission || await prepareRepaymentConfirmationAdmission({ id, from, to });
+  return withApi(async (api) => getRepaymentConfirmationSagaManager().confirm(api, {
+    ...prepared,
+    operationIdentity,
+    journalBinding,
+    faultInjector,
+  }), { mode: 'write' });
 }
 function reimbCategoryId(groups) {
   for (const g of groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) return c.id;
@@ -1448,6 +2568,7 @@ function reimbCategoryId(groups) {
 function dismissRepayment({ id, inflowId } = {}) {
   const infId = inflowId || (id && id.startsWith('sg_') ? id.slice(3) : null);
   if (!infId) throw new Error('inflowId (or sg_ id) required');
+  assertTransactionMutationAvailable({ ids: [infId] });
   const store = readReimbSuggest();
   if (!store.dismissed.includes(infId)) store.dismissed.push(infId);
   writeReimbSuggest(store);
@@ -1456,6 +2577,7 @@ function dismissRepayment({ id, inflowId } = {}) {
 // Undo a dismissal (lets a suggestion resurface).
 function undismissRepayment({ inflowId } = {}) {
   if (!inflowId) throw new Error('inflowId required');
+  assertTransactionMutationAvailable({ ids: [inflowId] });
   const store = readReimbSuggest();
   store.dismissed = store.dismissed.filter((x) => x !== inflowId);
   writeReimbSuggest(store);
@@ -1470,31 +2592,49 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
       tripStart: TRIP_START,
       swNet: SW_NET,
       settledExt: SETTLED_EXT,
-      manualTrips: MANUAL_TRIPS,
       eventStatus: EVENT_STATUS,
       autoDetectExcludeEvents: AUTO_DETECT_EXCLUDE_EVENTS,
     } = loadOwesConfig();
     // Who-owes-you and the People roster are stable across UI windows, but direct
     // ledger debts before the cutoff are historical/settled outside this system.
     // `from`/`to` only scope the headline summary below.
-    const legFrom = REIMB_LEDGER_FROM;
+    const config = loadQueryScalingConfig();
     const legTo = todayYMD();
-    const winFrom = from || legFrom;
+    const ledgerWindow = resolveBoundedLedgerStart({
+      configuredStart: REIMB_LEDGER_FROM,
+      end: legTo,
+      config,
+    });
+    const legFrom = ledgerWindow.start;
+    validateCanonicalDateRange(legFrom, legTo, {
+      config,
+      purpose: 'reimbursement ledger scan',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
+    const winFrom = from || REIMB_LEDGER_FROM;
     const winTo = to || legTo;
-    const groups = await api.getCategoryGroups();
+    if (from != null || to != null) {
+      validateCanonicalDateRange(winFrom, winTo, {
+        config,
+        purpose: 'reimbursement summary window',
+        maxSpanDays: config.maxLedgerQueryDays,
+      });
+    }
+    const ctx = await loadLedgerReadContext(api);
+    const { groups, payeeMap: pn } = ctx;
     let reimbId = null;
     for (const g of groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) reimbId = c.id;
     if (!reimbId) throw new Error('Reimbursement category not found');
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name;
-    const accts = await api.getAccounts();
+    const accts = ctx.accountsRaw;
 
     const legs = [];
     const inflows = [];
-    for (const a of accts) {
-      if (a.offbudget) continue;
-      const tx = await api.getTransactions(a.id, legFrom, legTo);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts: accts.filter((a) => !a.offbudget),
+      start: legFrom,
+      end: legTo,
+    });
+    for (const { account: a, transactions: tx } of batches) {
       for (const t of tx) {
         const parentPayee = pn[t.payee] || t.imported_payee || '';
         const push = (amount, notes, meta = {}) => {
@@ -1654,24 +2794,26 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
     // Combined "who owes me" — AUTHORITATIVE. Trip/group debts come straight from
     // Splitwise's own pairwise balance via the owes-snapshot (see reimbursement docs:
     // NEVER reconstruct per-person trip debts from line items). Personal loans not
-    // in any Splitwise group (e.g. a Venmo loan) still come from the ledger. If the
-    // snapshot is unavailable we fall back to the legacy `expected` baseline.
-    const truth = loadOwesTruth();
+    // in any Splitwise group (e.g. a Venmo loan) still come from the ledger.
+    // Legacy/manual values are diagnostics only and never substitute for missing
+    // current pairwise truth.
+    const truthState = loadOwesTruth();
+    const truth = truthState.current;
     const tripBySlug = {}; // slug -> [{ event, remaining }]
-    let owesSource = 'splitwise-snapshot';
+    let owesSource = truth ? (truth.source || 'splitwise-snapshot') : 'ledger-only';
     const owesGeneratedAt = truth && truth.generatedAt ? truth.generatedAt : null;
-    const owesWarning = truth && truth.warning ? truth.warning : null;
+    const owesWarning = truthState.warning;
+    const lastKnownSplitwise = truthState.lastKnown ? {
+      generatedAt: truthState.lastKnown.generatedAt || null,
+      total: round2(Number(truthState.lastKnown.total) || 0),
+      bySlug: truthState.lastKnown.bySlug,
+      source: truthState.lastKnown.source || 'splitwise-snapshot',
+    } : null;
     if (truth) {
-      owesSource = truth.source || owesSource;
       for (const [slug, arr] of Object.entries(truth.bySlug))
         tripBySlug[slug] = (Array.isArray(arr) ? arr : [])
           .filter((t) => t && Number(t.amount) > 0.005)
           .map((t) => ({ event: t.event, remaining: round2(Number(t.amount)) }));
-    } else {
-      owesSource = 'legacy-baseline';
-      for (const e of expected)
-        for (const r of e.rows)
-          if (r.remaining > 0.5) (tripBySlug[r.slug] = tripBySlug[r.slug] || []).push({ event: e.event, remaining: r.remaining });
     }
 
     // Venmo debts (imported from a statement CSV) merge in as another source, so a
@@ -1692,32 +2834,10 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
       }
     }
 
-    // Manual overrides win over the auto snapshot (e.g. a Splitwise group that
-    // reports settled while the person actually still owes). { slug: [{event,amount}] }.
-    if (MANUAL_TRIPS && typeof MANUAL_TRIPS === 'object') {
-      for (const [slug, arr] of Object.entries(MANUAL_TRIPS)) {
-        if (!Array.isArray(arr)) continue;
-        const list = tripBySlug[slug] || [];
-        for (const m of arr) {
-          if (!m || !m.event) continue;
-          const amount = round2(Number(m.amount) || 0);
-          const i = list.findIndex((t) => t.event === m.event);
-          if (amount > 0.005) {
-            if (i >= 0) list[i] = { event: m.event, remaining: amount };
-            else list.push({ event: m.event, remaining: amount });
-          } else if (i >= 0) list.splice(i, 1);
-        }
-        if (list.length) { tripBySlug[slug] = list; owesSource = owesSource + '+manual'; } else delete tripBySlug[slug];
-      }
-    }
-
-    // A person is "Splitwise-governed" if ANY ledger leg is tied to a trip event or
-    // a Splitwise expense — then their debt comes ONLY from the authoritative
-    // snapshot above (never the ledger), which avoids double-counting cross-tagged
-    // settle-ups (e.g. gift fronts netted into a trip payback). People with purely
-    // personal, non-Splitwise legs (e.g. a direct loan) keep their ledger net.
-    const swGoverned = (p) => (byP[p] || []).some((l) => l.event || /splitwise/i.test(l.label || ''));
-    const personalNetOf = (p) => (swGoverned(p) ? 0 : (byP[p] || []).reduce((s, l) => s + l.amount, 0));
+    // Suppress only event/Splitwise legs. A person may also have an unrelated
+    // direct loan, which must remain visible alongside their pairwise trip debt.
+    const personalLegsOf = (p) => directReimbursementLegs(byP[p]);
+    const personalNetOf = (p) => personalLegsOf(p).reduce((s, l) => s + l.amount, 0);
 
     const owesSlugs = new Set([...persons, ...Object.keys(tripBySlug)]);
     const owes = [];
@@ -1728,9 +2848,7 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
       const trips = tripBySlug[slug] || [];
       const owed = round2(misc + trips.reduce((s, t) => s + t.remaining, 0));
       if (owed <= 0.5) continue;
-      const legs = swGoverned(slug)
-        ? []
-        : (byP[slug] || []).filter((l) => l.amount < 0).map((l) => ({
+      const legs = personalLegsOf(slug).filter((l) => l.amount < 0).map((l) => ({
           id: l.id, parentId: l.parentId, isLeg: l.isLeg, accountId: l.accountId, account: l.account,
           payee: l.payee, cleared: l.cleared, imported: l.imported, categoryId: l.categoryId,
           date: l.date, amount: d2(l.amount), label: l.label, notes: l.notes,
@@ -1747,27 +2865,61 @@ async function getReimbursement({ from, to, openOnly = false } = {}) {
     const inWin = (d) => { const x = d || ''; return x >= winFrom && x <= winTo; };
     const frontedWin = round2(legs.filter((l) => l.amount < 0 && inWin(l.date)).reduce((s, l) => s + -l.amount, 0) / 100);
     const paidBackWin = round2(legs.filter((l) => l.amount > 0 && inWin(l.date)).reduce((s, l) => s + l.amount, 0) / 100);
-    const isLifetimeWin = winFrom <= legFrom && winTo >= legTo;
+    const isLifetimeWin = winFrom <= REIMB_LEDGER_FROM && winTo >= legTo;
+    const ledgerComplete = ledgerWindow.complete;
+    const financeDate = todayYMD();
+    const totalOwedMetric = boundedLifetimeMetric({
+      metric: 'reimbursement.total_owed',
+      value: ledgerComplete ? totalOwedCombined : null,
+      valueCents: ledgerComplete ? toCents(totalOwedCombined) : null,
+      complete: ledgerComplete,
+      incompleteReasons: ledgerComplete ? [] : [QUERY_INCOMPLETE_REASON.ledgerScanIncomplete],
+      lowerBound: ledgerComplete ? null : totalOwedCombined,
+      lowerBoundLabel: 'at least (partial ledger scan)',
+      financeDate,
+      method: 'reimbursement_ledger_scan',
+      sources: [{ type: 'ledger', role: 'reimbursement' }],
+    });
     const summary = {
       fronted: frontedWin,
       paidBack: paidBackWin,
-      // Over the lifetime window the meaningful "outstanding" is the real balance
-      // still owed; for a bounded window it's that window's net flow.
-      outstanding: isLifetimeWin ? totalOwedCombined : round2(frontedWin - paidBackWin),
+      outstanding: isLifetimeWin
+        ? (ledgerComplete ? totalOwedCombined : null)
+        : round2(frontedWin - paidBackWin),
+      outstandingMetric: isLifetimeWin
+        ? boundedLifetimeMetric({
+          metric: 'reimbursement.summary_outstanding',
+          value: ledgerComplete ? totalOwedCombined : null,
+          valueCents: ledgerComplete ? toCents(totalOwedCombined) : null,
+          complete: ledgerComplete,
+          incompleteReasons: ledgerComplete ? [] : [QUERY_INCOMPLETE_REASON.ledgerScanIncomplete],
+          lowerBound: ledgerComplete ? null : totalOwedCombined,
+          lowerBoundLabel: 'at least (partial ledger scan)',
+          financeDate,
+          method: 'reimbursement_ledger_scan',
+        })
+        : null,
       window: { from: winFrom, to: winTo },
       lifetime: isLifetimeWin,
     };
 
     return {
       range: { from: winFrom, to: winTo },
-      totalOwed: totalOwedCombined,
+      totalOwed: totalOwedMetric,
       summary,
       ledgerCutoff: REIMB_LEDGER_CUTOFF_ACTIVE ? REIMB_LEDGER_FROM : null,
-      debtorCount: owes.length,
-      owes,
+      ledgerScan: {
+        queriedFrom: legFrom,
+        configuredFrom: REIMB_LEDGER_FROM,
+        to: legTo,
+        complete: ledgerWindow.complete,
+      },
+      debtorCount: ledgerComplete ? owes.length : null,
+      owes: ledgerComplete ? owes : [],
       owesSource,
       owesGeneratedAt,
       owesWarning,
+      lastKnownSplitwise,
       people,
       events,
       expected,
@@ -1804,20 +2956,25 @@ async function getReimbursementLedger({ month } = {}) {
     const windowStart = monthRange(curY, curM - 11).start;
     const windowEnd = todayYMD();
 
-    const groups = await api.getCategoryGroups();
+    const ctx = await loadLedgerReadContext(api, { accountFilter: (a) => !a.offbudget });
+    const { groups, payeeMap: pn } = ctx;
     let reimbId = null;
     for (const g of groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) reimbId = c.id;
     if (!reimbId) throw new Error('Reimbursement category not found');
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accts = (await api.getAccounts()).filter((a) => !a.offbudget);
+    validateCanonicalDateRange(windowStart, windowEnd, {
+      purpose: 'reimbursement ledger',
+      maxSpanDays: loadQueryScalingConfig().maxLedgerQueryDays,
+    });
 
     // All reimbursement charges (fronted, amount<0) over the 12-month window.
     const charges = []; // { id, date, payee, notes, amount(dollars<0), person, event }
     const frontedByMonth = {};
-    for (const a of accts) {
-      const tx = await api.getTransactions(a.id, windowStart, windowEnd);
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts: ctx.accounts,
+      start: windowStart,
+      end: windowEnd,
+    });
+    for (const { account: a, transactions: tx } of batches) {
       for (const t of tx) {
         const parentPayee = pn[t.payee] || t.imported_payee || '';
         const isSplit = t.subtransactions && t.subtransactions.length;
@@ -1836,14 +2993,18 @@ async function getReimbursementLedger({ month } = {}) {
 
     // Payback allocations from the links store (amount-allocated / partial aware).
     const { links } = readReimbLinks();
+    const { byExpense: allocByExpCents, paymentsByExpense } = buildTrustedAllocationIndex(links);
     const allocByExp = {};
     const paymentsByExp = {};
-    for (const l of links) {
-      if (!l.expense) continue;
-      const eid = l.expense.id;
-      const amt = l.amount != null ? round2(l.amount) : round2(Math.abs((l.expense && l.expense.amount) || 0));
-      allocByExp[eid] = round2((allocByExp[eid] || 0) + amt);
-      if (l.inflow) (paymentsByExp[eid] = paymentsByExp[eid] || []).push({ id: String(l.inflow.id), date: l.inflow.date || null, payee: l.inflow.payee || 'Payment', amount: amt });
+    for (const [expenseId, cents] of Object.entries(allocByExpCents)) {
+      allocByExp[expenseId] = fromCents(cents);
+      paymentsByExp[expenseId] = (paymentsByExpense[expenseId] || []).map((payment) => ({
+        id: payment.id,
+        date: payment.date,
+        payee: payment.payee,
+        amount: fromCents(payment.amountCents),
+        allocationTrusted: true,
+      }));
     }
 
     const chargeStatus = (fronted, allocated, remaining) =>
@@ -1946,26 +3107,72 @@ async function reconItemsFor(api, month) {
   const current = currentFinanceYearMonth();
   const isCurrent = Y === current.year && M - 1 === current.monthIndex;
   const to = isCurrent ? todayYMD() : end;
-  const groups = await api.getCategoryGroups();
-  const catInfo = buildCatInfo(groups);
-  const payees = await api.getPayees();
-  const pn = {};
-  for (const p of payees) pn[p.id] = p.name || '';
-  const accts = (await api.getAccounts()).filter((a) => !a.offbudget);
+  const ctx = await loadLedgerReadContext(api, { accountFilter: (a) => !a.offbudget });
+  const { catInfo, payeeMap: pn } = ctx;
+  const accts = ctx.accounts;
+  const rows = [];
+  const batches = await fetchAccountTransactionsBounded(api, {
+    accounts: accts,
+    start,
+    end: to,
+  });
+  for (const { account: a, transactions: tx } of batches) {
+    for (const t of tx) rows.push({ transaction: t, accountId: a.id, account: a });
+  }
+  const transferIndex = buildTransferIndex(rows);
   const items = [];
-  for (const a of accts) {
-    const tx = await api.getTransactions(a.id, start, to);
-    for (const t of tx) {
-      if (t.transfer_id) continue; // internal transfer
-      const isSplit = t.subtransactions && t.subtransactions.length;
-      const info = t.category ? catInfo[t.category] : null;
-      const kind = info ? info.kind : 'spend';
-      if (kind === 'mm') continue;
-      const payee = displayPayeeName(pn[t.payee] || t.imported_payee, t.notes, 'Transaction');
-      if (TRANSFER_PAYEE.test(payee)) continue;
-      const cat = isSplit ? 'Split' : info ? info.name : t.amount > 0 ? 'Deposit' : 'Uncategorized';
-      items.push({ id: String(t.id), date: t.date, payee: payee.slice(0, 80), amount: d2(t.amount), category: cat, account: a.name || '', accountId: a.id });
+  for (const row of rows) {
+    const { transaction: t, accountId, account: a } = row;
+    const isSplit = t.subtransactions && t.subtransactions.length;
+    const classified = classifyTransactionLeaves(t, catInfo, { accountId, transferIndex });
+    if (isSplit) {
+      const incomplete = classified.filter((lf) => lf.kind === 'incomplete' && lf.provenance === PROVENANCE.TRANSFER_IDENTITY);
+      if (incomplete.length) {
+        const payee = displayPayeeName(pn[t.payee] || t.imported_payee, t.notes, 'Transaction');
+        items.push({
+          id: String(t.id),
+          date: t.date,
+          payee: payee.slice(0, 80),
+          amount: d2(t.amount),
+          category: 'Transfer (review)',
+          account: a.name || '',
+          accountId: a.id,
+          transferIdentity: true,
+          transferReason: incomplete[0].reason || TRANSFER_REASON.IDENTITY_MALFORMED,
+          completeness: projectionCompletenessFromLeaves(incomplete),
+        });
+        continue;
+      }
+      const reviewable = classified.some((lf) => lf.countsAsSpending || (lf.kind === 'uncat' && lf.amount < 0) || (lf.kind === 'income' && lf.amount > 0));
+      if (!reviewable) continue;
+    } else {
+      const [leaf] = classified;
+      if (leaf && leaf.kind === 'incomplete' && leaf.provenance === PROVENANCE.TRANSFER_IDENTITY) {
+        const payee = displayPayeeName(pn[t.payee] || t.imported_payee, t.notes, 'Transaction');
+        items.push({
+          id: String(t.id),
+          date: t.date,
+          payee: payee.slice(0, 80),
+          amount: d2(t.amount),
+          category: 'Transfer (review)',
+          account: a.name || '',
+          accountId: a.id,
+          transferIdentity: true,
+          transferReason: leaf.reason || TRANSFER_REASON.IDENTITY_MALFORMED,
+          completeness: projectionCompletenessFromLeaves([leaf]),
+        });
+        continue;
+      }
+      if (!leaf || leaf.spendingExcluded) {
+        if (!(leaf && leaf.kind === 'income' && leaf.amount > 0)) continue;
+      }
+      if (leaf.kind === 'transfer' || leaf.kind === 'incomplete') continue;
+      if (leaf.kind === 'mm' || leaf.kind === 'reimb') continue;
     }
+    const payee = displayPayeeName(pn[t.payee] || t.imported_payee, t.notes, 'Transaction');
+    const info = t.category ? catInfo[t.category] : null;
+    const cat = isSplit ? 'Split' : info ? info.name : t.amount > 0 ? 'Deposit' : 'Uncategorized';
+    items.push({ id: String(t.id), date: t.date, payee: payee.slice(0, 80), amount: d2(t.amount), category: cat, account: a.name || '', accountId: a.id });
   }
   items.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   return items;
@@ -1994,6 +3201,7 @@ async function getReconciliation({ month } = {}) {
 
 function setReconcileItem({ month, id, reconciled } = {}) {
   if (!month || !id) throw new Error('month and id required');
+  assertTransactionMutationAvailable({ ids: [id] });
   const store = readRecon();
   const m = store.months[month] || (store.months[month] = { done: false, doneAt: null, items: {} });
   if (!m.items || typeof m.items !== 'object') m.items = {};
@@ -2056,46 +3264,65 @@ async function getInsights({ month } = {}) {
     const isCurrent = year === current.year && mIdx === current.monthIndex;
     const targetEnd = isCurrent ? todayYMD() : target.end;
 
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed && !a.offbudget);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (a) => !a.closed && !a.offbudget,
+      includeClosed: false,
+    });
+    const { catInfo, payeeMap: pn, accounts } = ctx;
+
+    const insightRows = [];
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: windowStart,
+      end: targetEnd,
+    });
+    for (const { account: a, transactions: txns } of batches) {
+      for (const t of txns) insightRows.push({ transaction: t, accountId: a.id });
+    }
+    const transferIndex = buildTransferIndex(insightRows);
+    const payeeNameFor = (t) => pn[t.payee] || t.imported_payee || '';
 
     // Enriched real-spend leaves over the window {date, payee, month, amount(cents), category}
     const leaves = [];
-    for (const a of accounts) {
-      const txns = await api.getTransactions(a.id, windowStart, targetEnd);
-      for (const t of txns) {
-        const payeeName = pn[t.payee] || t.imported_payee || '';
-        const parentTransfer = !!(t.transfer_id || t.transferred_id) || TRANSFER_PAYEE.test(payeeName);
-        for (const lf of leavesOf(t, parentTransfer)) {
-          let kind = catInfo[lf.catId] ? catInfo[lf.catId].kind : 'uncat';
-          if (kind === 'uncat' && (lf.transfer || parentTransfer)) kind = 'mm';
-          leaves.push({
-            date: t.date,
-            month: t.date.slice(0, 7),
-            payee: payeeName,
-            amount: lf.amount,
-            kind,
-            category: catInfo[lf.catId] ? catInfo[lf.catId].name : kind === 'mm' ? 'Transfer' : 'Uncategorized',
-            // identity so consumers (e.g. Largest Charges) can deep-link to the txn
-            id: lf.id,
-            account: a.name,
-            accountId: a.id,
-            categoryId: lf.catId || null,
-            notes: lf.notes || t.notes || '',
-            isLeg: !!lf.isLeg,
-            parentId: lf.parentId || null,
-            cleared: t.cleared, // false => pending (bank hasn't posted it yet)
-          });
-        }
+    for (const row of insightRows) {
+      const { transaction: t, accountId } = row;
+      const payeeName = payeeNameFor(t);
+      for (const lf of classifyTransactionLeaves(t, catInfo, {
+        accountId,
+        transferIndex,
+      })) {
+        leaves.push({
+          date: t.date,
+          month: t.date.slice(0, 7),
+          payee: payeeName,
+          amount: lf.amount,
+          kind: lf.kind,
+          category: lf.kind === 'transfer'
+            ? 'Transfer'
+            : lf.kind === 'incomplete'
+              ? 'Transfer (review)'
+              : catInfo[lf.catId]
+                ? catInfo[lf.catId].name
+                : lf.kind === 'mm'
+                  ? 'Transfer'
+                  : 'Uncategorized',
+          id: lf.id,
+          account: accounts.find((a) => a.id === accountId)?.name,
+          accountId,
+          categoryId: lf.catId || null,
+          notes: lf.notes || t.notes || '',
+          isLeg: !!lf.isLeg,
+          parentId: lf.parentId || null,
+          cleared: t.cleared,
+          needsReview: !!lf.needsReview,
+          provenance: lf.provenance,
+          transferIdentity: lf.transferIdentity,
+        });
       }
     }
 
     const inMonth = (e) => e.date >= target.start && e.date <= targetEnd;
-    const real = (e) => e.kind === 'spend' || e.kind === 'uncat';
+    const real = (e) => e.kind === 'spend' || (e.kind === 'uncat' && e.amount < 0);
 
     // Largest charges (target month)
     const largestCharges = leaves
@@ -2179,7 +3406,20 @@ async function getInsights({ month } = {}) {
       .sort((a, b) => b.current - a.current)
       .slice(0, 6);
 
-    return { month: target.key, largestCharges, topMerchants, uncategorized, recurring, anomalies };
+    const targetMonthLeaves = leaves.filter((e) => inMonth(e));
+    const completeness = projectionCompletenessFromLeaves(
+      targetMonthLeaves.filter((e) => e.kind === 'incomplete' && e.provenance === PROVENANCE.TRANSFER_IDENTITY),
+    );
+
+    return {
+      month: target.key,
+      largestCharges,
+      topMerchants,
+      uncategorized,
+      recurring,
+      anomalies,
+      completeness,
+    };
   });
 }
 
@@ -2194,16 +3434,27 @@ async function getMerchantHistory({ payee, months = 12 } = {}) {
     const current = currentFinanceYearMonth();
     const year = current.year;
     const mIdx = current.monthIndex;
-    const span = Math.max(1, Math.min(60, Number(months) || 12));
+    const config = loadQueryScalingConfig();
+    const span = Math.max(1, Math.min(config.maxMerchantHistoryMonths, Number(months) || 12));
     const windowStart = monthRange(year, mIdx - (span - 1)).start;
     const end = todayYMD();
 
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed && !a.offbudget);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (a) => !a.closed && !a.offbudget,
+      includeClosed: false,
+    });
+    const { catInfo, payeeMap: pn, accounts } = ctx;
+
+    const merchantRows = [];
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: windowStart,
+      end,
+    });
+    for (const { account: a, transactions: txns } of batches) {
+      for (const t of txns) merchantRows.push({ transaction: t, accountId: a.id });
+    }
+    const transferIndex = buildTransferIndex(merchantRows);
 
     // Zero-filled contiguous month buckets across the window.
     const buckets = new Map();
@@ -2216,41 +3467,36 @@ async function getMerchantHistory({ payee, months = 12 } = {}) {
 
     let total = 0;
     let count = 0;
-    for (const a of accounts) {
-      const txns = await api.getTransactions(a.id, windowStart, end);
-      for (const t of txns) {
-        const payeeName = pn[t.payee] || t.imported_payee || '';
-        const parentTransfer = !!(t.transfer_id || t.transferred_id) || TRANSFER_PAYEE.test(payeeName);
-        const matches = wantNoPayee ? !payeeName : payeeName.trim().toLowerCase() === target;
-        if (!matches) continue;
-        for (const lf of leavesOf(t, parentTransfer)) {
-          let kind = catInfo[lf.catId] ? catInfo[lf.catId].kind : 'uncat';
-          if (kind === 'uncat' && (lf.transfer || parentTransfer)) kind = 'mm';
-          const real = kind === 'spend' || kind === 'uncat';
-          if (!real || lf.amount === 0) continue;
-          const key = t.date.slice(0, 7);
-          const b = buckets.get(key);
-          if (!b) continue; // outside the window edge
-          const dollars = -lf.amount; // refunds are negative net spend
-          b.total += dollars;
-          b.count += 1;
-          b.items.push({
-            id: lf.id,
-            date: t.date,
-            payee: payeeName || '(no payee)',
-            amount: d2(lf.amount),
-            category: catInfo[lf.catId] ? catInfo[lf.catId].name : 'Uncategorized',
-            categoryId: lf.catId || null,
-            account: a.name,
-            accountId: a.id,
-            isLeg: !!lf.isLeg,
-            parentId: lf.parentId || null,
-            cleared: t.cleared,
-            notes: lf.notes || t.notes || '',
-          });
-          total += dollars;
-          count += 1;
-        }
+    for (const row of merchantRows) {
+      const { transaction: t, accountId } = row;
+      const payeeName = pn[t.payee] || t.imported_payee || '';
+      const matches = wantNoPayee ? !payeeName : payeeName.trim().toLowerCase() === target;
+      if (!matches) continue;
+      const account = accounts.find((a) => a.id === accountId);
+      for (const lf of classifyTransactionLeaves(t, catInfo, { accountId, transferIndex })) {
+        if (!leafCountsAsRealSpend(lf)) continue;
+        const key = t.date.slice(0, 7);
+        const b = buckets.get(key);
+        if (!b) continue;
+        const dollars = -lf.amount;
+        b.total += dollars;
+        b.count += 1;
+        b.items.push({
+          id: lf.id,
+          date: t.date,
+          payee: payeeName || '(no payee)',
+          amount: d2(lf.amount),
+          category: catInfo[lf.catId] ? catInfo[lf.catId].name : 'Uncategorized',
+          categoryId: lf.catId || null,
+          account: account?.name,
+          accountId,
+          isLeg: !!lf.isLeg,
+          parentId: lf.parentId || null,
+          cleared: t.cleared,
+          notes: lf.notes || t.notes || '',
+        });
+        total += dollars;
+        count += 1;
       }
     }
 
@@ -2275,10 +3521,14 @@ async function getMerchantHistory({ payee, months = 12 } = {}) {
 // Write: safe split-aware category change
 // ---------------------------------------------------------------------------
 async function setTransactionCategory({ id, categoryId, isLeg, parentId, accountId, date }) {
+  assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
   return withApi(async (api) => {
     if (!isLeg) {
       // Simple, safe path for non-split transactions.
       await api.updateTransaction(id, { category: categoryId || null });
+      invalidateReviewStateForTransactionEvidence({ targetIds: [id] });
       return { ok: true, mode: 'update' };
     }
     // Split leg: rebuild the parent, preserve every field, then migrate all IDs.
@@ -2293,9 +3543,14 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
       payee: s.payee || undefined,
     }));
     const replacement = addableTransaction(parent, { category: undefined, subtransactions: subs });
-    const added = await replaceActualTransaction(api, { accountId, original: parent, replacement });
-    const idMap = transactionReplacementMap(parent, added);
-    const references = updateTransactionReferences(idMap);
+    const added = await replaceActualTransaction(api, {
+      accountId,
+      original: parent,
+      replacement,
+      requestedLegs: retainedReplacementLegs(parent),
+    });
+    const { idMap, references } = replacementSagaResult(added);
+    invalidateReviewStateForTransactionEvidence({ targetIds: [id, parentId, added.id, idMap[String(id)]].filter(Boolean) });
     return {
       ok: true,
       mode: 'rebuild-split',
@@ -2304,33 +3559,133 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
       previousId: String(id),
       references,
     };
-  });
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
 // Review inbox — one prioritized daily queue for the app home screen.
 // ---------------------------------------------------------------------------
-async function getReview({ month } = {}) {
+function readReviewState() {
+  return normalizeReviewState(readRuntimeStateByPath(REVIEW_STATE_PATH).value);
+}
+
+function writeReviewState(state) {
+  writeJsonSafe(REVIEW_STATE_PATH, normalizeReviewState(state));
+}
+
+function invalidateReviewStateForTransactionEvidence(evidence) {
+  const state = readReviewState();
+  const { reviewState, stats } = invalidateReviewDispositionsForTargets(state, evidence);
+  if (stats.reviewState) writeReviewState(reviewState);
+  return stats;
+}
+
+function persistReviewStateMaintenance({ expectedRevision, expiredSnoozeKeys = [] } = {}) {
+  const state = readReviewState();
+  const result = compareAndSwapReviewStateMaintenance(state, { expectedRevision, expiredSnoozeKeys });
+  if (result.changed && !result.conflict) writeReviewState(result.state);
+  return { ok: true, changed: result.changed, conflict: result.conflict };
+}
+
+async function prepareReviewDispositionAdmission({ id, disposition, until, note, contentHash, month, expectedRevision } = {}) {
+  if (!id) throw new Error('review task id required');
+  const { ReviewDispositionStaleError } = require('./lib/review-disposition');
+  const { allTasks } = await collectReviewTasks({ month });
+  const taskIndex = buildReviewTaskIndex(allTasks);
+  const state = readReviewState();
+  const preWriteRevision = reviewStateRevision(state);
+  if (expectedRevision && expectedRevision !== preWriteRevision) {
+    throw new ReviewDispositionStaleError('review state changed — refresh and retry');
+  }
+  const preflight = preflightReviewDispositionAdmission(state, { id, disposition, until, note, contentHash }, { taskIndex });
+  const applied = applyReviewDisposition(state, { id, disposition, until, note, contentHash }, { taskIndex, preflight });
+  const task = allTasks.find((entry) => entry.id === applied.id || entry.stableKey === applied.stableKey);
+  return {
+    preWriteRevision,
+    nextState: applied.state,
+    result: {
+      ok: true,
+      id: applied.id,
+      disposition: applied.disposition,
+      contentHash: task?.contentHash || contentHash || null,
+    },
+  };
+}
+
+function commitReviewDisposition(admission) {
+  if (!admission?.nextState) throw new Error('review disposition admission required');
+  const { ReviewDispositionStaleError } = require('./lib/review-disposition');
+  const currentRevision = reviewStateRevision(readReviewState());
+  if (admission.preWriteRevision != null && admission.preWriteRevision !== currentRevision) {
+    throw new ReviewDispositionStaleError('review state changed — refresh and retry');
+  }
+  writeReviewState(admission.nextState);
+  return admission.result;
+}
+
+async function setReviewDisposition(payload) {
+  const admission = await prepareReviewDispositionAdmission(payload);
+  return commitReviewDisposition(admission);
+}
+
+async function collectReviewTasks({ month, classifiedLeaves: preclassifiedLeaves } = {}) {
+  // When `classifiedLeaves` is supplied (e.g. from getToday spending), skip a second
+  // on-budget leaf fetch/classification pass for the same month window.
   const m = month || todayYMD().slice(0, 7);
   const start = `${m}-01`;
   const [year, monthNum] = m.split('-').map(Number);
   const end = m === todayYMD().slice(0, 7) ? todayYMD() : monthRange(year, monthNum - 1).end;
-  const [txns, insights, recurring, repayments, recon, receipts] = await Promise.all([
+  const reviewExcludedAccountIds = new Set(
+    Object.entries(readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts)
+      .filter(([, override]) => override.hidden || override.role === 'excluded')
+      .map(([id]) => id),
+  );
+  const classifiedLeavesPromise = preclassifiedLeaves
+    ? Promise.resolve(preclassifiedLeaves)
+    : withApi(async (api) => {
+      const groups = await api.getCategoryGroups();
+      const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution);
+      return classifiedOnBudgetLeaves(api, start, end, buildCatInfo(groups), {
+        accountFilter: spendingProjection.accountFilter,
+      });
+    });
+  const [txnsRaw, insights, recurring, repayments, recon, receipts, classifiedLeaves] = await Promise.all([
     getTransactions({ start, end, collapse: true }),
     getInsights({ month: m }),
     getRecurring({}),
     suggestRepayments({}),
     getReconcilePending(),
     Promise.resolve(getReceipts()),
+    classifiedLeavesPromise,
   ]);
+  const txns = txnsRaw.filter((txn) => !reviewExcludedAccountIds.has(txn.accountId));
+
+  const largeThreshold = Number(process.env.REVIEW_LARGE_CHARGE_THRESHOLD || 200);
+  const receiptThreshold = Number(process.env.REVIEW_RECEIPT_THRESHOLD || 75);
 
   const tasks = [];
   const seen = new Set();
+  const reviewTxnRef = (txn) => ({
+    id: txn.id,
+    parentId: txn.parentId || null,
+    isLeg: !!txn.isLeg,
+    accountId: txn.accountId || '',
+    account: txn.account || '',
+    payee: txn.payee || '',
+    payeeId: txn.payeeId || txn.payee_id || null,
+    amount: round2(Number(txn.amount) || 0),
+    date: txn.date || '',
+    category: txn.category || null,
+    categoryId: txn.categoryId || null,
+    notes: txn.notes || '',
+    cleared: txn.cleared !== false,
+    imported: !!txn.imported,
+    imported_id: txn.imported_id || null,
+  });
   const addTxn = (kind, priority, title, subtitle, txn, action = 'open_transaction') => {
     if (!txn || !txn.id || seen.has(`${kind}:${txn.id}`)) return;
     seen.add(`${kind}:${txn.id}`);
     tasks.push({
-      id: `${kind}:${txn.id}`,
       kind,
       priority,
       title,
@@ -2338,46 +3693,63 @@ async function getReview({ month } = {}) {
       action,
       amount: round2(Math.abs(Number(txn.amount) || 0)),
       date: txn.date || null,
-      transaction: {
-        id: txn.id,
-        parentId: txn.parentId || null,
-        isLeg: !!txn.isLeg,
-        accountId: txn.accountId || '',
-        account: txn.account || '',
-        payee: txn.payee || '',
-        amount: round2(Number(txn.amount) || 0),
-        date: txn.date || '',
-        category: txn.category || null,
-        categoryId: txn.categoryId || null,
-        notes: txn.notes || '',
-        cleared: txn.cleared !== false,
-        imported: !!txn.imported,
-      },
+      transaction: reviewTxnRef(txn),
     });
   };
 
-  const largeThreshold = Number(process.env.REVIEW_LARGE_CHARGE_THRESHOLD || 200);
-  const receiptThreshold = Number(process.env.REVIEW_RECEIPT_THRESHOLD || 75);
+  const incompleteTransferIds = new Set();
+  for (const leaf of classifiedLeaves) {
+    if (leaf.kind !== 'incomplete' || leaf.provenance !== PROVENANCE.TRANSFER_IDENTITY) continue;
+    incompleteTransferIds.add(String(leaf.parentId || leaf.id));
+  }
+  const txnById = new Map(txns.map((t) => [String(t.id), t]));
+  for (const leaf of classifiedLeaves) {
+    if (leaf.kind !== 'incomplete' || leaf.provenance !== PROVENANCE.TRANSFER_IDENTITY) continue;
+    const txnId = String(leaf.parentId || leaf.id);
+    const txn = txnById.get(txnId);
+    if (!txn) continue;
+    const draft = {
+      kind: 'transfer_identity',
+      priority: 93,
+      title: 'Review transfer identity',
+      subtitle: leaf.reason || TRANSFER_REASON.IDENTITY_MALFORMED,
+      action: 'open_transaction',
+      amount: round2(Math.abs(Number(txn.amount) || 0)),
+      date: txn.date || null,
+      transferReason: leaf.reason || TRANSFER_REASON.IDENTITY_MALFORMED,
+      transferIdentity: leaf.transferIdentity || null,
+      transaction: reviewTxnRef(txn),
+    };
+    const stableKey = reviewTaskStableKey(draft);
+    if (seen.has(stableKey)) continue;
+    seen.add(stableKey);
+    tasks.push(draft);
+  }
+
   const receiptTxnIds = new Set((receipts.receipts || []).map((r) => String(r.txnId)));
   for (const t of txns) {
     const catName = String(t.category || '');
     const isSplitParent = t.isSplit || t.splitCount || /^split$/i.test(catName);
-    const reviewableCharge = !isSplitParent && !REIMB_CAT.test(catName) && !MM_CAT.test(catName);
-    if (!isSplitParent && (!t.category || !catName.trim())) addTxn('uncategorized', 95, 'Categorize transaction', t.payee || 'Uncategorized', t, 'categorize');
+    const isTransfer = !!t.transfer;
+    const hasIncompleteTransfer = incompleteTransferIds.has(String(t.id));
+    const reviewableCharge = !isSplitParent && !isTransfer && !hasIncompleteTransfer && !REIMB_CAT.test(catName) && !MM_CAT.test(catName);
+    if (!isSplitParent && !isTransfer && !hasIncompleteTransfer && (!t.category || !catName.trim())) addTxn('uncategorized', 95, 'Categorize transaction', t.payee || 'Uncategorized', t, 'categorize');
     if (reviewableCharge && t.amount < 0 && Math.abs(t.amount) >= largeThreshold) addTxn('large_charge', 70, 'Review large charge', t.payee || 'Large charge', t);
     if (reviewableCharge && t.amount < 0 && Math.abs(t.amount) >= receiptThreshold && !receiptTxnIds.has(String(t.id))) addTxn('missing_receipt', 60, 'Attach receipt', t.payee || 'Missing receipt', t, 'open_transaction');
-    if (t.cleared === false) addTxn('pending', 35, 'Pending transaction', t.payee || 'Pending', t);
+    if (t.cleared === false && !isTransfer && !hasIncompleteTransfer) addTxn('pending', 35, 'Pending transaction', t.payee || 'Pending', t);
   }
 
-  for (const c of insights.uncategorized || [])
+  for (const c of insights.uncategorized || []) {
+    if (incompleteTransferIds.has(String(c.id))) continue;
     addTxn('uncategorized', 95, 'Categorize transaction', c.payee || 'Uncategorized', c, 'categorize');
+  }
 
   for (const s of repayments.suggestions || []) {
     const inflow = s.inflow || {};
-    if (!inflow.id || seen.has(`repayment:${inflow.id}`)) continue;
-    seen.add(`repayment:${inflow.id}`);
+    if (!inflow.id || seen.has(`repayment:${s.id}`)) continue;
+    seen.add(`repayment:${s.id}`);
     tasks.push({
-      id: `repayment:${s.id}`,
+      suggestionId: s.id,
       kind: 'repayment',
       priority: 90,
       title: 'Confirm repayment',
@@ -2386,13 +3758,15 @@ async function getReview({ month } = {}) {
       amount: round2(inflow.amount || 0),
       date: inflow.date || null,
       person: s.person,
+      inflow: { ...inflow, imported_id: inflow.imported_id || null },
+      allocations: s.allocations || [],
+      allocationKind: s.kind,
     });
   }
 
   for (const item of recurring.items || []) {
     if (item.priceChange && item.status === 'active') {
       tasks.push({
-        id: `price:${item.key}`,
         kind: 'price_change',
         priority: item.priceChange.pct > 0 ? 80 : 45,
         title: item.priceChange.pct > 0 ? 'Subscription price increased' : 'Subscription price dropped',
@@ -2401,13 +3775,22 @@ async function getReview({ month } = {}) {
         amount: round2(item.amount),
         date: item.lastCharged || null,
         key: item.key,
+        priceChange: item.priceChange,
       });
     }
   }
 
   if (recon && recon.pending) {
+    const reconState = reconMonthState(readRecon(), recon.pending);
+    const reconItemRows = await withApi((api) => reconItemsFor(api, recon.pending));
+    const unresolvedItems = reconItemRows
+      .filter((item) => !reconState.items[item.id])
+      .map((item) => ({
+        id: item.id,
+        imported_id: item.imported_id || null,
+        amount: item.amount,
+      }));
     tasks.push({
-      id: `reconcile:${recon.pending}`,
       kind: 'reconciliation',
       priority: 85,
       title: `Reconcile ${recon.pending}`,
@@ -2416,13 +3799,52 @@ async function getReview({ month } = {}) {
       amount: recon.remaining || 0,
       date: null,
       month: recon.pending,
+      remaining: recon.remaining || 0,
+      total: recon.total || 0,
+      unresolvedItems,
     });
   }
 
-  tasks.sort((a, b) => b.priority - a.priority || String(b.date || '').localeCompare(String(a.date || '')));
+  const importedIdCounts = buildImportedIdCounts(txns);
+  const reviewContext = { largeThreshold, receiptThreshold, importedIdCounts, transactions: txns };
+  const enrichedTasks = tasks.map((task) => enrichReviewTask(task, reviewContext));
+  enrichedTasks.sort((a, b) => b.priority - a.priority || String(b.date || '').localeCompare(String(a.date || '')));
+  const state = readReviewState();
+  const now = Date.now();
+  const visibleTasks = filterVisibleReviewTasks(enrichedTasks, state, now);
   const counts = {};
-  for (const t of tasks) counts[t.kind] = (counts[t.kind] || 0) + 1;
-  return { generatedAt: new Date().toISOString(), month: m, count: tasks.length, counts, tasks: tasks.slice(0, 50) };
+  for (const t of visibleTasks) counts[t.kind] = (counts[t.kind] || 0) + 1;
+  const expiredSnoozeKeys = collectExpiredSnoozeKeys(state, now);
+  const migrationRequired = countMigrationRequired(state, buildReviewTaskIndex(enrichedTasks));
+  return {
+    generatedAt: new Date().toISOString(),
+    month: m,
+    count: visibleTasks.length,
+    hiddenCount: enrichedTasks.length - visibleTasks.length,
+    migrationRequired,
+    counts,
+    tasks: visibleTasks.slice(0, 50),
+    allTasks: enrichedTasks,
+    _maintenance: {
+      expectedRevision: reviewStateRevision(state),
+      expiredSnoozeKeys,
+    },
+  };
+}
+
+async function getReview(options = {}) {
+  const inbox = await collectReviewTasks(options);
+  return {
+    generatedAt: inbox.generatedAt,
+    month: inbox.month,
+    count: inbox.count,
+    hiddenCount: inbox.hiddenCount,
+    migrationRequired: inbox.migrationRequired,
+    counts: inbox.counts,
+    tasks: inbox.tasks,
+    _allTasks: inbox.allTasks,
+    _maintenance: inbox._maintenance,
+  };
 }
 
 // List of categories for the inline categorize dropdown.
@@ -2442,41 +3864,57 @@ async function getCategories() {
 // Recurring & subscriptions engine (cadence, next renewal, price hikes, status)
 // ---------------------------------------------------------------------------
 async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
+  const config = loadQueryScalingConfig();
+  const boundedWindow = Math.max(6, Math.min(config.maxRecurringWindowMonths, Number(window) || 18));
   return withApi(async (api) => {
     const current = currentFinanceYearMonth();
-    const startKey = monthRange(current.year, current.monthIndex - (window - 1)).start;
+    const startKey = monthRange(current.year, current.monthIndex - (boundedWindow - 1)).start;
     const today = todayYMD();
+    validateCanonicalDateRange(startKey, today, {
+      config,
+      purpose: 'recurring scan',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
 
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed && !a.offbudget);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (a) => !a.closed && !a.offbudget,
+      includeClosed: false,
+    });
+    const { catInfo, payeeMap: pn, accounts } = ctx;
+
+    const recurringRows = [];
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: startKey,
+      end: today,
+      config,
+    });
+    for (const { account: a, transactions: txns } of batches) {
+      for (const t of txns) recurringRows.push({ transaction: t, accountId: a.id });
+    }
+    const transferIndex = buildTransferIndex(recurringRows);
 
     // Gather negative real-spend leaves grouped by normalized payee.
     const byKey = {};
-    for (const a of accounts) {
-      const txns = await api.getTransactions(a.id, startKey, today);
-      for (const t of txns) {
-        const payeeName = pn[t.payee] || t.imported_payee || '';
-        if (!payeeName) continue;
-        const parentTransfer = !!(t.transfer_id || t.transferred_id) || TRANSFER_PAYEE.test(payeeName);
-        for (const lf of leavesOf(t, parentTransfer)) {
-          let kind = catInfo[lf.catId] ? catInfo[lf.catId].kind : 'uncat';
-          if (kind === 'uncat' && (lf.transfer || parentTransfer)) kind = 'mm';
-          if (kind === 'mm' || kind === 'reimb' || kind === 'income') continue;
-          if (lf.amount >= 0) continue; // outflows only
-          const key = recurringKey(payeeName);
-          if (!key) continue;
-          const rec = (byKey[key] = byKey[key] || {
-            key,
-            payee: payeeName,
-            category: (catInfo[lf.catId] && catInfo[lf.catId].name) || 'Uncategorized',
-            charges: [],
-          });
-          rec.charges.push({ date: t.date, amt: -lf.amount / 100 });
+    for (const row of recurringRows) {
+      const { transaction: t, accountId } = row;
+      const payeeName = pn[t.payee] || t.imported_payee || '';
+      if (!payeeName) continue;
+      for (const lf of classifyTransactionLeaves(t, catInfo, { accountId, transferIndex })) {
+        if (!leafCountsAsRealSpend(lf)) continue;
+        const key = recurringKey(payeeName);
+        if (!key) continue;
+        const rec = (byKey[key] = byKey[key] || {
+          key,
+          payee: payeeName,
+          category: (catInfo[lf.catId] && catInfo[lf.catId].name) || 'Uncategorized',
+          categoryIdCounts: {},
+          charges: [],
+        });
+        if (lf.catId) {
+          rec.categoryIdCounts[lf.catId] = (rec.categoryIdCounts[lf.catId] || 0) + 1;
         }
+        rec.charges.push({ date: t.date, amt: -lf.amount / 100 });
       }
     }
 
@@ -2542,9 +3980,19 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
       const effPeriod = period || (forced ? CADENCE_DAYS.monthly : period);
       const amount = median(amounts);
       const lastCharged = dates[dates.length - 1];
-      const nextRenewal = addDays(lastCharged, Math.round(effPeriod));
-      const monthlyEquivalent = amount * (30.44 / effPeriod);
-      const confidence = Math.max(35, Math.min(99, Math.round(100 - cv * 45 + Math.min(10, dates.length) * 2 + (forced ? -15 : 0))));
+      const schedule = inferRecurrenceSchedule({ dates, cadence: effCadence, forced });
+      const projectionUncertain = !!schedule.uncertain;
+      const nextRenewal = projectionUncertain ? null : nextOccurrenceAfter(lastCharged, schedule);
+      const monthlyEquivalent = monthlyEquivalentAmount(amount, effCadence);
+      const confidence = Math.max(
+        35,
+        Math.min(
+          99,
+          Math.round(
+            100 - cv * 45 + Math.min(10, dates.length) * 2 + (forced ? -15 : 0) - projectionConfidencePenalty(schedule),
+          ),
+        ),
+      );
 
       const lastAmt = amounts[amounts.length - 1];
       const prevAmt = amounts[amounts.length - 2];
@@ -2552,14 +4000,23 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
       if (prevAmt && Math.abs(lastAmt - prevAmt) / prevAmt > 0.05)
         priceChange = { from: round2(prevAmt), to: round2(lastAmt), pct: Math.round(((lastAmt - prevAmt) / prevAmt) * 100) };
 
-      let status = daysBetween(lastCharged, today) <= effPeriod * 1.8 ? 'active' : 'inactive';
+      let status = daysBetween(lastCharged, today) <= inactiveGapDays(effCadence) ? 'active' : 'inactive';
       if (ov && ov.status) status = ov.status; // user override (e.g. cancelled)
       const finalIsBill = ov && typeof ov.isBill === 'boolean' ? ov.isBill : isBill;
+      const categoryIdentity = resolveRecurringCategoryIdentity({
+        override: ov || {},
+        categoryIdCounts: rec.categoryIdCounts || {},
+      });
+      const resolvedCategoryName = categoryIdentity.categoryId && catInfo[categoryIdentity.categoryId]
+        ? catInfo[categoryIdentity.categoryId].name
+        : rec.category;
 
       items.push({
         key: rec.key,
         payee: rec.payee,
-        category: rec.category,
+        category: resolvedCategoryName,
+        categoryId: categoryIdentity.categoryId,
+        categoryIdentityStatus: categoryIdentity.status,
         cadence: effCadence,
         amount: round2(amount),
         monthlyEquivalent: round2(monthlyEquivalent),
@@ -2568,7 +4025,8 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
         firstCharged: dates[0],
         lastCharged,
         nextRenewal,
-        renewalWindow: { start: addDays(nextRenewal, -3), end: addDays(nextRenewal, 3) },
+        renewalWindow: renewalWindow(nextRenewal),
+        projectionUncertain: projectionUncertain || undefined,
         priceChange,
         confidence,
         firstSeen: dates[0],
@@ -2615,7 +4073,7 @@ async function getRecurring({ window = 18, debug = false, minDates = 3 } = {}) {
   });
 }
 
-function setRecurringOverride({ key, status, hidden, forced, isBill, cancellation } = {}) {
+function setRecurringOverride({ key, status, hidden, forced, isBill, categoryId, cancellation } = {}) {
   if (!key) throw new Error('key required');
   const overrides = readJsonSafe(OVERRIDES_PATH, {});
   const cur = overrides[key] || {};
@@ -2626,6 +4084,10 @@ function setRecurringOverride({ key, status, hidden, forced, isBill, cancellatio
   if (isBill !== undefined) {
     if (isBill === null) delete cur.isBill; // clear to fall back to auto-detected type
     else cur.isBill = !!isBill;
+  }
+  if (categoryId !== undefined) {
+    if (categoryId === null || categoryId === '') delete cur.categoryId;
+    else cur.categoryId = categoryId;
   }
   if (status !== undefined) {
     if (!status || status === 'active') delete cur.status;
@@ -2655,40 +4117,53 @@ function setRecurringOverride({ key, status, hidden, forced, isBill, cancellatio
 // Mirrors getRecurring but for income-category inflows.
 // ---------------------------------------------------------------------------
 async function getIncome({ window = 12 } = {}) {
+  const config = loadQueryScalingConfig();
+  const boundedWindow = Math.max(6, Math.min(config.maxRecurringWindowMonths, Number(window) || 12));
   return withApi(async (api) => {
     const current = currentFinanceYearMonth();
-    const startKey = monthRange(current.year, current.monthIndex - (window - 1)).start;
+    const startKey = monthRange(current.year, current.monthIndex - (boundedWindow - 1)).start;
     const today = todayYMD();
+    validateCanonicalDateRange(startKey, today, {
+      config,
+      purpose: 'income scan',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
 
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed && !a.offbudget);
+    const ctx = await loadLedgerReadContext(api, {
+      accountFilter: (a) => !a.closed && !a.offbudget,
+      includeClosed: false,
+    });
+    const { catInfo, payeeMap: pn, accounts } = ctx;
+
+    const incomeRows = [];
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts,
+      start: startKey,
+      end: today,
+      config,
+    });
+    for (const { account: a, transactions: txns } of batches) {
+      for (const t of txns) incomeRows.push({ transaction: t, accountId: a.id });
+    }
+    const transferIndex = buildTransferIndex(incomeRows);
 
     const byKey = {};
-    for (const a of accounts) {
-      const txns = await api.getTransactions(a.id, startKey, today);
-      for (const t of txns) {
-        const payeeName = pn[t.payee] || t.imported_payee || '';
-        if (!payeeName) continue;
-        const parentTransfer = !!(t.transfer_id || t.transferred_id) || TRANSFER_PAYEE.test(payeeName);
-        for (const lf of leavesOf(t, parentTransfer)) {
-          if (lf.transfer || parentTransfer) continue;
-          const kind = catInfo[lf.catId] ? catInfo[lf.catId].kind : 'uncat';
-          if (kind !== 'income') continue; // income-category leaves only
-          if (lf.amount <= 0) continue;     // inflows only
-          const key = incomeKey(payeeName, `${t.notes || ''} ${t.imported_payee || ''}`);
-          if (!key) continue;
-          const rec = (byKey[key] = byKey[key] || {
-            key, payee: key === 'interest' ? 'Interest' : payeeName,
-            category: (catInfo[lf.catId] && catInfo[lf.catId].name) || 'Income',
-            charges: [], names: [],
-          });
-          rec.names.push(payeeName);
-          rec.charges.push({ date: t.date, amt: lf.amount / 100 });
-        }
+    for (const row of incomeRows) {
+      const { transaction: t, accountId } = row;
+      const payeeName = pn[t.payee] || t.imported_payee || '';
+      if (!payeeName) continue;
+      for (const lf of classifyTransactionLeaves(t, catInfo, { accountId, transferIndex })) {
+        if (lf.kind === 'transfer' || lf.kind === 'incomplete') continue;
+        if (!leafCountsAsRealIncome(lf)) continue;
+        const key = incomeKey(payeeName, `${t.notes || ''} ${t.imported_payee || ''}`);
+        if (!key) continue;
+        const rec = (byKey[key] = byKey[key] || {
+          key, payee: key === 'interest' ? 'Interest' : payeeName,
+          category: (catInfo[lf.catId] && catInfo[lf.catId].name) || 'Income',
+          charges: [], names: [],
+        });
+        rec.names.push(payeeName);
+        rec.charges.push({ date: t.date, amt: lf.amount / 100 });
       }
     }
 
@@ -2703,20 +4178,20 @@ async function getIncome({ window = 12 } = {}) {
       for (let i = 1; i < dates.length; i++) gaps.push(daysBetween(dates[i - 1], dates[i]));
       const cadence = classifyCadence(median(gaps));
       if (!cadence) continue; // irregular deposits aren't a paycheck
-      const period = CADENCE_DAYS[cadence];
       const amount = median(amounts);
       const lastPaid = dates[dates.length - 1];
-      let nextPay = addDays(lastPaid, Math.round(period));
-      let guard = 0;
-      while (nextPay < today && guard < 64) { nextPay = addDays(nextPay, Math.round(period)); guard++; }
+      const schedule = inferRecurrenceSchedule({ dates, cadence });
+      if (schedule.uncertain) continue;
+      const nextPay = rollToOnOrAfter(today, schedule) || nextOccurrenceAfter(lastPaid, schedule);
+      if (!nextPay) continue;
       const displayPayee = rec.key === 'interest' ? 'Interest' : bestPayeeLabel(rec.names);
       streams.push({
         key: rec.key, payee: displayPayee, category: rec.category, cadence,
         amount: round2(amount),
-        monthlyEquivalent: round2(amount * (30.44 / period)),
+        monthlyEquivalent: round2(monthlyEquivalentAmount(amount, cadence)),
         occurrences: dates.length,
         lastPaid, nextPay,
-        active: daysBetween(lastPaid, today) <= period * 2,
+        active: daysBetween(lastPaid, today) <= inactiveGapDays(cadence),
         history: dates.slice(-6).map((d) => ({ date: d, amount: round2(perDay[d]) })),
       });
     }
@@ -2747,11 +4222,116 @@ async function getIncome({ window = 12 } = {}) {
   });
 }
 
+function readDebtPlannerDebts() {
+  const dStore = readJsonSafe(DEBT_PLANNER_PATH, { debts: [] }) || {};
+  return Array.isArray(dStore.debts) ? dStore.debts : [];
+}
+
+function enrichReimbLinksForGraph(links) {
+  return (links || []).map((link) => {
+    const classified = classifyStoredLink(link);
+    return {
+      ...link,
+      ambiguous: classified.ambiguous,
+      allocationIncomplete: classified.allocationCents == null && !classified.trusted,
+    };
+  });
+}
+
+function assertObligationGraphIntegration(graph) {
+  if (!graph?.completeness?.complete) return;
+  const cycleCheck = verifyCyclePartitionInvariants(graph.cyclePartitions || []);
+  if (!cycleCheck.ok) {
+    throw new Error(`obligation graph cycle partitions: ${cycleCheck.issues.join('; ')}`);
+  }
+  const reservedByCycle = new Map();
+  for (const occ of graph.occurrences || []) {
+    if (!occ.reserved || !occ.cycleKey) continue;
+    reservedByCycle.set(occ.cycleKey, sumCents([reservedByCycle.get(occ.cycleKey) || 0, -occ.amountCents]));
+  }
+  for (const cycle of graph.cyclePartitions || []) {
+    if (cycle.quarantined || cycle.adjustedObligationCents <= 0) continue;
+    const reserved = reservedByCycle.get(cycle.cycleKey) || 0;
+    if (reserved !== cycle.adjustedObligationCents) {
+      throw new Error(`cycle ${cycle.cycleKey} reserved ${reserved} != adjusted ${cycle.adjustedObligationCents}`);
+    }
+  }
+}
+
+async function buildObligationGraphBundle({
+  financeDate,
+  windowStart,
+  windowEnd,
+  accounts,
+  recurring,
+  income,
+  bills,
+  budgets,
+  reimb,
+  reimbLinks,
+  operatingAccounts,
+  txnContext = null,
+}) {
+  const accountOverrides = readAccountOverrides(ACCOUNT_OVERRIDES_PATH).accounts;
+  const accountRolesById = Object.fromEntries((accounts || []).map((account) => [account.id, account.role]));
+  const creditAccountIds = new Set((accounts || [])
+    .filter((account) => account.role === 'credit_card' && !account.closed && !account.hidden && account.role !== 'excluded')
+    .map((account) => account.id));
+
+  let txnInputs;
+  if (txnContext?.rows && txnContext?.catInfo) {
+    txnInputs = buildGraphTransactionInputs(txnContext.rows, txnContext.catInfo, {
+      windowStart,
+      windowEnd,
+      accountRolesById,
+      creditAccountIds,
+    });
+  } else {
+    txnInputs = await withApi(async (api) => {
+      const groups = await api.getCategoryGroups();
+      const catInfo = buildCatInfo(groups);
+      const rows = await fetchOnBudgetRows(api, windowStart, windowEnd);
+      return buildGraphTransactionInputs(rows, catInfo, {
+        windowStart,
+        windowEnd,
+        accountRolesById,
+        creditAccountIds,
+      });
+    });
+  }
+
+  const inputs = assembleObligationGraphInputs({
+    financeDate,
+    windowStart,
+    windowEnd,
+    accounts,
+    accountOverrides,
+    recurring,
+    income,
+    bills,
+    budgets,
+    debts: readDebtPlannerDebts(),
+    reimb: { ...reimb, possibleDate: addDays(financeDate, 14) },
+    reimbLinks: enrichReimbLinksForGraph(reimbLinks),
+    operatingAccountIds: operatingAccounts.map((account) => account.id),
+    transfers: txnInputs.transfers,
+    economicTransactions: txnInputs.economicTransactions,
+  });
+  const graph = buildObligationGraph(inputs);
+  assertObligationGraphIntegration(graph);
+  return {
+    graph,
+    inputs,
+    summary: graphSummary(graph),
+    liabilityPolicies: inputs.liabilityPolicies || {},
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Upcoming bills — projected from active recurring items (paid-state aware)
 // ---------------------------------------------------------------------------
-async function getBills({ days = 45 } = {}) {
-  const { items } = await getRecurring({});
+async function getBills({ days = 45, recurring } = {}) {
+  const { items } = recurring || await getRecurring({});
   const today = todayYMD();
   const horizon = addDays(today, days);
   const paid = readJsonSafe(BILLS_PAID_PATH, {});
@@ -2759,20 +4339,19 @@ async function getBills({ days = 45 } = {}) {
   for (const it of items) {
     if (it.status !== 'active') continue;
     if (!it.isBill) continue; // bills view = true bills only; subscriptions live in their own screen
-    const period = Math.round(CADENCE_DAYS[it.cadence] || 30.44);
+    if (it.projectionUncertain) continue;
     const hist = it.history || [];
+    const schedule = inferRecurrenceSchedule({
+      dates: hist.map((h) => h.date),
+      cadence: it.cadence,
+      forced: !!it.forced,
+    });
+    if (schedule.uncertain) continue;
     const amtTol = Math.max(2, Math.abs(it.amount) * 0.35); // utilities swing; allow ±35% (min $2)
-    let due = it.nextRenewal;
-    let guard = 0;
-    while (due < today && guard < 64) { due = addDays(due, period); guard++; } // roll overdue forward
-    while (due <= horizon && guard < 96) {
+    const dueDates = projectOccurrences({ schedule, windowStart: today, windowEnd: horizon });
+    for (const due of dueDates) {
       const id = `${it.key}|${due}`;
-      // Auto-derive "paid" by matching a real recorded charge to this cycle: a
-      // charge in the window leading up to (and just past) the due date with a
-      // comparable amount. The lower bound excludes the prior cycle's charge so
-      // we don't mis-flag the upcoming occurrence as already paid.
-      const lo = addDays(due, -Math.round(period * 0.45));
-      const hi = addDays(due, 7);
+      const { lo, hi } = paidMatchWindow(due, schedule);
       const match = hist.find((h) => h.date >= lo && h.date <= hi && Math.abs(Math.abs(h.amount) - Math.abs(it.amount)) <= amtTol);
       const manual = paid[id];
       bills.push({
@@ -2784,8 +4363,6 @@ async function getBills({ days = 45 } = {}) {
         matched: match ? { date: match.date, amount: match.amount } : null,
         variance: match ? round2(Math.abs(match.amount) - Math.abs(it.amount)) : null,
       });
-      due = addDays(due, period);
-      guard++;
     }
   }
   bills.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
@@ -2806,117 +4383,420 @@ async function getForecast({ days = 90 } = {}) {
   const horizonDays = Math.min(180, Math.max(30, Number(days) || 90));
   const today = todayYMD();
   const horizon = addDays(today, horizonDays);
-  const [accounts, income, bills, budgets, reimb] = await Promise.all([
+  const forecastBundle = await withApi(async (api) => {
+    const groups = await api.getCategoryGroups();
+    const catInfo = buildCatInfo(groups);
+    const projectionInputs = await loadAccountProjectionInputs(api);
+    const forecastProjection = await buildAccountProjection(api, ACCOUNT_METRIC.forecastCash, { inputs: projectionInputs });
+    const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution, { inputs: projectionInputs });
+    const [financeYear, financeMonth] = today.slice(0, 7).split('-').map(Number);
+    const cur = monthRange(financeYear, financeMonth - 1);
+    const prev = monthRange(financeYear, financeMonth - 2);
+    const monthEndDate = cur.end;
+    const rows = await fetchOnBudgetRows(api, prev.start, horizon, {
+      accountFilter: spendingProjection.accountFilter,
+    });
+    const currentMonthSpendingCompleteness = currentMonthSpendingCompletenessForSts({
+      rows,
+      catInfo,
+      envelopeStart: prev.start,
+      envelopeEnd: monthEndDate,
+      curStart: cur.start,
+      curEnd: today,
+      spendingProjection,
+    });
+    return { catInfo, rows, forecastProjection, spendingProjection, currentMonthSpendingCompleteness };
+  });
+  const [accounts, income, recurring, budgets, reimb] = await Promise.all([
     getAccounts(),
     getIncome({}),
-    getBills({ days: horizonDays }),
+    getRecurring({}),
     getBudgets({}),
     getReimbursement({}),
   ]);
-  const nonLiquidName = /(credit|\bcard\b|visa|mastercard|amex|sapphire|freedom|explorer|\bloan\b|mortgage|\bdebt\b|\broth\b|\bira\b|broker|invest)/i;
-  const cashName = /(check|saving|cash|money market)/i;
-  const liquidAccounts = accounts.filter((account) =>
-    !account.hidden &&
-    !account.offbudget &&
-    !nonLiquidName.test(account.name || '') &&
-    (account.balance >= 0 || cashName.test(account.name || ''))
-  );
-  const startBalance = round2(liquidAccounts.reduce((sum, account) => sum + account.balance, 0));
-  const events = [];
-  const pushEvent = (date, label, amount, kind) => {
-    if (!date || date < today || date > horizon || !Number.isFinite(Number(amount)) || Math.abs(Number(amount)) < 0.005) return;
-    events.push({ date, label, amount: round2(Number(amount)), kind });
+  const { catInfo, rows, forecastProjection, spendingProjection, currentMonthSpendingCompleteness } = forecastBundle;
+  const bills = await getBills({ days: horizonDays, recurring });
+  const liquidAccounts = accounts.filter((account) => account.inclusion?.forecast);
+  const operatingProjectionComplete = forecastProjection.incompleteReasons.length === 0;
+  let startBalanceCents = null;
+  if (operatingProjectionComplete) {
+    startBalanceCents = sumOperatingCashBalanceCents(liquidAccounts);
+  }
+  const obligationAccounts = accounts.filter((account) => account.inclusion?.obligations);
+  const { graph, liabilityPolicies } = await buildObligationGraphBundle({
+    financeDate: today,
+    windowStart: today,
+    windowEnd: horizon,
+    accounts: obligationAccounts,
+    recurring,
+    income,
+    bills,
+    budgets,
+    reimb,
+    reimbLinks: enrichReimbLinksForGraph(readReimbLinks().links),
+    operatingAccounts: liquidAccounts,
+    txnContext: { rows, catInfo },
+  });
+  const eventRows = [];
+  const pushEventCents = (date, label, amountCents, kind, provenance, sourceId = null) => {
+    if (!date || date < today || date > horizon) return;
+    if (!Number.isSafeInteger(amountCents) || amountCents === 0) return;
+    eventRows.push({ date, label, amountCents, kind, provenance, sourceId });
   };
 
-  const nextCadenceDate = (date, cadence) => {
-    if (cadence === 'semimonthly') {
-      const day = Number(date.slice(8, 10));
-      if (day < 15) return `${date.slice(0, 7)}-15`;
-      if (day === 15) return monthRange(Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1).end;
-      return `${addMonths(date, 1).slice(0, 7)}-15`;
-    }
-    const monthSteps = { monthly: 1, bimonthly: 2, quarterly: 3, semiannual: 6, annual: 12 };
-    if (monthSteps[cadence]) return addMonths(date, monthSteps[cadence]);
-    return addDays(date, Math.round(CADENCE_DAYS[cadence] || 14));
-  };
-
-  for (const s of income.streams || []) {
-    if (!s.active) continue;
-    let due = s.nextPay;
-    let guard = 0;
-    while (due < today && guard < 64) { due = nextCadenceDate(due, s.cadence); guard++; }
-    while (due <= horizon && guard < 128) {
-      pushEvent(due, s.payee || 'Income', Math.abs(s.amount), 'income');
-      due = nextCadenceDate(due, s.cadence);
-      guard++;
+  const graphCompleteness = graph.completeness;
+  if (graphCompleteness.complete) {
+    for (const event of forecastCashEventsFromGraph(graph, { windowStart: today, windowEnd: horizon })) {
+      pushEventCents(
+        event.date,
+        event.label,
+        event.amountCents,
+        event.kind,
+        event.provenance,
+        event.sourceId,
+      );
     }
   }
-  for (const b of bills.bills || []) if (!b.paid) pushEvent(b.dueDate, b.payee || 'Bill', -Math.abs(b.amount), 'bill');
 
+  const billCategoryIds = new Set(collectBillCategoryIds(recurring, budgets));
   const genericCategories = (budgets.groups || []).flatMap((group) =>
     (group.categories || [])
-      .filter((category) => !BILL_CAT.test(`${group.name || ''} ${category.name || ''}`))
+      .filter((category) => !billCategoryIds.has(category.id))
       .map((category) => category)
   );
-  const genericTarget = round2(genericCategories.reduce((sum, category) => sum + (category.target || 0), 0));
-  const currentGenericRemaining = round2(genericCategories.reduce((sum, category) => sum + (category.remaining || 0), 0));
-  const currentMonth = today.slice(0, 7);
-  const currentDaysRemaining = Math.max(1, daysInMonth(currentMonth) - Number(today.slice(8, 10)) + 1);
-  for (let i = 0; i <= horizonDays; i++) {
-    const date = addDays(today, i);
-    const month = date.slice(0, 7);
-    const dailyBudget = month === currentMonth
-      ? currentGenericRemaining / currentDaysRemaining
-      : genericTarget / Math.max(1, daysInMonth(month));
-    if (dailyBudget > 0.005) pushEvent(date, 'Planned non-bill spending', -dailyBudget, 'budget');
+  const genericBudget = buildForecastGenericBudgetContext(genericCategories);
+  const visibleAccounts = accounts.filter((account) => !account.hidden);
+  const operatingAccounts = accounts.filter((account) => account.inclusion?.operatingCash);
+  let stsIncompleteReasons = safeToSpendIncompleteReasons({
+    accounts,
+    visibleAccounts,
+    operatingAccounts,
+    budgets,
+    recurring,
+    spendingCompleteness: currentMonthSpendingCompleteness,
+    obligationGraph: graph,
+    liabilityPolicies,
+  });
+  if (!operatingProjectionComplete) {
+    for (const reason of forecastProjection.incompleteReasons) {
+      if (!stsIncompleteReasons.includes(reason)) stsIncompleteReasons.push(reason);
+    }
   }
-  const possibleReimbursement = reimb.totalOwed > 0.5
-    ? { date: addDays(today, 14), amount: round2(reimb.totalOwed), includedInBalance: false }
+  const stsContainment = buildForecastStsContainment({
+    incompleteReasons: stsIncompleteReasons,
+    complete: stsIncompleteReasons.length === 0 && operatingProjectionComplete,
+  });
+  const withholdGraphEvents = !graphCompleteness.complete;
+  const knownGraphEventCount = withholdGraphEvents
+    ? 0
+    : forecastCashEventsFromGraph(graph, { windowStart: today, windowEnd: horizon }).length;
+  const projectionContainment = buildForecastProjectionContainment({
+    stsContainment,
+    withholdGraphEvents,
+    knownEventCount: knownGraphEventCount,
+  });
+  const forecastWarnings = [
+    ...genericBudget.warnings,
+    ...forecastContainmentWarnings({
+      stsContainment,
+      projectionContainment,
+      obligationGraphIncompleteReasons: graphCompleteness.incompleteReasons || [],
+    }),
+  ];
+  if (!operatingProjectionComplete) {
+    forecastWarnings.push('Operating cash projection incomplete; forecast start balance withheld.');
+  }
+  if (genericBudget.complete) {
+    const budgetEntries = buildForecastBudgetDailyCents({
+      today,
+      horizonDays,
+      currentMonthRemainingCents: genericBudget.reserveSum.cents,
+      fullMonthTargetCents: genericBudget.targetSum.cents,
+      addDays,
+      daysInMonth,
+    });
+    for (const entry of budgetEntries) {
+      pushEventCents(entry.date, 'Planned non-bill spending', -entry.centsCents, 'budget', 'planned');
+    }
+  }
+  const possibleReimbursement = reimb.totalOwed?.complete && reimb.totalOwed.value != null && reimb.totalOwed.value > 0.5
+    ? { date: addDays(today, 14), amount: round2(reimb.totalOwed.value), includedInBalance: false }
     : null;
 
-  events.sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
+  const events = eventRows
+    .map((row) => ({ ...row, amount: fromCents(row.amountCents) }))
+    .sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
   const byDate = new Map();
-  for (const e of events) {
-    const cur = byDate.get(e.date) || { date: e.date, inflow: 0, outflow: 0, events: [] };
-    if (e.amount >= 0) cur.inflow = round2(cur.inflow + e.amount);
-    else cur.outflow = round2(cur.outflow + Math.abs(e.amount));
+  for (const e of eventRows) {
+    const cur = byDate.get(e.date) || { date: e.date, inflowCents: 0, outflowCents: 0, events: [] };
+    if (e.amountCents >= 0) cur.inflowCents = sumCents([cur.inflowCents, e.amountCents]);
+    else cur.outflowCents = sumCents([cur.outflowCents, -e.amountCents]);
     cur.events.push(e);
     byDate.set(e.date, cur);
   }
   const points = [];
-  let balance = startBalance;
-  let lowest = { date: today, balance };
+  let balanceCents = startBalanceCents;
+  let lowest = startBalanceCents == null
+    ? { date: today, balance: null }
+    : { date: today, balance: fromCents(startBalanceCents) };
   for (let i = 0; i <= horizonDays; i++) {
     const date = addDays(today, i);
     const day = byDate.get(date);
-    if (day) balance = round2(balance + day.inflow - day.outflow);
-    const p = { date, balance, inflow: day ? day.inflow : 0, outflow: day ? day.outflow : 0 };
+    if (day && balanceCents != null) balanceCents = sumCents([balanceCents, day.inflowCents, -day.outflowCents]);
+    const balance = balanceCents == null ? null : fromCents(balanceCents);
+    const p = {
+      date,
+      balance,
+      inflow: day ? fromCents(day.inflowCents) : 0,
+      outflow: day ? fromCents(day.outflowCents) : 0,
+    };
     points.push(p);
-    if (p.balance < lowest.balance) lowest = { date, balance: p.balance };
+    if (balance != null && (lowest.balance == null || p.balance < lowest.balance)) lowest = { date, balance };
   }
+  const totalInflowCents = sumCents(eventRows.filter((e) => e.amountCents > 0).map((e) => e.amountCents));
+  const totalOutflowCents = sumCents(eventRows.filter((e) => e.amountCents < 0).map((e) => -e.amountCents));
   return {
     generatedAt: new Date().toISOString(),
     range: { start: today, end: horizon, days: horizonDays },
-    startBalance,
+    startBalance: startBalanceCents == null ? null : fromCents(startBalanceCents),
     endingBalance: points[points.length - 1].balance,
     lowest,
     totals: {
-      inflow: round2(events.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)),
-      outflow: round2(events.filter((e) => e.amount < 0).reduce((s, e) => s + Math.abs(e.amount), 0)),
+      inflow: fromCents(totalInflowCents),
+      outflow: fromCents(totalOutflowCents),
     },
     points,
     events: events.slice(0, 200),
     assumptions: {
       liquidAccounts: liquidAccounts.map((account) => ({ id: account.id, name: account.name })),
-      genericBudgetTarget: genericTarget,
+      accountProjectionRevision: forecastProjection.revision,
+      operatingCashComplete: forecastProjection.incompleteReasons.length === 0,
+      operatingCashIncompleteReasons: forecastProjection.incompleteReasons,
+      genericBudgetTarget: genericBudget.assumptions.genericBudgetTarget,
+      genericBudget: {
+        target: genericBudget.assumptions.target,
+        remaining: genericBudget.assumptions.remaining,
+        complete: genericBudget.assumptions.complete,
+        incompleteReasons: genericBudget.assumptions.incompleteReasons,
+      },
       billsExcludedFromGenericBudget: true,
       reimbursementsIncluded: false,
+      obligationGraph: {
+        version: graph.version,
+        complete: graphCompleteness.complete,
+        incompleteReasons: graphCompleteness.incompleteReasons,
+      },
+      stsContainment,
+      projectionContainment,
     },
     possibleReimbursement,
     warnings: [
-      ...(lowest.balance < 0 ? [`Projected cash drops below $0 on ${lowest.date}`] : []),
+      ...(startBalanceCents == null ? ['Operating cash start balance unavailable; forecast curve withheld.'] : []),
+      ...(lowest.balance != null && lowest.balance < 0 ? [`Projected cash drops below $0 on ${lowest.date}`] : []),
       ...(possibleReimbursement ? ['Possible reimbursements are shown separately and are not counted as guaranteed cash.'] : []),
+      ...forecastWarnings,
     ],
+  };
+}
+
+async function getToday() {
+  const financeDate = todayYMD();
+  const month = financeDate.slice(0, 7);
+  const monthEndDate = monthRange(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1).end;
+  const asOf = new Date().toISOString();
+  const spendingBundle = await withApi(async (api) => {
+    const financeToday = todayYMD();
+    const [financeYear, financeMonth] = financeToday.slice(0, 7).split('-').map(Number);
+    const cur = monthRange(financeYear, financeMonth - 1);
+    const prev = monthRange(financeYear, financeMonth - 2);
+    const curEnd = financeToday;
+    const monthEndDate = monthRange(financeYear, financeMonth - 1).end;
+    const groups = await api.getCategoryGroups();
+    const catInfo = buildCatInfo(groups);
+    const projectionInputs = await loadAccountProjectionInputs(api);
+    const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution, { inputs: projectionInputs });
+    const nwProjection = await buildAccountProjection(api, ACCOUNT_METRIC.netWorthLive, { inputs: projectionInputs });
+    const operatingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.operatingCash, { inputs: projectionInputs });
+    const liquidProjection = await buildAccountProjection(api, ACCOUNT_METRIC.liquidCash, { inputs: projectionInputs });
+    const goalsBundle = await materializeGoals(api, { projectionInputs });
+    const rows = await fetchOnBudgetRows(api, prev.start, monthEndDate, {
+      accountFilter: spendingProjection.accountFilter,
+    });
+    const transferIndex = buildTransferIndex(rows);
+    const classifyWindow = (start, end) => classifyLeavesInDateRange(rows, catInfo, start, end, transferIndex);
+    const currentLeaves = classifyWindow(cur.start, curEnd);
+    const previousLeaves = classifyWindow(prev.start, prev.end);
+    const current = summarize(currentLeaves);
+    const previous = summarize(previousLeaves);
+    let spendingCompleteness = mergeProjectionCompleteness([current.completeness, previous.completeness]);
+    if (spendingProjection.incompleteReasons.length) {
+      spendingCompleteness = {
+        ...spendingCompleteness,
+        complete: false,
+        incompleteReasons: [
+          ...new Set([...(spendingCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+        ],
+      };
+    }
+    return {
+      spending: {
+        current,
+        prev: previous,
+        month,
+        completeness: spendingCompleteness,
+      },
+      classifiedLeaves: currentLeaves,
+      txnContext: { rows, catInfo },
+      projections: {
+        spending: spendingProjection,
+        netWorth: nwProjection,
+        operating: operatingProjection,
+        liquid: liquidProjection,
+      },
+      goalsBundle,
+      projectionInputs,
+    };
+  });
+  const spending = spendingBundle.spending;
+  const [accounts, budgets, recurring, income, review, recent, reimb] = await Promise.all([
+    getAccounts({ projectionInputs: spendingBundle.projectionInputs }),
+    getBudgets({ month }),
+    getRecurring({}),
+    getIncome({}),
+    getReview({ month, classifiedLeaves: spendingBundle.classifiedLeaves }),
+    getTransactions({ start: addDays(financeDate, -14), end: financeDate, collapse: true }),
+    getReimbursement({}),
+  ]);
+  const goals = spendingBundle.goalsBundle.goals;
+  const goalAdvisory = spendingBundle.goalsBundle.goalAdvisory;
+  const bills = await getBills({ days: 45, recurring });
+  const manualAssets = getManualAssets();
+  const { projections } = spendingBundle;
+
+  const operatingAccounts = accounts.filter((account) => account.inclusion?.operatingCash);
+  const visibleAccounts = accounts.filter((account) => !account.hidden);
+  const obligationAccounts = accounts.filter((account) => account.inclusion?.obligations);
+  const operatingProjectionComplete = projections.operating.incompleteReasons.length === 0;
+  let cashCents = null;
+  if (operatingProjectionComplete) {
+    cashCents = sumIncludedBalanceCents(projections.operating);
+  }
+  const { graph, summary: obligationSummary, liabilityPolicies } = await buildObligationGraphBundle({
+    financeDate,
+    windowStart: financeDate,
+    windowEnd: monthEndDate,
+    accounts: obligationAccounts,
+    recurring,
+    income,
+    bills,
+    budgets,
+    reimb,
+    reimbLinks: enrichReimbLinksForGraph(readReimbLinks().links),
+    operatingAccounts,
+    txnContext: spendingBundle.txnContext,
+  });
+  const stfFromGraph = Number.isSafeInteger(cashCents)
+    ? safeToSpendFromGraph(graph, {
+      operatingCashCents: cashCents,
+      monthStart: financeDate,
+      monthEnd: monthEndDate,
+    })
+    : { valueCents: null, method: 'obligation-graph', reservations: [] };
+  const incompleteReasons = safeToSpendIncompleteReasons({
+    accounts,
+    visibleAccounts,
+    operatingAccounts,
+    budgets,
+    recurring,
+    spendingCompleteness: spending.current?.completeness,
+    obligationGraph: graph,
+    liabilityPolicies,
+  });
+  if (!operatingProjectionComplete) {
+    for (const reason of projections.operating.incompleteReasons) {
+      if (!incompleteReasons.includes(reason)) incompleteReasons.push(reason);
+    }
+  }
+  const safeToSpendComplete = incompleteReasons.length === 0 && operatingProjectionComplete;
+  const safeToSpend = metricValue({
+    metric: 'safe_to_spend',
+    value: safeToSpendComplete && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? fromCents(stfFromGraph.valueCents)
+      : null,
+    valueCents: safeToSpendComplete && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? stfFromGraph.valueCents
+      : null,
+    complete: safeToSpendComplete,
+    asOf,
+    financeDate,
+    sources: safeToSpendComplete
+      ? operatingAccounts.map((account) => ({ type: 'actual-account', id: account.id, role: account.role }))
+      : [],
+    method: stfFromGraph.method,
+    excludes: ['protected savings', 'investments', 'credit availability', 'possible reimbursements', 'unfunded goals'],
+    incompleteReasons,
+  });
+  const operatingCash = buildBalanceMetric({
+    projection: projections.operating,
+    metric: 'operating_cash',
+    asOf,
+    financeDate,
+  });
+  const liquidCash = buildBalanceMetric({
+    projection: projections.liquid,
+    metric: 'liquid_cash',
+    asOf,
+    financeDate,
+  });
+  const netWorth = buildNetWorthMetric({
+    projection: projections.netWorth,
+    manualAssets,
+    asOf,
+    financeDate,
+    metric: 'net_worth',
+  });
+  const revision = crypto.createHash('sha256')
+    .update(`${apiHealth.lastSyncAt || apiHealth.initializedAt || ''}\0${financeDate}\0${projections.netWorth.revision}`)
+    .digest('hex')
+    .slice(0, 16);
+
+  return {
+    asOf,
+    financeDate,
+    revision,
+    complete: safeToSpend.complete && spending.current?.completeness?.complete !== false,
+    incompleteReasons: [...new Set([...safeToSpend.incompleteReasons, ...(spending.current?.completeness?.complete === false ? spending.current.completeness.incompleteReasons : [])])],
+    health: getHealth(),
+    accounts,
+    metrics: {
+      netWorth,
+      liquidCash,
+      operatingCash,
+    },
+    scope: {
+      accountProjectionRevision: projections.netWorth.revision,
+      netWorthIncludedAccountIds: [...projections.netWorth.includedIds],
+      splitwiseMirrorAccountId: projections.netWorth.splitwiseMirrorAccountId,
+      splitwiseMirrorIdentity: projections.netWorth.scope?.splitwiseMirrorIdentity || null,
+      netWorthIncludesManualAssets: true,
+      netWorthHistoryScope: 'live_balances',
+    },
+    spending,
+    liquidity: { safeToSpend, goalAdvisory },
+    obligationGraph: {
+      version: graph.version,
+      summary: obligationSummary,
+      completeness: graph.completeness,
+      reservations: (stfFromGraph.reservations || []).slice(0, 12),
+    },
+    obligations: {
+      bills: (bills.bills || []).filter((bill) => !bill.paid).slice(0, 5),
+      nextIncome: (income.streams || []).filter((stream) => stream.active).sort((a, b) => String(a.nextPay).localeCompare(String(b.nextPay)))[0] || null,
+      source: graph.completeness.complete ? 'obligation-graph' : 'inferred',
+      reserved: (stfFromGraph.reservations || []).slice(0, 8),
+    },
+    review,
+    activity: { recent: recent.slice(0, 8) },
   };
 }
 
@@ -2940,94 +4820,326 @@ async function resolvePayeeId(api, name) {
   return found ? found.id : await api.createPayee({ name: n });
 }
 
-function addableSubtransaction(transaction) {
-  return {
-    amount: transaction.amount,
-    category: transaction.category || null,
-    notes: transaction.notes || undefined,
-    payee: transaction.payee || undefined,
-  };
+let transactionSagaManager = null;
+let transactionDeletionSagaManager = null;
+let repaymentConfirmationSagaManager = null;
+let reimbursementLinkSagaManager = null;
+let bulkOperationSagaManager = null;
+const replacementSagaResults = new WeakMap();
+
+function reimbLinkBlocksTransactionRecovery(saga) {
+  const blocked = getReimbursementLinkSagaManager().activeOwnedIds();
+  if (!blocked.size) return false;
+  const owned = new Set([
+    saga.original?.id,
+    saga.replacementId,
+    saga.replacementIds?.parentId,
+    saga.restoredIds?.parentId,
+    ...(saga.original?.subtransactions || []).map((leg) => leg.id),
+    ...(saga.replacementIds?.legIds || []),
+    ...(saga.restoredIds?.legIds || []),
+  ].filter(Boolean).map(String));
+  return [...owned].some((id) => blocked.has(id));
 }
 
-function addableTransaction(transaction, overrides = {}) {
-  const value = {
-    date: transaction.date,
-    amount: transaction.amount,
-    payee: transaction.payee || undefined,
-    notes: transaction.notes || undefined,
-    cleared: transaction.cleared,
-    imported_id: transaction.imported_id || undefined,
-    imported_payee: transaction.imported_payee || undefined,
-    category: transaction.category || undefined,
-  };
-  const sourceSubs = overrides.subtransactions !== undefined
-    ? overrides.subtransactions
-    : transaction.subtransactions;
-  if (Array.isArray(sourceSubs) && sourceSubs.length) {
-    delete value.category;
-    value.subtransactions = sourceSubs.map(addableSubtransaction);
-  }
-  return { ...value, ...overrides, subtransactions: value.subtransactions };
-}
-
-function transactionReplacementMap(original, replacement, requestedLegs) {
-  const idMap = { [String(original.id)]: String(replacement.id) };
-  const oldSubs = Array.isArray(original.subtransactions) ? original.subtransactions : [];
-  const newSubs = Array.isArray(replacement.subtransactions) ? replacement.subtransactions : [];
-  if (requestedLegs) {
-    const retained = new Set();
-    requestedLegs.forEach((leg, index) => {
-      if (!leg.id) return;
-      retained.add(String(leg.id));
-      idMap[String(leg.id)] = newSubs[index]?.id ? String(newSubs[index].id) : null;
+function getTransactionSagaManager() {
+  if (!transactionSagaManager) {
+    transactionSagaManager = createTransactionReplacementSaga({
+      sagaPath: TRANSACTION_SAGAS_PATH,
+      preflightReferences: readTransactionReferenceStores,
+      planReferences: planTransactionReferenceMigration,
+      applyReferenceStep: applyTransactionReferenceStep,
+      referencesConverged: transactionReferencesConverged,
+      referenceSteps: TRANSACTION_REFERENCE_STEPS,
+      recoveryOwnershipGuard: reimbLinkBlocksTransactionRecovery,
+      assertExternalAvailable: ({ accountId, original }) => {
+        getTransactionDeletionSagaManager().assertAvailable({ accountId, transaction: original });
+        getRepaymentConfirmationSagaManager().assertAvailable({
+          accountId,
+          ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
+        });
+        getBulkOperationSagaManager().assertAvailable({
+          accountId,
+          ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
+        });
+        getReimbursementLinkSagaManager().assertAvailable({
+          accountId,
+          ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
+        });
+      },
     });
-    for (const old of oldSubs) if (!retained.has(String(old.id))) idMap[String(old.id)] = null;
-  } else if (newSubs.length) {
-    oldSubs.forEach((old, index) => {
-      idMap[String(old.id)] = newSubs[index]?.id ? String(newSubs[index].id) : null;
-    });
-  } else {
-    for (const old of oldSubs) idMap[String(old.id)] = String(replacement.id);
   }
-  return idMap;
+  return transactionSagaManager;
 }
 
-async function locateReplacement(api, accountId, date, beforeIds, expected) {
-  const after = await api.getTransactions(accountId, date, date);
-  const candidates = after.filter((transaction) => !beforeIds.has(String(transaction.id)));
-  return candidates.find((transaction) =>
-    transaction.date === expected.date &&
-    transaction.amount === expected.amount &&
-    Boolean(transaction.is_parent) === Boolean(expected.subtransactions?.length) &&
-    (!expected.imported_id || transaction.imported_id === expected.imported_id) &&
-    (!expected.subtransactions || (transaction.subtransactions || []).length === expected.subtransactions.length)
-  ) || null;
+function getTransactionDeletionSagaManager() {
+  if (!transactionDeletionSagaManager) {
+    transactionDeletionSagaManager = createTransactionDeletionSaga({
+      sagaPath: TRANSACTION_DELETION_SAGAS_PATH,
+      planReferences: planTransactionReferenceDeletion,
+      applyReferenceStep: applyTransactionDeletionReferenceStep,
+      referencesConverged: transactionDeletionReferencesConverged,
+      referenceSteps: TRANSACTION_DELETION_REFERENCE_STEPS,
+      receiptFileState: transactionDeletionReceiptFileState,
+      unlinkReceiptFile: unlinkTransactionDeletionReceiptFile,
+      assertExternalAvailable: ({ accountId, original, bulkDelegation }) => {
+        getTransactionSagaManager().assertAvailable({ accountId, original });
+        getRepaymentConfirmationSagaManager().assertAvailable({
+          accountId,
+          ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
+        });
+        getBulkOperationSagaManager().assertAvailable({
+          accountId,
+          ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
+          allowDeletionDelegation: bulkDelegation,
+        });
+        getReimbursementLinkSagaManager().assertAvailable({
+          accountId,
+          ids: original ? [original.id, ...(original.subtransactions || []).map((leg) => leg.id)] : [],
+        });
+      },
+    });
+  }
+  return transactionDeletionSagaManager;
 }
 
-async function replaceActualTransaction(api, { accountId, original, replacement }) {
-  if (original.transfer_id) throw new Error('transfer transactions cannot be rebuilt as splits');
-  readTransactionReferenceStores(); // fail before deleting if any sidecar is unreadable
-  const dayTransactions = await api.getTransactions(accountId, original.date, original.date);
-  const beforeIds = new Set(dayTransactions.map((transaction) => String(transaction.id)));
-  await api.deleteTransaction(original.id);
-  let added = null;
-  try {
-    await api.addTransactions(accountId, [replacement], { learnCategories: false, runTransfers: false });
-    added = await locateReplacement(api, accountId, original.date, beforeIds, replacement);
-    if (!added) throw new Error('replacement transaction could not be identified');
-    return added;
-  } catch (error) {
+function getRepaymentConfirmationSagaManager() {
+  if (!repaymentConfirmationSagaManager) {
+    repaymentConfirmationSagaManager = createRepaymentConfirmationSaga({
+      sagaPath: REPAYMENT_CONFIRMATION_SAGAS_PATH,
+      readLinks: readReimbLinks,
+      writeLinks: writeReimbLinks,
+      readSuggestions: readReimbSuggest,
+      writeSuggestions: writeReimbSuggest,
+      assertExternalAvailable: ({ accountId, ids }) => {
+        getTransactionSagaManager().assertAvailable({ accountId, ids });
+        getTransactionDeletionSagaManager().assertAvailable({ accountId, ids });
+        getBulkOperationSagaManager().assertAvailable({ accountId, ids });
+        getReimbursementLinkSagaManager().assertAvailable({ accountId, ids });
+      },
+    });
+  }
+  return repaymentConfirmationSagaManager;
+}
+
+function getReimbursementLinkSagaManager() {
+  if (!reimbursementLinkSagaManager) {
+    reimbursementLinkSagaManager = createReimbursementLinkSaga({
+      sagaPath: REIMBURSEMENT_LINK_SAGAS_PATH,
+      readLinks: readReimbLinks,
+      writeLinks: writeReimbLinks,
+      revalidateLinkApply,
+      revalidateUnlinkApply,
+      resolveReimbCategoryId: async (actualApi) => {
+        const groups = await actualApi.getCategoryGroups();
+        return reimbCategoryId(groups);
+      },
+      resolvePayeeNames: async (actualApi) => {
+        const payees = await actualApi.getPayees();
+        return Object.fromEntries(payees.map((p) => [p.id, p.name || '']));
+      },
+      assertExternalAvailable: ({ accountId, ids }) => {
+        getTransactionSagaManager().assertAvailable({ accountId, ids });
+        getTransactionDeletionSagaManager().assertAvailable({ accountId, ids });
+        getRepaymentConfirmationSagaManager().assertAvailable({ accountId, ids });
+        getBulkOperationSagaManager().assertAvailable({ accountId, ids });
+      },
+    });
+  }
+  return reimbursementLinkSagaManager;
+}
+
+function readSplitwiseMirrorResolutions() {
+  const raw = readJsonSafe(SPLITWISE_MIRROR_RESOLUTIONS_PATH, null);
+  return loadSplitwiseMirrorResolutions(raw);
+}
+
+function getBulkOperationSagaManager() {
+  if (!bulkOperationSagaManager) {
+    bulkOperationSagaManager = createBulkOperationSaga({
+      sagaPath: BULK_OPERATION_SAGAS_PATH,
+      readRules: () => {
+        const store = readJsonSafe(RULES_PATH, { rules: [] });
+        return { ...store, rules: Array.isArray(store.rules) ? store.rules : [] };
+      },
+      writeRules: (patch) => {
+        const current = readJsonSafe(RULES_PATH, { rules: [] });
+        writeJsonSafe(RULES_PATH, { ...current, ...patch });
+      },
+      readPhantomSeen,
+      writePhantomSeen: (store) => writeJsonSafe(PHANTOM_SEEN_PATH, store),
+      readPhantomLog,
+      writePhantomLog: (store) => writeJsonSafe(PHANTOM_LOG_PATH, store),
+      readSplitwiseMirrorResolutions,
+      readSplitwiseTruth: () => readJsonSafe(OWES_TRUTH_PATH, null),
+      validateSplitwiseMirrorSnapshot,
+      ensureSplitwiseAccount,
+      ensureSplitwiseCategory,
+      pickSplitwiseCategory,
+      swAccountName: SW_ACCOUNT_NAME,
+      swCategoryName: SW_CATEGORY_NAME,
+      deleteTransaction,
+      inspectDeletionState: () => getTransactionDeletionSagaManager().inspectState(),
+      recoverDeletionSagas: recoverTransactionDeletionSagas,
+      merchantCatalog: MERCHANT_CATALOG,
+      catalogTypeMatch: CATALOG_TYPE_MATCH,
+      resolveCatalogCategory,
+      buildCatInfo,
+      settleUpPayee: SETTLE_UP_PAYEE,
+      reimbCat: REIMB_CAT,
+      incomeGroup: INCOME_GROUP,
+      moneyMovementGroup: MONEY_MOVEMENT_GROUP,
+      todayYMD,
+      addDays,
+      assertExternalAvailable: ({ accountId, ids, bulkDelegation }) => {
+        getTransactionSagaManager().assertAvailable({ accountId, ids });
+        if (!bulkDelegation) {
+          getTransactionDeletionSagaManager().assertAvailable({ accountId, ids });
+        }
+        getRepaymentConfirmationSagaManager().assertAvailable({ accountId, ids });
+        getReimbursementLinkSagaManager().assertAvailable({ accountId, ids });
+      },
+    });
+  }
+  return bulkOperationSagaManager;
+}
+
+async function recoverBulkOperationSagas(actualApi, options) {
+  return getBulkOperationSagaManager().recover(actualApi, options);
+}
+
+function getBulkOperationResult(operationKey) {
+  if (!operationKey) return null;
+  return getBulkOperationSagaManager().resultForOperationKey(operationKey);
+}
+
+function proveBulkOperationJournalCompletion(operationKey, journalOperation) {
+  if (!operationKey || !journalOperation) return null;
+  return getBulkOperationSagaManager().proveTerminalJournalCompletion(operationKey, journalOperation);
+}
+
+function proveReimbursementLinkJournalCompletion(operationKey, journalOperation) {
+  if (!operationKey || !journalOperation) return null;
+  return getReimbursementLinkSagaManager().proveTerminalJournalCompletion(operationKey, journalOperation);
+}
+
+function proveRepaymentConfirmationJournalCompletion(operationKey, journalOperation) {
+  if (!operationKey || !journalOperation) return null;
+  return getRepaymentConfirmationSagaManager().proveTerminalJournalCompletion(operationKey, journalOperation);
+}
+
+function assertBulkOperationJournalAdmission({ operationKey, journalBinding, kind }) {
+  if (!operationKey || !journalBinding?.fingerprint) return;
+  getBulkOperationSagaManager().assertJournalAdmission({ operationKey, journalBinding, kind });
+}
+
+function assertReimbursementLinkJournalAdmission({ operationKey, journalBinding, action }) {
+  if (!operationKey || !journalBinding?.fingerprint) return;
+  getReimbursementLinkSagaManager().assertJournalAdmission({ operationKey, journalBinding, action });
+}
+
+function assertRepaymentConfirmationJournalAdmission({ operationKey, journalBinding }) {
+  if (!operationKey || !journalBinding?.fingerprint) return;
+  getRepaymentConfirmationSagaManager().assertJournalAdmission({ operationKey, journalBinding });
+}
+
+async function recoverTransactionSagas(actualApi, options) {
+  return getTransactionSagaManager().recover(actualApi, options);
+}
+
+async function recoverTransactionDeletionSagas(actualApi, options) {
+  return getTransactionDeletionSagaManager().recover(actualApi, options);
+}
+
+async function recoverRepaymentConfirmationSagas(actualApi, options) {
+  return getRepaymentConfirmationSagaManager().recover(actualApi, options);
+}
+
+async function recoverReimbursementLinkSagas(actualApi, options) {
+  return getReimbursementLinkSagaManager().recover(actualApi, options);
+}
+
+async function markTransactionSagasSynced(actualApi) {
+  let firstError = null;
+  for (const manager of [
+    getTransactionSagaManager(),
+    getTransactionDeletionSagaManager(),
+    getRepaymentConfirmationSagaManager(),
+    getReimbursementLinkSagaManager(),
+    getBulkOperationSagaManager(),
+  ]) {
     try {
-      if (added) await api.deleteTransaction(added.id);
-      await api.addTransactions(accountId, [addableTransaction(original)], { learnCategories: false, runTransfers: false });
-      const restored = await locateReplacement(api, accountId, original.date, beforeIds, addableTransaction(original));
-      if (restored) updateTransactionReferences(transactionReplacementMap(original, restored));
-      error.recoveryTransactionId = restored?.id || null;
-    } catch (recoveryError) {
-      error.recoveryError = recoveryError;
+      await manager.markSynced(actualApi);
+    } catch (error) {
+      firstError ||= error;
     }
-    throw error;
   }
+  if (firstError) throw firstError;
+}
+
+async function driveTransactionSagasForSync(actualApi) {
+  const recovery = await driveOperationalSagaRecovery(actualApi, { deferSync: true });
+  return {
+    needsSync: recovery.needsSync,
+    errors: recovery.errors.map((entry) => ({ sagaId: entry.sagaId, error: new Error(entry.message), store: entry.store })),
+  };
+}
+
+async function syncTransactionSagas(actualApi) {
+  const recovery = await driveTransactionSagasForSync(actualApi);
+  await actualApi.sync();
+
+  let terminalError = null;
+  try {
+    await markTransactionSagasSynced(actualApi);
+  } catch (error) {
+    terminalError = error;
+  }
+  if (terminalError) throw terminalError;
+  if (recovery.errors.length) throw recovery.errors[0].error;
+  return recovery;
+}
+
+function assertTransactionMutationAvailable({ accountId, ids, transaction, bulkDelegation } = {}) {
+  getTransactionSagaManager().assertAvailable({ accountId, ids, original: transaction });
+  getTransactionDeletionSagaManager().assertAvailable({ accountId, ids, transaction });
+  getRepaymentConfirmationSagaManager().assertAvailable({ accountId, ids });
+  getReimbursementLinkSagaManager().assertAvailable({ accountId, ids });
+  getBulkOperationSagaManager().assertAvailable({
+    accountId,
+    ids,
+    allowDeletionDelegation: bulkDelegation,
+  });
+}
+
+function assertTransactionReplacementAvailable(options) {
+  assertTransactionMutationAvailable(options);
+}
+
+function assertTransactionDeletionAvailable(options) {
+  assertTransactionMutationAvailable(options);
+}
+
+async function assertTransactionImportedIdentityAvailable(api, { accountId, original }) {
+  await getTransactionSagaManager().assertImportedIdentityAvailable(api, { accountId, original });
+}
+
+function retainedReplacementLegs(transaction) {
+  return (transaction?.subtransactions || []).map((leg) => ({ id: String(leg.id) }));
+}
+
+async function replaceActualTransaction(api, args) {
+  const result = await getTransactionSagaManager().replace(api, args);
+  if (result.transaction && typeof result.transaction === 'object') {
+    replacementSagaResults.set(result.transaction, result);
+  }
+  return result.transaction;
+}
+
+function replacementSagaResult(transaction) {
+  const result = replacementSagaResults.get(transaction);
+  if (!result) throw new Error('replacement saga result is unavailable');
+  return result;
 }
 
 // Fetch one transaction (parent or simple) with its legs. Account id is preferred,
@@ -3044,7 +5156,10 @@ async function getTransactionById({ id, accountId, date } = {}) {
     const candidates = accountId
       ? accts.filter((account) => account.id === accountId)
       : accts.filter((account) => !account.closed);
-    if (!candidates.length) throw new Error('account not found');
+    if (!candidates.length) {
+      if (accountId) throw new AccountNotFoundError();
+      throw new Error('account not found');
+    }
     const transactionSets = await Promise.all(candidates.map(async (account) => ({
       account,
       transactions: await api.getTransactions(account.id, date, date),
@@ -3062,7 +5177,7 @@ async function getTransactionById({ id, accountId, date } = {}) {
         break;
       }
     }
-    if (!account) throw new Error('transaction not found');
+    if (!account) throw new TransactionNotFoundError();
     const catMap = Object.fromEntries(cats.map((c) => [c.id, c.name]));
     const pn = Object.fromEntries(payees.map((p) => [p.id, p.name]));
     const acctName = account.name || account.id;
@@ -3078,7 +5193,7 @@ async function getTransactionById({ id, accountId, date } = {}) {
       parent = txns.find((transaction) => transaction.id === requested.parent_id) || requested;
       requestedLeg = requested;
     }
-    if (!parent) throw new Error('transaction not found');
+    if (!parent) throw new TransactionNotFoundError();
     const subs = Array.isArray(parent.subtransactions) ? parent.subtransactions : [];
     const display = requestedLeg || parent;
     return {
@@ -3113,20 +5228,23 @@ async function getTransactionById({ id, accountId, date } = {}) {
 // and every parent/leg field. The replacement receives new IDs, so all sidecar
 // references are migrated before the operation reports success.
 async function splitTransaction({ id, accountId, date, legs } = {}) {
+  if (!accountId || !date) throw new Error('accountId and date required');
+  if (!Array.isArray(legs) || legs.length < 2) throw new Error('at least 2 legs required');
+  const norm = legs.map((l) => {
+    const cents = toCents(l.amount);
+    if (cents === 0) throw new Error('each leg needs a non-zero amount');
+    return { id: l.id || null, cents, categoryId: l.categoryId || null, name: (l.name || '').trim(), notes: (l.notes || '').trim() };
+  });
+  assertTransactionMutationAvailable({ ids: [id, ...norm.map((leg) => leg.id)] });
   return withApi(async (api) => {
-    if (!accountId || !date) throw new Error('accountId and date required');
-    if (!Array.isArray(legs) || legs.length < 2) throw new Error('at least 2 legs required');
     const txns = await api.getTransactions(accountId, date, date);
     const target = txns.find((t) => t.id === id);
     if (!target) throw new Error('transaction not found');
     if (target.parent_id) throw new Error('edit the whole split, not a single leg');
+    assertReconstructableTransaction(target);
+    await assertTransactionImportedIdentityAvailable(api, { accountId, original: target });
     const total = target.amount; // integer cents (sign preserved)
 
-    const norm = legs.map((l) => {
-      const cents = Math.round(Number(l.amount) * 100);
-      if (!Number.isFinite(cents) || cents === 0) throw new Error('each leg needs a non-zero amount');
-      return { id: l.id || null, cents, categoryId: l.categoryId || null, name: (l.name || '').trim(), notes: (l.notes || '').trim() };
-    });
     const sum = norm.reduce((s, x) => s + x.cents, 0);
     if (sum !== total) throw new Error(`legs must sum to ${(total / 100).toFixed(2)} (got ${(sum / 100).toFixed(2)})`);
     for (const l of norm) l.payeeId = l.name ? await resolvePayeeId(api, l.name) : null;
@@ -3139,9 +5257,8 @@ async function splitTransaction({ id, accountId, date, legs } = {}) {
         payee: leg.payeeId || undefined,
       })),
     });
-    const added = await replaceActualTransaction(api, { accountId, original: target, replacement });
-    const idMap = transactionReplacementMap(target, added, target.is_parent ? norm : undefined);
-    const references = updateTransactionReferences(idMap);
+    const added = await replaceActualTransaction(api, { accountId, original: target, replacement, requestedLegs: target.is_parent ? norm : undefined });
+    const { references } = replacementSagaResult(added);
     return {
       ok: true,
       mode: target.is_parent ? 'edit' : 'create',
@@ -3151,19 +5268,18 @@ async function splitTransaction({ id, accountId, date, legs } = {}) {
       legIds: (added.subtransactions || []).map((leg) => String(leg.id)),
       references,
     };
-  });
+  }, { mode: 'write' });
 }
 
-// When a pending charge you'd already split later POSTS at a different amount, the
-// bank updates the parent total but the legs still sum to the old total. Rather than
-// force you to re-split, absorb the difference into the master (first/remainder) leg
-// so the split stays valid — exactly what you asked for. Idempotent; runs on refresh.
-async function reconcileSplitDeltas(api, { months = 3 } = {}) {
+// A pending split can post at a different amount. Discovery is read-only by
+// default: silently absorbing the delta into one leg destroys allocation intent.
+async function reconcileSplitDeltas(api, { months = 3, apply = false } = {}) {
   const today = todayYMD();
   const start = addDays(today, -Math.round(30.44 * months));
   const accounts = (await api.getAccounts()).filter((a) => !a.closed);
   let fixed = 0;
   const failures = [];
+  const pending = [];
   for (const a of accounts) {
     const txns = await api.getTransactions(a.id, start, today);
     for (const t of txns) {
@@ -3173,6 +5289,15 @@ async function reconcileSplitDeltas(api, { months = 3 } = {}) {
       if (delta === 0) continue;
       const master = t.subtransactions[0];
       const newMaster = (master.amount || 0) + delta;
+      pending.push({
+        id: String(t.id),
+        accountId: String(a.id),
+        date: t.date,
+        delta: fromCents(delta),
+        currentTotal: fromCents(t.amount),
+        proposedFirstLeg: fromCents(newMaster),
+      });
+      if (!apply) continue;
       // A 0-amount leg is invalid in Actual, and flipping the master's sign would
       // mean the posted total no longer resembles the original split — skip & log.
       if (newMaster === 0 || Math.sign(newMaster) !== Math.sign(t.amount)) {
@@ -3186,9 +5311,17 @@ async function reconcileSplitDeltas(api, { months = 3 } = {}) {
         payee: s.payee || undefined,
       }));
       try {
+        assertTransactionMutationAvailable({
+          accountId: a.id,
+          ids: [t.id, ...t.subtransactions.map((leg) => leg.id)],
+        });
         const replacement = addableTransaction(t, { category: undefined, subtransactions: subs });
-        const added = await replaceActualTransaction(api, { accountId: a.id, original: t, replacement });
-        updateTransactionReferences(transactionReplacementMap(t, added));
+        await replaceActualTransaction(api, {
+          accountId: a.id,
+          original: t,
+          replacement,
+          requestedLegs: retainedReplacementLegs(t),
+        });
         fixed++;
       } catch (e) {
         console.error(`[split-delta] ${t.id} update failed: ${e.message}`);
@@ -3196,16 +5329,16 @@ async function reconcileSplitDeltas(api, { months = 3 } = {}) {
       }
     }
   }
-  return { fixed, failures };
+  return { fixed, failures, pending };
 }
-// Self-contained wrapper for the refresh pipeline.
-async function reconcileSplits() {
-  const result = await withApi((api) => reconcileSplitDeltas(api));
+// Self-contained wrapper for refresh (preview) and explicit confirmation (apply).
+async function reconcileSplits({ apply = false } = {}) {
+  const result = await withApi((api) => reconcileSplitDeltas(api, { apply }), { mode: apply ? 'write' : 'read' });
   if (result.fixed) await syncNow();
   if (result.failures.length) {
     throw new Error(`failed to reconcile ${result.failures.length} split transaction(s)`);
   }
-  return { ok: true, fixed: result.fixed };
+  return { ok: true, fixed: result.fixed, pending: result.pending };
 }
 
 // Auto-file expenses that someone else actually pays (tagged #<person>) into
@@ -3255,12 +5388,21 @@ async function sweepReimbursementTags({ tags, from, to } = {}) {
             };
           });
           if (changed) {
+            assertTransactionMutationAvailable({
+              accountId: a.id,
+              ids: [t.id, ...t.subtransactions.map((leg) => leg.id)],
+            });
             const replacement = addableTransaction(t, { category: undefined, subtransactions: subs });
-            const added = await replaceActualTransaction(api, { accountId: a.id, original: t, replacement });
-            updateTransactionReferences(transactionReplacementMap(t, added));
+            await replaceActualTransaction(api, {
+              accountId: a.id,
+              original: t,
+              replacement,
+              requestedLegs: retainedReplacementLegs(t),
+            });
           }
         } else if (!t.is_parent) {
           if (t.amount < 0 && isSpendKind(t.category) && hasTargetTag(t.notes)) {
+            assertTransactionMutationAvailable({ accountId: a.id, ids: [t.id] });
             await api.updateTransaction(t.id, { category: reimbId });
             moved.push({ id: t.id, amount: d2(t.amount), leg: false });
           }
@@ -3268,7 +5410,7 @@ async function sweepReimbursementTags({ tags, from, to } = {}) {
       }
     }
     return { ok: true, moved: moved.length, tags: targetTags, items: moved };
-  });
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
@@ -3297,7 +5439,31 @@ function payeeAlike(a, b) {
   return short.length >= 3 && long.includes(short);
 }
 
-async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, holdAgedDays = 5, holdObserveDays = 0, dryRun = false } = {}) {
+async function cleanupPhantoms({
+  window = 60,
+  agedDays = 14,
+  observeDays = 10,
+  holdAgedDays = 5,
+  holdObserveDays = 0,
+  dryRun = false,
+  operationKey = null,
+  journalBinding = null,
+  faultInjector = null,
+} = {}) {
+  if (!dryRun) {
+    const result = await withApi((api) => getBulkOperationSagaManager().run(api, {
+      kind: 'phantom_cleanup',
+      operationKey,
+      journalBinding,
+      params: { window, agedDays, observeDays, holdAgedDays, holdObserveDays },
+      faultInjector,
+      deferSync: true,
+    }), { mode: 'write' });
+    if (result.status === 'unresolved') {
+      throw new Error(`phantom cleanup outcome unresolved (${result.auditOutcome?.failed || 0} failed item(s))`);
+    }
+    return result;
+  }
   return withApi(async (api) => {
     const today = todayYMD();
     const start = addDays(today, -Math.abs(window));
@@ -3327,9 +5493,11 @@ async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, h
       const txns = await api.getTransactions(acct.id, start, today);
       const pendings = txns.filter((t) => t.imported_id && t.cleared === false && !t.is_parent && !t.parent_id);
       const cleared = txns.filter((t) => t.cleared === true && !t.is_parent);
+      const clearedIndex = buildClearedSupersederIndex(new Map([[acct.id, cleared]]), nameOf);
 
       for (const p of pendings) {
         const id = String(p.id);
+        if (!dryRun) assertTransactionMutationAvailable({ accountId: acct.id, ids: [id] });
         liveIds.add(id);
         const amt = d2(p.amount);
         const payee = nameOf(p);
@@ -3340,12 +5508,12 @@ async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, h
 
         // Rule A — superseded: a cleared charge for the same merchant, similar
         // amount, dated on/after the hold => the auth actually posted.
-        const magP = Math.abs(amt);
-        const superseder = cleared.find((q) => {
-          if (q.id === p.id) return false;
-          const magQ = Math.abs(d2(q.amount));
-          const near = Math.abs(magQ - magP) <= Math.max(2, magP * 0.30);
-          return near && q.date >= addDays(p.date, -1) && payeeAlike(payee, nameOf(q));
+        const superseder = findSupersedingCleared({
+          pending: { ...p, accountId: acct.id },
+          clearedIndex,
+          nameOf,
+          payeeName: payee,
+          amountCents: p.amount,
         });
 
         let reason = null;
@@ -3374,7 +5542,11 @@ async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, h
     }
 
     // Forget ledger entries whose transaction is gone (cleared or removed).
-    for (const id of Object.keys(store.seen)) if (!liveIds.has(id) && !deleted.some((d) => d.id === id)) delete store.seen[id];
+    for (const id of Object.keys(store.seen)) {
+      if (liveIds.has(id) || deleted.some((d) => d.id === id)) continue;
+      if (!dryRun) assertTransactionMutationAvailable({ ids: [id] });
+      delete store.seen[id];
+    }
 
     if (!dryRun) {
       writeJsonSafe(PHANTOM_SEEN_PATH, store);
@@ -3382,7 +5554,7 @@ async function cleanupPhantoms({ window = 60, agedDays = 14, observeDays = 10, h
       writeJsonSafe(PHANTOM_LOG_PATH, log);
     }
     return { ok: true, dryRun: !!dryRun, deletedCount: deleted.length, deleted, flaggedAged, watching: Object.keys(store.seen).length };
-  });
+  }, { mode: dryRun ? 'read' : 'write' });
 }
 function getPhantomLog({ limit = 100 } = {}) {
   const log = readPhantomLog();
@@ -3415,25 +5587,44 @@ function detectedImageMime(buffer) {
   return null;
 }
 function decodeImageBase64(value) {
-  const clean = String(value).replace(/^data:[^;]+;base64,/, '').replace(/\s+/g, '');
+  const clean = stripBase64Envelope(value);
   if (!clean || clean.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(clean)) throw new Error('invalid base64 image');
+  const estimated = exactBase64DecodedBytes(clean);
+  if (estimated > RECEIPT_MAX_DECODED_BYTES) throw new Error('image too large (max 25MB)');
   const buffer = Buffer.from(clean, 'base64');
   if (!buffer.length) throw new Error('empty image');
+  if (buffer.length > RECEIPT_MAX_DECODED_BYTES) throw new Error('image too large (max 25MB)');
   return buffer;
 }
 
 // Persist a scanned receipt. `imageBase64` is the raw (optionally data-URI-prefixed)
 // image; OCR text/lines + a guessed total/date are stored for search + display.
-function addReceipt({ txnId, imageBase64, mime, ocrText, ocrLines, amount, date, source } = {}) {
+function addReceipt({
+  txnId,
+  imageBase64,
+  mime,
+  ocrText,
+  ocrLines,
+  amount,
+  date,
+  source,
+} = {}) {
   if (!txnId) throw new Error('txnId required');
   if (!imageBase64) throw new Error('imageBase64 required');
+  assertTransactionMutationAvailable({ ids: [txnId] });
+  const normalizedAmount = amount == null ? null : fromCents(toCents(amount));
   const buf = decodeImageBase64(imageBase64);
-  if (buf.length > 25 * 1024 * 1024) throw new Error('image too large (max 25MB)');
   const m = (mime || 'image/jpeg').toLowerCase();
   if (!EXT_FOR_MIME[m]) throw new Error('unsupported receipt image type');
   const detected = detectedImageMime(buf);
   const compatibleHeif = detected && ['image/heic', 'image/heif'].includes(detected) && ['image/heic', 'image/heif'].includes(m);
   if (!detected || (detected !== m && !compatibleHeif)) throw new Error('receipt image bytes do not match the declared type');
+  const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+  const store = readReceipts();
+  for (const receipts of Object.values(store.byTxn)) {
+    const duplicate = receipts.find((receipt) => receipt.sha256 === sha256);
+    if (duplicate) throw new Error(`duplicate receipt image already stored as ${duplicate.id}`);
+  }
   const ext = EXT_FOR_MIME[detected];
   const id = `rcpt_${Date.now().toString(36)}_${crypto.randomBytes(6).toString('hex')}`;
   ensureReceiptsDir();
@@ -3458,12 +5649,13 @@ function addReceipt({ txnId, imageBase64, mime, ocrText, ocrLines, amount, date,
     id, txnId: String(txnId), file: `${id}.${ext}`, mime: detected, size: buf.length,
     ocrText: typeof ocrText === 'string' ? ocrText.slice(0, 8000) : '',
     ocrLines: Array.isArray(ocrLines) ? ocrLines.slice(0, 200) : [],
-    amount: Number.isFinite(Number(amount)) ? round2(Number(amount)) : null,
+    amount: normalizedAmount,
     date: date || null,
     source: source || 'camera',
+    sha256,
+    evidenceStatus: ocrText || (Array.isArray(ocrLines) && ocrLines.length) ? 'needs-review' : 'unreadable',
     uploadedAt: new Date().toISOString(),
   };
-  const store = readReceipts();
   (store.byTxn[rec.txnId] = store.byTxn[rec.txnId] || []).push(rec);
   try {
     writeJsonSafe(RECEIPTS_PATH, store);
@@ -3471,11 +5663,12 @@ function addReceipt({ txnId, imageBase64, mime, ocrText, ocrLines, amount, date,
     try { fs.unlinkSync(finalPath); } catch (_) {}
     throw error;
   }
+  invalidateReviewStateForTransactionEvidence({ targetIds: [txnId] });
   return publicReceipt(rec);
 }
 // Strip server-only fields for API responses (the file name stays internal).
 function publicReceipt(r) {
-  return { id: r.id, txnId: r.txnId, mime: r.mime, size: r.size, ocrText: r.ocrText, ocrLines: r.ocrLines, amount: r.amount, date: r.date, source: r.source, uploadedAt: r.uploadedAt };
+  return { id: r.id, txnId: r.txnId, mime: r.mime, size: r.size, ocrText: r.ocrText, ocrLines: r.ocrLines, amount: r.amount, date: r.date, source: r.source, evidenceStatus: r.evidenceStatus || 'unreadable', uploadedAt: r.uploadedAt };
 }
 function getReceipts({ txnId } = {}) {
   const store = readReceipts();
@@ -3483,6 +5676,16 @@ function getReceipts({ txnId } = {}) {
   const all = [];
   for (const list of Object.values(store.byTxn)) for (const r of list) all.push(publicReceipt(r));
   return { receipts: all };
+}
+function assertReceiptMutationAvailable({ id } = {}) {
+  if (!id) throw new Error('id required');
+  const store = readReceipts();
+  for (const [txnId, receipts] of Object.entries(store.byTxn)) {
+    const receipt = receipts.find((candidate) => candidate.id === id);
+    if (!receipt) continue;
+    assertTransactionMutationAvailable({ ids: [txnId, receipt.txnId] });
+    return;
+  }
 }
 // Resolve a receipt id to its on-disk file for streaming.
 function getReceiptFile({ id } = {}) {
@@ -3499,6 +5702,7 @@ function getReceiptFile({ id } = {}) {
 }
 function deleteReceipt({ id } = {}) {
   if (!id) throw new Error('id required');
+  assertReceiptMutationAvailable({ id });
   const store = readReceipts();
   let removed = null;
   for (const [txn, list] of Object.entries(store.byTxn)) {
@@ -3521,6 +5725,7 @@ function deleteReceipt({ id } = {}) {
       try { if (fs.existsSync(trash)) fs.renameSync(trash, file); } catch (_) {}
       throw error;
     }
+    invalidateReviewStateForTransactionEvidence({ targetIds: [removed.txnId] });
   }
   return { ok: true, removed: !!removed };
 }
@@ -3532,6 +5737,100 @@ function safeReceiptPath(file) {
   return resolved;
 }
 
+function isStateObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readTransactionDeletionReferenceStores() {
+  return {
+    receipts: readJsonSafe(
+      RECEIPTS_PATH,
+      { byTxn: {} },
+      (value) => isStateObject(value)
+        && isStateObject(value.byTxn)
+        && Object.values(value.byTxn).every(Array.isArray),
+    ),
+    links: readJsonSafe(
+      REIMB_LINKS_PATH,
+      { links: [] },
+      (value) => isStateObject(value) && Array.isArray(value.links),
+    ),
+    suggestions: readJsonSafe(
+      REIMB_SUGGEST_PATH,
+      { confirmed: {}, dismissed: [] },
+      (value) => isStateObject(value)
+        && isStateObject(value.confirmed)
+        && Array.isArray(value.dismissed),
+    ),
+    reconciliation: readJsonSafe(
+      RECON_PATH,
+      { enabled: false, months: {} },
+      (value) => isStateObject(value) && isStateObject(value.months),
+    ),
+    phantomSeen: readJsonSafe(
+      PHANTOM_SEEN_PATH,
+      { seen: {} },
+      (value) => isStateObject(value) && isStateObject(value.seen),
+    ),
+    reviewState: readReviewState(),
+  };
+}
+
+function planTransactionReferenceDeletion(targetEvidence) {
+  const result = rewriteTransactionDeletionReferences(
+    readTransactionDeletionReferenceStores(),
+    targetEvidence,
+  );
+  for (const file of result.receiptFilesToDelete) safeReceiptPath(file);
+  return {
+    stats: result.stats,
+    receiptFilesToDelete: result.receiptFilesToDelete,
+  };
+}
+
+function applyTransactionDeletionReferenceStep(step, targetEvidence, plan) {
+  const evidence = plan?.targetEvidence || targetEvidence;
+  const current = readTransactionDeletionReferenceStores();
+  const next = rewriteTransactionDeletionReferences(current, evidence).stores[step];
+  const destinations = {
+    receipts: RECEIPTS_PATH,
+    links: REIMB_LINKS_PATH,
+    suggestions: REIMB_SUGGEST_PATH,
+    reconciliation: RECON_PATH,
+    phantomSeen: PHANTOM_SEEN_PATH,
+    reviewState: REVIEW_STATE_PATH,
+  };
+  if (!destinations[step]) throw new Error(`unknown transaction deletion reference step: ${step}`);
+  if (JSON.stringify(current[step]) !== JSON.stringify(next)) {
+    if (step === 'links') writeReimbLinks(next);
+    else writeJsonSafe(destinations[step], next);
+  }
+}
+
+function transactionDeletionReferencesConverged(targetEvidence, plan) {
+  const evidence = plan?.targetEvidence || targetEvidence;
+  const current = readTransactionDeletionReferenceStores();
+  const rewritten = rewriteTransactionDeletionReferences(current, evidence);
+  return TRANSACTION_DELETION_REFERENCE_STEPS.every(
+    (step) => JSON.stringify(current[step]) === JSON.stringify(rewritten.stores[step]),
+  );
+}
+
+function transactionDeletionReceiptFileState(file) {
+  const resolved = safeReceiptPath(file);
+  const receipts = readTransactionDeletionReferenceStores().receipts;
+  const referenced = Object.values(receipts.byTxn)
+    .some((list) => list.some((receipt) => receipt?.file === file));
+  return { exists: fs.existsSync(resolved), referenced };
+}
+
+function unlinkTransactionDeletionReceiptFile(file) {
+  const state = transactionDeletionReceiptFileState(file);
+  if (state.referenced) throw new Error('refusing to delete a referenced receipt file');
+  const resolved = safeReceiptPath(file);
+  if (fs.existsSync(resolved)) fs.unlinkSync(resolved);
+}
+
 function readTransactionReferenceStores() {
   return {
     receipts: readReceipts(),
@@ -3539,51 +5838,57 @@ function readTransactionReferenceStores() {
     suggestions: readReimbSuggest(),
     reconciliation: readRecon(),
     phantomSeen: readPhantomSeen(),
+    reviewState: readReviewState(),
   };
 }
 
-function updateTransactionReferences(idMap) {
-  const before = readTransactionReferenceStores();
-  const result = rewriteTransactionReferences(before, idMap);
-  const writes = [
-    [RECEIPTS_PATH, before.receipts, result.stores.receipts],
-    [REIMB_LINKS_PATH, before.links, result.stores.links],
-    [REIMB_SUGGEST_PATH, before.suggestions, result.stores.suggestions],
-    [RECON_PATH, before.reconciliation, result.stores.reconciliation],
-    [PHANTOM_SEEN_PATH, before.phantomSeen, result.stores.phantomSeen],
-  ].filter(([, previous, next]) => JSON.stringify(previous) !== JSON.stringify(next));
+const TRANSACTION_REFERENCE_STEPS = Object.freeze([
+  'receipts',
+  'links',
+  'suggestions',
+  'reconciliation',
+  'phantomSeen',
+  'reviewState',
+]);
 
-  const movedFiles = [];
-  for (const file of result.receiptFilesToDelete) {
-    const source = safeReceiptPath(file);
-    if (!fs.existsSync(source)) continue;
-    const trash = `${source}.pending-delete-${process.pid}-${Date.now()}`;
-    fs.renameSync(source, trash);
-    movedFiles.push([source, trash]);
-  }
+function planTransactionReferenceMigration(idMap) {
+  const result = rewriteTransactionReplacementReferences(readTransactionReferenceStores(), idMap);
+  return {
+    stats: result.stats,
+  };
+}
 
-  const written = [];
-  try {
-    for (const [file, previous, next] of writes) {
-      writeJsonSafe(file, next);
-      written.push([file, previous]);
-    }
-    for (const [, trash] of movedFiles) fs.unlinkSync(trash);
-    return result.stats;
-  } catch (error) {
-    for (const [file, previous] of written.reverse()) {
-      try { writeJsonSafe(file, previous); } catch (_) {}
-    }
-    for (const [source, trash] of movedFiles) {
-      try { if (fs.existsSync(trash)) fs.renameSync(trash, source); } catch (_) {}
-    }
-    throw error;
+function applyTransactionReferenceStep(step, idMap, _plan) {
+  const current = readTransactionReferenceStores();
+  const next = rewriteTransactionReplacementReferences(current, idMap).stores[step];
+  const destinations = {
+    receipts: RECEIPTS_PATH,
+    links: REIMB_LINKS_PATH,
+    suggestions: REIMB_SUGGEST_PATH,
+    reconciliation: RECON_PATH,
+    phantomSeen: PHANTOM_SEEN_PATH,
+    reviewState: REVIEW_STATE_PATH,
+  };
+  if (!destinations[step]) throw new Error(`unknown transaction reference step: ${step}`);
+  if (JSON.stringify(current[step]) !== JSON.stringify(next)) {
+    if (step === 'links') writeReimbLinks(next);
+    else writeJsonSafe(destinations[step], next);
   }
+}
+
+function transactionReferencesConverged(idMap, _plan) {
+  const current = readTransactionReferenceStores();
+  const rewritten = rewriteTransactionReplacementReferences(current, idMap);
+  for (const step of TRANSACTION_REFERENCE_STEPS) {
+    if (JSON.stringify(current[step]) !== JSON.stringify(rewritten.stores[step])) return false;
+  }
+  return true;
 }
 
 // Collapse a split back into a single plain transaction (RM's "remove split").
 // delete + re-add as a simple row so we never hit the unsafe in-place unsplit path.
 async function removeSplit({ id, accountId, date, categoryId } = {}) {
+  assertTransactionMutationAvailable({ ids: [id] });
   return withApi(async (api) => {
     if (!accountId || !date) throw new Error('accountId and date required');
     const txns = await api.getTransactions(accountId, date, date);
@@ -3597,7 +5902,7 @@ async function removeSplit({ id, accountId, date, categoryId } = {}) {
     });
     delete replacement.subtransactions;
     const added = await replaceActualTransaction(api, { accountId, original: parent, replacement });
-    const references = updateTransactionReferences(transactionReplacementMap(parent, added));
+    const { references } = replacementSagaResult(added);
     return {
       ok: true,
       mode: 'unsplit',
@@ -3605,7 +5910,7 @@ async function removeSplit({ id, accountId, date, categoryId } = {}) {
       previousId: String(parent.id),
       references,
     };
-  });
+  }, { mode: 'write' });
 }
 
 // Permanently remove a transaction. Deleting a split parent removes its legs too.
@@ -3614,36 +5919,66 @@ async function removeSplit({ id, accountId, date, categoryId } = {}) {
 // The automated phantom cleanup passes allowImported=true to remove stale pending
 // charges that fell off the feed. Every caller must still provide account + date
 // so authorization and sidecar cleanup are based on the canonical ledger row.
-async function deleteTransaction({ id, accountId, date, allowImported = false } = {}) {
+async function deleteTransaction({
+  id,
+  accountId,
+  date,
+  allowImported = false,
+  bulkDelegation = null,
+  faultInjector,
+} = {}) {
   if (!id) throw new Error('id required');
   if (!accountId || !date) throw new Error('accountId and date required');
+  if (bulkDelegation) {
+    if (String(id) !== String(bulkDelegation.txnId)) {
+      throw new BulkOperationInProgressError();
+    }
+    if (String(accountId) !== String(bulkDelegation.accountId)) {
+      throw new BulkOperationInProgressError();
+    }
+    getBulkOperationSagaManager().assertDeletionDelegationAuthorized(bulkDelegation);
+  }
+  assertTransactionDeletionAvailable({ accountId, ids: [id], bulkDelegation });
   return withApi(async (api) => {
     const txns = await api.getTransactions(accountId, date, date);
     let transaction = txns.find((item) => String(item.id) === String(id));
     if (!transaction) throw new Error('transaction not found');
     if (transaction.parent_id) {
       if (!allowImported) throw new Error('split legs cannot be deleted independently');
-      transaction = txns.find((item) => item.id === transaction.parent_id) || transaction;
+      const parent = txns.find(
+        (item) => String(item.id) === String(transaction.parent_id),
+      );
+      if (!parent) throw new Error('split parent not found');
+      transaction = parent;
     }
     if (!allowImported && transaction.imported_id) {
       throw new Error('Bank-imported transactions can’t be deleted — only ones you added manually.');
     }
-    readTransactionReferenceStores(); // fail before touching Actual if sidecars are unreadable
-    await api.deleteTransaction(transaction.id);
-    const idMap = { [String(transaction.id)]: null };
-    for (const leg of transaction.subtransactions || []) idMap[String(leg.id)] = null;
-    const references = updateTransactionReferences(idMap);
-    return { ok: true, deleted: String(transaction.id), references };
-  });
+    const ids = [
+      String(transaction.id),
+      ...(transaction.subtransactions || []).map((leg) => String(leg.id)),
+    ];
+    assertTransactionDeletionAvailable({ accountId, ids, transaction, bulkDelegation });
+    return getTransactionDeletionSagaManager().remove(api, {
+      accountId,
+      date,
+      transaction,
+      faultInjector,
+      bulkDelegation,
+    });
+  }, { mode: 'write' });
 }
 
 // Rename a transaction's payee (RM "rename"). Resolves the free-text name to a payee
 // (find-or-create); Actual keeps imported_payee + imported_id untouched so the
 // original bank description and future matching are preserved. Blank name clears it.
 async function setPayee({ id, payee, isLeg, parentId, accountId, date } = {}) {
+  assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
   return withApi(async (api) => {
-    const payeeId = await resolvePayeeId(api, payee);
     if (!isLeg) {
+      const payeeId = await resolvePayeeId(api, payee);
       await api.updateTransaction(id, { payee: payeeId || null });
       return { ok: true, mode: 'update' };
     }
@@ -3651,6 +5986,9 @@ async function setPayee({ id, payee, isLeg, parentId, accountId, date } = {}) {
     const txns = await api.getTransactions(accountId, date, date);
     const parent = txns.find((t) => t.id === parentId);
     if (!parent || !Array.isArray(parent.subtransactions)) throw new Error('parent split not found');
+    assertReconstructableTransaction(parent);
+    await assertTransactionImportedIdentityAvailable(api, { accountId, original: parent });
+    const payeeId = await resolvePayeeId(api, payee);
     const subs = parent.subtransactions.map((s) => ({
       amount: s.amount,
       category: s.category || null,
@@ -3658,9 +5996,13 @@ async function setPayee({ id, payee, isLeg, parentId, accountId, date } = {}) {
       payee: s.id === id ? payeeId || null : s.payee || undefined,
     }));
     const replacement = addableTransaction(parent, { category: undefined, subtransactions: subs });
-    const added = await replaceActualTransaction(api, { accountId, original: parent, replacement });
-    const idMap = transactionReplacementMap(parent, added);
-    const references = updateTransactionReferences(idMap);
+    const added = await replaceActualTransaction(api, {
+      accountId,
+      original: parent,
+      replacement,
+      requestedLegs: retainedReplacementLegs(parent),
+    });
+    const { idMap, references } = replacementSagaResult(added);
     return {
       ok: true,
       mode: 'rebuild-split',
@@ -3669,7 +6011,7 @@ async function setPayee({ id, payee, isLeg, parentId, accountId, date } = {}) {
       previousId: String(id),
       references,
     };
-  });
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
@@ -3699,6 +6041,7 @@ async function applyRuleToTxns(api, rule, { months = 24 } = {}) {
       if (t.category) continue; // only uncategorized
       const name = (pn[t.payee] || t.imported_payee || '').toLowerCase();
       if (!name.includes(needle)) continue;
+      assertTransactionMutationAvailable({ accountId: a.id, ids: [t.id] });
       await api.updateTransaction(t.id, { category: rule.categoryId });
       applied++;
     }
@@ -3706,19 +6049,33 @@ async function applyRuleToTxns(api, rule, { months = 24 } = {}) {
   return applied;
 }
 
-async function saveRule({ match, categoryId, categoryName } = {}) {
+async function saveRule({ match, categoryId, categoryName } = {}, {
+  sync = true,
+  operationKey = null,
+  journalBinding = null,
+  faultInjector = null,
+} = {}) {
   const m = (match || '').trim();
   if (!m || !categoryId) throw new Error('match and categoryId required');
   const store = getRules();
+  if (!store || !Array.isArray(store.rules)) throw new Error('invalid rules store');
   const id = 'r' + Date.now().toString(36);
   const rule = { id, match: m, categoryId, categoryName: categoryName || '', created: todayYMD() };
-  // Replace any existing rule with the same match text (case-insensitive).
-  store.rules = store.rules.filter((r) => (r.match || '').toLowerCase() !== m.toLowerCase());
-  store.rules.push(rule);
-  const applied = await withApi((api) => applyRuleToTxns(api, rule));
-  if (applied) await syncNow();
-  writeJsonSafe(RULES_PATH, store);
-  return { ok: true, id, applied };
+  const result = await withApi((api) => getBulkOperationSagaManager().run(api, {
+    kind: 'rules_save',
+    operationKey,
+    journalBinding,
+    params: { rule },
+    faultInjector,
+    deferSync: !sync,
+  }), { mode: 'write' });
+  if (result.status === 'unresolved') {
+    throw new Error(`rule save outcome unresolved (${result.auditOutcome?.failed || 0} failed item(s))`);
+  }
+  if (result.failed) {
+    throw new Error(`rule save failed for ${result.failed} item(s)`);
+  }
+  return { ok: result.ok, needsSync: result.needsSync, id: result.id || id, applied: result.applied, status: result.status, auditOutcome: result.auditOutcome };
 }
 
 function deleteRule({ id } = {}) {
@@ -3734,20 +6091,33 @@ function deleteRule({ id } = {}) {
 // category over to Reimbursement, so a friend paying you back never counts as
 // real income. Only ever touches income-filed inflows whose payee/notes match a
 // settle-up service — manual categorizations elsewhere are left alone.
-async function refileSettleUps() {
+async function refileSettleUps({ sync = true, from, to } = {}) {
   return withApi(async (api) => {
-    const groups = await api.getCategoryGroups();
-    const catInfo = buildCatInfo(groups);
+    const config = loadQueryScalingConfig();
+    const end = to || todayYMD();
+    const configuredStart = from || REIMB_LEDGER_FROM;
+    const scanWindow = from
+      ? { start: configuredStart, complete: true }
+      : resolveBoundedLedgerStart({ configuredStart, end, config });
+    const start = scanWindow.start;
+    validateCanonicalDateRange(start, end, {
+      config,
+      purpose: 'settle-up refile scan',
+      maxSpanDays: config.maxLedgerQueryDays,
+    });
+    const ctx = await loadLedgerReadContext(api, { accountFilter: (a) => !a.offbudget && !a.closed });
+    const { catInfo, payeeMap: pn, accounts: accts } = ctx;
     let reimbId = null;
-    for (const g of groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) reimbId = c.id;
+    for (const g of ctx.groups) for (const c of g.categories || []) if (REIMB_CAT.test(c.name || '')) reimbId = c.id;
     if (!reimbId) return { ok: false, moved: 0, reason: 'no Reimbursement category' };
-    const payees = await api.getPayees();
-    const pn = {};
-    for (const p of payees) pn[p.id] = p.name || '';
-    const accts = (await api.getAccounts()).filter((a) => !a.offbudget && !a.closed);
     let moved = 0;
-    for (const a of accts) {
-      const tx = await api.getTransactions(a.id, '2000-01-01', todayYMD());
+    const batches = await fetchAccountTransactionsBounded(api, {
+      accounts: accts,
+      start,
+      end,
+      config,
+    });
+    for (const { account: a, transactions: tx } of batches) {
       for (const t of tx) {
         if (t.is_parent || t.parent_id) continue;
         if (!(t.amount > 0)) continue; // paybacks are inflows
@@ -3755,13 +6125,14 @@ async function refileSettleUps() {
         if (!meta || meta.kind !== 'income') continue; // only rescue misfiled income
         const hay = `${pn[t.payee] || t.imported_payee || ''} ${t.notes || ''}`;
         if (!SETTLE_UP_PAYEE.test(hay)) continue;
+        assertTransactionMutationAvailable({ accountId: a.id, ids: [t.id] });
         await api.updateTransaction(t.id, { category: reimbId });
         moved++;
       }
     }
-    if (moved) await syncNow();
-    return { ok: true, moved };
-  });
+    if (moved && sync) await syncNow();
+    return { ok: true, moved, range: { start, end } };
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
@@ -3793,7 +6164,8 @@ async function ensureSplitwiseAccount(api) {
   if (found) return found.id;
   return api.createAccount({ name: SW_ACCOUNT_NAME, offbudget: false }, 0);
 }
-async function ensureSplitwiseCategory(api, groups) {
+async function ensureSplitwiseCategory(api) {
+  const groups = await api.getCategoryGroups();
   for (const g of groups) for (const c of g.categories || []) if ((c.name || '').toLowerCase() === SW_CATEGORY_NAME.toLowerCase()) return c.id;
   const spendGroup = groups.find((g) => !g.is_income && !MONEY_MOVEMENT_GROUP.test(g.name || '') && !INCOME_GROUP.test(g.name || '') && (g.categories || []).length);
   if (!spendGroup) return null;
@@ -3806,7 +6178,14 @@ function pickSplitwiseCategory(swCatName, spendCats) {
   }
   return null;
 }
-function validateSplitwiseMirrorSnapshot(truth, { now = Date.now(), maxAgeMs = 6 * 60 * 60 * 1000 } = {}) {
+function validateSplitwiseMirrorSnapshot(truth, { now = Date.now(), maxAgeMs = owesSnapshotMaxAgeMs() } = {}) {
+  try {
+    return validateSplitwiseMirrorSnapshotRaw(truth, { now, maxAgeMs });
+  } catch (error) {
+    throw new SplitwiseMirrorSnapshotError(String(error?.message || error || 'Splitwise snapshot validation failed'));
+  }
+}
+function validateSplitwiseMirrorSnapshotRaw(truth, { now = Date.now(), maxAgeMs = owesSnapshotMaxAgeMs() } = {}) {
   if (!truth || typeof truth !== 'object') throw new Error('Splitwise snapshot is missing');
   const manifest = truth.manifest;
   if (
@@ -3834,8 +6213,10 @@ function validateSplitwiseMirrorSnapshot(truth, { now = Date.now(), maxAgeMs = 6
     if (!/^\d+$/.test(id)) throw new Error('Splitwise snapshot contains an invalid expense id');
     if (seen.has(id)) throw new Error(`Splitwise snapshot contains duplicate expense ${id}`);
     seen.add(id);
-    if (!Number.isFinite(Number(item.myShare)) || Number(item.myShare) <= 0) {
-      throw new Error(`Splitwise snapshot contains an invalid share for expense ${id}`);
+    try {
+      myShareExpenseCents(item);
+    } catch (error) {
+      throw new Error(String(error.message || error));
     }
     if (item.currency && item.currency !== expectedCurrency) {
       throw new Error(`Splitwise expense ${id} has unexpected currency ${item.currency}`);
@@ -3843,44 +6224,42 @@ function validateSplitwiseMirrorSnapshot(truth, { now = Date.now(), maxAgeMs = 6
   }
   return truth.othersPaidItems;
 }
-async function syncSplitwiseShareExpenses() {
-  return withApi(async (api) => {
-    const truth = readJsonSafe(OWES_TRUTH_PATH, null);
-    const items = validateSplitwiseMirrorSnapshot(truth);
-    const acctId = await ensureSplitwiseAccount(api);
-    let groups = await api.getCategoryGroups();
-    const fallbackCat = await ensureSplitwiseCategory(api, groups);
-    if (fallbackCat) groups = await api.getCategoryGroups(); // refresh if we just made it
-    const catInfo = buildCatInfo(groups);
-    const spendCats = [];
-    for (const g of groups) for (const c of g.categories || []) if (catInfo[c.id] && catInfo[c.id].kind === 'spend') spendCats.push({ id: c.id, name: c.name });
-
-    const existing = await api.getTransactions(acctId, '2000-01-01', todayYMD());
-    const byTag = {};
-    for (const t of existing) { const m = /#sw-(\d+)/.exec(t.notes || ''); if (m) byTag[m[1]] = t; }
-
-    const wanted = new Set();
-    let created = 0, updated = 0, pruned = 0;
-    for (const it of items) {
-      const id = String(it.id);
-      const amtCents = -Math.round(Number(it.myShare) * 100);
-      if (!(amtCents < 0)) continue;
-      wanted.add(id);
-      const catId = pickSplitwiseCategory(it.category, spendCats) || fallbackCat || undefined;
-      const notes = `${it.desc || 'Splitwise expense'}${it.payer ? ` (paid by ${it.payer})` : ''} #sw-${id}`;
-      const ex = byTag[id];
-      if (!ex) {
-        await api.addTransactions(acctId, [{ date: (it.date || todayYMD()).slice(0, 10), amount: amtCents, category: catId, notes, cleared: true }], { learnCategories: false, runTransfers: false });
-        created++;
-      } else if (ex.amount !== amtCents || (catId && ex.category !== catId)) {
-        await api.updateTransaction(ex.id, { amount: amtCents, category: catId || ex.category || null });
-        updated++;
-      }
-    }
-    for (const [id, t] of Object.entries(byTag)) if (!wanted.has(id)) { await api.deleteTransaction(t.id); pruned++; }
-    if (created || updated || pruned) await syncNow();
-    return { ok: true, account: SW_ACCOUNT_NAME, items: items.length, created, updated, pruned };
-  });
+async function preflightSplitwiseMirrorShareSync() {
+  return withApi(async (actualApi) => preflightSplitwiseMirrorAdmission({
+    api: actualApi,
+    readTruth: () => readJsonSafe(OWES_TRUTH_PATH, null),
+    validateSnapshot: validateSplitwiseMirrorSnapshot,
+    readResolutions: readSplitwiseMirrorResolutions,
+    accountName: SW_ACCOUNT_NAME,
+    categoryName: SW_CATEGORY_NAME,
+    accountRangeStart: '1900-01-01',
+    accountRangeEnd: '9999-12-31',
+  }), { mode: 'read', skipRecover: true });
+}
+async function syncSplitwiseShareExpenses({
+  sync = true,
+  operationKey = null,
+  journalBinding = null,
+  faultInjector = null,
+} = {}) {
+  const result = await withApi((api) => getBulkOperationSagaManager().run(api, {
+    kind: 'splitwise_mirror',
+    operationKey,
+    journalBinding,
+    params: {},
+    faultInjector,
+    deferSync: !sync,
+  }), { mode: 'write' });
+  if (result.status === 'unresolved') {
+    throw new BulkOperationOutcomeUnknownError('Splitwise mirror outcome unresolved');
+  }
+  if (result.needsSync && result.status === 'in_progress') {
+    return result;
+  }
+  if (operationKey) {
+    return getBulkOperationResult(operationKey) || result;
+  }
+  return result;
 }
 
 // Built-in merchant catalog — the "Rocket Money auto-categorize". Each entry maps
@@ -3948,6 +6327,7 @@ async function applyBuiltinCatalog(api, { months = 24 } = {}) {
         if (entry.type === 'income' ? !(t.amount > 0) : !(t.amount < 0)) continue; // sign guard
         const cat = typeCat[entry.type];
         if (!cat) break;
+        assertTransactionMutationAvailable({ accountId: a.id, ids: [t.id] });
         await api.updateTransaction(t.id, { category: cat });
         applied++;
         break;
@@ -3963,25 +6343,34 @@ function getCatalogDisplay() {
 
 // Re-apply every rule (used on refresh + manual "apply now"). Successful work is
 // synced, but any failed stage is surfaced so refresh never claims full success.
-async function applyRules() {
-  const { rules } = getRules();
-  let total = 0;
-  const failures = [];
-  await withApi(async (api) => {
-    for (const r of rules) {
-      try { total += await applyRuleToTxns(api, r); }
-      catch (error) { failures.push({ stage: `rule:${r.id}`, error: error.message }); }
-    }
-    // Built-in catalog fills anything your rules didn't (yours already won above).
-    try { total += await applyBuiltinCatalog(api); }
-    catch (error) { failures.push({ stage: 'catalog', error: error.message }); }
-  });
-  // Rescue misfiled peer settle-ups on every refresh so income never inflates.
-  try { await refileSettleUps(); }
-  catch (error) { failures.push({ stage: 'settle-ups', error: error.message }); }
-  if (total) await syncNow();
-  if (failures.length) throw new Error(`categorization failed in ${failures.length} stage(s)`);
-  return { ok: true, applied: total };
+async function applyRules({
+  sync = true,
+  operationKey = null,
+  journalBinding = null,
+  faultInjector = null,
+} = {}) {
+  const result = await withApi((api) => getBulkOperationSagaManager().run(api, {
+    kind: 'rules_apply',
+    operationKey,
+    journalBinding,
+    params: {},
+    faultInjector,
+    deferSync: !sync,
+  }), { mode: 'write' });
+  if (result.status === 'unresolved') {
+    throw new Error(`categorization outcome unresolved (${result.failed || 0} failed item(s))`);
+  }
+  if (result.failed) {
+    throw new Error(`categorization failed in ${result.failed} item(s)`);
+  }
+  return {
+    ok: result.ok,
+    needsSync: result.needsSync,
+    applied: result.applied,
+    settleUpsMoved: result.settleUpsMoved || 0,
+    status: result.status,
+    auditOutcome: result.auditOutcome,
+  };
 }
 
 // Force a payee to be treated as recurring even if detection didn't catch it
@@ -3996,6 +6385,9 @@ function markRecurring({ payee, isBill } = {}) {
 // Write: safe split-aware notes change (mirrors setTransactionCategory)
 // ---------------------------------------------------------------------------
 async function setTransactionNotes({ id, notes, isLeg, parentId, accountId, date }) {
+  assertTransactionMutationAvailable({
+    ids: isLeg ? [parentId, id] : [id],
+  });
   return withApi(async (api) => {
     if (!isLeg) {
       await api.updateTransaction(id, { notes: notes || null });
@@ -4012,9 +6404,13 @@ async function setTransactionNotes({ id, notes, isLeg, parentId, accountId, date
       payee: s.payee || undefined,
     }));
     const replacement = addableTransaction(parent, { category: undefined, subtransactions: subs });
-    const added = await replaceActualTransaction(api, { accountId, original: parent, replacement });
-    const idMap = transactionReplacementMap(parent, added);
-    const references = updateTransactionReferences(idMap);
+    const added = await replaceActualTransaction(api, {
+      accountId,
+      original: parent,
+      replacement,
+      requestedLegs: retainedReplacementLegs(parent),
+    });
+    const { idMap, references } = replacementSagaResult(added);
     return {
       ok: true,
       mode: 'rebuild-split',
@@ -4023,7 +6419,7 @@ async function setTransactionNotes({ id, notes, isLeg, parentId, accountId, date
       previousId: String(id),
       references,
     };
-  });
+  }, { mode: 'write' });
 }
 
 // Move a transaction to a different date. Handy for refunds that post the month
@@ -4033,46 +6429,122 @@ async function setTransactionNotes({ id, notes, isLeg, parentId, accountId, date
 async function setTransactionDate({ id, date, isLeg }) {
   if (isLeg) throw new Error('A split leg inherits its parent’s date — move the parent instead.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) throw new Error('date must be YYYY-MM-DD');
+  assertTransactionMutationAvailable({ ids: [id] });
   return withApi(async (api) => {
     await api.updateTransaction(id, { date });
     return { ok: true, date };
-  });
+  }, { mode: 'write' });
 }
 
 // ---------------------------------------------------------------------------
-// Savings goals — sidecar JSON; progress tracks a linked account balance
+// Savings goals — funded allocations; linked accounts are capacity constraints,
+// never balances that multiple goals may each claim in full.
 // ---------------------------------------------------------------------------
+async function materializeGoals(api, { projectionInputs = null } = {}) {
+  const financeDate = todayYMD();
+  const storedGoals = readJsonSafe(GOALS_PATH, []);
+  const inputs = projectionInputs || await loadAccountProjectionInputs(api);
+  const { accountsRaw, balancesById, balanceUnavailableIds, overrides } = inputs;
+  const accountsWithRoles = (accountsRaw || []).map((account) => {
+    const override = overrides[account.id] || {};
+    return {
+      ...account,
+      role: override?.role || account.role || 'unknown',
+      hidden: !!override?.hidden,
+      closed: !!account.closed,
+    };
+  });
+  const balanceCentsById = new Map();
+  for (const account of accountsRaw || []) {
+    const cents = balancesById[account.id];
+    if (Number.isSafeInteger(cents)) balanceCentsById.set(account.id, cents);
+    else if (balanceUnavailableIds.has(account.id)) balanceCentsById.set(account.id, null);
+  }
+  const balanceIncompleteReasons = balanceUnavailableIds.size
+    ? [ACCOUNT_PROJECTION_REASON.accountBalanceUnavailable]
+    : [];
+  const normalizedGoals = storedGoals.map((g) => {
+    const current = Math.max(0, Number(g.current) || 0);
+    return {
+      ...g,
+      target: fromCents(toCents(g.target)),
+      current: fromCents(toCents(current)),
+    };
+  });
+  const enriched = enrichGoalsResponse({
+    goals: normalizedGoals,
+    accounts: accountsWithRoles,
+    balanceCentsById,
+    financeDate,
+    balanceIncompleteReasons,
+  });
+  const goals = enriched.goals.map((goal) => {
+    const accountId = goal.accountId;
+    const balCents = accountId ? balanceCentsById.get(accountId) : null;
+    const account = accountId ? accountsWithRoles.find((candidate) => candidate.id === accountId) : null;
+    const linkedOpen = account && !account.closed;
+    return {
+      ...goal,
+      pct: goal.target > 0 ? Math.min(999, Math.round((goal.current / goal.target) * 100)) : null,
+      fundingSource: accountId ? 'allocated-account' : 'manual',
+      availableInAccount: linkedOpen && Number.isSafeInteger(balCents)
+        ? Math.max(0, fromCents(Math.max(0, balCents)))
+        : null,
+    };
+  });
+  return { goals, goalAdvisory: enriched.goalAdvisory };
+}
+
+async function getGoalsWithAdvisory(options = {}) {
+  return withApi(async (api) => materializeGoals(api, options));
+}
+
 async function getGoals() {
+  const { goals } = await getGoalsWithAdvisory();
+  return goals;
+}
+
+async function saveGoal(goal = {}) {
+  const target = fromCents(toCents(goal.target));
+  const current = goal.current === undefined ? undefined : fromCents(toCents(goal.current));
+  if (!goal.name || !(target > 0)) throw new Error('name and positive target required');
+  if (current != null && current < 0) throw new Error('current must be non-negative');
+  const input = { ...goal, target };
+  if (current != null) input.current = current;
   return withApi(async (api) => {
     const goals = readJsonSafe(GOALS_PATH, []);
-    const accounts = (await api.getAccounts()).filter((a) => !a.closed);
-    const bals = await Promise.all(accounts.map((a) => api.getAccountBalance(a.id)));
-    const balById = {};
-    accounts.forEach((a, i) => { balById[a.id] = bals[i] / 100; });
-    return goals.map((g) => {
-      const current = g.accountId && balById[g.accountId] != null ? balById[g.accountId] : (g.current || 0);
-      return {
-        ...g,
-        current: round2(current),
-        pct: g.target > 0 ? Math.min(999, Math.round((current / g.target) * 100)) : null,
-      };
-    });
+    const normalized = { ...input };
+    const existing = normalized.id ? goals.find((candidate) => candidate.id === normalized.id) : null;
+    const isNewLink = normalized.accountId
+      && (!existing?.accountId || existing.accountId !== normalized.accountId);
+    if (isNewLink) {
+      const accounts = await api.getAccounts();
+      const account = accounts.find((candidate) => candidate.id === normalized.accountId);
+      if (!account) throw new Error('linked account not found');
+      if (account.closed) throw new Error('linked account is closed');
+    }
+    if (normalized.id) {
+      if (existing) {
+        if (normalized.current === undefined) normalized.current = existing.current ?? 0;
+        goals[goals.findIndex((candidate) => candidate.id === normalized.id)] = { ...existing, ...normalized };
+      } else {
+        if (normalized.current === undefined) normalized.current = 0;
+        goals.push(normalized);
+      }
+    } else {
+      normalized.id = 'g' + Date.now().toString(36);
+      if (normalized.current === undefined) normalized.current = 0;
+      goals.push(normalized);
+    }
+    writeJsonSafe(GOALS_PATH, goals);
+    const { goals: enrichedGoals } = await materializeGoals(api);
+    const saved = enrichedGoals.find((candidate) => candidate.id === normalized.id);
+    return {
+      ok: true,
+      id: normalized.id,
+      feasibility: saved?.feasibility || null,
+    };
   });
-}
-
-function saveGoal(goal = {}) {
-  if (!goal.name || !(goal.target > 0)) throw new Error('name and positive target required');
-  const goals = readJsonSafe(GOALS_PATH, []);
-  if (goal.id) {
-    const i = goals.findIndex((g) => g.id === goal.id);
-    if (i >= 0) goals[i] = { ...goals[i], ...goal };
-    else goals.push(goal);
-  } else {
-    goal.id = 'g' + Date.now().toString(36);
-    goals.push(goal);
-  }
-  writeJsonSafe(GOALS_PATH, goals);
-  return { ok: true, id: goal.id };
 }
 
 function deleteGoal(id) {
@@ -4085,24 +6557,59 @@ function deleteGoal(id) {
 // ---------------------------------------------------------------------------
 // All-time transaction search + CSV report data.
 // ---------------------------------------------------------------------------
-async function searchTransactions({ q, start, end, limit = 200 } = {}) {
-  const today = todayYMD();
-  const startDate = start || '2000-01-01';
-  const endDate = end || today;
-  const all = await getTransactions({ start: startDate, end: endDate });
-  const needle = (q || '').toLowerCase().trim();
-  const res = needle
+async function searchTransactions({ q, start, end, limit = 200, cursor } = {}) {
+  const config = loadQueryScalingConfig();
+  const generation = getActualCoordinator().generation;
+  const decoded = cursor
+    ? decodeSearchCursor(cursor, { config, expectedGeneration: generation })
+    : null;
+  const range = decoded
+    ? { start: decoded.start, end: decoded.end }
+    : resolveSearchWindow({ start, end, config });
+  const effectiveLimit = Math.min(config.maxSearchLimit, Math.max(1, Number(decoded?.limit ?? limit) || 200));
+  const needle = (decoded?.q ?? q ?? '').toLowerCase().trim();
+  if (decoded) {
+    if (start && start !== decoded.start) throw new QueryRangeExceededError('search cursor start mismatch');
+    if (end && end !== decoded.end) throw new QueryRangeExceededError('search cursor end mismatch');
+    if (q != null && String(q).trim() !== '' && needle !== String(decoded.q || '').toLowerCase().trim()) {
+      throw new QueryRangeExceededError('search cursor query mismatch');
+    }
+  }
+  const all = await getTransactions({ start: range.start, end: range.end, collapse: true });
+  let res = needle
     ? all.filter((t) =>
         (t.payee || '').toLowerCase().includes(needle) ||
         (t.category || '').toLowerCase().includes(needle) ||
         (t.account || '').toLowerCase().includes(needle) ||
         (t.notes || '').toLowerCase().includes(needle))
     : all;
+  if (decoded?.anchorDate && decoded?.anchorId) {
+    res = res.filter((t) => rowBeforeSearchAnchor(t, decoded.anchorDate, decoded.anchorId));
+  }
+  res.sort(compareSearchRowsDesc);
+  const page = res.slice(0, effectiveLimit);
+  const hasMore = res.length > effectiveLimit;
+  const last = page[page.length - 1];
   return {
-    transactions: res.slice(0, limit),
-    total: res.length,
-    truncated: res.length > limit,
-    range: { start: startDate, end: endDate },
+    transactions: page,
+    truncated: hasMore,
+    range: { start: range.start, end: range.end },
+    pagination: {
+      limit: effectiveLimit,
+      nextCursor: hasMore && last
+        ? encodeSearchCursor({
+          start: range.start,
+          end: range.end,
+          q: needle,
+          limit: effectiveLimit,
+          anchorDate: last.date,
+          anchorId: last.id,
+          generation,
+        })
+        : null,
+      complete: !hasMore,
+      consistency: { generation, semantics: 'coordinator_generation_bound' },
+    },
   };
 }
 
@@ -4110,9 +6617,15 @@ async function searchTransactions({ q, start, end, limit = 200 } = {}) {
 // Tags live inline in transaction notes (e.g. "#ev-trip #alex"); this aggregates
 // them with usage counts so the app can offer reuse instead of duplicates.
 async function getTags({ start, end } = {}) {
+  const config = loadQueryScalingConfig();
   const today = todayYMD();
-  const startDate = start || addDays(today, -365 * 3);
+  const startDate = start || addDays(today, -config.maxTagsRangeDays + 1);
   const endDate = end || today;
+  validateCanonicalDateRange(startDate, endDate, {
+    config,
+    purpose: 'tag aggregation',
+    maxSpanDays: config.maxTagsRangeDays,
+  });
   const all = await getTransactions({ start: startDate, end: endDate });
   const counts = new Map(); // lowercased raw -> { raw, count }
   for (const t of all) {
@@ -4138,54 +6651,105 @@ async function getTags({ start, end } = {}) {
   return { tags };
 }
 
+async function loadMonthlyReportSpendingBundle(api, month) {
+  const [Y, M] = month.split('-').map(Number);
+  const cur = monthRange(Y, M - 1);
+  const prev = monthRange(Y, M - 2);
+  const isCurrent = cur.key === todayYMD().slice(0, 7);
+  const curEnd = isCurrent ? todayYMD() : cur.end;
+  const groups = await api.getCategoryGroups();
+  const catInfo = buildCatInfo(groups);
+  const spendingProjection = await buildAccountProjection(api, ACCOUNT_METRIC.spendingAttribution);
+  const ctx = await loadLedgerReadContext(api, {
+    accountFilter: spendingProjection.accountFilter,
+    includeClosed: false,
+  });
+  const rows = await fetchOnBudgetRows(api, prev.start, curEnd, {
+    accountFilter: spendingProjection.accountFilter,
+  });
+  const transferIndex = buildTransferIndex(rows);
+  const currentLeaves = classifyLeavesInDateRange(rows, catInfo, cur.start, curEnd, transferIndex);
+  const classifiedLeaves = enrichCurrentLeavesWithPayee(currentLeaves, rows, ctx.payeeMap);
+  const summary = summarize(currentLeaves);
+  if (spendingProjection.incompleteReasons.length) {
+    summary.completeness = {
+      ...summary.completeness,
+      complete: false,
+      incompleteReasons: [
+        ...new Set([...(summary.completeness?.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
+      ],
+    };
+  }
+  return { cur, curEnd, summary, classifiedLeaves };
+}
+
 async function getMonthlyReport({ month } = {}) {
   const m = month || todayYMD().slice(0, 7);
-  const [Y, M] = m.split('-').map(Number);
-  const start = `${m}-01`;
-  const end = monthRange(Y, M - 1).end;
-  const [transactions, spending] = await Promise.all([
-    getTransactions({ start, end, budgetOnly: true }),
-    getSpending({ month: m }),
-  ]);
-  return { month: m, start, end, transactions, summary: spending.current };
+  const spendingBundle = await withApi((api) => loadMonthlyReportSpendingBundle(api, m));
+  const { cur, curEnd, summary, classifiedLeaves } = spendingBundle;
+  const transactions = await getTransactions({ start: cur.start, end: curEnd, budgetOnly: true });
+  return {
+    month: m,
+    start: cur.start,
+    end: cur.end,
+    transactions,
+    summary,
+    classifiedLeaves,
+  };
 }
 
 function buildReportsPayload({ month, monthly, trends, insights, tags, generatedAt = new Date().toISOString() }) {
-  const merchants = {};
-  for (const t of monthly.transactions || []) {
-    if (t.amount >= 0) continue;
-    const key = t.payee || 'Unknown';
-    const cur = merchants[key] || { payee: key, spend: 0, count: 0 };
-    cur.spend = round2(cur.spend + Math.abs(t.amount));
-    cur.count++;
-    merchants[key] = cur;
+  const summaryComplete = monthly.summary?.completeness?.complete !== false;
+  const totalSpend = summaryComplete ? (monthly.summary?.totalSpend ?? 0) : null;
+  let topMerchants = [];
+  let merchantTrendsComplete = false;
+  let merchantTrendsTruncated = false;
+  if (summaryComplete) {
+    const merchantAggregate = merchantTrendsFromClassifiedLeaves(monthly.classifiedLeaves || []);
+    merchantTrendsComplete = merchantTrendsConservationOk(merchantAggregate.aggregateSpendCents, totalSpend);
+    topMerchants = merchantTrendsComplete ? merchantAggregate.top : [];
+    merchantTrendsTruncated = merchantTrendsComplete && merchantAggregate.truncated;
   }
-  const topMerchants = Object.values(merchants).sort((a, b) => b.spend - a.spend).slice(0, 12);
-  const categories = Object.entries(monthly.summary?.spending || {})
-    .map(([name, spend]) => ({
-      name,
-      spend: round2(Number(spend) || 0),
-      pct: monthly.summary.totalSpend > 0 ? round2(((Number(spend) || 0) / monthly.summary.totalSpend) * 100) : 0,
-    }))
-    .sort((a, b) => b.spend - a.spend);
+  const categories = summaryComplete
+    ? Object.entries(monthly.summary?.spending || {})
+      .map(([name, spend]) => ({
+        name,
+        spend: round2(Number(spend) || 0),
+        pct: totalSpend > 0 ? round2(((Number(spend) || 0) / totalSpend) * 100) : null,
+      }))
+      .sort((a, b) => b.spend - a.spend)
+    : [];
   return {
     generatedAt,
     month,
+    completeness: mergeProjectionCompleteness([
+      monthly.summary?.completeness,
+      trends?.completeness,
+      insights?.completeness,
+    ]),
     saved: [
       { id: 'monthly-review', title: 'Monthly review', subtitle: 'Income, spend, top categories, and review tasks' },
       { id: 'merchant-trends', title: 'Merchant trends', subtitle: 'Top merchants for the selected month' },
       { id: 'tag-events', title: 'Tags and events', subtitle: 'Spend grouped by note tags and trips' },
     ],
     monthlyReview: {
-      income: monthly.summary?.totalIncome || 0,
-      spend: monthly.summary?.totalSpend || 0,
-      net: round2((monthly.summary?.totalIncome || 0) - (monthly.summary?.totalSpend || 0)),
+      income: summaryComplete ? (monthly.summary?.totalIncome || 0) : null,
+      spend: summaryComplete ? (monthly.summary?.totalSpend || 0) : null,
+      knownSpendSubtotal: summaryComplete ? undefined : monthly.summary?.knownSpendSubtotal,
+      knownIncomeSubtotal: summaryComplete ? undefined : monthly.summary?.knownIncomeSubtotal,
+      net: summaryComplete
+        ? round2((monthly.summary?.totalIncome || 0) - (monthly.summary?.totalSpend || 0))
+        : null,
+      completeness: monthly.summary?.completeness,
       transactionCount: monthly.transactions.length,
       largest: insights.largestCharges || [],
       uncategorized: insights.uncategorized || [],
     },
     categoryTrends: categories,
     merchantTrends: topMerchants,
+    categoryTrendsComplete: summaryComplete,
+    merchantTrendsComplete,
+    merchantTrendsTruncated,
     tagSummary: tags.tags || [],
     cashFlow: trends.months || [],
   };
@@ -4205,14 +6769,17 @@ async function getReports({ month } = {}) {
 }
 
 module.exports = {
-  api,
   config,
   initApi,
   getHealth,
   withApi,
+  runActualRead,
+  runActualWrite,
+  runActualRecover,
   syncNow,
   bankSync,
   resetApi,
+  shutdownApi,
   getAccounts,
   setAccountOverride,
   getManualAssets,
@@ -4226,14 +6793,25 @@ module.exports = {
   getBudgets,
   setBudgetAmount,
   getReimbursement,
+  classifyOwesTruth,
+  directReimbursementLegs,
   getOwesConfig,
   setOwesConfig,
   getReimbLinks,
   addReimbLink,
   deleteReimbLink,
+  prepareReimbLinkAdmission,
+  exportReimbursementLegacyReport,
+  buildReimbursementExport,
   getReview,
+  persistReviewStateMaintenance,
+  prepareReviewDispositionAdmission,
+  commitReviewDisposition,
+  setReviewDisposition,
   suggestRepayments,
   confirmRepayment,
+  validateRepaymentConfirmationAdmission,
+  prepareRepaymentConfirmationAdmission,
   dismissRepayment,
   undismissRepayment,
   getInsights,
@@ -4243,11 +6821,20 @@ module.exports = {
   removeSplit,
   sweepReimbursementTags,
   cleanupPhantoms,
+  getBulkOperationResult,
+  proveBulkOperationJournalCompletion,
+  proveReimbursementLinkJournalCompletion,
+  proveRepaymentConfirmationJournalCompletion,
+  assertBulkOperationJournalAdmission,
+  assertReimbursementLinkJournalAdmission,
+  assertRepaymentConfirmationJournalAdmission,
   getPhantomLog,
   addReceipt,
   getReceipts,
   getReceiptFile,
+  assertReceiptMutationAvailable,
   deleteReceipt,
+  decodeImageBase64,
   getReimbursementLedger,
   getReconciliation,
   setReconcileItem,
@@ -4255,9 +6842,19 @@ module.exports = {
   setReconcileEnabled,
   getReconcilePending,
   getTransactionById,
+  SagaInterruption,
   addableTransaction,
+  assertReconstructableTransaction,
+  assertTransactionDeletionAvailable,
+  assertTransactionMutationAvailable,
+  assertTransactionReplacementAvailable,
   transactionReplacementMap,
   replaceActualTransaction,
+  recoverTransactionDeletionSagas,
+  recoverRepaymentConfirmationSagas,
+  recoverReimbursementLinkSagas,
+  recoverBulkOperationSagas,
+  recoverTransactionSagas,
   getMerchantHistory,
   deleteTransaction,
   setPayee,
@@ -4272,6 +6869,7 @@ module.exports = {
   applyRules,
   refileSettleUps,
   validateSplitwiseMirrorSnapshot,
+  preflightSplitwiseMirrorShareSync,
   syncSplitwiseShareExpenses,
   getRecurring,
   setRecurringOverride,
@@ -4279,6 +6877,7 @@ module.exports = {
   getIncome,
   getBills,
   getForecast,
+  getToday,
   setBillPaid,
   searchTransactions,
   getTags,
@@ -4288,6 +6887,17 @@ module.exports = {
   setTransactionNotes,
   setTransactionDate,
   getGoals,
+  getGoalsWithAdvisory,
   saveGoal,
   deleteGoal,
 };
+
+Object.defineProperty(module.exports, 'api', {
+  enumerable: true,
+  get() {
+    if (process.env.ALLOW_RAW_ACTUAL_API === '1') return api;
+    throw new Error(
+      'Direct data.api access bypasses the Actual coordinator; use runActualRead/runActualWrite or set ALLOW_RAW_ACTUAL_API=1 for tests',
+    );
+  },
+});

@@ -7,6 +7,7 @@ const { spawnSync } = require('child_process');
 
 function fixture(t, dataDir) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-runner-'));
+  if (dataDir !== '/') fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   t.after(() => {
     fs.rmSync(dir, { recursive: true, force: true });
     if (dataDir !== '/') fs.rmSync(dataDir, { recursive: true, force: true });
@@ -38,4 +39,21 @@ test('filtered-only output remains successful while script failures propagate', 
   const failed = spawnSync('bash', [path.join(dir, 'run.sh'), 'fail.js'], { encoding: 'utf8' });
   assert.equal(quiet.status, 0);
   assert.equal(failed.status, 7);
+});
+
+test('run.sh sets restrictive umask before recreating private cache directory', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '..', 'run.sh'), 'utf8');
+  const umaskIndex = source.indexOf('umask 077');
+  const mkdirIndex = source.indexOf('mkdir -p "$SAFE_DATA_DIR"');
+  assert.ok(umaskIndex >= 0, 'expected umask 077');
+  assert.ok(mkdirIndex > umaskIndex, 'umask must precede private directory creation');
+});
+
+test('runner recreates FIX_DATA_DIR with mode 0700', (t) => {
+  const dataDir = `/tmp/darkfinances-runner-mode-${process.pid}`;
+  const dir = fixture(t, dataDir);
+  fs.writeFileSync(path.join(dir, 'touch.js'), 'console.log("ok");\n');
+  const result = spawnSync('bash', [path.join(dir, 'run.sh'), 'touch.js'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(fs.statSync(dataDir).mode & 0o777, 0o700);
 });

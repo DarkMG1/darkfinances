@@ -5,16 +5,22 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check dataModule.js && node --check demoData.js && node --check server.js && node --check scripts/actual-clone-smoke.js && node --check lib/date-only.js && node --check lib/errors.js && node --check lib/json-store.js && node --check lib/serial-queue.js && node --check lib/transaction-references.js && node --check lib/validation.js",
+    "check": "node --check dataModule.js && node --check demoData.js && node --check server.js && node --check scripts/actual-clone-smoke.js && node --check scripts/chart-js-vendor.js && node --check scripts/verify-chart-js-asset.js && node --check scripts/pin-chart-js-asset.js && node --check scripts/check-dashboard-install-contract.js && node --check scripts/sync-bounded-ledger-vendor.js && node --check scripts/verify-browser-manifest.js && node --check scripts/verify-no-inline-styles.js && node --check lib/browser-static.js && node --check lib/browser-style-policy.js && for file in lib/*.js lib/domain/*.js; do node --check \"$file\"; done",
     "lint": "eslint .",
-    "test": "npm run check && node --test test/*.test.js"
+    "vendor:chart-js:verify": "node scripts/verify-chart-js-asset.js",
+    "vendor:chart-js:pin": "node scripts/pin-chart-js-asset.js",
+    "vendor:bounded-ledger:sync": "node scripts/sync-bounded-ledger-vendor.js",
+    "vendor:bounded-ledger:check": "node scripts/sync-bounded-ledger-vendor.js --check",
+    "browser:manifest:verify": "node scripts/verify-browser-manifest.js",
+    "browser:style:verify": "node scripts/verify-no-inline-styles.js",
+    "test": "npm run vendor:chart-js:verify && node scripts/check-dashboard-install-contract.js && npm run browser:manifest:verify && npm run browser:style:verify && npm run check && npm run vendor:bounded-ledger:check && ALLOW_RAW_ACTUAL_API=1 node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
-    "@actual-app/api": "^26.7.0",
+    "@actual-app/api": "26.7.0",
     "@simplewebauthn/server": "^13.3.2",
     "express": "^5.2.1",
     "express-session": "^1.19.0",
@@ -25,6 +31,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "chart.js": "4.4.0",
     "eslint": "^9.39.4",
     "globals": "^14.0.0"
   }

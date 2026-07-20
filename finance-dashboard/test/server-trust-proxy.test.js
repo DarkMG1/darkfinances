@@ -1,0 +1,430 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('crypto');
+const fs = require('fs');
+const net = require('net');
+const os = require('os');
+const path = require('path');
+const { spawn } = require('child_process');
+const {
+  TRUST_SEMANTICS_ENV_KEYS,
+  finalizeTrustProxyHopsEnv,
+  parentEnvWithoutTrustSemantics,
+} = require('./helpers/ephemeral-dashboard-server');
+
+async function unusedPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      server.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
+async function waitForServer(base, child, logs) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode != null) throw new Error(`server exited early: ${logs.value}`);
+    try {
+      const response = await fetch(`${base}/auth/status`);
+      if (response.ok) return;
+    } catch (_) {}
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`server startup timeout: ${logs.value}`);
+}
+
+async function waitForExit(child, logs, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && child.exitCode == null) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return child.exitCode;
+}
+
+function baseServerEnv(port, dir, overrides = {}) {
+  const code = 'test-enrollment-code';
+  const env = {
+    ...parentEnvWithoutTrustSemantics(),
+    NODE_ENV: 'test',
+    PORT: String(port),
+    DEMO_ONLY: '1',
+    PUBLIC_ORIGIN: `http://localhost:${port}`,
+    WEBAUTHN_ORIGIN: `http://localhost:${port}`,
+    WEBAUTHN_RP_ID: 'localhost',
+    FINANCE_API_TOKEN: 'test-api-token',
+    SESSION_SECRET: 'test-session-secret-with-sufficient-length',
+    SESSION_DIR: path.join(dir, 'sessions'),
+    OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
+    PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
+    PASSKEY_ENROLLMENT_TOKEN_HASH: crypto.createHash('sha256').update(code).digest('hex'),
+    PASSKEY_ENROLLMENT_EXPIRES_AT: String(Date.now() + 60_000),
+    ...overrides,
+  };
+  return finalizeTrustProxyHopsEnv(env, overrides);
+}
+
+function spawnServer(t, env) {
+  const logs = { value: '' };
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: path.resolve(__dirname, '..'),
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (chunk) => { logs.value += chunk; });
+  child.stderr.on('data', (chunk) => { logs.value += chunk; });
+  t.after(() => {
+    if (child.exitCode == null) child.kill('SIGTERM');
+  });
+  return { child, logs };
+}
+
+async function postJson(base, pathname, body, headers = {}) {
+  const response = await fetch(`${base}${pathname}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let parsed;
+  try { parsed = JSON.parse(text); } catch (_) { parsed = text; }
+  return { response, body: parsed };
+}
+
+function writePasskeyCredentials(dir) {
+  fs.writeFileSync(path.join(dir, 'credentials.json'), JSON.stringify([{
+    credentialID: 'cred-id',
+    credentialPublicKey: Buffer.from('public-key').toString('base64'),
+    counter: 0,
+    transports: [],
+  }]));
+}
+
+test('direct exposure ignores spoofed X-Forwarded-For for enrollment rate limits', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-direct-'));
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, {
+    FINANCE_TRUST_PROXY_HOPS: '0',
+  }));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+
+  for (let i = 0; i < 10; i += 1) {
+    const result = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+      'X-Forwarded-For': `203.0.113.${i + 1}`,
+    });
+    assert.equal(result.response.status, 403, `attempt ${i + 1} should count toward the shared bucket`);
+  }
+
+  const limited = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+    'X-Forwarded-For': '203.0.113.99',
+  });
+  assert.equal(limited.response.status, 429);
+  assert.equal(limited.body.error, 'Too many requests');
+});
+
+test('trusted proxy hop honors forwarded client IP for enrollment rate limits', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-enabled-'));
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, {
+    FINANCE_TRUST_PROXY_HOPS: '1',
+  }));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+
+  for (let i = 0; i < 10; i += 1) {
+    const result = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+      'X-Forwarded-For': '198.51.100.10',
+    });
+    assert.equal(result.response.status, 403);
+  }
+  const sameClientLimited = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+    'X-Forwarded-For': '198.51.100.10',
+  });
+  assert.equal(sameClientLimited.response.status, 429);
+
+  const otherClient = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+    'X-Forwarded-For': '198.51.100.11',
+  });
+  assert.equal(otherClient.response.status, 403);
+});
+
+test('login and demo rate limits share the direct-exposure client key', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-login-demo-'));
+  writePasskeyCredentials(dir);
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, {
+    FINANCE_TRUST_PROXY_HOPS: '0',
+  }));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+
+  for (let i = 0; i < 30; i += 1) {
+    const result = await postJson(base, '/auth/login/start', {}, {
+      'X-Forwarded-For': `203.0.113.${i + 1}`,
+    });
+    assert.notEqual(result.response.status, 429, `login attempt ${i + 1} should not be limited yet`);
+  }
+  const loginLimited = await postJson(base, '/auth/login/start', {}, {
+    'X-Forwarded-For': '203.0.113.99',
+  });
+  assert.equal(loginLimited.response.status, 429);
+
+  const demoPort = await unusedPort();
+  const demoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-demo-'));
+  const { child: demoChild, logs: demoLogs } = spawnServer(t, baseServerEnv(demoPort, demoDir, {
+    FINANCE_TRUST_PROXY_HOPS: '0',
+  }));
+  t.after(() => fs.rmSync(demoDir, { recursive: true, force: true }));
+  const demoBase = `http://127.0.0.1:${demoPort}`;
+  await waitForServer(demoBase, demoChild, demoLogs);
+
+  for (let i = 0; i < 240; i += 1) {
+    const response = await fetch(`${demoBase}/api/v1/accounts`, {
+      headers: {
+        'X-Demo-Mode': '1',
+        'X-Forwarded-For': `198.51.100.${(i % 200) + 1}`,
+      },
+    });
+    assert.notEqual(response.status, 429, `demo attempt ${i + 1} should not be limited yet`);
+  }
+  const demoLimited = await fetch(`${demoBase}/api/v1/accounts`, {
+    headers: {
+      'X-Demo-Mode': '1',
+      'X-Forwarded-For': '198.51.100.250',
+    },
+  });
+  assert.equal(demoLimited.status, 429);
+});
+
+test('trusted proxy hop honors forwarded client IP for login and demo rate limits', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-trusted-login-demo-'));
+  writePasskeyCredentials(dir);
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, {
+    FINANCE_TRUST_PROXY_HOPS: '1',
+  }));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+
+  for (let i = 0; i < 30; i += 1) {
+    const result = await postJson(base, '/auth/login/start', {}, {
+      'X-Forwarded-For': '198.51.100.20',
+    });
+    assert.notEqual(result.response.status, 429, `login attempt ${i + 1} should not be limited yet`);
+  }
+  const loginLimited = await postJson(base, '/auth/login/start', {}, {
+    'X-Forwarded-For': '198.51.100.20',
+  });
+  assert.equal(loginLimited.response.status, 429);
+
+  const loginOtherClient = await postJson(base, '/auth/login/start', {}, {
+    'X-Forwarded-For': '198.51.100.21',
+  });
+  assert.notEqual(loginOtherClient.response.status, 429);
+
+  for (let i = 0; i < 240; i += 1) {
+    const response = await fetch(`${base}/api/v1/accounts`, {
+      headers: {
+        'X-Demo-Mode': '1',
+        'X-Forwarded-For': '198.51.100.30',
+      },
+    });
+    assert.notEqual(response.status, 429, `demo attempt ${i + 1} should not be limited yet`);
+  }
+  const demoLimited = await fetch(`${base}/api/v1/accounts`, {
+    headers: {
+      'X-Demo-Mode': '1',
+      'X-Forwarded-For': '198.51.100.30',
+    },
+  });
+  assert.equal(demoLimited.status, 429);
+
+  const demoOtherClient = await fetch(`${base}/api/v1/accounts`, {
+    headers: {
+      'X-Demo-Mode': '1',
+      'X-Forwarded-For': '198.51.100.31',
+    },
+  });
+  assert.notEqual(demoOtherClient.status, 429);
+});
+
+function nonLoopbackOrigin() {
+  return {
+    PUBLIC_ORIGIN: 'https://finances.example.test',
+    WEBAUTHN_ORIGIN: 'https://finances.example.test',
+    WEBAUTHN_RP_ID: 'finances.example.test',
+  };
+}
+
+function withParentTrustSemanticsExport(t, values) {
+  const saved = {};
+  for (const key of TRUST_SEMANTICS_ENV_KEYS) {
+    saved[key] = process.env[key];
+    if (Object.prototype.hasOwnProperty.call(values, key)) {
+      process.env[key] = values[key];
+    }
+  }
+  t.after(() => {
+    for (const key of TRUST_SEMANTICS_ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+}
+
+test('baseServerEnv isolates trust semantics from parent process.env', () => {
+  const saved = {};
+  for (const key of TRUST_SEMANTICS_ENV_KEYS) {
+    saved[key] = process.env[key];
+    process.env[key] = key === 'FINANCE_TRUST_PROXY_HOPS'
+      ? '1'
+      : 'https://parent.example.test';
+  }
+  try {
+    const absent = baseServerEnv(4321, '/tmp', nonLoopbackOrigin());
+    assert.equal(absent.FINANCE_TRUST_PROXY_HOPS, undefined);
+    assert.equal(absent.PUBLIC_ORIGIN, 'https://finances.example.test');
+
+    const explicit = baseServerEnv(4321, '/tmp', { FINANCE_TRUST_PROXY_HOPS: '0' });
+    assert.equal(explicit.FINANCE_TRUST_PROXY_HOPS, '0');
+    assert.equal(explicit.PUBLIC_ORIGIN, 'http://localhost:4321');
+  } finally {
+    for (const key of TRUST_SEMANTICS_ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+});
+
+test('absent FINANCE_TRUST_PROXY_HOPS starts on non-loopback with a proxy-bucket warning', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-default-prod-'));
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, nonLoopbackOrigin()));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+  assert.match(logs.value, /\[trust-proxy\].*defaulting to 0.*FINANCE_TRUST_PROXY_HOPS=1/s);
+});
+
+test('explicit FINANCE_TRUST_PROXY_HOPS=0 warns on non-loopback startup', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-explicit-zero-'));
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, {
+    ...nonLoopbackOrigin(),
+    FINANCE_TRUST_PROXY_HOPS: '0',
+  }));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+  assert.match(logs.value, /\[trust-proxy\].*FINANCE_TRUST_PROXY_HOPS=0.*FINANCE_TRUST_PROXY_HOPS=1/s);
+});
+
+test('non-loopback default hops share one bucket and resist X-Forwarded-For rotation', async (t) => {
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-shared-bucket-'));
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, nonLoopbackOrigin()));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+
+  for (let i = 0; i < 10; i += 1) {
+    const result = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+      'X-Forwarded-For': `203.0.113.${i + 1}`,
+    });
+    assert.equal(result.response.status, 403, `attempt ${i + 1} should count toward the shared bucket`);
+  }
+
+  const limited = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+    'X-Forwarded-For': '203.0.113.99',
+  });
+  assert.equal(limited.response.status, 429);
+  assert.equal(limited.body.error, 'Too many requests');
+});
+
+test('absent FINANCE_TRUST_PROXY_HOPS ignores parent FINANCE_TRUST_PROXY_HOPS=1 export', async (t) => {
+  withParentTrustSemanticsExport(t, {
+    FINANCE_TRUST_PROXY_HOPS: '1',
+    PUBLIC_ORIGIN: 'https://parent.example.test',
+  });
+
+  const port = await unusedPort();
+  const base = `http://127.0.0.1:${port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-parent-export-'));
+  const { child, logs } = spawnServer(t, baseServerEnv(port, dir, nonLoopbackOrigin()));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  await waitForServer(base, child, logs);
+  assert.match(logs.value, /\[trust-proxy\].*defaulting to 0.*FINANCE_TRUST_PROXY_HOPS=1/s);
+  assert.doesNotMatch(logs.value, /\[trust-proxy\].*FINANCE_TRUST_PROXY_HOPS=0:/);
+
+  for (let i = 0; i < 10; i += 1) {
+    const result = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+      'X-Forwarded-For': `203.0.113.${i + 1}`,
+    });
+    assert.equal(result.response.status, 403, `attempt ${i + 1} should count toward the shared bucket`);
+  }
+
+  const limited = await postJson(base, '/auth/enroll/authorize', { code: 'wrong' }, {
+    'X-Forwarded-For': '203.0.113.99',
+  });
+  assert.equal(limited.response.status, 429);
+});
+
+test('malformed trust proxy config fails startup', async (t) => {
+  const cases = [
+    {
+      name: 'non-numeric hop count',
+      env: { FINANCE_TRUST_PROXY_HOPS: 'not-a-number' },
+      pattern: /\^\[0-3\]\$/,
+    },
+    {
+      name: 'hop count above cap',
+      env: { FINANCE_TRUST_PROXY_HOPS: '99' },
+      pattern: /\^\[0-3\]\$/,
+    },
+    {
+      name: 'whitespace suffix',
+      env: { FINANCE_TRUST_PROXY_HOPS: '1 ' },
+      pattern: /\^\[0-3\]\$/,
+    },
+    {
+      name: 'hex radix',
+      env: { FINANCE_TRUST_PROXY_HOPS: '0x1' },
+      pattern: /\^\[0-3\]\$/,
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      const port = await unusedPort();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-trust-proxy-startup-'));
+      const logs = { value: '' };
+      const child = spawn(process.execPath, ['server.js'], {
+        cwd: path.resolve(__dirname, '..'),
+        env: baseServerEnv(port, dir, {
+          ...nonLoopbackOrigin(),
+          ...testCase.env,
+        }),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      child.stdout.on('data', (chunk) => { logs.value += chunk; });
+      child.stderr.on('data', (chunk) => { logs.value += chunk; });
+      t.after(() => {
+        if (child.exitCode == null) child.kill('SIGTERM');
+        fs.rmSync(dir, { recursive: true, force: true });
+      });
+
+      const exitCode = await waitForExit(child, logs);
+      assert.notEqual(exitCode, 0);
+      assert.match(logs.value, testCase.pattern);
+    });
+  }
+});

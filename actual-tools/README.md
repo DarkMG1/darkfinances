@@ -48,8 +48,9 @@ gitignored because they contain secrets and personal identity mappings.
 | `EVENTS_PATH` | Optional dashboard event sidecar override. |
 | `VENMO_TRUTH_PATH` | Optional Venmo snapshot output override. |
 
-`FIX_DATA_DIR` is removed before every `run.sh` execution. It must resolve inside `/tmp` or
-`~/.cache/actual-tools`; `/`, the home directory, and unrelated paths are rejected.
+`FIX_DATA_DIR` is removed before every `run.sh` execution. Create it first with mode `0700`; it must
+be an owned directory strictly below `/tmp` or `~/.cache/actual-tools`. The allowed roots themselves,
+missing paths, symlinks, `/`, the home directory, and unrelated paths are rejected.
 
 ### Splitwise environment
 
@@ -86,7 +87,7 @@ The runner:
 1. Sources `.actual.env` and optional `.splitwise.env`.
 2. Requires an explicit script filename that exists in this directory.
 3. Resolves and validates `FIX_DATA_DIR`.
-4. Recreates the cache with private permissions.
+4. Recreates the already-owned cache with private permissions.
 5. Runs Node with `pipefail`, preserving tool failures through output filtering.
 
 Run commands from this directory unless an example includes an absolute path.
@@ -101,9 +102,12 @@ Run commands from this directory unless an example includes an absolute path.
 | `finance-weekly.js` | Weekly recap with deterministic period boundaries and integer-cent arithmetic. |
 | `month-review.js` | Month-to-date categorized transaction audit; money movement, reimbursement, and income are summarized separately. |
 | `reimb-report.js` | Dashboard-compatible lifetime reimbursement ledger and debt summary. |
-| `actual-dump.js` | Low-level budget inspection for debugging. |
 
 All finance date boundaries use `FINANCE_TIME_ZONE`, then `TZ`, then `America/Los_Angeles`.
+Shared date-only helpers live in `lib/date-only.js` (strict `YYYY-MM-DD` values, UTC-agnostic
+calendar math, and `todayYMD()` anchored to the finance zone rather than process UTC).
+Cross-runtime parity with `finance-dashboard/lib/date-only.js` and
+`finance-app/src/lib/finance-date-core.js` is enforced by `test/finance-date-parity.test.js`.
 
 Example:
 
@@ -187,8 +191,9 @@ node trip-quickadd.js rm trip-2026
 Set `EVENTS_PATH` to override the default `../finance-dashboard/events.json`. A linked Splitwise group
 is included on the next `owes-snapshot.js` run.
 
-This helper edits the sidecar directly and therefore bypasses the dashboard mutation queue. Back up the
-file and do not run it concurrently with event edits in the app/dashboard.
+This helper edits the sidecar directly and therefore bypasses the dashboard mutation queue. It fails
+closed on malformed input and writes atomically with mode `0600`, but should still not run concurrently
+with event edits in the app/dashboard.
 
 ### Rule generation
 
@@ -229,7 +234,6 @@ COLLECTION_EVENT=trip-2026 CONFIRM=1 bash run.sh event-collect.js
 ```
 
 Transactions outside configured amount ratios are reported for manual review, not changed.
-`yosemite-collect.js` is a compatibility wrapper for older scheduled jobs.
 
 ## Safety model
 
@@ -267,6 +271,18 @@ npm run check:tools
 
 This syntax-checks every JavaScript tool and runs tests for retry handling, group resolution,
 multi-currency rejection, snapshots, CSV parsing/merging, and runner safety.
+
+## Finance Dashboard account projection parity
+
+The dashboard server (`finance-dashboard`) owns authoritative account projection for net worth,
+operating/liquid cash, spending attribution, and Splitwise mirror identity. `actual-tools` CLI
+reports read Actual directly and **do not** consume dashboard account overrides, role assignments,
+or the durable Splitwise mirror ID contract (`SPLITWISE_MIRROR_ACCOUNT_ID`, `owes-config.json`
+`mirrorAccountId`, bulk-saga `mirrorRuntime.accountId`).
+
+Until a deployment contract ships override/mirror metadata to tools, treat CLI balances and
+name-based Splitwise heuristics as **non-authoritative** relative to dashboard metrics. Do not
+invent account-name resolution in tools; configure durable mirror IDs in dashboard sidecars instead.
 
 ## License
 

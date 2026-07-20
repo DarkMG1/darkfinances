@@ -15,7 +15,7 @@ DarkFinances service.
 | --- | --- |
 | [`finance-dashboard/`](./finance-dashboard) | Express API and passkey-protected web dashboard. Owns finance calculations, Actual reads/writes, API validation, runtime sidecars, and demo fixtures. |
 | [`finance-app/`](./finance-app) | Expo/React Native client for iOS, Android, and web. Uses `expo-router`, React Query, Face ID, local notifications, receipts, and an optional widget. |
-| [`actual-tools/`](./actual-tools) | Deterministic Actual/Splitwise/Venmo reports, imports, snapshot generation, and CONFIRM-gated maintenance tools. |
+| [`actual-tools/`](./actual-tools) | Deterministic Actual/Splitwise/Venmo reports, imports, snapshot generation, and CONFIRM-gated maintenance tools. Root workspace package with pinned `@actual-app/api`. |
 | [`ops/`](./ops) | Reproducible Docker Compose, systemd, backup/restore, alerting, and log-rotation assets. |
 | [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) | Repository-wide verification on pushes and pull requests. |
 
@@ -69,8 +69,8 @@ See [`actual-tools/README.md`](./actual-tools/README.md) for setup and operation
 
 ## Requirements
 
-- Node.js 24 recommended.
-- npm with workspace support.
+- Node.js 24+ and the npm version declared in `packageManager` (`npm run check:toolchain`; CI runs `node scripts/ensure-declared-npm.js` before installs).
+- npm with workspace support (`finance-dashboard`, `finance-app`, `actual-tools`).
 - A self-hosted Actual Budget server aligned with the dashboard's `@actual-app/api` version.
 - Optional Splitwise API credentials and Venmo statement exports.
 - Xcode for iOS simulator/native compilation.
@@ -78,7 +78,20 @@ See [`actual-tools/README.md`](./actual-tools/README.md) for setup and operation
 
 ## Quick start
 
-Install workspace dependencies:
+Install workspace dependencies. When your global npm differs from the repo's declared
+`packageManager` version (for example npm 11 on Node 26), bootstrap the pinned npm before
+installing or running verification locally:
+
+```bash
+node scripts/ensure-declared-npm.js
+npm install
+```
+
+`npm run check:toolchain` rejects npm drift from `packageManager`; CI runs the same bootstrap
+step before every `npm ci`. This is a local development convenience, not part of production
+deployment.
+
+If npm already matches, `ensure-declared-npm` is a no-op:
 
 ```bash
 npm install
@@ -122,10 +135,20 @@ The package READMEs describe optional integrations separately.
 
 ## Verification
 
-Run the complete repository suite:
+Run the complete repository suite (after matching the declared npm when needed):
 
 ```bash
+node scripts/ensure-declared-npm.js
 npm run check
+```
+
+Focused gates:
+
+```bash
+npm run check:alignment
+npm run check:contract
+npm run check:fixtures
+npm run check:release
 ```
 
 Or run one area:
@@ -163,7 +186,9 @@ There are three supported delivery paths:
 3. **Unsigned IPA for Sideloadly** when local Apple signing is unavailable.
 
 The free-sideload build intentionally removes widgets, App Groups, and push-notification entitlements.
-Local notifications continue to work. See [`finance-app/README.md`](./finance-app/README.md).
+It uses the separate `free-sideload` OTA channel and `<app-version>-free-sideload` runtime so a
+full-entitlement bundle cannot reach it. Local notifications continue to work. See
+[`finance-app/README.md`](./finance-app/README.md).
 
 ## Security and privacy
 
@@ -174,11 +199,16 @@ Local notifications continue to work. See [`finance-app/README.md`](./finance-ap
 - Application security headers include CSP, frame denial, no-sniff, no-referrer, and a restrictive
   permissions policy; the HTTPS reverse proxy should add HSTS.
 - Authentication, passkey enrollment, demo access, and expensive endpoints are rate-limited.
+  Reverse-proxy production deployments should set `FINANCE_TRUST_PROXY_HOPS=1` so limits honor the
+  forwarded client address; absent values default fail-safe to `0`, ignore spoofed
+  `X-Forwarded-For`, and emit a startup warning on non-loopback hosts.
 - Sidecar JSON writes are atomic, schema-validated where applicable, and recover through last-good copies.
 - Receipt paths and MIME content are validated before storage.
 - App diagnostics redact tokens, URLs, query contents, transaction details, and personal labels.
 - The app clears scoped query data and in-flight requests, namespaces notification baselines, and
   rebuilds widget state when its server identity changes.
+- Cold offline persistence is intentionally unsupported. Data already loaded in memory is labeled
+  offline, and financial mutations are never queued for later replay.
 
 Do not expose the dashboard or Actual directly to the public internet without TLS and an additional
 trusted access layer. Do not commit generated runtime files.
@@ -187,6 +217,7 @@ trusted access layer. Do not commit generated runtime files.
 
 - [`finance-dashboard/README.md`](./finance-dashboard/README.md) — API, auth, configuration, sidecars,
   demo mode, health checks, and tests.
+- [`docs/RELEASE.md`](./docs/RELEASE.md) — release manifests, sideload vs full builds, contract/lockfile gates.
 - [`finance-app/README.md`](./finance-app/README.md) — app setup, server onboarding, iOS builds, OTA,
   widgets, notifications, diagnostics, and E2E tests.
 - [`actual-tools/README.md`](./actual-tools/README.md) — environment, tool catalog, safety model,

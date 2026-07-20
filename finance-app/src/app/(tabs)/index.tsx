@@ -1,17 +1,24 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
-import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useRouter } from 'expo-router';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
-import { useAccounts, useBankSync, useBills, useBudgets, useGoals, useIncome, useManualAssets, useRecurring, useReview, useSpending, useTrends } from '@/api/hooks/finance.hooks';
+import { useBankSync, useManualAssets, usePing, useRecurring, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { Screen } from '@/components/screen';
+import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
+import { useMutationAction } from '@/hooks/useMutationAction';
 import { Avatar, Card, CardTitle, EmptyState, ErrorState, ListRow, SectionLabel, StatCard } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { AreaChart } from '@/components/charts';
 import { Account } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { useDashboardWidgets } from '@/lib/dashboard-widgets';
-import { financeToday, monthEnd } from '@/lib/date-only';
+import { useFinanceToday } from '@/lib/date-only';
+import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
+import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { QueryRefetchBanners, refetchEnabledQueries } from '@/components/query-display';
+import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
+import { buildHomeRefetchQueries } from '@/lib/screen-query-display-config.js';
+import { formatOptionalPos } from '@/lib/money-display.js';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -25,7 +32,6 @@ const RANGES: { label: string; v: number }[] = [
 const ACTIONS: { label: string; route: string; symbol: SymbolViewProps['name']; color: string }[] = [
   { label: 'Budgets', route: '/budgets', symbol: 'chart.pie.fill', color: colors.accentLight },
   { label: 'Cash Flow', route: '/cashflow', symbol: 'arrow.left.arrow.right', color: '#06b6d4' },
-  { label: 'Reports', route: '/reports', symbol: 'doc.text.magnifyingglass', color: '#ec4899' },
   { label: 'Goals', route: '/goals', symbol: 'target', color: '#f59e0b' },
   { label: 'Who Owes Me', route: '/reimbursement', symbol: 'person.2.fill', color: '#22c55e' },
 ];
@@ -36,130 +42,246 @@ export default function Overview() {
   const [months, setMonths] = useState(12);
   const { visible: widgets } = useDashboardWidgets();
 
-  const accounts = useAccounts();
-  const spending = useSpending();
+  const today = useToday();
+  const ping = usePing();
   const trends = useTrends(months);
-  const bills = useBills();
-  const budgets = useBudgets();
   const recurring = useRecurring();
-  const income = useIncome();
-  const goals = useGoals();
   const manual = useManualAssets();
-  const review = useReview();
   const bankSync = useBankSync();
-  const reviewCount = review.data?.count ?? 0;
-  const topReview = review.data?.tasks?.[0] ?? null;
+  const bankSyncAction = useMutationAction({
+    mutation: bankSync,
+    mutationLabel: 'Bank sync',
+    onRefetch: () => today.refetch(),
+  });
+  const reviewPayload = today.data?.review;
+  const reviewKnown = reviewPayload != null;
+  const reviewCount = reviewKnown && reviewPayload.count != null ? reviewPayload.count : null;
+  const topReview = reviewKnown ? (reviewPayload.tasks?.[0] ?? null) : null;
+  const healthPayload = today.data?.health;
+  const healthKnown = healthPayload != null;
+  const healthReady = healthKnown ? healthPayload.ready === true : null;
+  const healthDotColor = ping.isError
+    ? colors.red
+    : !healthKnown
+      ? colors.muted
+      : healthReady
+        ? colors.green
+        : colors.yellow;
+  const healthStatusText = ping.isError
+    ? `Offline · showing data loaded this session · as of ${today.data?.asOf ?? today.data?.financeDate ?? 'unknown'}`
+    : !healthKnown
+      ? `Ledger status unavailable · as of ${today.data?.financeDate ?? 'unknown'}`
+      : `${healthReady ? 'Ledger ready' : 'Ledger needs attention'} · as of ${today.data?.financeDate ?? 'unknown'}`;
 
   const doBankSync = () => {
-    if (bankSync.isPending) return;
+    if (bankSyncAction.isLocked) return;
     haptics.tap();
-    bankSync.mutate(undefined, {
+    bankSyncAction.run(undefined, {
       onSuccess: (r) => {
-        haptics.success();
-        const cleared = r?.phantom?.deletedCount ?? 0;
-        if (r?.warning) Alert.alert('Synced with a warning', `Your ledger was refreshed, but the bank fetch reported: ${r.warning}`);
-        else if (cleared > 0) Alert.alert('Synced', `Removed ${cleared} stale pending charge${cleared === 1 ? '' : 's'} that fell off your card.`);
+        const result = r as { warning?: string; phantom?: { deletedCount?: number } } | undefined;
+        const cleared = result?.phantom?.deletedCount ?? 0;
+        if (result?.warning) Alert.alert('Synced with a warning', `Your ledger was refreshed, but the bank fetch reported: ${result.warning}`);
+        else if (cleared > 0) Alert.alert('Synced', `${cleared} stale pending charge${cleared === 1 ? '' : 's'} may need cleanup. Nothing was deleted.`);
       },
-      onError: (e) => { haptics.warning(); Alert.alert('Sync failed', e.error || 'Please try again.'); },
     });
   };
 
-  const refreshing = accounts.isFetching || spending.isFetching || trends.isFetching || review.isFetching;
-  const onRefresh = () => {
-    accounts.refetch();
-    spending.refetch();
-    trends.refetch();
-    bills.refetch();
-    budgets.refetch();
-    recurring.refetch();
-    income.refetch();
-    goals.refetch();
-    manual.refetch();
-    review.refetch();
-  };
+  const homeRefetchQueries = useMemo(
+    () => buildHomeRefetchQueries({ today, trends, manual, recurring, widgets }),
+    [manual, recurring, today, trends, widgets],
+  );
+  const onRefresh = () => refetchEnabledQueries(homeRefetchQueries);
 
-  const accts = (accounts.data ?? []).filter((a) => !a.hidden);
-  const acctAssets = accts.filter((a) => a.balance > 0).reduce((s, a) => s + a.balance, 0);
-  const acctLiab = accts.filter((a) => a.balance < 0).reduce((s, a) => s + a.balance, 0);
-  const assets = acctAssets + (manual.data?.assets ?? 0);
-  const liabilities = acctLiab - (manual.data?.liabilities ?? 0);
-  const netWorth = assets + liabilities;
+  const accts = (today.data?.accounts ?? []).filter((a) => !a.hidden);
+  const hasInclusion = accountsHaveInclusion(accts);
+  const manualComplete = manual.data?.complete !== false;
+  const acctAssets = accts.filter((a) => (hasInclusion ? !!a.inclusion?.netWorth && a.balance > 0 : a.balance > 0)).reduce((s, a) => s + a.balance, 0);
+  const acctLiab = accts.filter((a) => (hasInclusion ? !!a.inclusion?.netWorth && a.balance < 0 : a.balance < 0)).reduce((s, a) => s + a.balance, 0);
+  const assets = acctAssets + (manualComplete ? (manual.data?.assets ?? 0) : 0);
+  const liabilities = acctLiab - (manualComplete ? (manual.data?.liabilities ?? 0) : 0);
+  const fallbackNetWorth = assets + liabilities;
+  const resolvedNetWorth = resolveMoneyMetric(today.data?.metrics?.netWorth, fallbackNetWorth);
+  const netWorthAuthoritative = resolvedNetWorth.authoritative;
+  const netWorthIncompleteReasons = resolvedNetWorth.reasons;
+  const netWorth = netWorthAuthoritative && resolvedNetWorth.value != null
+    ? resolvedNetWorth.value
+    : (resolvedNetWorth.unavailable ? 0 : (resolvedNetWorth.value ?? fallbackNetWorth));
+  const aggregateDisplay = resolveNetWorthAggregateDisplay({
+    resolved: resolvedNetWorth,
+    assets,
+    liabilities,
+  });
 
-  const financeDate = financeToday();
-  const curMonth = financeDate.slice(0, 7);
-  const cur = spending.data?.current;
-  const prev = spending.data?.prev;
-  const net = cur ? cur.totalIncome - cur.totalSpend : 0;
-  const spendDelta = cur && prev && prev.totalSpend > 0 ? ((cur.totalSpend - prev.totalSpend) / prev.totalSpend) * 100 : null;
+  const financeToday = useFinanceToday();
+  const curMonth = financeToday.slice(0, 7);
+  const cur = today.data?.spending?.current;
+  const prev = today.data?.spending?.prev;
+  const spendingComplete = cur?.completeness?.complete !== false;
+  const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
+  const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
+  const net = totalSpend != null && totalIncome != null ? totalIncome - totalSpend : null;
+  const spendDelta = spendingComplete && cur && prev && prev.totalSpend != null && prev.totalSpend > 0 && cur.totalSpend != null
+    ? ((cur.totalSpend - prev.totalSpend) / prev.totalSpend) * 100
+    : null;
 
-  const nwPoints = (trends.data?.months ?? []).map((m) => ({ value: m.netWorth, label: m.month }));
+  const nwHist = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
+  const nwPoints = nwHist.map((m) => ({ value: m.netWorth as number, label: m.month }));
   // "This month" net-worth change ≈ now vs the previous monthly snapshot. Based on
   // synced accounts only, since manual assets have no monthly history.
-  const nwHist = trends.data?.months ?? [];
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
-  const nwDelta = prevNW != null ? acctAssets + acctLiab - prevNW : null;
+  const acctNetWorth = acctAssets + acctLiab;
+  const nwDelta = resolvedNetWorth.unavailable || prevNW == null ? null : acctNetWorth - prevNW;
 
-  const nonLiquidName = /(credit|\bcard\b|visa|mastercard|amex|sapphire|freedom|explorer|\bloan\b|mortgage|\bdebt\b|\broth\b|\bira\b|broker|invest)/i;
-  const cashName = /(check|saving|cash|money market)/i;
-  const cash = accts.filter((a) =>
-    !a.offbudget &&
-    !nonLiquidName.test(a.name) &&
-    (a.balance >= 0 || cashName.test(a.name))
-  );
-  const credit = accts.filter((a) => a.balance < 0);
-  const invest = accts.filter((a) => a.offbudget && a.balance >= 0);
+  const cash = hasInclusion
+    ? accts.filter((a) => a.inclusion?.liquidCash)
+    : accts.filter((a) => a.role === 'operating_cash' || a.role === 'protected_savings');
+  const credit = hasInclusion
+    ? accts.filter((a) => a.inclusion?.netWorth && (a.role === 'credit_card' || a.role === 'loan'))
+    : accts.filter((a) => a.role === 'credit_card' || a.role === 'loan');
+  const invest = hasInclusion
+    ? accts.filter((a) => a.inclusion?.netWorth && (a.role === 'investment' || a.role === 'excluded' || a.role === 'unknown'))
+    : accts.filter((a) => a.role === 'investment' || a.role === 'excluded' || a.role === 'unknown');
   const groups: { title: string; items: Account[] }[] = [
     { title: 'Cash', items: cash },
     { title: 'Credit & Loans', items: credit },
     { title: 'Investments & Other', items: invest },
   ].filter((g) => g.items.length);
 
-  // Safe to Spend = on-hand cash minus bills, remaining budget commitments, and
-  // this month's required goal funding.
-  const cashOnHand = cash.reduce((s, a) => s + a.balance, 0);
-  const currentMonthEnd = monthEnd(curMonth);
-  const upcomingBillsTotal = (bills.data?.bills ?? [])
-    .filter((bill) => !bill.paid && bill.dueDate >= financeDate && bill.dueDate <= currentMonthEnd)
-    .reduce((sum, bill) => sum + bill.amount, 0);
-  const billCategory = /(util|electric|power|energy|\bgas\b|water|sewer|trash|internet|cable|phone|mobile|wireless|insuranc|rent|mortgage|\bloan|subscription|membership|fitness|gym|\bhealth|software|hosting|cloud|stream|donat|charit)/i;
-  const budgetCommitments = (budgets.data?.groups ?? []).reduce(
-    (total, group) => total + group.categories
-      .filter((category) => !billCategory.test(`${group.name} ${category.name}`))
-      .reduce((sum, category) => sum + category.remaining, 0),
-    0,
-  );
-  const [currentYear, currentMonthNumber] = curMonth.split('-').map(Number);
-  const goalCommitments = (goals.data ?? []).reduce((sum, g) => {
-    const left = Math.max(0, g.target - g.current);
-    if (!left || !g.deadline || !/^\d{4}-(0[1-9]|1[0-2])$/.test(g.deadline)) return sum;
-    const [y, m] = g.deadline.split('-').map(Number);
-    const months = Math.max(1, (y - currentYear) * 12 + (m - currentMonthNumber) + 1);
-    return sum + left / months;
-  }, 0);
-  const computedSafeToSpend = cashOnHand - upcomingBillsTotal - budgetCommitments - goalCommitments;
-  const safeToSpend = Number.isFinite(computedSafeToSpend) ? computedSafeToSpend : 0;
-
-  const upcoming = (bills.data?.bills ?? []).slice(0, 3);
+  const upcoming = (today.data?.obligations?.bills ?? []).slice(0, 3);
+  const reserved = today.data?.obligations?.reserved ?? today.data?.obligationGraph?.reservations ?? [];
+  const nextIncome = today.data?.obligations?.nextIncome;
+  const safeToSpend = today.data?.liquidity?.safeToSpend;
+  const goalAdvisory = today.data?.liquidity?.goalAdvisory;
+  const incompleteReasons = safeToSpend?.incompleteReasons ?? [];
+  const todayInitialLoad = shouldShowInitialLoad(today.isLoading, today.data);
+  const todayFatal = shouldShowFatalError(today.isError, today.data);
 
   return (
-    <Screen title="dark" accent="finances" refreshing={refreshing} onRefresh={onRefresh} testID="home-screen">
-      {!accounts.data && accounts.isLoading ? (
+    <Screen title="dark" accent="finances" onRefresh={onRefresh} testID="home-screen">
+      <MutationLiveRegion message={bankSyncAction.announce} />
+      <MutationFormBanner outcome={bankSyncAction.outcome} onRetry={bankSyncAction.retry} onRefetch={onRefresh} />
+      {todayInitialLoad ? (
         <SkeletonList hero rows={4} />
-      ) : !accounts.data && accounts.isError ? (
-        <ErrorState error={accounts.error?.error} onRetry={onRefresh} />
+      ) : todayFatal ? (
+        <ErrorState error={today.error?.error} onRetry={onRefresh} />
       ) : (
         <>
+          <QueryRefetchBanners queries={homeRefetchQueries} testID="home-refetch-banner" />
+          <View testID="today-health-strip" style={styles.healthStrip}>
+            <View style={[styles.healthDot, { backgroundColor: healthDotColor }]} />
+            <Text style={styles.healthText}>{healthStatusText}</Text>
+          </View>
+
+          {reviewCount != null && reviewCount > 0 ? (
+            <Pressable testID="home-review-banner" onPress={() => { haptics.tap(); router.push('/review' as never); }} style={({ pressed }) => pressed && { opacity: 0.6 }}>
+              <Card style={{ ...styles.bannerCard, ...styles.reviewBanner }}>
+                <View style={[styles.bannerIcon, { backgroundColor: colors.yellow + '22' }]}>
+                  <SymbolView name="checklist" tintColor={colors.yellow} size={22} resizeMode="scaleAspectFit" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.bannerLabel}>Review today</Text>
+                  <Text style={styles.bannerSub}>{topReview ? `${topReview.title} · ${topReview.subtitle}` : `${reviewCount} item${reviewCount === 1 ? '' : 's'} need attention`}</Text>
+                </View>
+                <Text style={[styles.bannerValue, { color: colors.yellow }]}>{reviewCount} ›</Text>
+              </Card>
+            </Pressable>
+          ) : reviewCount === 0 ? (
+            <Card testID="home-review-all-clear" style={styles.allClearCard}>
+              <SymbolView name="checkmark.circle.fill" tintColor={colors.green} size={20} resizeMode="scaleAspectFit" />
+              <Text style={styles.allClearText}>Nothing needs review</Text>
+            </Card>
+          ) : (
+            <Card testID="home-review-unavailable" style={styles.incompleteCard}>
+              <Text style={styles.incompleteTitle}>Review status unavailable</Text>
+              <Text style={styles.incompleteText}>Today&apos;s review count is missing from the server payload.</Text>
+            </Card>
+          )}
+
+          {safeToSpend?.complete && safeToSpend.value != null ? (
+            <Card
+              testID="today-safe-to-spend"
+              style={styles.liquidityCard}
+              accessible
+              accessibilityLabel={heroMetricAccessibilityLabel('Available after this month\'s plan', fmtMoney(safeToSpend.value), safeToSpend.provenance.method)}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">AVAILABLE AFTER THIS MONTH&apos;S PLAN</Text>
+                <Text style={[styles.liquidityValue, { color: safeToSpend.value >= 0 ? colors.text : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(safeToSpend.value)}</Text>
+                <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{safeToSpend.provenance.method}</Text>
+              </View>
+              <SymbolView name="wallet.pass.fill" tintColor={colors.accentLight} size={28} resizeMode="scaleAspectFit" />
+            </Card>
+          ) : safeToSpend ? (
+            <Card testID="today-safe-to-spend-unavailable" style={styles.incompleteCard}>
+              <Text style={styles.incompleteTitle}>Safe to Spend unavailable</Text>
+              <Text style={styles.incompleteText}>Required inputs are missing or unresolved. No estimate is shown until they are complete.</Text>
+              {incompleteReasons.length ? (
+                <Text style={styles.incompleteText}>{incompleteReasons.join(' · ')}</Text>
+              ) : null}
+            </Card>
+          ) : null}
+
+          {goalAdvisory?.overAllocatedAccountCount ? (
+            <Card testID="today-goal-advisory" style={styles.incompleteCard}>
+              <Text style={styles.incompleteTitle}>Goal tracking advisory</Text>
+              <Text style={styles.incompleteText}>
+                {goalAdvisory.overAllocatedAccountCount} linked account{goalAdvisory.overAllocatedAccountCount === 1 ? '' : 's'} show allocations above current balance. This does not reduce Safe to Spend.
+              </Text>
+            </Card>
+          ) : null}
+
+          {reserved.length ? (
+            <View style={{ marginTop: 4 }}>
+              <SectionLabel>Cash Reserved</SectionLabel>
+              <Card style={styles.list}>
+                {reserved.slice(0, 4).map((item, i) => (
+                  <ListRow
+                    key={item.id}
+                    testID={`home-reserved-row-${i}`}
+                    title={item.label}
+                    subtitle={`${item.date}${item.source?.provenance ? ` · ${item.source.provenance}` : ''}`}
+                    value={fmtPos(Math.abs(item.amountCents) / 100)}
+                    chevron={false}
+                  />
+                ))}
+              </Card>
+            </View>
+          ) : null}
+
           {widgets.netWorth ? (
-            <Pressable testID="home-networth-hero" onPress={() => { haptics.tap(); router.push('/networth' as never); }} style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}>
-              <Text style={styles.heroLabel}>NET WORTH</Text>
-              <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]}>{fmtMoney(netWorth)}</Text>
+            <Pressable
+              testID="home-networth-hero"
+              accessibilityRole="button"
+              accessibilityLabel={heroMetricAccessibilityLabel(
+                'Net worth',
+                netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth)),
+                !netWorthAuthoritative && netWorthIncompleteReasons.length
+                  ? 'Local estimate hidden, server projection incomplete'
+                  : aggregateDisplay.showAggregates
+                    ? `${fmtPos(aggregateDisplay.assets!)} assets, ${fmtPos(Math.abs(aggregateDisplay.liabilities!))} liabilities`
+                    : aggregateDisplay.unavailableLabel,
+              )}
+              onPress={() => { haptics.tap(); router.push('/networth' as never); }}
+              style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}
+            >
+              <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">NET WORTH</Text>
+              <Text style={[styles.heroValue, { color: netWorth >= 0 ? colors.text : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">
+                {netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth))}
+              </Text>
+              {!netWorthAuthoritative && netWorthIncompleteReasons.length ? (
+                <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">Local estimate hidden — server projection incomplete</Text>
+              ) : null}
               <View style={styles.heroMetaRow}>
                 {nwDelta != null ? (
-                  <Text style={[styles.heroDelta, { color: nwDelta >= 0 ? colors.green : colors.red }]}>
+                  <Text style={[styles.heroDelta, { color: nwDelta >= 0 ? colors.green : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">
                     {nwDelta >= 0 ? '▲' : '▼'} {fmtPos(Math.abs(nwDelta))} this month
                   </Text>
                 ) : null}
-                <Text style={styles.heroSub}>{fmtPos(assets)} assets · {fmtPos(Math.abs(liabilities))} liabilities · details ›</Text>
+                {aggregateDisplay.showAggregates ? (
+                  <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{fmtPos(aggregateDisplay.assets!)} assets · {fmtPos(Math.abs(aggregateDisplay.liabilities!))} liabilities · details ›</Text>
+                ) : (
+                  <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{aggregateDisplay.unavailableLabel} · details ›</Text>
+                )}
               </View>
             </Pressable>
           ) : null}
@@ -185,19 +307,6 @@ export default function Overview() {
             </Card>
           ) : null}
 
-          {widgets.safeToSpend && accts.length ? (
-            <Animated.View entering={FadeInDown.duration(240)}>
-              <Card style={styles.safeCard}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.safeLabel}>SAFE TO SPEND</Text>
-                  <Text style={[styles.safeValue, { color: safeToSpend >= 0 ? colors.text : colors.red }]}>{fmtMoney(safeToSpend)}</Text>
-                  <Text style={styles.safeSub}>{fmtPos(cashOnHand)} cash - {fmtPos(upcomingBillsTotal)} bills - {fmtPos(budgetCommitments)} budgets - {fmtPos(goalCommitments)} goals</Text>
-                </View>
-                <SymbolView name="wallet.pass.fill" tintColor={colors.accentLight} size={30} resizeMode="scaleAspectFit" />
-              </Card>
-            </Animated.View>
-          ) : null}
-
           {widgets.actions ? <View style={styles.tiles}>
             {ACTIONS.map((a) => (
               <Pressable
@@ -214,43 +323,28 @@ export default function Overview() {
             ))}
           </View> : null}
 
-          {widgets.review && reviewCount > 0 ? (
-            <Pressable testID="home-review-banner" onPress={() => { haptics.tap(); router.push('/review' as never); }} style={({ pressed }) => pressed && { opacity: 0.6 }}>
-              <Card style={{ ...styles.bannerCard, ...styles.reviewBanner }}>
-                <View style={[styles.bannerIcon, { backgroundColor: colors.yellow + '22' }]}>
-                  <SymbolView name="checklist" tintColor={colors.yellow} size={22} resizeMode="scaleAspectFit" />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.bannerLabel}>Review today</Text>
-                  <Text style={styles.bannerSub}>{topReview ? `${topReview.title} · ${topReview.subtitle}` : `${reviewCount} item${reviewCount === 1 ? '' : 's'} need attention`}</Text>
-                </View>
-                <Text style={[styles.bannerValue, { color: colors.yellow }]}>{reviewCount} ›</Text>
-              </Card>
-            </Pressable>
-          ) : null}
-
           {widgets.monthlyStats ? <>
           <SectionLabel>This Month</SectionLabel>
           <View style={styles.statsRow}>
             <StatCard
               testID="home-stat-spent"
               label="Spent"
-              value={cur ? fmtPos(cur.totalSpend) : '—'}
+              value={totalSpend != null ? fmtPos(totalSpend) : 'Unavailable'}
               sub={spendDelta != null ? `${spendDelta > 0 ? '▲' : '▼'} ${Math.abs(spendDelta).toFixed(0)}% vs prev` : undefined}
               subColor={spendDelta != null ? (spendDelta > 0 ? colors.red : colors.green) : undefined}
             />
             <StatCard
               testID="home-stat-income"
               label="Income"
-              value={cur ? fmtPos(cur.totalIncome) : '—'}
+              value={totalIncome != null ? fmtPos(totalIncome) : 'Unavailable'}
               sub="sources ›"
               onPress={() => router.push(`/category/${encodeURIComponent('Income')}?month=${curMonth}` as never)}
             />
-            <StatCard testID="home-stat-net" label="Net" value={cur ? fmtMoney(net) : '—'} valueColor={net >= 0 ? colors.green : colors.red} />
+            <StatCard testID="home-stat-net" label="Net" value={net != null ? fmtMoney(net) : 'Unavailable'} valueColor={net != null && net >= 0 ? colors.green : colors.red} />
           </View>
           </> : null}
 
-          {widgets.income && (income.data?.primaryNextPay ?? income.data?.nextPayday) ? (
+          {widgets.income && nextIncome?.nextPay ? (
             <Pressable testID="home-income-banner" onPress={() => router.push('/income' as never)} style={({ pressed }) => pressed && { opacity: 0.6 }}>
               <Card style={styles.bannerCard}>
                 <View style={[styles.bannerIcon, { backgroundColor: colors.green + '22' }]}>
@@ -258,9 +352,9 @@ export default function Overview() {
                 </View>
                 <View style={{ flex: 1, paddingRight: 12 }}>
                   <Text style={styles.bannerLabel}>Next income</Text>
-                  <Text style={styles.bannerSub} numberOfLines={1}>{(income.data.primaryPayee ?? income.data.nextPaydayPayee) ?? 'Income'} · {dueLabel((income.data.primaryNextPay ?? income.data.nextPayday)!)}</Text>
+                  <Text style={styles.bannerSub} numberOfLines={1}>{nextIncome.payee || 'Income'} · estimated {dueLabel(nextIncome.nextPay, financeToday)}</Text>
                 </View>
-                <Text style={[styles.bannerValue, { color: colors.green }]}>+{fmtPos((income.data.primaryAmount ?? income.data.nextPaydayAmount) ?? 0)} ›</Text>
+                <Text style={[styles.bannerValue, { color: colors.green }]}>+{formatOptionalPos(nextIncome.amount, fmtPos)} ›</Text>
               </Card>
             </Pressable>
           ) : null}
@@ -290,7 +384,7 @@ export default function Overview() {
                     testID={`home-bill-row-${i}`}
                     avatar={<Avatar label={b.payee} category={b.category} size={34} />}
                     title={b.payee}
-                    subtitle={dueLabel(b.dueDate)}
+                    subtitle={`Estimated ${dueLabel(b.dueDate, financeToday)}`}
                     value={fmtPos(b.amount)}
                     chevron={false}
                   />
@@ -316,7 +410,7 @@ export default function Overview() {
                       testID={`home-account-${a.id}`}
                       key={a.id}
                       style={({ pressed }) => [styles.accountCard, pressed && { opacity: 0.6 }]}
-                      onPress={() => router.push({ pathname: '/account/[id]', params: { id: a.id, name: a.name, balance: String(a.balance) } })}
+                      onPress={() => router.push({ pathname: '/account/[id]', params: { id: a.id, name: a.name, balance: String(a.balance), hidden: a.hidden ? '1' : '', role: a.role } })}
                     >
                       <Card>
                         <Text style={styles.accountName} numberOfLines={1}>{a.name}</Text>
@@ -334,15 +428,15 @@ export default function Overview() {
             <Pressable
               testID="home-sync-button"
               onPress={doBankSync}
-              disabled={bankSync.isPending}
+              disabled={bankSyncAction.isLocked}
               style={({ pressed }) => [styles.syncBtn, pressed && { opacity: 0.6 }]}
             >
-              {bankSync.isPending ? (
+              {bankSyncAction.isLocked ? (
                 <ActivityIndicator color={colors.accentLight} size="small" />
               ) : (
                 <SymbolView name="arrow.triangle.2.circlepath" tintColor={colors.accentLight} size={18} resizeMode="scaleAspectFit" />
               )}
-              <Text style={styles.syncText}>{bankSync.isPending ? 'Syncing…' : 'Sync with bank'}</Text>
+              <Text style={styles.syncText}>{bankSyncAction.isLocked ? 'Syncing…' : 'Sync with bank'}</Text>
             </Pressable>
           ) : null}
         </>
@@ -352,6 +446,16 @@ export default function Overview() {
 }
 
 const styles = StyleSheet.create({
+  healthStrip: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 4, marginBottom: 12 },
+  healthDot: { width: 8, height: 8, borderRadius: 4 },
+  healthText: { color: colors.muted, fontSize: 11, fontWeight: '600' },
+  allClearCard: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 14 },
+  allClearText: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  liquidityCard: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 18 },
+  liquidityValue: { fontSize: 30, fontWeight: '800', letterSpacing: -1, marginTop: 4 },
+  incompleteCard: { marginBottom: 18, borderColor: colors.yellow + '55', borderWidth: 1 },
+  incompleteTitle: { color: colors.yellow, fontSize: 13, fontWeight: '800' },
+  incompleteText: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 4 },
   chartHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   chartHint: { color: colors.muted, fontSize: 10, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 },
   rangeRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, gap: 6 },
@@ -365,10 +469,6 @@ const styles = StyleSheet.create({
   heroMetaRow: { marginTop: 6, gap: 2 },
   heroDelta: { fontSize: 13, fontWeight: '700' },
   heroSub: { color: colors.muted, fontSize: 13 },
-  safeCard: { flexDirection: 'row', alignItems: 'center', marginBottom: 18 },
-  safeLabel: { color: colors.muted, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
-  safeValue: { fontSize: 28, fontWeight: '800', letterSpacing: -1, marginTop: 4 },
-  safeSub: { color: colors.muted, fontSize: 12, marginTop: 4 },
   tiles: { flexDirection: 'row', gap: 8, marginBottom: 20 },
   tile: { flex: 1, alignItems: 'center', gap: 8, paddingVertical: 14, backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: 14 },
   tileIcon: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },

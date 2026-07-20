@@ -50,7 +50,7 @@ independently and cannot inherit a live server token.
 From `finance-app`:
 
 ```bash
-# Every flow
+# Every flow (privacy matcher runs for the full suite lifetime)
 npm run test:e2e:ios
 
 # Onboarding, Home, Activity, and Settings
@@ -59,8 +59,11 @@ npm run test:e2e:ios:core
 # Planning, recurring items, bills, subscriptions, and goals
 npm run test:e2e:ios:planning
 
-# Review, reconciliation, reimbursement, rules, events, and transaction creation
+# Review, reconciliation, reimbursement, rules, events, transaction creation, and mutation validation
 npm run test:e2e:ios:workflows
+
+# Notification unavailable demo copy
+npm run test:e2e:ios:notification
 
 # Spending and drilldowns
 npm run test:e2e:ios:spending
@@ -80,8 +83,13 @@ From the monorepo root, `npm run test:e2e:ios` runs the complete app suite.
 Run one flow directly while iterating:
 
 ```bash
-maestro test .maestro/home-dashboard.yaml
+bash scripts/run-maestro-ios.sh .maestro/home-dashboard.yaml
 ```
+
+iOS Maestro scripts route through `scripts/run-maestro-ios.sh`, which resolves `MAESTRO_APP_ID`, enrolls
+simulator biometrics, and—when the target includes `privacy-unlock.yaml` or the full `.maestro` directory—
+posts biometric match notifications for exactly the Maestro process lifetime. Override the booted simulator
+with `DEVICE=booted` (default) or a specific UDID.
 
 ## Suite map
 
@@ -91,12 +99,16 @@ maestro test .maestro/home-dashboard.yaml
 | `home-dashboard.yaml` | Home hero, balances, and key dashboard sections. |
 | `activity-workflows.yaml` | Activity list, search/filter, and transaction routing. |
 | `settings-workflows.yaml` | Connection, privacy, notification, and diagnostic controls. |
+| `notification-settings.yaml` | Demo-mode notification unavailable copy and controls stay hidden. |
 | `planning-analytics.yaml` | Planning and analytics screens. |
 | `recurring-bills-subscriptions.yaml` | Recurring, bill, and subscription details. |
 | `goals-workflows.yaml` | Goal list and edit/create behavior. |
 | `review-reconcile-reimbursement.yaml` | Review inbox, reconciliation, and reimbursement screens. |
 | `rules-events.yaml` | Categorization rules and event/trip management. |
 | `add-transaction.yaml` | Manual transaction creation. |
+| `mutation-validation-errors.yaml` | Add-transaction client validation for amount and date fields. |
+| `mutation-validation-banner-dismiss.yaml` | Goals sheet validation banner clears after editing a field. |
+| `mutation-validation-draft-preservation.yaml` | Goals sheet keeps entered name when target validation fails. |
 | `spending-smoke.yaml` | Spending overview and lower-page sections. |
 | `spending-drilldown.yaml` | Total-spend transaction drilldown. |
 | `bills-utilities-drilldown.yaml` | Bills/Utilities category drilldown. |
@@ -115,7 +127,8 @@ npm run test:e2e:ios:privacy:animation
 ```
 
 Outputs are written under `build/privacy-animation/`. Override the booted simulator, app ID, output
-directory, or flow with `DEVICE`, `APP_ID`, `OUT_DIR`, and `FLOW`.
+directory, or flow with `DEVICE`, `APP_ID`, `OUT_DIR`, and `FLOW`. The animation script reuses
+`scripts/run-maestro-ios.sh` for biometric matching instead of a fixed-duration loop.
 
 The analyzer reports frame counts, meaningful pixel deltas, longest changing-frame run, and peak delta.
 It is a regression aid, not a substitute for human review of captured frames.
@@ -144,7 +157,7 @@ directory, which is under the ignored `build/` tree by default.
 - **Onboarding cannot reach demo:** verify the demo-only dashboard is listening on `127.0.0.1:5007`.
 - **Unexpected live-server state:** uninstall/reset the app, then rerun a flow with `clearState: true`.
 - **Deep-link Open prompt appears:** flows handle the simulator's optional **Open** confirmation.
-- **Face ID flow times out:** enroll simulator biometrics and verify biometric matching is available.
+- **Face ID flow times out:** run through `npm run test:e2e:ios:privacy` so the in-repo biometric matcher wrapper is active; do not rely on manual background `simctl` loops.
 - **Element not found:** run the single flow, inspect the Maestro hierarchy/artifacts, and prefer adding a
   stable `testID` over timing sleeps.
 - **Data-dependent row missing:** update the synthetic demo fixture and its tests; do not switch E2E to a

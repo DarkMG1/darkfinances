@@ -1,50 +1,70 @@
 import React, { useEffect, useRef } from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  AccessibilityAnnouncementEffect,
+  visibleStatusLiveRegionProps,
+} from '@/components/accessibility-live-region';
 import { usePing } from '@/api/hooks/finance.hooks';
-import { queryClient } from '@/lib/query-client';
+import { applyPingAvailabilityTransition } from '@/lib/finance-status-ping-recovery';
+import {
+  getReconnectConnectivityPhase,
+  requestReconnectServerRecovery,
+} from '@/lib/reconnect-refresh-registry';
 import { colors } from '@/theme/colors';
 
-export function FinanceStatusBanner() {
+export function FinanceStatusBanner({ top }: { top?: number }) {
   const insets = useSafeAreaInsets();
   const ping = usePing();
-  const wasUnavailable = useRef(false);
+  const bannerTop = top ?? insets.top + 4;
+  const recoveryState = useRef({ wasUnavailable: false });
+
   useEffect(() => {
-    if (ping.isError) {
-      wasUnavailable.current = true;
-      return;
+    const next = applyPingAvailabilityTransition(recoveryState.current, {
+      isError: ping.isError,
+      isSuccess: ping.isSuccess,
+      connectivityPhase: getReconnectConnectivityPhase(),
+    });
+    if (next.recoveryRequested) {
+      requestReconnectServerRecovery();
     }
-    if (ping.isSuccess && wasUnavailable.current) {
-      wasUnavailable.current = false;
-      void queryClient.invalidateQueries();
-    }
+    recoveryState.current = { wasUnavailable: next.wasUnavailable };
   }, [ping.isError, ping.isSuccess]);
+
   const syncError = ping.data?.actual?.lastError;
   if (!ping.isError && !syncError) return null;
 
   const text = ping.isError
-    ? 'Server unavailable · tap to retry'
-    : 'Finance sync needs attention · tap to retry';
+    ? 'Server unavailable \u00b7 tap to retry'
+    : 'Finance sync needs attention \u00b7 tap to retry';
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={text}
-      onPress={() => ping.refetch()}
-      style={({ pressed }) => [
-        styles.banner,
-        { top: insets.top + 4 },
-        pressed && { opacity: 0.8 },
-      ]}
-    >
-      <Text style={styles.text}>{text}</Text>
-    </Pressable>
+    <>
+      <AccessibilityAnnouncementEffect message={text} />
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={text}
+        {...visibleStatusLiveRegionProps()}
+        onPress={() => {
+          ping.refetch();
+          if (getReconnectConnectivityPhase() === 'online') {
+            requestReconnectServerRecovery();
+          }
+        }}
+        style={({ pressed }) => [
+          styles.banner,
+          { top: bannerTop },
+          pressed && { opacity: 0.8 },
+        ]}
+      >
+        <Text accessibilityElementsHidden importantForAccessibility="no" style={styles.text}>{text}</Text>
+      </Pressable>
+    </>
   );
 }
 
 const styles = StyleSheet.create({
   banner: {
     position: 'absolute',
-    zIndex: 10_000,
     alignSelf: 'center',
     maxWidth: '92%',
     borderRadius: 999,

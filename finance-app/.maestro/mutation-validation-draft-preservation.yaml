@@ -1,0 +1,34 @@
+appId: ${MAESTRO_APP_ID}
+---
+- launchApp:
+    clearState: true
+- assertVisible:
+    id: onboarding-screen
+- tapOn:
+    id: onboarding-demo-button
+- assertVisible:
+    id: home-screen
+- openLink: darkfinances:///goals
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: goals-screen
+- tapOn:
+    id: goals-add-button
+- tapOn:
+    id: goals-name-input
+- inputText: "Draft goal"
+- tapOn:
+    point: 50%,20%
+- tapOn:
+    id: goals-save-button
+- assertVisible:
+    id: goals-sheet-mutation-banner
+- assertVisible:
+    id: goals-target-error
+- assertVisible:
+    id: goals-name-input
+    text: "Draft goal"
+- assertVisible:
+    id: goals-edit-sheet

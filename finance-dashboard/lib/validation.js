@@ -1,11 +1,37 @@
 const { z } = require('zod');
 const { RequestValidationError } = require('./errors');
+const { toCents } = require('./domain/money');
+const { sanitizeIssues } = require('./request-issues');
+const {
+  RECEIPT_MAX_BASE64_CHARS,
+  RECEIPT_MAX_DECODED_BYTES,
+  exactBase64DecodedBytes,
+  isStrictBase64,
+  stripBase64Envelope,
+} = require('./receipt-limits');
 
 const nonEmpty = (max = 200) => z.string().trim().min(1).max(max);
 const optionalText = (max = 8000) => z.string().max(max).optional().nullable();
 const identifier = nonEmpty(200);
-const finiteNumber = z.coerce.number().finite();
-const money = finiteNumber.refine((value) => Math.abs(value) <= 100_000_000, 'amount is outside the supported range');
+const MAX_MONEY_DOLLARS = 100_000_000;
+const MAX_MONEY_CENTS = MAX_MONEY_DOLLARS * 100;
+const money = z.number({ invalid_type_error: 'money value must be a JSON number' })
+  .finite('money value must be finite')
+  .refine((value) => !Object.is(value, -0), 'money value must not be negative zero')
+  .refine((value) => Math.abs(value) <= MAX_MONEY_DOLLARS, 'money value is outside the supported range')
+  .refine((value) => {
+    try {
+      toCents(value);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }, 'money value must use whole cents');
+const nonNegativeCentAmount = z.number({ invalid_type_error: 'cent amount must be a JSON number' })
+  .int('cent amount must be an integer')
+  .min(0, 'cent amount must be non-negative')
+  .max(MAX_MONEY_CENTS, 'cent amount is outside the supported range')
+  .refine((value) => !Object.is(value, -0), 'cent amount must not be negative zero');
 
 function validDateOnly(value) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
@@ -20,7 +46,26 @@ function validDateOnly(value) {
 
 const dateOnly = z.string().refine(validDateOnly, 'date must be a real YYYY-MM-DD date');
 const monthOnly = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'month must be YYYY-MM');
+
+const owesTripEntry = z.object({
+  event: z.string().max(200).optional(),
+  amount: money.refine((value) => value >= 0, 'amount must be non-negative'),
+}).strict();
+
+const owesConfig = z.object({
+  expected: z.record(z.record(nonNegativeCentAmount)).optional(),
+  debtorPatterns: z.record(z.string().max(500)).optional(),
+  tripStart: z.record(dateOnly).optional(),
+  swNet: z.array(z.string().max(200)).max(1000).optional(),
+  settledExt: z.array(z.string().max(200)).max(1000).optional(),
+  autoReimbTags: z.array(z.string().max(100)).max(100).optional(),
+  eventStatus: z.record(z.string().max(80)).optional(),
+  autoDetectExcludeEvents: z.array(z.string().max(200)).max(1000).optional(),
+  manualTrips: z.record(z.array(owesTripEntry)).optional(),
+}).strict();
+
 const nullableIdentifier = identifier.optional().nullable();
+const accountRole = z.enum(['operating_cash', 'protected_savings', 'credit_card', 'loan', 'investment', 'excluded', 'unknown']);
 
 const transactionRef = z.object({
   id: identifier,
@@ -113,6 +158,26 @@ const schemas = {
     date: dateOnly,
   }).strict(),
 
+  deleteTransactionBody: z.object({
+    id: identifier.optional(),
+    accountId: identifier.optional(),
+    date: dateOnly.optional(),
+  }).strict(),
+
+  confirmRepaymentQuery: z.object({
+    from: dateOnly.optional(),
+    to: dateOnly.optional(),
+  }).strict(),
+
+  confirmRepaymentBody: z.object({
+    id: identifier.optional(),
+  }).strict(),
+
+  dismissRepaymentBody: z.object({
+    id: identifier.optional(),
+    inflowId: identifier.optional(),
+  }).strict(),
+
   budget: z.object({
     month: monthOnly.optional(),
     categoryId: identifier,
@@ -123,7 +188,35 @@ const schemas = {
     id: identifier.optional(),
     name: z.string().max(300).optional().nullable(),
     hidden: z.boolean().optional(),
-  }).strict().refine((value) => value.name !== undefined || value.hidden !== undefined, 'an override field is required'),
+    role: accountRole.optional().nullable(),
+    creditLiabilityCoverage: z.enum(['exclude', 'current_balance', 'statement']).optional().nullable(),
+    paymentRecurringKey: z.string().max(200).optional().nullable(),
+    fundingAccountId: identifier.optional().nullable(),
+    statement: z.object({
+      balanceCents: z.number().int(),
+      paymentDueDate: dateOnly,
+      observedAt: z.string().datetime(),
+    }).strict().optional().nullable(),
+    clearCreditLiability: z.boolean().optional(),
+  }).strict().refine(
+    (value) => value.name !== undefined
+      || value.hidden !== undefined
+      || value.role !== undefined
+      || value.creditLiabilityCoverage !== undefined
+      || value.paymentRecurringKey !== undefined
+      || value.fundingAccountId !== undefined
+      || value.statement !== undefined
+      || value.clearCreditLiability === true,
+    'an override field is required',
+  ),
+
+  reviewDisposition: z.object({
+    id: nonEmpty(500),
+    disposition: z.enum(['acknowledge', 'snooze', 'dismiss', 'resolved', 'clear']),
+    until: z.string().datetime().optional().nullable(),
+    note: z.string().max(1000).optional().nullable(),
+    contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional().nullable(),
+  }).strict().refine((value) => value.disposition !== 'snooze' || !!value.until, 'snooze requires an until timestamp'),
 
   manualAsset: z.object({
     id: identifier.optional(),
@@ -161,6 +254,7 @@ const schemas = {
     hidden: z.boolean().optional(),
     forced: z.boolean().optional(),
     isBill: z.boolean().optional().nullable(),
+    categoryId: identifier.optional().nullable(),
     cancellation: cancellation.optional(),
   }).strict(),
 
@@ -176,11 +270,24 @@ const schemas = {
     paid: z.boolean(),
   }).strict().refine((value) => Boolean(value.id || (value.key && value.dueDate)), 'bill id or key and dueDate are required'),
 
+  owesConfig,
+
   receipt: z.object({
     txnId: identifier,
     accountId: identifier,
     transactionDate: dateOnly,
-    imageBase64: z.string().min(1).max(34_000_000),
+    imageBase64: z.string().min(1, 'imageBase64 is required').transform(stripBase64Envelope).pipe(
+      z.string().max(RECEIPT_MAX_BASE64_CHARS).superRefine((encoded, ctx) => {
+        if (!isStrictBase64(encoded)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'invalid receipt image encoding' });
+          return;
+        }
+        const decoded = exactBase64DecodedBytes(encoded);
+        if (decoded > RECEIPT_MAX_DECODED_BYTES) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'payload exceeds the maximum allowed size' });
+        }
+      }),
+    ),
     mime: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']),
     ocrText: z.string().max(8000).optional(),
     ocrLines: z.array(z.string().max(1000)).max(200).optional(),
@@ -192,13 +299,27 @@ const schemas = {
   reimbLink: z.object({
     inflow: transactionRef,
     expense: transactionRef,
+    allocationCents: nonNegativeCentAmount.refine((value) => value > 0, 'allocationCents must be greater than zero').optional(),
     amount: money.refine((value) => value > 0, 'amount must be greater than zero').optional(),
     person: z.string().max(100).optional().nullable(),
-  }).strict(),
+    expectedVersion: z.number().int().min(0).optional(),
+  }).strict().superRefine((value, ctx) => {
+    if (value.allocationCents == null && value.amount == null) {
+      ctx.addIssue({ code: 'custom', message: 'allocationCents or amount is required' });
+      return;
+    }
+    if (value.allocationCents != null && value.amount != null) {
+      const fromAmount = Math.round(Math.abs(Number(value.amount) * 100));
+      if (fromAmount !== value.allocationCents) {
+        ctx.addIssue({ code: 'custom', message: 'allocationCents and amount must agree when both are provided' });
+      }
+    }
+  }),
 
   deleteReimbLink: z.object({
     inflowId: identifier,
     expenseId: identifier,
+    expectedVersion: z.number().int().min(0).optional(),
   }).strict(),
 
   reimbursementSweep: z.object({
@@ -235,11 +356,15 @@ const schemas = {
 function parse(schema, value, label = 'request') {
   const result = schema.safeParse(value ?? {});
   if (result.success) return result.data;
-  const issues = result.error.issues.map((issue) => ({
+  const issues = sanitizeIssues(result.error.issues.map((issue) => ({
     path: issue.path.join('.'),
     message: issue.message,
-  }));
-  const summary = issues.slice(0, 3).map((issue) => `${issue.path || label}: ${issue.message}`).join('; ');
+    code: issue.code,
+  })));
+  const summary = issues.slice(0, 3).map((issue) => {
+    if (/unknown fields are not allowed/i.test(issue.message)) return `${label}: unknown fields are not allowed`;
+    return `${issue.path || label}: ${issue.message}`;
+  }).join('; ');
   throw new RequestValidationError(`Invalid ${label}: ${summary}`, issues);
 }
 

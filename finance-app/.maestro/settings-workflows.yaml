@@ -1,10 +1,13 @@
-appId: dev.darkmg1.finances
+appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
+- assertVisible:
+    id: home-screen
 - openLink: darkfinances:///settings
 - tapOn:
     text: Open
@@ -15,6 +18,13 @@ appId: dev.darkmg1.finances
     id: settings-server-url-input
 - assertVisible:
     id: settings-token-input
+- assertVisible:
+    id: settings-save-url-button
+- tapOn:
+    id: settings-save-url-button
+    optional: true
+- assertVisible:
+    id: settings-screen
 - tapOn:
     id: settings-test-connection-button
 - assertVisible:
@@ -39,19 +49,10 @@ appId: dev.darkmg1.finances
     id: settings-reconcile-row
 - scroll
 - assertVisible:
+    id: settings-notifications-unavailable
+- assertNotVisible:
     id: settings-notif-bills
-- tapOn:
-    id: settings-notif-bills
-- tapOn:
-    id: settings-notif-bills
-- tapOn:
-    id: settings-notif-large-charge
-- assertVisible:
-    id: settings-large-charge-threshold-input
-- tapOn:
-    id: settings-large-charge-threshold-input
-- eraseText
-- inputText: 450
+    optional: true
 - tapOn:
     id: settings-check-updates-button
     optional: true

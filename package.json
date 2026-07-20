@@ -2,16 +2,36 @@
   "name": "darkfinances",
   "private": true,
   "version": "1.0.0",
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": ">=24",
+    "npm": ">=10.9.2"
+  },
   "workspaces": [
     "finance-dashboard",
-    "finance-app"
+    "finance-app",
+    "actual-tools"
   ],
   "scripts": {
-    "check": "npm run check:dashboard && npm run check:app && npm run check:tools && npm run check:ops",
+    "check": "npm run check:toolchain && npm run check:alignment && npm run check:contract && npm run check:fixtures && npm run check:dashboard && npm run check:app && npm run check:tools && npm run check:ops && npm run check:parity && npm run check:release",
+    "check:toolchain": "node scripts/check-toolchain.js",
+    "check:alignment": "node scripts/check-version-alignment.js",
+    "check:contract": "node scripts/check-contract-freshness.js",
+    "update:contract-stamp": "node scripts/update-contract-fingerprint.js",
+    "check:fixtures": "node scripts/check-finance-fixtures.js",
     "check:dashboard": "npm --prefix finance-dashboard test && npm --prefix finance-dashboard run lint",
-    "check:app": "npm --prefix finance-app test && npm --prefix finance-app run lint",
-    "check:tools": "for file in actual-tools/*.js; do node --check \"$file\"; done && node --test actual-tools/test/*.test.js",
+    "check:app": "npm --prefix finance-app test && npm --prefix finance-app run lint && node finance-app/scripts/verify-release-variant.js",
+    "check:tools": "node finance-dashboard/scripts/sync-bounded-ledger-vendor.js --check && npm --prefix actual-tools test",
     "check:ops": "for file in ops/bin/*.sh; do bash -n \"$file\"; done && node --test ops/test/*.test.js",
+    "check:parity": "node --test test/finance-date-parity.test.js",
+    "check:release": "node scripts/release-manifest.js --stdout >/dev/null",
+    "check:shell": "bash scripts/check-shell.sh",
+    "check:systemd": "for unit in ops/systemd/*.service ops/systemd/*.timer; do systemd-analyze --user verify \"$unit\"; done",
+    "check:shutdown-stress": "FINANCE_QUERY_SHUTDOWN_STRESS=1 ALLOW_RAW_ACTUAL_API=1 node --test finance-dashboard/test/query-scaling-shutdown-stress.test.js",
+    "check:compose": "docker compose -f ops/actual-compose.yml config >/dev/null",
+    "check:expo": "npm --prefix finance-app exec expo-doctor",
+    "check:browser": "npm --prefix finance-dashboard test -- --test-name-pattern 'browser dashboard'",
+    "release:manifest": "node scripts/release-manifest.js",
     "test:e2e:ios": "npm --prefix finance-app run test:e2e:ios"
   }
 }

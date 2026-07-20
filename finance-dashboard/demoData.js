@@ -3,32 +3,89 @@
 // so the dashboard / app can be shown to other people safely. Dates are computed
 // relative to "today" on each call so the demo always looks current.
 
+const { metricValue } = require('./lib/metric-provenance');
+const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
+const {
+  buildForecastProjectionContainment,
+  buildForecastStsContainment,
+  forecastContainmentWarnings,
+} = require('./lib/domain/forecast-containment');
+const {
+  buildObligationGraph,
+  forecastCashEventsFromGraph,
+  graphSummary,
+  safeToSpendFromGraph,
+} = require('./lib/domain/obligation-graph');
+const { assembleObligationGraphInputs, buildGraphTransactionInputs } = require('./lib/obligation-graph-bridge');
+const { enrichGoalsResponse } = require('./lib/domain/goal-feasibility');
+const {
+  buildCategoryInfo,
+  buildTransferIndex,
+  classifyTransactionLeaves,
+  hasActualTransferIdentity,
+  leafCountsAsRealSpend,
+  transactionLeaves,
+} = require('./lib/domain/classification');
+const { spendSummaryFromClassifiedLeaves, mergeProjectionCompleteness } = require('./lib/domain/projection-completeness');
+const { addDays, addMonths, daysBetween, daysInMonth, monthEnd, shiftMonth, todayYMD } = require('./lib/date-only');
+const {
+  inferRecurrenceSchedule,
+  nextOccurrenceAfter,
+  renewalWindow,
+} = require('./lib/recurrence');
+const { projectAllocationLedger } = require('./lib/reimbursement-export-ledger');
+const {
+  ACCOUNT_METRIC,
+  attachInclusionToAccountRow,
+  buildBalanceMetric,
+  buildNetWorthMetric,
+  projectAccounts,
+} = require('./lib/account-projection');
+
 const pad2 = (n) => String(n).padStart(2, '0');
-const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-const monthKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+const anchorDate = () => (process.env.DEMO_FINANCE_NOW ? new Date(process.env.DEMO_FINANCE_NOW) : new Date());
+const financeAnchor = () => todayYMD(anchorDate());
+const dayOfFinanceMonth = (anchor = financeAnchor()) => Number(anchor.slice(8, 10));
+const ymd = (d) => {
+  if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  return todayYMD(d instanceof Date ? d : new Date(d));
+};
+const monthKey = (d) => ymd(d).slice(0, 7);
 const round2 = (n) => Math.round(n * 100) / 100;
-function daysAgo(n) { const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - n); return d; }
-function addDays(dateStr, days) { const [y, m, dd] = dateStr.split('-').map(Number); const d = new Date(y, m - 1, dd); d.setDate(d.getDate() + days); return ymd(d); }
+function daysAgo(n) { return addDays(financeAnchor(), -n); }
 function mulberry32(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 const recurKey = (p) => (p || '').toLowerCase().replace(/[#*]?\d{3,}/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-const currentMonth = () => monthKey(new Date());
+const currentMonth = () => financeAnchor().slice(0, 7);
 const categoryById = (id) => categories().find((c) => c.id === id) || null;
 const categoryByName = (name) => categories().find((c) => c.name.toLowerCase() === String(name || '').toLowerCase()) || null;
 const monthStart = (month) => `${month}-01`;
-const monthEnd = (month) => {
-  const [y, m] = String(month).split('-').map(Number);
-  return ymd(new Date(y, m, 0));
-};
 
 // ---- Accounts -------------------------------------------------------------
 const ACCOUNTS = [
-  { id: 'acc-check', name: 'Everyday Checking', offbudget: false, balance: 4820.55 },
-  { id: 'acc-save', name: 'High-Yield Savings', offbudget: false, balance: 18450.00 },
-  { id: 'acc-credit', name: 'Sapphire Card', offbudget: false, balance: -1240.30 },
-  { id: 'acc-invest', name: 'Brokerage', offbudget: true, balance: 32160.75 },
-  { id: 'acc-roth', name: 'Roth IRA', offbudget: true, balance: 21300.00 },
+  { id: 'acc-check', name: 'Everyday Checking', offbudget: false, balance: 4820.55, role: 'operating_cash', roleSource: 'explicit' },
+  { id: 'acc-save', name: 'High-Yield Savings', offbudget: false, balance: 18450.00, role: 'protected_savings', roleSource: 'explicit' },
+  { id: 'acc-credit', name: 'Sapphire Card', offbudget: false, balance: -1240.30, role: 'credit_card', roleSource: 'explicit' },
+  { id: 'acc-invest', name: 'Brokerage', offbudget: true, balance: 32160.75, role: 'investment', roleSource: 'explicit' },
+  { id: 'acc-roth', name: 'Roth IRA', offbudget: true, balance: 21300.00, role: 'investment', roleSource: 'explicit' },
 ];
-const accounts = () => ACCOUNTS.map((a) => ({ ...a }));
+const accounts = () => {
+  const projection = demoAccountProjection(ACCOUNT_METRIC.displayList);
+  return projection.accounts.map((row) => attachInclusionToAccountRow(row));
+};
+
+function demoAccountProjection(metric) {
+  const raw = ACCOUNTS.map((account) => ({ ...account, closed: false }));
+  const balancesById = Object.fromEntries(
+    raw.map((account) => [account.id, Math.round(account.balance * 100)]),
+  );
+  return projectAccounts({
+    accountsRaw: raw,
+    balancesById,
+    overrides: {},
+    metric,
+    splitwiseMirrorAccountId: null,
+  });
+}
 
 // ---- Categories -----------------------------------------------------------
 const CATS = [
@@ -41,7 +98,23 @@ const CATS = [
   ['Shopping', 'Shopping'], ['Electronics', 'Shopping'],
   ['Gym', 'Health'], ['Pharmacy', 'Health'],
   ['Entertainment', 'Entertainment'], ['Travel', 'Travel'],
+  ['Transfer', 'Money Movement'],
 ];
+const DEMO_CLASSIFIER_PATTERNS = {
+  incomeGroup: /^income$/i,
+  moneyMovementGroup: /money movement/i,
+  moneyMovementCategory: /^(transfers?|investments?|credit\s*card\s*payments?|cc\s*payments?)$/i,
+  reimbursementCategory: /^reimbursement$/i,
+};
+const demoCategoryInfo = () => buildCategoryInfo(
+  [{ name: 'Income', is_income: true, categories: [{ id: catId('Salary'), name: 'Salary' }, { id: catId('Interest'), name: 'Interest' }] },
+    { name: 'Money Movement', categories: [{ id: catId('Transfer'), name: 'Transfer' }] },
+    ...Array.from(new Set(CATS.map(([, group]) => group))).filter((g) => g !== 'Income' && g !== 'Money Movement').map((group) => ({
+      name: group,
+      categories: CATS.filter(([, g]) => g === group).map(([name]) => ({ id: catId(name), name })),
+    }))],
+  DEMO_CLASSIFIER_PATTERNS,
+);
 const catId = (name) => 'cat-' + name.toLowerCase().replace(/[^a-z]+/g, '-');
 const categories = () => CATS.map(([name, group]) => ({ id: catId(name), name, group }));
 
@@ -49,19 +122,30 @@ const categories = () => CATS.map(([name, group]) => ({ id: catId(name), name, g
 function buildSub(payee, category, amount, daysSinceLast, occ, priceFrom) {
   const last = ymd(daysAgo(daysSinceLast));
   const history = [];
-  for (let k = occ - 1; k >= 0; k--) history.push({ date: addDays(last, -k * 30), amount: priceFrom && k >= 2 ? priceFrom : amount });
+  for (let k = occ - 1; k >= 0; k--) history.push({ date: addMonths(last, -k), amount: priceFrom && k >= 2 ? priceFrom : amount });
+  const schedule = inferRecurrenceSchedule({
+    cadence: 'monthly',
+    dates: history.map((entry) => entry.date),
+    forced: true,
+  });
+  const nextRenewal = nextOccurrenceAfter(last, schedule);
   const priceChange = priceFrom && priceFrom !== amount
     ? { from: round2(priceFrom), to: round2(amount), pct: Math.round(((amount - priceFrom) / priceFrom) * 100) } : null;
   return {
-    key: recurKey(payee), payee, category, cadence: 'monthly', amount: round2(amount), monthlyEquivalent: round2(amount),
+    key: recurKey(payee), payee, category, categoryId: catId(category), cadence: 'monthly', amount: round2(amount), monthlyEquivalent: round2(amount),
     isBill: /rent|mortgage|phone|internet|cable|utilit|electric|water|\bgas\b|sewer|trash|insuranc|\bloan/i.test(category),
-    occurrences: occ, firstCharged: history[0].date, lastCharged: last, nextRenewal: addDays(last, 30),
+    occurrences: occ, firstCharged: history[0].date, lastCharged: last, nextRenewal,
+    renewalWindow: renewalWindow(nextRenewal),
     priceChange, status: 'active', hidden: false, history,
   };
 }
 function activeSubs() {
+  const cardPayment = buildSub('Sapphire Card Payment', 'Transfer', 1240.3, 4, 6);
+  cardPayment.isBill = true;
+  cardPayment.key = recurKey('Sapphire Card Payment');
   return [
     buildSub('Skyline Apartments', 'Rent', 2100, 2, 12),
+    cardPayment,
     buildSub('Verizon Wireless', 'Phone', 85.0, 6, 11),
     buildSub('City Fiber Internet', 'Internet', 69.99, 14, 10),
     buildSub('Adobe Creative Cloud', 'Software', 54.99, 12, 9),
@@ -92,15 +176,153 @@ function recurring() {
   };
 }
 function bills() {
-  const today = ymd(new Date());
+  const today = financeAnchor();
   const within = [];
   for (const it of activeSubs()) {
     if (!it.isBill) continue; // bills view = true bills only (rent/utilities/phone/internet)
-    const diff = (new Date(it.nextRenewal) - new Date(today)) / 86400000;
+    if (!it.nextRenewal) continue;
+    const diff = daysBetween(today, it.nextRenewal);
     if (diff >= 0 && diff <= 45) within.push({ id: `${it.key}|${it.nextRenewal}`, key: it.key, payee: it.payee, amount: it.amount, dueDate: it.nextRenewal, category: it.category, cadence: it.cadence, paid: false, paidDate: null, matched: null });
   }
   within.sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1));
   return { bills: within, total: round2(within.reduce((s, b) => s + b.amount, 0)), count: within.length, unpaidCount: within.length, horizonDays: 45 };
+}
+
+function today() {
+  const asOf = new Date().toISOString();
+  const financeDate = financeAnchor();
+  const monthEndDate = monthEnd(financeDate.slice(0, 7));
+  const allAccounts = accounts();
+  const manualAssetTotals = manualAssets();
+  const operatingProjection = demoAccountProjection(ACCOUNT_METRIC.operatingCash);
+  const liquidProjection = demoAccountProjection(ACCOUNT_METRIC.liquidCash);
+  const netWorthProjection = demoAccountProjection(ACCOUNT_METRIC.netWorthLive);
+  const cash = allAccounts.filter((account) => account.inclusion?.operatingCash);
+  const cashCents = operatingProjection.accounts
+    .filter((row) => operatingProjection.includedIds.has(row.id))
+    .reduce((sum, row) => sum + row.balanceCents, 0);
+  const obligationAccounts = allAccounts.filter((account) => account.inclusion?.obligations);
+  const upcoming = bills();
+  const recurringData = recurring();
+  const incomeData = income();
+  const currentSpending = spending({});
+  const inbox = review();
+  const graphTxnInputs = buildGraphTransactionInputs(
+    transactions().map((t) => actualRowFromDemoTransaction(t)),
+    demoCategoryInfo(),
+    {
+      windowStart: financeDate,
+      windowEnd: monthEndDate,
+      accountRolesById: Object.fromEntries(allAccounts.map((account) => [account.id, account.role])),
+    },
+  );
+  const graphInputs = assembleObligationGraphInputs({
+    financeDate,
+    windowStart: financeDate,
+    windowEnd: monthEndDate,
+    accounts: obligationAccounts,
+    accountOverrides: {
+      'acc-credit': {
+        creditLiabilityCoverage: 'current_balance',
+        paymentRecurringKey: 'sapphire card payment',
+        fundingAccountId: 'acc-check',
+      },
+    },
+    recurring: recurringData,
+    income: incomeData,
+    bills: upcoming,
+    budgets: { supported: false },
+    reimb: { totalOwed: 0 },
+    operatingAccountIds: cash.map((account) => account.id),
+    transfers: graphTxnInputs.transfers,
+    economicTransactions: graphTxnInputs.economicTransactions,
+  });
+  const graph = buildObligationGraph(graphInputs);
+  const stfFromGraph = safeToSpendFromGraph(graph, {
+    operatingCashCents: cashCents,
+    monthStart: financeDate,
+    monthEnd: monthEndDate,
+  });
+  const incompleteReasons = safeToSpendIncompleteReasons({
+    accounts: allAccounts,
+    visibleAccounts: allAccounts,
+    operatingAccounts: cash,
+    budgets: { supported: false },
+    recurring: recurringData,
+    spendingCompleteness: currentSpending.current?.completeness,
+    obligationGraph: graph,
+    liabilityPolicies: graphInputs.liabilityPolicies,
+  });
+  const safeToSpend = metricValue({
+    metric: 'safe_to_spend',
+    value: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? stfFromGraph.valueCents / 100
+      : null,
+    valueCents: incompleteReasons.length === 0 && Number.isSafeInteger(stfFromGraph.valueCents)
+      ? stfFromGraph.valueCents
+      : null,
+    complete: incompleteReasons.length === 0,
+    incompleteReasons,
+    asOf,
+    financeDate,
+    sources: cash.map((account) => ({ type: 'actual-account', id: account.id, role: account.role })),
+    method: stfFromGraph.method,
+    excludes: ['possible reimbursements'],
+  });
+  const operatingCash = buildBalanceMetric({
+    projection: operatingProjection,
+    metric: 'operating_cash',
+    asOf,
+    financeDate,
+  });
+  const liquidCash = buildBalanceMetric({
+    projection: liquidProjection,
+    metric: 'liquid_cash',
+    asOf,
+    financeDate,
+  });
+  const netWorth = buildNetWorthMetric({
+    projection: netWorthProjection,
+    manualAssets: manualAssetTotals,
+    asOf,
+    financeDate,
+    metric: 'net_worth',
+  });
+  return {
+    asOf,
+    financeDate,
+    revision: `demo-${currentMonth()}-${netWorthProjection.revision}`,
+    complete: safeToSpend.complete && currentSpending.current?.completeness?.complete !== false,
+    incompleteReasons: [...new Set([
+      ...safeToSpend.incompleteReasons,
+      ...(currentSpending.current?.completeness?.complete === false ? currentSpending.current.completeness.incompleteReasons : []),
+    ])],
+    health: { ready: true, initializedAt: asOf, lastSyncAt: asOf, lastErrorAt: null, lastError: null },
+    accounts: allAccounts,
+    metrics: { netWorth, liquidCash, operatingCash },
+    scope: {
+      accountProjectionRevision: netWorthProjection.revision,
+      netWorthIncludedAccountIds: [...netWorthProjection.includedIds],
+      netWorthIncludesManualAssets: true,
+      netWorthHistoryScope: 'live_balances',
+    },
+    spending: currentSpending,
+    liquidity: { safeToSpend, goalAdvisory: buildDemoGoalAdvisory() },
+    obligationGraph: {
+      version: graph.version,
+      summary: graphSummary(graph),
+      completeness: graph.completeness,
+      reservations: (stfFromGraph.reservations || []).slice(0, 12),
+    },
+    obligations: {
+      bills: upcoming.bills.slice(0, 5),
+      nextIncome: incomeData.streams[0] || null,
+      source: graph.completeness.complete ? 'obligation-graph' : 'inferred',
+      reserved: (stfFromGraph.reservations || []).slice(0, 8),
+    },
+    review: inbox,
+    activity: { recent: transactions().slice(0, 8) },
+  };
 }
 
 // ---- Income / paycheck streams -------------------------------------------
@@ -144,8 +366,10 @@ function income() {
 }
 
 // ---- Goals ----------------------------------------------------------------
-function goals() {
-  const mk = (id, name, target, current, accountId, deadline) => ({ id, name, target, accountId: accountId || null, deadline: deadline || null, current: round2(current), pct: Math.round((current / target) * 100) });
+function seedDefaultGoals() {
+  const mk = (id, name, target, current, accountId, deadline) => ({
+    id, name, target, accountId: accountId || null, deadline: deadline || null, current: round2(current),
+  });
   return [
     mk('goal-ef', 'Emergency Fund', 20000, 18450, 'acc-save'),
     mk('goal-jp', 'Japan Trip', 6000, 2750, null, ymd(daysAgo(-150))),
@@ -153,67 +377,146 @@ function goals() {
   ];
 }
 
+function goalsList() {
+  const financeDate = financeAnchor();
+  const allAccounts = accounts();
+  const balanceCentsById = new Map(allAccounts.map((account) => [account.id, Math.round(account.balance * 100)]));
+  if (!demoState.goals) demoState.goals = seedDefaultGoals();
+  return enrichGoalsResponse({
+    goals: demoState.goals,
+    accounts: allAccounts,
+    balanceCentsById,
+    financeDate,
+  }).goals.map((goal) => ({
+    ...goal,
+    pct: goal.target > 0 ? Math.min(999, Math.round((goal.current / goal.target) * 100)) : null,
+    fundingSource: goal.accountId ? 'allocated-account' : 'manual',
+    availableInAccount: goal.accountId
+      ? Math.max(0, allAccounts.find((account) => account.id === goal.accountId)?.balance || 0)
+      : null,
+  }));
+}
+
+function buildDemoGoalAdvisory() {
+  const financeDate = financeAnchor();
+  const allAccounts = accounts();
+  const balanceCentsById = new Map(allAccounts.map((account) => [account.id, Math.round(account.balance * 100)]));
+  if (!demoState.goals) demoState.goals = seedDefaultGoals();
+  return enrichGoalsResponse({
+    goals: demoState.goals,
+    accounts: allAccounts,
+    balanceCentsById,
+    financeDate,
+  }).goalAdvisory;
+}
+
+function goals() {
+  return goalsList();
+}
+
 // ---- Spending (this month + prev) -----------------------------------------
 function summarizeTxns(start, end) {
-  const out = {};
-  let totalIncome = 0;
-  for (const t of transactions()) {
-    if (start && t.date < start) continue;
-    if (end && t.date > end) continue;
-    if (t.amount > 0) totalIncome += t.amount;
-    else if (t.category) out[t.category] = round2((out[t.category] || 0) + Math.abs(t.amount));
-  }
-  return { spending: out, totalSpend: round2(Object.values(out).reduce((s, x) => s + x, 0)), totalIncome: round2(totalIncome) };
+  const catInfo = demoCategoryInfo();
+  const allRows = transactions().map((t) => actualRowFromDemoTransaction(t));
+  const transferIndex = buildTransferIndex(allRows);
+  const classified = transactions()
+    .filter((t) => (!start || t.date >= start) && (!end || t.date <= end))
+    .flatMap((t) => {
+      const row = actualRowFromDemoTransaction(t);
+      return classifyTransactionLeaves(row.transaction, catInfo, { accountId: row.accountId, transferIndex });
+    });
+  return spendSummaryFromClassifiedLeaves(classified);
 }
+
+function actualRowFromDemoTransaction(t) {
+  const subtransactions = Array.isArray(t.subtransactions) ? t.subtransactions : null;
+  return {
+    transaction: {
+      id: t.id,
+      is_parent: !!subtransactions?.length,
+      amount: Math.round((t.amount || 0) * 100),
+      category: t.categoryId,
+      notes: t.notes,
+      transfer_id: t.transferId || null,
+      transferred_id: t.transferredId || null,
+      subtransactions: subtransactions?.map((leg) => ({
+        id: leg.id,
+        amount: Math.round((leg.amount || 0) * 100),
+        category: leg.categoryId,
+        notes: leg.notes,
+        transfer_id: leg.transferId || null,
+        transferred_id: leg.transferredId || null,
+      })),
+    },
+    accountId: t.accountId,
+  };
+}
+
 function spending(opts = {}) {
-  const now = new Date();
+  const anchor = financeAnchor();
   let start = opts.start;
   let end = opts.end;
   let key = opts.month || currentMonth();
   if (!start || !end) {
     key = opts.month || currentMonth();
     start = monthStart(key);
-    end = opts.month ? monthEnd(key) : ymd(now);
+    end = opts.month ? monthEnd(key) : anchor;
   }
-  const ms = Date.parse(`${start}T00:00:00`);
-  const me = Date.parse(`${end}T00:00:00`);
-  const span = Number.isFinite(ms) && Number.isFinite(me) ? Math.max(1, Math.round((me - ms) / 86400000) + 1) : 30;
-  const prevEnd = new Date(ms - 86400000);
-  const prevStart = new Date(prevEnd);
-  prevStart.setDate(prevEnd.getDate() - span + 1);
+  const span = Math.max(1, daysBetween(start, end) + 1);
+  const prevEnd = addDays(start, -1);
+  const prevStart = addDays(prevEnd, -(span - 1));
+  const current = summarizeTxns(start, end);
+  const previous = summarizeTxns(prevStart, prevEnd);
   return {
-    current: summarizeTxns(start, end),
-    prev: summarizeTxns(ymd(prevStart), ymd(prevEnd)),
+    current,
+    prev: previous,
     month: key || start.slice(0, 7),
+    completeness: mergeProjectionCompleteness([current.completeness, previous.completeness]),
   };
 }
 
 // ---- Trends (up to 36 months) ---------------------------------------------
 function trends(n = 12) {
-  const now = new Date();
   const out = [];
   let nw = 59000;
+  const anchorMonth = currentMonth();
+  const bounded = Math.min(36, Math.max(3, Number(n) || 12));
   for (let i = 35; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const month = shiftMonth(anchorMonth, -i);
     const rnd = mulberry32(1000 + i);
     const income = 6500 + (i % 6 === 0 ? 1600 : 0) + Math.round(rnd() * 80);
     const spend = 4300 + Math.round(rnd() * 1100);
     const net = income - spend;
     nw += net * 0.22 + (rnd() * 240 - 60);
-    out.push({ month: monthKey(d), netWorth: round2(nw), spend: round2(spend), income: round2(income), net: round2(net) });
+    out.push({ month, netWorth: round2(nw), spend: round2(spend), income: round2(income), net: round2(net) });
   }
-  return { months: out.slice(36 - Math.min(36, Math.max(3, n))) };
+  const netWorthProjection = demoAccountProjection(ACCOUNT_METRIC.netWorthHistory);
+  return {
+    months: out.slice(36 - bounded),
+    scope: {
+      includesClosedAccountHistory: true,
+      includesManualAssets: false,
+      excludedHiddenAccounts: true,
+      excludedRoles: ['excluded'],
+      netWorthHistoryComplete: true,
+      accountProjectionRevision: netWorthProjection.revision,
+      netWorthIncludedAccountIds: [...netWorthProjection.includedIds],
+      netWorthIncludedRoles: ['operating_cash', 'protected_savings', 'credit_card', 'loan', 'investment'],
+      months: bounded,
+      demoSyntheticHistory: true,
+    },
+  };
 }
 
 // ---- Budgets --------------------------------------------------------------
-function bcat(name, budgeted, spent) {
+function bcat(name, budgeted, spent, daysElapsed = dayOfFinanceMonth()) {
   const remaining = round2(budgeted - spent);
   const pct = budgeted ? Math.round((spent / budgeted) * 100) : null;
   const over = spent > budgeted;
   return {
     id: catId(name), name, budgeted, target: budgeted, spent, remaining,
     projected: round2(spent * 1.08), expectedToDate: round2(budgeted * 0.5),
-    dailyPace: round2(spent / Math.max(1, new Date().getDate())), balance: remaining, pct, over,
+    dailyPace: round2(spent / Math.max(1, daysElapsed)), balance: remaining, pct, over,
     status: over ? 'over' : pct && pct > 85 ? 'watch' : 'on_track',
     rolloverMode: 'none', rolloverAmount: 0, annualTarget: null, trueExpenseCadence: null,
     snoozedMonth: null, priority: null, linkedGoal: null,
@@ -232,6 +535,8 @@ function bgroup(name, cats) {
   };
 }
 function budgets() {
+  const month = currentMonth();
+  const elapsed = dayOfFinanceMonth();
   const groups = [
     bgroup('Housing', [bcat('Rent', 2100, 2100)]),
     bgroup('Food', [bcat('Groceries', 600, 512.34), bcat('Dining', 300, 328.9), bcat('Coffee', 60, 58.5)]),
@@ -246,12 +551,11 @@ function budgets() {
   const totalSpent = round2(groups.reduce((s, g) => s + g.spent, 0));
   const totalProjected = round2(groups.reduce((s, g) => s + g.projected, 0));
   const totalRemaining = round2(totalBudgeted - totalSpent);
-  const now = new Date();
   return {
-    month: monthKey(now), supported: true,
+    month, supported: true,
     totalBudgeted, totalTarget: totalBudgeted, totalSpent, totalRemaining, totalProjected,
-    daysInMonth: new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate(),
-    daysElapsed: now.getDate(),
+    daysInMonth: daysInMonth(month),
+    daysElapsed: elapsed,
     status: totalRemaining < 0 ? 'over' : 'on_track',
     groups,
   };
@@ -269,27 +573,54 @@ function reimbursement() {
     { event: 'ski weekend', fronted: 300, recovered: 300, net: 0, status: 'settled_venmo', n: 4, firstDate: ymd(daysAgo(82)), lastDate: ymd(daysAgo(76)), settledDate: ymd(daysAgo(64)) },
   ];
   return {
-    range: { from: ymd(daysAgo(150)), to: ymd(new Date()) },
-    totalOwed: 255.0, debtorCount: 2, owes, people: [], events, expected: [], buckets: {},
+    range: { from: ymd(daysAgo(150)), to: financeAnchor() },
+    totalOwed: {
+      value: 255.0,
+      valueCents: 25500,
+      complete: true,
+      incompleteReasons: [],
+      provenance: {
+        metric: 'reimbursement.total_owed',
+        asOf: new Date().toISOString(),
+        financeDate: financeAnchor(),
+        sources: [{ type: 'demo' }],
+        method: 'demo',
+        excludes: [],
+      },
+    },
+    debtorCount: 2,
+    owes,
+    people: [],
+    events,
+    expected: [],
+    buckets: {},
+    ledgerScan: { queriedFrom: ymd(daysAgo(150)), configuredFrom: '2000-01-01', to: financeAnchor(), complete: true },
   };
 }
 
 // ---- Insights -------------------------------------------------------------
 function insights() {
   const month = currentMonth();
-  const curTxns = transactions().filter((t) => t.date.slice(0, 7) === month);
-  const expenses = curTxns.filter((t) => t.amount < 0);
+  const catInfo = demoCategoryInfo();
+  const leaves = transactions()
+    .filter((t) => t.date.slice(0, 7) === month)
+    .flatMap((t) => classifyTransactionLeaves(actualRowFromDemoTransaction(t).transaction, catInfo, { accountId: t.accountId, transactionId: t.id })
+      .map((lf) => ({ ...lf, payee: t.payee, date: t.date })));
+  const expenses = leaves.filter((lf) => leafCountsAsRealSpend(lf));
   const byPayee = {};
-  for (const t of expenses) {
-    if (!byPayee[t.payee]) byPayee[t.payee] = { payee: t.payee, total: 0, count: 0, category: t.category };
-    byPayee[t.payee].total = round2(byPayee[t.payee].total + Math.abs(t.amount));
-    byPayee[t.payee].count += 1;
+  for (const lf of expenses) {
+    const payee = lf.payee || '(no payee)';
+    if (!byPayee[payee]) byPayee[payee] = { payee, total: 0, count: 0, category: lf.reason?.startsWith('category:') ? lf.reason.slice('category:'.length) : 'Uncategorized' };
+    byPayee[payee].total = round2(byPayee[payee].total + Math.abs(lf.amount / 100));
+    byPayee[payee].count += 1;
   }
   return {
     month,
-    largestCharges: expenses.slice().sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount)).slice(0, 5),
+    largestCharges: expenses.slice().sort((a, b) => a.amount - b.amount).slice(0, 5).map((lf) => ({
+      id: lf.id, date: lf.date, payee: lf.payee, amount: lf.amount / 100, category: lf.reason?.startsWith('category:') ? lf.reason.slice('category:'.length) : 'Uncategorized',
+    })),
     topMerchants: Object.values(byPayee).sort((a, b) => b.total - a.total).slice(0, 5),
-    uncategorized: curTxns.filter((t) => !t.category).map((t) => ({ date: t.date, payee: t.payee, amount: t.amount })),
+    uncategorized: leaves.filter((lf) => lf.kind === 'uncat' && lf.amount < 0).map((lf) => ({ date: lf.date, payee: lf.payee, amount: lf.amount / 100 })),
     recurring: [
       { payee: 'Netflix', category: 'Streaming', monthsSeen: 8, estimated: 15.49 },
       { payee: 'Spotify', category: 'Streaming', monthsSeen: 10, estimated: 11.99 },
@@ -322,8 +653,34 @@ function transactions() {
   const rnd = mulberry32(42);
   const tx = [];
   const acctName = (accId) => (ACCOUNTS.find((a) => a.id === accId) || ACCOUNTS[0]).name;
-  const push = (daysBack, payee, amount, cat, accId, notes = '') => {
-    tx.push({ id: 'tx-' + _nextTxn++, parentId: null, isLeg: false, date: ymd(daysAgo(daysBack)), payee, account: acctName(accId), accountId: accId, cleared: true, amount: round2(amount), category: cat, categoryId: cat ? catId(cat) : null, notes, imported: true });
+  const push = (daysBack, payee, amount, cat, accId, notes = '', identity = {}) => {
+    const id = identity.id || ('tx-' + _nextTxn++);
+    if (!identity.id) _nextTxn += 1;
+    const row = {
+      id,
+      parentId: null,
+      isLeg: false,
+      date: ymd(daysAgo(daysBack)),
+      payee,
+      account: acctName(accId),
+      accountId: accId,
+      cleared: true,
+      amount: round2(amount),
+      category: cat,
+      categoryId: cat ? catId(cat) : null,
+      notes,
+      imported: true,
+      transferId: identity.transferId || null,
+      transferredId: identity.transferredId || null,
+    };
+    if (identity.subtransactions) {
+      row.isSplit = true;
+      row.splitCount = identity.subtransactions.length;
+      row.category = 'Split';
+      row.categoryId = null;
+      row.subtransactions = identity.subtransactions;
+    }
+    tx.push(row);
   };
   for (const db of [1, 15, 31, 46]) push(db, 'Acme Corp Payroll', 3250, 'Salary', 'acc-check');
   push(2, 'Ally Bank Interest', 38.2, 'Interest', 'acc-save');
@@ -352,7 +709,27 @@ function transactions() {
   push(13, 'CVS Pharmacy', -18.5, 'Pharmacy', 'acc-credit');
   push(5, 'Square *Vendor', -22.4, null, 'acc-credit', '#work');
   push(18, 'Venmo', -30, null, 'acc-check', '#alex');
+  const savingsXferOut = 'tx-demo-xfer-out';
+  const savingsXferIn = 'tx-demo-xfer-in';
+  push(4, 'Transfer : to High-Yield Savings', -500, 'Transfer', 'acc-check', '', { transferId: savingsXferIn, transferredId: 'acc-save' });
+  tx[tx.length - 1].id = savingsXferOut;
+  push(4, 'Transfer : from Everyday Checking', 500, 'Transfer', 'acc-save', '', { transferId: savingsXferOut, transferredId: 'acc-check' });
+  tx[tx.length - 1].id = savingsXferIn;
+  push(9, 'Transfer from Mom', -120, null, 'acc-check', 'renamed payee without Actual identity');
+  push(10, 'Wire Fee', -35, 'Shopping', 'acc-check', 'category Transfer name does not prove movement', { categoryOverride: true });
+  tx[tx.length - 1].category = 'Transfer';
+  tx[tx.length - 1].categoryId = catId('Transfer');
+  push(6, 'Split purchase', -150, null, 'acc-credit', 'mixed split', {
+    id: 'tx-demo-split-parent',
+    subtransactions: [
+      { id: 'tx-demo-split-exp', amount: -100, categoryId: catId('Shopping'), notes: 'merchandise' },
+      { id: 'tx-demo-split-xfer', amount: -50, categoryId: catId('Transfer'), transferId: 'tx-demo-split-remote', notes: 'savings leg' },
+    ],
+  });
   tx.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  for (const row of tx) {
+    row.transfer = hasActualTransferIdentity(actualRowFromDemoTransaction(row).transaction);
+  }
   _txns = tx;
   return tx;
 }
@@ -376,8 +753,7 @@ const demoState = {
 };
 
 function currentGoals() {
-  if (!demoState.goals) demoState.goals = goals();
-  return demoState.goals;
+  return goalsList();
 }
 function manualAssets() {
   const items = demoState.manualAssets.map((m) => ({ ...m }));
@@ -403,32 +779,144 @@ function investments() {
     byAccount[h.account] = round2((byAccount[h.account] || 0) + h.value);
   }
   const debts = [
-    { id: 'debt-student', name: 'Student Loan', balance: 8400, apr: 5.8, minPayment: 175, dueDate: addDays(ymd(new Date()), 18), strategy: 'avalanche', months: 54, totalInterest: 1320, payoffDate: addDays(ymd(new Date()), 54 * 30) },
-    { id: 'debt-auto', name: 'Auto Loan', balance: 6200, apr: 4.2, minPayment: 240, dueDate: addDays(ymd(new Date()), 9), strategy: 'snowball', months: 28, totalInterest: 410, payoffDate: addDays(ymd(new Date()), 28 * 30) },
+    { id: 'debt-student', name: 'Student Loan', balance: 8400, apr: 5.8, minPayment: 175, dueDate: addDays(financeAnchor(), 18), strategy: 'avalanche', months: 54, totalInterest: 1320, payoffDate: addDays(financeAnchor(), 54 * 30) },
+    { id: 'debt-auto', name: 'Auto Loan', balance: 6200, apr: 4.2, minPayment: 240, dueDate: addDays(financeAnchor(), 9), strategy: 'snowball', months: 28, totalInterest: 410, payoffDate: addDays(financeAnchor(), 28 * 30) },
   ];
   const debtTotals = { balance: round2(debts.reduce((s, d) => s + d.balance, 0)), minPayment: round2(debts.reduce((s, d) => s + d.minPayment, 0)), weightedApr: 5.1 };
   return { generatedAt: new Date().toISOString(), holdings, totals, allocation: { byAssetClass, byAccount }, debts, debtTotals };
 }
 function forecast(days = 90) {
-  const start = ymd(new Date());
-  const end = addDays(start, days);
-  const base = accounts().filter((a) => !a.offbudget && a.balance > 0).reduce((s, a) => s + a.balance, 0);
-  const events = [
-    { date: addDays(start, 7), label: 'Acme Corp Payroll', amount: 3250, kind: 'income' },
-    { date: addDays(start, 13), label: 'Skyline Apartments', amount: -2100, kind: 'bill' },
-    { date: addDays(start, 21), label: 'Budgeted spending', amount: -950, kind: 'budget' },
-    { date: addDays(start, 28), label: 'Alex reimbursement', amount: 142.5, kind: 'reimbursement' },
-  ].filter((e) => e.date <= end);
+  const todaySnapshot = today();
+  const start = financeAnchor();
+  const horizonDays = Math.min(180, Math.max(30, Number(days) || 90));
+  const end = addDays(start, horizonDays);
+  const allAccounts = accounts();
+  const cash = allAccounts.filter((account) => account.role === 'operating_cash');
+  const startBalance = round2(cash.reduce((sum, account) => sum + account.balance, 0));
+  const recurringData = recurring();
+  const incomeData = income();
+  const upcoming = bills();
+  const graphTxnInputs = buildGraphTransactionInputs(
+    transactions().map((t) => actualRowFromDemoTransaction(t)),
+    demoCategoryInfo(),
+    {
+      windowStart: start,
+      windowEnd: end,
+      accountRolesById: Object.fromEntries(allAccounts.map((account) => [account.id, account.role])),
+    },
+  );
+  const graphInputs = assembleObligationGraphInputs({
+    financeDate: start,
+    windowStart: start,
+    windowEnd: end,
+    accounts: allAccounts,
+    accountOverrides: {
+      'acc-credit': {
+        creditLiabilityCoverage: 'current_balance',
+        paymentRecurringKey: 'sapphire card payment',
+        fundingAccountId: 'acc-check',
+      },
+    },
+    recurring: recurringData,
+    income: incomeData,
+    bills: { bills: upcoming.bills.filter((bill) => bill.dueDate <= end) },
+    budgets: { supported: false },
+    reimb: { totalOwed: 0 },
+    operatingAccountIds: cash.map((account) => account.id),
+    transfers: graphTxnInputs.transfers,
+    economicTransactions: graphTxnInputs.economicTransactions,
+  });
+  const graph = buildObligationGraph(graphInputs);
+  const obligationBlocked = !todaySnapshot.obligationGraph?.completeness?.complete
+    || (todaySnapshot.incompleteReasons || []).some((reason) => String(reason).startsWith('obligation_'));
+  const withholdGraphEvents = obligationBlocked;
+  const graphEvents = !withholdGraphEvents
+    ? forecastCashEventsFromGraph(graph, { windowStart: start, windowEnd: end })
+    : [];
+  const events = graphEvents.map((event) => ({
+    date: event.date,
+    label: event.label,
+    amount: round2(event.amountCents / 100),
+    kind: event.kind,
+    sourceId: event.sourceId || null,
+    provenance: event.provenance || 'inferred',
+  })).sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
+  const byDate = new Map();
+  for (const event of events) {
+    const cents = Math.round(event.amount * 100);
+    const cur = byDate.get(event.date) || { date: event.date, inflow: 0, outflow: 0 };
+    if (cents >= 0) cur.inflow = round2(cur.inflow + event.amount);
+    else cur.outflow = round2(cur.outflow + Math.abs(event.amount));
+    byDate.set(event.date, cur);
+  }
   const points = [];
-  let bal = base;
-  for (let d = 0; d <= days; d += Math.max(1, Math.round(days / 12))) {
+  let running = startBalance;
+  const step = Math.max(1, Math.round(horizonDays / 12));
+  for (let d = 0; d <= horizonDays; d += step) {
     const date = addDays(start, d);
-    const todays = events.filter((e) => e.date <= date);
-    bal = round2(base + todays.reduce((s, e) => s + e.amount, 0) - d * 22);
-    points.push({ date, balance: bal, inflow: round2(todays.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)), outflow: round2(Math.abs(todays.filter((e) => e.amount < 0).reduce((s, e) => s + e.amount, 0))) });
+    for (const event of events) {
+      if (event.date > addDays(start, d - step) && event.date <= date) running = round2(running + event.amount);
+    }
+    const dayTotals = byDate.get(date) || { inflow: 0, outflow: 0 };
+    points.push({ date, balance: running, inflow: dayTotals.inflow, outflow: dayTotals.outflow });
+  }
+  if (points.length === 0 || points[points.length - 1].date !== end) {
+    points.push({ date: end, balance: running, inflow: 0, outflow: 0 });
   }
   const lowest = points.reduce((a, p) => (p.balance < a.balance ? p : a), points[0]);
-  return { generatedAt: new Date().toISOString(), range: { start, end, days }, startBalance: round2(base), endingBalance: points[points.length - 1].balance, lowest: { date: lowest.date, balance: lowest.balance }, totals: { inflow: round2(events.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0)), outflow: round2(Math.abs(events.filter((e) => e.amount < 0).reduce((s, e) => s + e.amount, 0))) }, points, events, warnings: lowest.balance < 1000 ? ['Projected cash gets low this period.'] : [] };
+  const stsMetric = todaySnapshot.liquidity?.safeToSpend || {};
+  const stsContainment = buildForecastStsContainment({
+    complete: stsMetric.complete === true,
+    incompleteReasons: stsMetric.incompleteReasons || [],
+  });
+  const budgetGoalReasons = stsContainment.incompleteReasons.filter((reason) =>
+    reason === 'budget_data_unavailable' || reason === 'rollover_treatment_unknown');
+  const projectionContainment = buildForecastProjectionContainment({
+    stsContainment,
+    withholdGraphEvents,
+    knownEventCount: events.length,
+  });
+  const warnings = forecastContainmentWarnings({
+    stsContainment,
+    projectionContainment,
+    obligationGraphIncompleteReasons: todaySnapshot.obligationGraph?.completeness?.incompleteReasons || [],
+    obligationSnapshotIncompleteReasons: todaySnapshot.incompleteReasons || [],
+  });
+  if (lowest.balance < 1000) warnings.push('Projected cash gets low this period.');
+  return {
+    generatedAt: new Date().toISOString(),
+    range: { start, end, days: horizonDays },
+    startBalance,
+    endingBalance: points[points.length - 1].balance,
+    lowest: { date: lowest.date, balance: lowest.balance },
+    totals: {
+      inflow: round2(events.filter((event) => event.amount > 0).reduce((sum, event) => sum + event.amount, 0)),
+      outflow: round2(Math.abs(events.filter((event) => event.amount < 0).reduce((sum, event) => sum + event.amount, 0))),
+    },
+    points,
+    events,
+    assumptions: {
+      liquidAccounts: cash.map((account) => ({ id: account.id, name: account.name })),
+      obligationGraph: {
+        ...graphSummary(graph),
+        complete: graph.completeness?.complete,
+        incompleteReasons: graph.completeness?.incompleteReasons || [],
+      },
+      graphDriven: true,
+      stsContainment,
+      projectionContainment,
+      genericBudgetTarget: budgetGoalReasons.length === 0 ? 0 : null,
+      genericBudget: {
+        target: budgetGoalReasons.length === 0 ? 0 : null,
+        remaining: budgetGoalReasons.length === 0 ? 0 : null,
+        complete: budgetGoalReasons.length === 0,
+        incompleteReasons: budgetGoalReasons,
+      },
+      billsExcludedFromGenericBudget: true,
+      reimbursementsIncluded: false,
+    },
+    warnings,
+  };
 }
 function reports() {
   const sp = spending();
@@ -446,8 +934,8 @@ function reports() {
 }
 function review() {
   const tx = transactions();
-  const uncategorized = tx.find((t) => !t.category);
-  const large = tx.find((t) => Math.abs(t.amount) > 1000 && t.amount < 0);
+  const uncategorized = tx.find((t) => !t.category && !t.transfer);
+  const large = tx.find((t) => !t.transfer && Math.abs(t.amount) > 1000 && t.amount < 0);
   const tasks = [
     uncategorized ? { id: 'review-uncat', kind: 'uncategorized', priority: 95, title: 'Categorize transaction', subtitle: 'Needs a category', action: 'categorize', amount: Math.abs(uncategorized.amount), date: uncategorized.date, transaction: uncategorized } : null,
     large ? { id: 'review-large', kind: 'large_charge', priority: 85, title: 'Large charge', subtitle: 'Review unusually large spending', action: 'open_transaction', amount: Math.abs(large.amount), date: large.date, transaction: large } : null,
@@ -459,12 +947,16 @@ function events() { return { events: demoState.events.map((e) => ({ ...e, member
 function rules() { return { rules: demoState.rules.map((r) => ({ ...r })), catalog: [{ label: 'Streaming services', type: 'subscription' }, { label: 'Coffee shops', type: 'merchant' }] }; }
 function merchantHistory({ payee = '', months = 12 } = {}) {
   const m = Math.min(36, Math.max(1, Number(months) || 12));
+  const catInfo = demoCategoryInfo();
   const out = [];
-  const now = new Date();
+  const anchorMonth = currentMonth();
   for (let i = m - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const key = monthKey(d);
-    const items = transactions().filter((t) => t.payee.toLowerCase() === String(payee).toLowerCase() && t.date.slice(0, 7) === key);
+    const key = shiftMonth(anchorMonth, -i);
+    const items = transactions()
+      .filter((t) => t.payee.toLowerCase() === String(payee).toLowerCase() && t.date.slice(0, 7) === key)
+      .flatMap((t) => classifyTransactionLeaves(actualRowFromDemoTransaction(t).transaction, catInfo, { accountId: t.accountId })
+        .filter((lf) => leafCountsAsRealSpend(lf))
+        .map((lf) => ({ id: lf.id, date: t.date, payee: t.payee, amount: lf.amount / 100, category: lf.reason?.startsWith('category:') ? lf.reason.slice('category:'.length) : 'Uncategorized' })));
     out.push({ month: key, total: round2(items.reduce((s, t) => s + Math.abs(t.amount), 0)), count: items.length, items });
   }
   const all = out.flatMap((x) => x.items);
@@ -490,9 +982,34 @@ function repaymentSuggestions() {
   const inflow = { id: 'tx-repay-demo', date: ymd(daysAgo(4)), payee: 'Venmo Alex', amount: 142.5 };
   const expense = { id: 'tx-expense-demo', date: ymd(daysAgo(20)), payee: 'Tahoe cabin share', amount: -112.5 };
   const suggestions = demoState.dismissedSuggestions.has('demo-sugg-alex') ? [] : [{ id: 'demo-sugg-alex', inflow, person: 'alex', owed: 142.5, allocations: [{ expense, amount: 112.5 }], matched: 112.5, remainder: 30, kind: 'over', score: 93, reason: 'Incoming Venmo looks like Alex paying back shared trip expenses.', createdAt: new Date().toISOString() }];
-  return { suggestions, count: suggestions.length, generatedAt: new Date().toISOString(), range: { from: ymd(daysAgo(60)), to: ymd(new Date()) } };
+  return { suggestions, count: suggestions.length, generatedAt: new Date().toISOString(), range: { from: ymd(daysAgo(60)), to: financeAnchor() } };
 }
-function receipts(txnId) { return { receipts: demoState.receipts.filter((r) => !txnId || r.txnId === txnId).map((r) => ({ ...r })) }; }
+
+function receipts(txnId) {
+  return { receipts: demoState.receipts.filter((r) => !txnId || r.txnId === txnId).map((r) => ({ ...r })) };
+}
+
+function reimbursementExport() {
+  const links = [{
+    linkKey: 'tx-repay-demo:tx-expense-demo',
+    inflow: { id: 'tx-repay-demo', date: ymd(daysAgo(4)), payee: 'Venmo Alex', amount: 142.5, accountId: 'acc-checking', account: 'Checking' },
+    expense: { id: 'tx-expense-demo', date: ymd(daysAgo(20)), payee: 'Tahoe cabin share', amount: -112.5, accountId: 'acc-credit', account: 'Credit Card' },
+    allocationCents: 11250,
+    amount: 112.5,
+    person: 'alex',
+    version: 1,
+  }];
+  return projectAllocationLedger({
+    links,
+    liveById: {
+      'tx-repay-demo': { id: 'tx-repay-demo', date: links[0].inflow.date, payee: 'Venmo Alex', amountCents: 14250, accountId: 'acc-checking', accountName: 'Checking' },
+      'tx-expense-demo': { id: 'tx-expense-demo', date: links[0].expense.date, payee: 'Tahoe cabin share', amountCents: -11250, accountId: 'acc-credit', accountName: 'Credit Card' },
+    },
+    activeSagas: [],
+    provenance: { actualGeneration: 0, release: null, linksSidecarDigest: 'demo' },
+  });
+}
+
 function reimbLinks(id) {
   const links = demoState.links.filter((l) => !id || l.inflow.id === id || l.expense.id === id);
   return {
@@ -502,18 +1019,30 @@ function reimbLinks(id) {
 }
 
 function saveGoal(input = {}) {
-  const list = currentGoals();
+  if (!demoState.goals) demoState.goals = seedDefaultGoals();
+  const list = demoState.goals;
   const id = input.id || `goal-demo-${Date.now()}`;
-  const cur = input.accountId ? accounts().find((a) => a.id === input.accountId)?.balance || 0 : 0;
-  const row = { id, name: input.name || 'Demo Goal', target: Number(input.target) || 1000, accountId: input.accountId || null, deadline: input.deadline || null, current: round2(Math.max(0, cur)), pct: Math.round((Math.max(0, cur) / Math.max(1, Number(input.target) || 1000)) * 100) };
-  const idx = list.findIndex((g) => g.id === id);
+  const existing = list.find((goal) => goal.id === id);
+  const current = input.current != null
+    ? round2(Math.max(0, Number(input.current) || 0))
+    : round2(Math.max(0, Number(existing?.current) || 0));
+  const row = {
+    id,
+    name: input.name || existing?.name || 'Demo Goal',
+    target: Number(input.target) || existing?.target || 1000,
+    accountId: input.accountId !== undefined ? (input.accountId || null) : (existing?.accountId || null),
+    deadline: input.deadline !== undefined ? (input.deadline || null) : (existing?.deadline || null),
+    current,
+  };
+  const idx = list.findIndex((goal) => goal.id === id);
   if (idx >= 0) list[idx] = row; else list.push(row);
-  return { ok: true, id };
+  const saved = goalsList().find((goal) => goal.id === id);
+  return { ok: true, id, feasibility: saved?.feasibility || null };
 }
 function deleteGoal(id) { demoState.goals = currentGoals().filter((g) => g.id !== id); return { ok: true, removed: 1 }; }
 function saveManualAsset(input = {}) {
   const id = input.id || `manual-demo-${Date.now()}`;
-  const row = { id, name: input.name || 'Demo asset', value: round2(Number(input.value) || 0), kind: input.kind === 'liability' ? 'liability' : 'asset', updated: ymd(new Date()) };
+  const row = { id, name: input.name || 'Demo asset', value: round2(Number(input.value) || 0), kind: input.kind === 'liability' ? 'liability' : 'asset', updated: financeAnchor() };
   const idx = demoState.manualAssets.findIndex((m) => m.id === id);
   if (idx >= 0) demoState.manualAssets[idx] = row; else demoState.manualAssets.push(row);
   return { ok: true, id };
@@ -521,14 +1050,14 @@ function saveManualAsset(input = {}) {
 function deleteManualAsset(id) { demoState.manualAssets = demoState.manualAssets.filter((m) => m.id !== id); return { ok: true, removed: 1 }; }
 function saveRule(input = {}) {
   const id = `rule-demo-${Date.now()}`;
-  const row = { id, match: input.match || 'Demo', categoryId: input.categoryId || catId('Shopping'), categoryName: input.categoryName || categoryById(input.categoryId)?.name || 'Shopping', created: ymd(new Date()) };
+  const row = { id, match: input.match || 'Demo', categoryId: input.categoryId || catId('Shopping'), categoryName: input.categoryName || categoryById(input.categoryId)?.name || 'Shopping', created: financeAnchor() };
   demoState.rules.push(row);
   return { ok: true, id, applied: 1 };
 }
 function deleteRule(id) { demoState.rules = demoState.rules.filter((r) => r.id !== id); return { ok: true, removed: 1 }; }
 function saveEvent(input = {}) {
   const slug = input.slug || String(input.name || 'demo-event').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `event-${Date.now()}`;
-  const event = { slug, name: input.name || 'Demo Event', start: input.start || ymd(new Date()), members: String(input.members || '').split(',').map((s) => s.trim()).filter(Boolean), group: input.group || '', created: ymd(new Date()), taggedCount: 0 };
+  const event = { slug, name: input.name || 'Demo Event', start: input.start || financeAnchor(), members: String(input.members || '').split(',').map((s) => s.trim()).filter(Boolean), group: input.group || '', created: financeAnchor(), taggedCount: 0 };
   const idx = demoState.events.findIndex((e) => e.slug === slug);
   if (idx >= 0) demoState.events[idx] = event; else demoState.events.push(event);
   return { ok: true, event };
@@ -537,7 +1066,7 @@ function deleteEvent(slug) { demoState.events = demoState.events.filter((e) => e
 function createTransaction(input = {}) {
   const account = accounts().find((a) => a.id === input.accountId) || accounts()[0];
   const cat = categoryById(input.categoryId);
-  const row = { id: `tx-${_nextTxn++}`, parentId: null, isLeg: false, date: input.date || ymd(new Date()), payee: input.payee || 'Manual transaction', account: account.name, accountId: account.id, cleared: true, amount: round2(Number(input.amount) || 0), category: cat?.name || null, categoryId: cat?.id || null, notes: input.notes || '', imported: false };
+  const row = { id: `tx-${_nextTxn++}`, parentId: null, isLeg: false, date: input.date || financeAnchor(), payee: input.payee || 'Manual transaction', account: account.name, accountId: account.id, cleared: true, amount: round2(Number(input.amount) || 0), category: cat?.name || null, categoryId: cat?.id || null, notes: input.notes || '', imported: false };
   transactions().unshift(row);
   return { ok: true, id: row.id };
 }
@@ -576,8 +1105,8 @@ function deleteReceipt(id) { demoState.receipts = demoState.receipts.filter((r) 
 
 module.exports = {
   accounts, transactions, spending, trends, budgets, reimbursement, insights, categories, recurring, bills, income,
-  goals: currentGoals, tags, manualAssets, investments, forecast, reports, review, events, rules, merchantHistory,
-  transactionDetail, reconciliation, reconcilePending, repaymentSuggestions, receipts, reimbLinks,
+  goals, tags, manualAssets, investments, forecast, reports, review, today, events, rules, merchantHistory,
+  transactionDetail, reconciliation, reconcilePending, repaymentSuggestions, receipts, reimbLinks, reimbursementExport,
   saveGoal, deleteGoal, saveManualAsset, deleteManualAsset, saveRule, deleteRule, saveEvent, deleteEvent,
   createTransaction, updateTransaction, splitTransaction, unsplitTransaction, deleteTransaction,
   addReimbLink, deleteReimbLink, confirmRepayment, dismissRepayment, setReconcileItem, setReconcileMonth,
