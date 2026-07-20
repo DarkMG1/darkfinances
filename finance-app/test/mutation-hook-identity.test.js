@@ -70,9 +70,11 @@ test('hook sources reset pending locks and guard callbacks on identity change', 
   const identityHook = require('fs').readFileSync(require('path').join(__dirname, '../src/hooks/useMutationHookIdentity.ts'), 'utf8');
   assert.match(identityHook, /prevIdentityKeyRef/);
   assert.match(identityHook, /if \(prevIdentityKeyRef\.current !== identityKey\)/);
-  assert.match(identityHook, /bumpMutationHookEpoch\(epochRef\)/);
-  assert.match(identityHook, /invalidateMutationDispatch\(dispatchIdRef, epochRef\)/);
-  assert.match(identityHook, /resetMutationHookPendingLock/);
+  assert.match(identityHook, /bumpMutationHookEpoch\(epochRef\.current\)/);
+  assert.match(identityHook, /invalidateMutationDispatch\(dispatchIdRef\.current, epochRef\.current\)/);
+  assert.match(identityHook, /captureMutationDispatchToken\(\s*epochRef\.current,\s*dispatchIdRef\.current/);
+  assert.match(identityHook, /pendingLockRef\.current = pendingLockKind === 'counter' \? 0 : false/);
+  assert.doesNotMatch(identityHook, /captureMutationDispatchToken\(epochRef, dispatchIdRef/);
   assert.doesNotMatch(identityHook, /useEffect\(\(\) => \{\s*bumpMutationHookEpoch/);
   assert.match(identityHook, /useEffect\(\(\) => \(\) => \{/);
 });

@@ -198,7 +198,7 @@ export default function CategoryDetail() {
                 }}
                 style={({ pressed }) => [styles.sortPill, pressed && { opacity: 0.7 }]}
               >
-                <Text style={styles.sortText}>{SORTS.find((s) => s.key === sort)?.label ?? 'Date: Newest'}</Text>
+                <Text testID="category-sort-control-label" style={styles.sortText}>{SORTS.find((s) => s.key === sort)?.label ?? 'Date: Newest'}</Text>
                 <SymbolView name="chevron.down" tintColor={colors.text} size={10} resizeMode="scaleAspectFit" />
               </Pressable>
             </View>
@@ -307,20 +307,38 @@ function MiniCategoryBars({ months, selected, onSelect }: { months: { month: str
 }
 
 function SortSheet({ visible, value, onSelect, onClose }: { visible: boolean; value: SortKey; onSelect: (key: SortKey) => void; onClose: () => void }) {
+  const insets = useSafeAreaInsets();
+  if (!visible) return null;
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable testID="category-sort-sheet-backdrop" style={styles.sheetBackdrop} onPress={onClose}>
-        <Pressable testID="category-sort-sheet" style={styles.sheetCard} onPress={() => undefined}>
+    <Modal visible transparent animationType="fade" onRequestClose={onClose} accessibilityViewIsModal>
+      <View style={styles.sheetRoot}>
+        <View pointerEvents="none" style={styles.sheetDim} />
+        <Pressable
+          testID="category-sort-sheet-backdrop"
+          style={styles.sheetBackdrop}
+          onPress={onClose}
+          accessibilityRole="button"
+          accessibilityLabel="Dismiss sort sheet"
+        />
+        <View
+          testID="category-sort-sheet"
+          accessible={false}
+          importantForAccessibility="no"
+          style={[styles.sheetCard, { paddingBottom: insets.bottom + 16 }]}
+        >
           <View style={styles.sheetHandle} />
-          <Text style={styles.sheetTitle}>Sort transactions</Text>
+          <Text accessibilityRole="header" style={styles.sheetTitle}>Sort transactions</Text>
           {SORTS.map((option) => {
             const selected = option.key === value;
             return (
               <Pressable
                 key={option.key}
                 testID={`category-sort-option-${option.key}`}
+                accessibilityRole="button"
                 accessibilityLabel={option.label}
+                accessibilityState={{ selected }}
                 onPress={() => onSelect(option.key)}
+                hitSlop={4}
                 style={({ pressed }) => [styles.sheetOption, pressed && { opacity: 0.7 }]}
               >
                 <Text style={[styles.sheetOptionText, selected && styles.sheetOptionTextOn]}>{option.label}</Text>
@@ -328,8 +346,8 @@ function SortSheet({ visible, value, onSelect, onClose }: { visible: boolean; va
               </Pressable>
             );
           })}
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
@@ -367,8 +385,10 @@ const styles = StyleSheet.create({
   footer: { position: 'absolute', left: 14, right: 14, minHeight: 50, paddingHorizontal: 16, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16 },
   footerLabel: { color: colors.muted, fontSize: 13, fontWeight: '700' },
   footerValue: { color: colors.text, fontSize: 17, fontWeight: '900' },
-  sheetBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.48)' },
-  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, borderColor: colors.border, borderWidth: 1, paddingHorizontal: 18, paddingTop: 10, paddingBottom: 28 },
+  sheetRoot: { flex: 1, justifyContent: 'flex-end' },
+  sheetDim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.48)' },
+  sheetBackdrop: { flex: 1, alignSelf: 'stretch' },
+  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, borderColor: colors.border, borderWidth: 1, paddingHorizontal: 18, paddingTop: 10 },
   sheetHandle: { alignSelf: 'center', width: 42, height: 4, borderRadius: 2, backgroundColor: colors.border, marginBottom: 16 },
   sheetTitle: { color: colors.text, fontSize: 18, fontWeight: '800', marginBottom: 10 },
   sheetOption: { minHeight: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },

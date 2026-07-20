@@ -1,0 +1,38 @@
+appId: ${MAESTRO_APP_ID}
+---
+# Client validation banner: no retry action; editing a field invalidates/dismisses the banner.
+- launchApp:
+    clearState: true
+- assertVisible:
+    id: onboarding-screen
+- tapOn:
+    id: onboarding-demo-button
+- assertVisible:
+    id: home-screen
+- openLink: darkfinances:///goals
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: goals-screen
+- tapOn:
+    id: goals-add-button
+- tapOn:
+    id: goals-save-button
+- assertVisible:
+    id: goals-sheet-mutation-banner
+- assertVisible:
+    id: goals-name-error
+- assertNotVisible:
+    id: goals-sheet-mutation-banner-action
+- tapOn:
+    id: goals-name-input
+- inputText: "Retry draft"
+- tapOn:
+    point: 50%,20%
+- assertNotVisible:
+    id: goals-sheet-mutation-banner
+- assertNotVisible:
+    id: goals-name-error
+- assertVisible:
+    id: goals-edit-sheet

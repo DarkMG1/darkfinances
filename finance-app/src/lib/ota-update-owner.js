@@ -30,6 +30,7 @@ function createOtaUpdateOwner(deps) {
   const getNativePending = deps.getNativePending ?? (() => ({ pending: false, updateId: null }));
 
   let state = createInitialOtaUpdateState({ supported: deps.isSupported() });
+  let snapshot = Object.freeze(cloneState(state));
   const listeners = new Set();
   let lastAutoCheckAt = 0;
   let appActive = true;
@@ -65,6 +66,17 @@ function createOtaUpdateOwner(deps) {
     for (const listener of listeners) listener();
   }
 
+  function publishSnapshot() {
+    snapshot = Object.freeze(cloneState(state));
+  }
+
+  function replaceState(next) {
+    if (next === state) return false;
+    state = next;
+    publishSnapshot();
+    return true;
+  }
+
   function dispatch(event) {
     const deferredRecord = deps.persistence.readDeferred(now());
     const next = reduceOtaUpdateState(state, event, {
@@ -72,20 +84,16 @@ function createOtaUpdateOwner(deps) {
       checkThrottleMs,
       deferCooldownMs,
     });
-    if (next !== state) {
-      state = next;
-      emit();
-    }
+    if (replaceState(next)) emit();
     return deferredRecord;
   }
 
   function setState(next) {
-    state = next;
-    emit();
+    if (replaceState(next)) emit();
   }
 
   function getSnapshot() {
-    return cloneState(state);
+    return snapshot;
   }
 
   function subscribe(listener) {
@@ -347,13 +355,13 @@ function createOtaUpdateOwner(deps) {
 
     const native = getNativePending();
     const deferredRecord = deps.persistence.readDeferred(now());
-    state = createInitialOtaUpdateState({
+    replaceState(createInitialOtaUpdateState({
       supported: true,
       nativePending: native.pending,
       updateId: native.updateId,
       deferredRecord,
       now: now(),
-    });
+    }));
     emit();
     restoreDeferredCooldown();
     schedulePromptIfReady();
@@ -400,7 +408,7 @@ function createOtaUpdateOwner(deps) {
     lastAutoCheckAt = 0;
     appActive = true;
     promptGateOpen = false;
-    state = createInitialOtaUpdateState({ supported: deps.isSupported() });
+    replaceState(createInitialOtaUpdateState({ supported: deps.isSupported() }));
   }
 
   return {

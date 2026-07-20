@@ -2,9 +2,12 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
-- assertVisible: Use demo data
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
-    text: Use demo data
+    id: onboarding-demo-button
+- assertVisible:
+    id: home-screen
 - openLink: darkfinances:///category/Bills%20%26%20Utilities?bucket=bills
 - tapOn:
     text: Open
@@ -15,4 +18,4 @@ appId: ${MAESTRO_APP_ID}
 - assertVisible: Transactions
 - assertVisible:
     id: category-transaction-row-0
-- takeScreenshot: bills-utilities-drilldown
+- takeScreenshot: build/maestro/screenshots/bills-utilities-drilldown

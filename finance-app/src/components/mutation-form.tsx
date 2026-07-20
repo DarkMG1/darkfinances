@@ -38,6 +38,9 @@ export function MutationFormBanner({
     <View
       testID={testID}
       accessibilityRole="alert"
+      accessibilityLabel={outcome.summary}
+      accessibilityLiveRegion="polite"
+      importantForAccessibility="yes"
       style={[
         styles.banner,
         outcome.kind === 'terminal' || outcome.kind === 'conflict_ownership'
@@ -161,30 +164,35 @@ export function MutationSheet({
     if (canDismiss === false) return;
     onRequestClose();
   };
+  const backdropTestID = testID ? `${testID}-backdrop` : 'mutation-sheet-backdrop';
+  if (!visible) return null;
   return (
     <Modal
-      visible={visible}
+      visible
       animationType={Platform.OS === 'ios' ? 'slide' : 'fade'}
       transparent
       onRequestClose={handleClose}
       accessibilityViewIsModal
     >
-      <Pressable
-        style={styles.modalBg}
-        onPress={handleClose}
-        accessibilityLabel="Dismiss sheet"
-        disabled={canDismiss === false}
-      >
+      <View style={styles.modalRoot}>
+        <View pointerEvents="none" style={styles.modalDim} />
         <Pressable
-          testID={testID}
+          testID={backdropTestID}
+          style={styles.modalDismissRegion}
+          onPress={handleClose}
+          accessibilityRole="button"
+          accessibilityLabel="Dismiss sheet"
+          disabled={canDismiss === false}
+        />
+        <View
+          accessible={false}
+          importantForAccessibility="no"
           style={[styles.sheet, { paddingBottom: bottomInset + 16 }]}
-          onPress={() => {}}
-          accessibilityLabel={title}
         >
-          <Text accessibilityRole="header" style={styles.sheetTitle}>{title}</Text>
+          <Text testID={testID} accessibilityRole="header" style={styles.sheetTitle}>{title}</Text>
           {children}
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
@@ -263,10 +271,17 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '600',
   },
-  modalBg: {
+  modalRoot: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
     justifyContent: 'flex-end',
+  },
+  modalDim: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  modalDismissRegion: {
+    flex: 1,
+    alignSelf: 'stretch',
   },
   sheet: {
     backgroundColor: colors.bg,

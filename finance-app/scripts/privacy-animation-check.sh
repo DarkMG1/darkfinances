@@ -5,13 +5,15 @@ DEVICE="${DEVICE:-booted}"
 APP_ID="${APP_ID:-dev.darkmg1.finances}"
 OUT_DIR="${OUT_DIR:-build/privacy-animation}"
 FLOW="${FLOW:-.maestro/privacy-unlock.yaml}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+export DEVICE
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/frames"
 
 echo "==> Enrolling simulator biometrics"
-xcrun simctl spawn "$DEVICE" notifyutil -s com.apple.BiometricKit.enrollmentChanged 1 || true
-xcrun simctl spawn "$DEVICE" notifyutil -p com.apple.BiometricKit.enrollmentChanged || true
+bash "$SCRIPT_DIR/ios-sim-biometrics.sh" enroll
 
 echo "==> Starting screenshot sampler"
 (
@@ -22,22 +24,15 @@ echo "==> Starting screenshot sampler"
 ) &
 SAMPLER_PID=$!
 
-echo "==> Starting biometric matcher"
-(
-  for _ in $(seq 1 360); do
-    xcrun simctl spawn "$DEVICE" notifyutil -p com.apple.BiometricKit_Sim.fingerTouch.match >/dev/null 2>&1 || true
-    sleep 0.2
-  done
-) &
-MATCHER_PID=$!
+cleanup() {
+  wait "$SAMPLER_PID" 2>/dev/null || true
+  bash "$SCRIPT_DIR/ios-sim-biometrics.sh" stop || true
+}
+trap cleanup EXIT INT TERM
 
-set +e
-maestro test "$FLOW"
+echo "==> Running privacy flow with biometric matcher wrapper"
+bash "$SCRIPT_DIR/run-maestro-ios.sh" "$FLOW"
 MAESTRO_EXIT=$?
-set -e
-
-wait "$SAMPLER_PID" || true
-kill "$MATCHER_PID" >/dev/null 2>&1 || true
 
 echo "==> Analyzing screenshot deltas"
 python3 - "$OUT_DIR/frames" <<'PY'

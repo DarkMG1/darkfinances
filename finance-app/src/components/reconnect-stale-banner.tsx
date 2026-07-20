@@ -1,4 +1,4 @@
-import React, { useSyncExternalStore } from 'react';
+import React, { useCallback, useSyncExternalStore } from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -30,11 +30,9 @@ export function ReconnectStaleBanner({ top }: { top?: number }) {
   const { scope } = useServerConfig();
   const bannerTop = top ?? insets.top + 44;
   const store = getReconnectStaleWarningStore();
-  const warning = useSyncExternalStore(
-    (listener) => store.subscribe(listener),
-    () => store.get(scope),
-    () => store.get(scope),
-  );
+  const subscribe = useCallback((listener: () => void) => store.subscribe(listener), [store]);
+  const getSnapshot = useCallback(() => store.get(scope), [store, scope]);
+  const warning = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   if (!warning) return null;
 

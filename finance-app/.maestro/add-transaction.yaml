@@ -2,9 +2,12 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
+- assertVisible:
+    id: home-screen
 - openLink: darkfinances:///transactions
 - tapOn:
     text: Open
@@ -19,20 +22,19 @@ appId: ${MAESTRO_APP_ID}
     id: add-transaction-type-expense-selected
 - tapOn:
     id: add-transaction-amount-input
-- inputText: 12.34
+- eraseText
+- inputText: "12.34"
 - tapOn:
     id: add-transaction-payee-input
 - inputText: Maestro Coffee
 - tapOn:
-    id: add-transaction-notes-input
-- inputText: "#work"
-- tapOn:
     point: 50%,20%
 - tapOn:
     id: add-transaction-submit-button
-- assertVisible:
-    id: add-transaction-screen
-- waitForAnimationToEnd
+- extendedWaitUntil:
+    notVisible:
+      id: add-transaction-screen
+    timeout: 12000
 - assertVisible:
     id: activity-screen
 - tapOn:

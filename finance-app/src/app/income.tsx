@@ -8,6 +8,7 @@ import { Avatar, Card, EmptyState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { useFinanceToday } from '@/lib/date-only';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { formatOptionalMoney, formatOptionalPos } from '@/lib/money-display.js';
 import { cadenceLabel, colors, dueLabel, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
@@ -35,8 +36,6 @@ export default function Income() {
   const financeToday = useFinanceToday();
   const income = useIncome();
   const data = income.data;
-  const active = (data?.streams ?? []).filter((s) => s.active);
-  const inactive = (data?.streams ?? []).filter((s) => !s.active);
 
   return (
     <PushScreen testID="income-screen" onRefresh={income.refetch}>
@@ -44,43 +43,51 @@ export default function Income() {
         query={income}
         loading={<SkeletonList hero rows={4} />}
         empty={<EmptyState icon="dollarsign.circle">No recurring income detected yet</EmptyState>}
-        hasContent={!!data && data.count > 0}
+        hasContent={Boolean(data && data.count > 0)}
         refetchBannerTestID="income-refetch-banner"
-      >
+        renderContent={(incomeData) => {
+          const activeStreams = (incomeData.streams ?? []).filter((s) => s.active);
+          const inactiveStreams = (incomeData.streams ?? []).filter((s) => !s.active);
+          const monthlyTotalLabel = formatOptionalMoney(incomeData.monthlyTotal, fmtMoney);
+          const nextAmountLabel = incomeData.nextPayday
+            ? formatOptionalPos(incomeData.nextPaydayAmount, fmtPos)
+            : null;
+          const nextSub = incomeData.nextPayday
+            ? `Next: ${cap(incomeData.nextPaydayPayee ?? 'paycheck')} · ${dueLabel(incomeData.nextPayday, financeToday)} · ${nextAmountLabel}`
+            : `${incomeData.activeCount ?? 0} active stream${(incomeData.activeCount ?? 0) === 1 ? '' : 's'}`;
+          return (
+          <>
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               'Monthly income',
-              fmtMoney(data!.monthlyTotal),
-              data!.nextPayday
-                ? `Next: ${cap(data!.nextPaydayPayee ?? 'paycheck')}, ${dueLabel(data!.nextPayday, financeToday)}, ${fmtPos(data!.nextPaydayAmount ?? 0)}`
-                : `${data!.activeCount} active stream${data!.activeCount === 1 ? '' : 's'}`,
+              monthlyTotalLabel,
+              nextSub,
             )}
           >
             <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">MONTHLY INCOME</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(data!.monthlyTotal)}</Text>
-            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
-              {data!.nextPayday
-                ? `Next: ${cap(data!.nextPaydayPayee ?? 'paycheck')} · ${dueLabel(data!.nextPayday, financeToday)} · ${fmtPos(data!.nextPaydayAmount ?? 0)}`
-                : `${data!.activeCount} active stream${data!.activeCount === 1 ? '' : 's'}`}
-            </Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{monthlyTotalLabel}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{nextSub}</Text>
           </View>
 
-          {active.length ? (
+          {activeStreams.length ? (
             <View style={{ marginTop: 8 }}>
               <SectionLabel>Active</SectionLabel>
-              <Card style={styles.list}>{active.map((s) => <Row key={s.key} s={s} />)}</Card>
+              <Card style={styles.list}>{activeStreams.map((s) => <Row key={s.key} s={s} />)}</Card>
             </View>
           ) : null}
 
-          {inactive.length ? (
+          {inactiveStreams.length ? (
             <View style={{ marginTop: 8 }}>
               <SectionLabel>Paused</SectionLabel>
-              <Card style={styles.list}>{inactive.map((s) => <Row key={s.key} s={s} muted />)}</Card>
+              <Card style={styles.list}>{inactiveStreams.map((s) => <Row key={s.key} s={s} muted />)}</Card>
             </View>
           ) : null}
-      </QueryScreenBody>
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }

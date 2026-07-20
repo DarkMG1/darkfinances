@@ -82,9 +82,8 @@ export default function ReviewScreen() {
     mutationLabel: 'Acknowledge task',
     onRefetch: () => review.refetch(),
   });
+  const tasksKnown = Array.isArray(review.data?.tasks);
   const tasks = review.data?.tasks ?? [];
-  const high = tasks.filter((t) => t.priority >= 80);
-  const normal = tasks.filter((t) => t.priority < 80);
 
   const openTask = (task: ReviewTask) => {
     if (acknowledgeAction.isLocked) return;
@@ -156,36 +155,45 @@ export default function ReviewScreen() {
       <QueryScreenBody
         query={review}
         loading={<SkeletonList rows={6} />}
-        empty={<EmptyState icon="checkmark.circle">Nothing needs review right now</EmptyState>}
+        empty={<EmptyState icon={tasksKnown ? 'checkmark.circle' : 'exclamationmark.triangle'}>{tasksKnown ? 'Nothing needs review right now' : 'Review details unavailable'}</EmptyState>}
         hasContent={tasks.length > 0}
         refetchBannerTestID="review-refetch-banner"
-      >
+        renderContent={(reviewData) => {
+          const reviewTasks = reviewData.tasks ?? [];
+          const highPriority = reviewTasks.filter((t) => t.priority >= 80);
+          const normalPriority = reviewTasks.filter((t) => t.priority < 80);
+          return (
+          <>
           <Card
+            testID="review-hero"
             style={styles.hero}
             accessible
-            accessibilityLabel={heroMetricAccessibilityLabel('Today review', String(tasks.length), 'Prioritized from categorization, reimbursements, large charges, subscription changes, and reconciliation.')}
+            accessibilityLabel={heroMetricAccessibilityLabel('Today review', String(reviewTasks.length), 'Prioritized from categorization, reimbursements, large charges, subscription changes, and reconciliation.')}
           >
             <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">TODAY REVIEW</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{tasks.length}</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{reviewTasks.length}</Text>
             <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">Prioritized from categorization, reimbursements, large charges, subscription changes, and reconciliation.</Text>
           </Card>
 
-          {high.length ? (
+          {highPriority.length ? (
             <>
               <CardTitle>Needs Attention</CardTitle>
-              <Card style={styles.list}>{high.map(renderTask)}</Card>
+              <Card style={styles.list}>{highPriority.map(renderTask)}</Card>
             </>
           ) : null}
 
-          {normal.length ? (
+          {normalPriority.length ? (
             <>
               <CardTitle style={{ marginTop: 16 }}>Later</CardTitle>
-              <Card style={styles.list}>{normal.map(renderTask)}</Card>
+              <Card style={styles.list}>{normalPriority.map(renderTask)}</Card>
             </>
           ) : null}
 
           <Text style={styles.hint}>Swipe a row to open it or acknowledge it across devices. Editing the underlying transaction resolves matching tasks after refresh.</Text>
-      </QueryScreenBody>
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }

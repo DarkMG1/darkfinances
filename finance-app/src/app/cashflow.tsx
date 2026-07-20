@@ -9,19 +9,12 @@ import { Card, CardTitle, EmptyState, Loading, StatCard } from '@/components/ui'
 import { GroupedBars, trendPeriodComplete } from '@/components/charts';
 import { colors, fmtMoney, fmtPos, monthLabel } from '@/theme/colors';
 import { haptics } from '@/lib/haptics';
+import { isKnownMoney } from '@/lib/money-display.js';
 
 export default function CashFlow() {
   const { width } = useWindowDimensions();
   const router = useRouter();
   const trends = useTrends(12);
-  const months = trends.data?.months ?? [];
-  const cur = months[months.length - 1];
-
-  const labels = months.map((m) => m.month.slice(5));
-  const monthComplete = trendPeriodComplete;
-  const income = months.map((m) => (monthComplete(m) ? m.income! : null));
-  const spend = months.map((m) => (monthComplete(m) ? m.spend! : null));
-  const chartHasIncomplete = months.some((m) => !monthComplete(m));
 
   return (
     <PushScreen testID="cashflow-screen" onRefresh={trends.refetch}>
@@ -29,13 +22,23 @@ export default function CashFlow() {
         query={trends}
         loading={<Loading />}
         empty={<EmptyState icon="chart.bar">No cash flow data</EmptyState>}
-        hasContent={months.length > 0}
+        hasContent={Boolean(trends.data?.months?.length)}
         refetchBannerTestID="cashflow-refetch-banner"
-      >
+        renderContent={(trendData) => {
+          const months = trendData.months ?? [];
+          const cur = months[months.length - 1];
+          const labels = months.map((m) => m.month.slice(5));
+          const monthComplete = trendPeriodComplete;
+          const income = months.map((m) => (monthComplete(m) ? m.income! : null));
+          const spend = months.map((m) => (monthComplete(m) ? m.spend! : null));
+          const chartHasIncomplete = months.some((m) => !monthComplete(m));
+          const currentNetKnown = !!cur && monthComplete(cur) && isKnownMoney(cur.net);
+          return (
+          <>
           <View style={styles.statsRow}>
             <StatCard testID="cashflow-money-in" label="Money In" value={cur && monthComplete(cur) ? fmtPos(cur.income!) : 'Unavailable'} valueColor={colors.green} />
             <StatCard testID="cashflow-money-out" label="Money Out" value={cur && monthComplete(cur) ? fmtPos(cur.spend!) : 'Unavailable'} valueColor={colors.red} />
-            <StatCard testID="cashflow-net" label="Net" value={cur && monthComplete(cur) ? fmtMoney(cur.net!) : 'Unavailable'} valueColor={cur && monthComplete(cur) && cur.net! >= 0 ? colors.green : colors.red} />
+            <StatCard testID="cashflow-net" label="Net" value={currentNetKnown ? fmtMoney(cur!.net!) : 'Unavailable'} valueColor={currentNetKnown ? (cur!.net! >= 0 ? colors.green : colors.red) : colors.muted} />
           </View>
 
           <Pressable testID="cashflow-forecast-link" onPress={() => { haptics.tap(); router.push('/forecast' as never); }} style={({ pressed }) => [styles.forecastCard, pressed && { opacity: 0.65 }]}>
@@ -63,16 +66,22 @@ export default function CashFlow() {
 
           <Card style={{ marginTop: 12 }}>
             <CardTitle>Monthly Net</CardTitle>
-            {[...months].reverse().map((m) => (
-              <View key={m.month} testID={`cashflow-month-row-${m.month}`} style={styles.row}>
-                <Text style={styles.month}>{monthLabel(m.month)}</Text>
-                <Text style={styles.rowIn}>{monthComplete(m) ? `+${fmtPos(m.income!)}` : 'Unavailable'}</Text>
-                <Text style={styles.rowOut}>{monthComplete(m) ? `-${fmtPos(m.spend!)}` : 'Unavailable'}</Text>
-                <Text style={[styles.rowNet, { color: monthComplete(m) && m.net! >= 0 ? colors.green : colors.red }]}>{monthComplete(m) ? fmtMoney(m.net!) : 'Unavailable'}</Text>
-              </View>
-            ))}
+            {[...months].reverse().map((m) => {
+              const netKnown = monthComplete(m) && isKnownMoney(m.net);
+              return (
+                <View key={m.month} testID={`cashflow-month-row-${m.month}`} style={styles.row}>
+                  <Text style={styles.month}>{monthLabel(m.month)}</Text>
+                  <Text style={styles.rowIn}>{monthComplete(m) ? `+${fmtPos(m.income!)}` : 'Unavailable'}</Text>
+                  <Text style={styles.rowOut}>{monthComplete(m) ? `-${fmtPos(m.spend!)}` : 'Unavailable'}</Text>
+                  <Text style={[styles.rowNet, { color: netKnown ? (m.net! >= 0 ? colors.green : colors.red) : colors.muted }]}>{netKnown ? fmtMoney(m.net!) : 'Unavailable'}</Text>
+                </View>
+              );
+            })}
           </Card>
-      </QueryScreenBody>
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }

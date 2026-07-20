@@ -5,6 +5,7 @@ import {
   collectEnabledRefetchQueries,
   collectRefetchErrorQueries,
   queryErrorMessage,
+  shouldInvokeQueryScreenContent,
   shouldShowFatalError,
   shouldShowInitialLoad,
   shouldShowRefetchError,
@@ -30,6 +31,8 @@ export function resolveQueryDisplay(query: QueryLike) {
     errorMessage: queryErrorMessage(query.error),
   };
 }
+
+export { shouldInvokeQueryScreenContent } from '@/lib/query-display-state.js';
 
 export function refetchQueries(queries: QueryLike[]) {
   return Promise.all(
@@ -73,17 +76,17 @@ export function QueryRefetchBanners({
   );
 }
 
-export function QueryFatalGate({
+export function QueryFatalGate<TData>({
   query,
   onRetry,
   loading = null,
-  children,
+  renderContent,
   retryLabel,
 }: {
-  query: QueryLike;
+  query: QueryLike & { data?: TData };
   onRetry?: () => void;
   loading?: React.ReactNode;
-  children: React.ReactNode;
+  renderContent: (data: TData) => React.ReactNode;
   retryLabel?: string;
 }) {
   const display = resolveQueryDisplay(query);
@@ -97,26 +100,27 @@ export function QueryFatalGate({
       />
     );
   }
-  return <>{children}</>;
+  if (display.data == null) return null;
+  return <>{renderContent(display.data as TData)}</>;
 }
 
-export function QueryScreenBody({
+export function QueryScreenBody<TData>({
   query,
   onRetry,
   loading = null,
   empty = null,
   hasContent,
-  children,
+  renderContent,
   retryLabel,
   refetchBannerTestID,
   compoundRefetchQueries,
 }: {
-  query: QueryLike;
+  query: QueryLike & { data?: TData };
   onRetry?: () => void;
   loading?: React.ReactNode;
   empty?: React.ReactNode;
   hasContent: boolean;
-  children: React.ReactNode;
+  renderContent: (data: TData) => React.ReactNode;
   retryLabel?: string;
   refetchBannerTestID?: string;
   /** When set, one consolidated banner covers the primary query and compound members. */
@@ -142,10 +146,14 @@ export function QueryScreenBody({
     <QueryRefetchBanner onRetry={retry} testID={refetchBannerTestID} />
   ) : null;
 
+  if (!shouldInvokeQueryScreenContent(display, hasContent)) {
+    return <>{refetchBanner}{empty}</>;
+  }
+
   return (
     <>
       {refetchBanner}
-      {!hasContent ? empty : children}
+      {renderContent(display.data as TData)}
     </>
   );
 }

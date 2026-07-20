@@ -2,18 +2,27 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
+- assertVisible:
+    id: home-screen
 - openLink: darkfinances:///settings
 - tapOn:
     text: Open
     optional: true
 - assertVisible:
     id: settings-screen
-- scroll
+- scrollUntilVisible:
+    element:
+      id: settings-notifications-unavailable
+    direction: DOWN
+    timeout: 15000
 - assertVisible:
     id: settings-notifications-unavailable
+- assertVisible:
+    id: settings-notifications-unavailable-demo-copy
 - assertNotVisible:
     id: settings-notif-bills
     optional: true

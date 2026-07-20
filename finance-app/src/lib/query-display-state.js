@@ -18,6 +18,13 @@ function shouldShowRefetchError(isError, data) {
   return !!isError && hasQueryData(data);
 }
 
+/** Pure gate for when QueryScreenBody may invoke renderContent (tested without React). */
+function shouldInvokeQueryScreenContent(display, hasContent) {
+  if (display.initialLoad || display.fatalError) return false;
+  if (!hasContent || display.data == null) return false;
+  return true;
+}
+
 function isSearchQuerySettled(inputQuery, activeQuery) {
   const trimmed = String(inputQuery ?? '').trim();
   if (trimmed.length < 2) return true;
@@ -82,6 +89,7 @@ module.exports = {
   shouldShowInitialLoad,
   shouldShowFatalError,
   shouldShowRefetchError,
+  shouldInvokeQueryScreenContent,
   isSearchQuerySettled,
   queryErrorMessage,
   isRefetchEntryEnabled,

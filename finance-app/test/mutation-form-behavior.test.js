@@ -177,8 +177,8 @@ test('mutation hooks capture per-dispatch ids in dispatch tokens', () => {
 test('mutation hooks store submitted field snapshot and invalidate stale retry on edit', () => {
   const form = fs.readFileSync(path.join(root, 'src/hooks/useMutationForm.ts'), 'utf8');
   assert.match(form, /submittedFieldsRef/);
-  assert.match(form, /mutationFieldsEqual/);
-  assert.match(form, /phase !== 'error'/);
+  assert.match(form, /shouldInvalidateValidationOutcome/);
+  assert.match(form, /captureValidationFieldSnapshot/);
 });
 
 test('mutation form uses canonical field equality not JSON.stringify', () => {

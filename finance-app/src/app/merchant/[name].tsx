@@ -10,6 +10,7 @@ import { MonthNavigator } from '@/components/charts';
 import { SkeletonList } from '@/components/skeleton';
 import { useFinanceToday } from '@/lib/date-only';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { formatOptionalMoney, isKnownMoney } from '@/lib/money-display.js';
 import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -30,13 +31,12 @@ export default function MerchantDetail() {
   const currentKey = useFinanceToday().slice(0, 7);
 
   const series = useMemo(
-    () => (hist.data?.months ?? []).map((m) => ({ month: m.month, spend: m.total })),
+    () => (hist.data?.months ?? []).map((m) => ({ month: m.month, spend: isKnownMoney(m.total) ? m.total : null })),
     [hist.data]
   );
 
-  // Default to the most recent month that actually has spend (falls back to current).
   const selectedMonth = selected || [...(hist.data?.months ?? [])].reverse().find((m) => m.count > 0)?.month || currentKey;
-  const selMonth = hist.data?.months.find((m) => m.month === selectedMonth);
+  const selMonth = (hist.data?.months ?? []).find((m) => m.month === selectedMonth);
   const rows = selMonth?.items ?? [];
 
   return (
@@ -48,21 +48,25 @@ export default function MerchantDetail() {
         empty={null}
         hasContent={hist.data != null}
         refetchBannerTestID="merchant-refetch-banner"
-      >
+        renderContent={(merchantData) => {
+          const totalLabel = formatOptionalMoney(merchantData.total, fmtMoney);
+          const avgLabel = isKnownMoney(merchantData.avg) ? fmtMoney(merchantData.avg) : null;
+          return (
+          <>
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               name || 'Merchant',
-              fmtMoney(hist.data?.total ?? 0),
-              `${hist.data?.count ?? 0} transactions${hist.data?.avg ? `, ${fmtMoney(hist.data.avg)} net average` : ''}, last ${months} months`,
+              totalLabel,
+              `${merchantData.count ?? 0} transactions${avgLabel ? `, ${avgLabel} net average` : ''}, last ${months} months`,
             )}
           >
             <Avatar label={name} size={52} style={{ marginBottom: 10 }} />
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(hist.data?.total ?? 0)}</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{totalLabel}</Text>
             <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
-              {hist.data?.count ?? 0} transaction{(hist.data?.count ?? 0) === 1 ? '' : 's'}
-              {hist.data?.avg ? ` · ${fmtMoney(hist.data.avg)} net avg` : ''}
+              {merchantData.count ?? 0} transaction{(merchantData.count ?? 0) === 1 ? '' : 's'}
+              {avgLabel ? ` · ${avgLabel} net avg` : ''}
               {` · last ${months}mo`}
             </Text>
           </View>
@@ -85,7 +89,7 @@ export default function MerchantDetail() {
 
           <View style={styles.monthHead}>
             <Text style={styles.monthTitle}>{selMonth ? monthTitle(selMonth.month) : ''}</Text>
-            {selMonth ? <Text style={styles.monthTotal}>{fmtMoney(selMonth.total)}</Text> : null}
+            {selMonth ? <Text style={styles.monthTotal}>{formatOptionalMoney(selMonth.total, fmtMoney)}</Text> : null}
           </View>
 
           {rows.length === 0 ? (
@@ -120,7 +124,10 @@ export default function MerchantDetail() {
               ))}
             </Card>
           )}
-      </QueryScreenBody>
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }

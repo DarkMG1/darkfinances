@@ -2,9 +2,12 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
+- assertVisible:
+    id: home-screen
 - openLink: darkfinances:///goals
 - tapOn:
     text: Open
@@ -17,11 +20,11 @@ appId: ${MAESTRO_APP_ID}
     id: goals-row-goal-ef
 - assertVisible:
     id: goals-edit-sheet
-- waitForAnimationToEnd
 - tapOn:
-    point: 50%,20%
+    id: goals-edit-sheet-backdrop
+- assertNotVisible:
+    id: goals-edit-sheet
 - tapOn:
     id: goals-add-button
 - assertVisible:
     id: goals-edit-sheet
-- waitForAnimationToEnd

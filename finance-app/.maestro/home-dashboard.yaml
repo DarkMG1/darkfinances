@@ -2,26 +2,14 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
 - assertVisible:
     id: home-screen
 - assertVisible:
     id: home-networth-hero
-- scroll
-- assertVisible:
-    id: home-stat-spent
-- assertVisible:
-    id: home-stat-income
-- assertVisible:
-    id: home-stat-net
-- assertVisible:
-    id: home-action-cash-flow
-- assertVisible:
-    id: home-action-budgets
-- assertVisible:
-    id: home-action-reports
 - assertVisible:
     id: home-review-banner
 - tapOn:
@@ -34,6 +22,24 @@ appId: ${MAESTRO_APP_ID}
     optional: true
 - assertVisible:
     id: home-screen
+- scroll
+- assertVisible:
+    id: home-stat-spent
+- assertVisible:
+    id: home-stat-income
+- assertVisible:
+    id: home-stat-net
+- assertVisible:
+    id: home-action-cash-flow
+- assertVisible:
+    id: home-action-budgets
+- assertVisible:
+    id: home-action-goals
+- assertVisible:
+    id: home-action-who-owes-me
+- assertNotVisible:
+    id: home-action-reports
+    optional: true
 - scroll
 - assertVisible:
     id: home-account-acc-check

@@ -13,6 +13,8 @@ import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinat
 import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { OwesPerson, ReimbLeg, RepaymentSuggestion } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
+import { formatOptionalPos, formatOptionalSignedMoney, isKnownMoney } from '@/lib/money-display.js';
+import { reimbursementWindowNet } from '@/lib/reimbursement-window-net.js';
 import { colors, fmtDate, fmtPos, fmtSignedMoney } from '@/theme/colors';
 import { reimbursementWindow, type ReimbursementRangeKey, useFinanceToday } from '@/lib/date-only';
 
@@ -92,24 +94,31 @@ export default function Reimbursement() {
   const owes = reimb.data?.owes ?? [];
   const summary = reimb.data?.summary;
   const totalOwedMetric = reimb.data?.totalOwed;
-  const grandTotal = totalOwedMetric?.complete ? (totalOwedMetric.value ?? 0) : null;
+  const grandTotal = totalOwedMetric?.complete && isKnownMoney(totalOwedMetric.value)
+    ? totalOwedMetric.value
+    : null;
   const grandLowerBound = !totalOwedMetric?.complete ? totalOwedMetric?.lowerBound : null;
   const debtorCount = reimb.data?.debtorCount ?? owes.length;
   const sugg = suggestions.data?.complete === false ? [] : (suggestions.data?.suggestions ?? []);
   const snapshot = snapshotLabel(reimb.data?.owesSource, reimb.data?.owesGeneratedAt, reimb.data?.owesWarning);
-  const windowNet = (summary?.paidBack ?? 0) - (summary?.fronted ?? 0);
+  const windowNet = reimbursementWindowNet(summary);
   const netValue = range === 'life'
     ? (summary?.outstanding ?? (totalOwedMetric?.complete ? totalOwedMetric.value : null))
     : windowNet;
+  const netDisplay = range === 'life'
+    ? formatOptionalPos(netValue, fmtPos)
+    : formatOptionalSignedMoney(netValue, fmtSignedMoney);
   const netGood = range === 'life'
-    ? (netValue != null && netValue <= 0.5)
-    : netValue != null && netValue >= -0.005;
+    ? (isKnownMoney(netValue) && netValue! <= 0.5)
+    : isKnownMoney(netValue) && netValue! >= -0.005;
 
   // Group/trip fronts not attributed to a specific person (net < 0 = owed to you).
   const bucketList = useMemo(() => {
     const b = reimb.data?.buckets ?? {};
     return Object.entries(b)
-      .map(([name, v]) => ({ name, owed: -(v?.net ?? 0), count: v?.count ?? 0, legs: v?.legs ?? [] }))
+      .flatMap(([name, v]) => isKnownMoney(v?.net)
+        ? [{ name, owed: -v!.net!, count: v?.count ?? 0, legs: v?.legs ?? [] }]
+        : [])
       .filter((x) => x.owed > 0.5)
       .sort((a, b2) => b2.owed - a.owed);
   }, [reimb.data]);
@@ -224,18 +233,16 @@ export default function Reimbursement() {
 
             <View style={styles.sumRow}>
               <View style={styles.sumChip}>
-                <Text style={styles.sumVal}>{fmtPos(summary?.fronted ?? 0)}</Text>
+                <Text style={styles.sumVal}>{formatOptionalPos(summary?.fronted, fmtPos)}</Text>
                 <Text style={styles.sumLabel}>fronted</Text>
               </View>
               <View style={styles.sumChip}>
-                <Text style={[styles.sumVal, { color: colors.green }]}>{fmtPos(summary?.paidBack ?? 0)}</Text>
+                <Text style={[styles.sumVal, { color: colors.green }]}>{formatOptionalPos(summary?.paidBack, fmtPos)}</Text>
                 <Text style={styles.sumLabel}>paid back</Text>
               </View>
               <View style={styles.sumChip}>
                 <Text style={[styles.sumVal, { color: netGood ? colors.green : colors.red }]}>
-                  {range === 'life'
-                    ? (netValue != null ? fmtPos(netValue) : '—')
-                    : (netValue != null ? fmtSignedMoney(netValue) : '—')}
+                  {netDisplay}
                 </Text>
                 <Text style={styles.sumLabel}>{range === 'life' ? 'still owed' : 'net cash flow'}</Text>
               </View>

@@ -5,6 +5,7 @@ import { getServerAuthHeaders } from '@/api/client/server-auth';
 import { getServerBaseUrl } from '@/api/client/server-url';
 import { useServerConfig } from '@/state/server';
 import { API_ENDPOINTS } from '@/api/generated/endpoints';
+import { scheduleQueryInvalidation } from '@/lib/query-invalidation';
 import {
   Account,
   AccountCreditStatementOverride,
@@ -97,11 +98,11 @@ const TRANSACTION_DERIVED_KEYS = [
 ] as const;
 
 function invalidateKeys(qc: ReturnType<typeof useQueryClient>, keys: readonly string[]) {
-  return Promise.all(keys.map((key) => qc.invalidateQueries({ queryKey: [key] })));
+  scheduleQueryInvalidation(qc, keys);
 }
 
 function invalidateTransactionDerivedData(qc: ReturnType<typeof useQueryClient>) {
-  return invalidateKeys(qc, TRANSACTION_DERIVED_KEYS);
+  invalidateKeys(qc, TRANSACTION_DERIVED_KEYS);
 }
 
 export function usePing() {
@@ -243,11 +244,8 @@ export function useSetReviewDisposition() {
   }>({
     endpoint: API_ENDPOINTS.setReviewDisposition.endpoint,
     method: API_ENDPOINTS.setReviewDisposition.method,
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.today.key] }),
-      ]);
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.review.key, API_ENDPOINTS.today.key]);
     },
   });
 }
@@ -308,11 +306,8 @@ export function useSetReconcileItem() {
       const c = ctx as { prev?: Reconciliation; key: (string | undefined)[] } | undefined;
       if (c?.prev) qc.setQueryData(c.key, c.prev);
     },
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reconciliation.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reconcilePending.key] }),
-      ]);
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.reconciliation.key, API_ENDPOINTS.reconcilePending.key]);
     },
   });
 }
@@ -322,11 +317,11 @@ export function useSetReconcileMonth() {
   return useFinanceMutation<OkResult, { month: string; done?: boolean }>({
     endpoint: API_ENDPOINTS.setReconcileMonth.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reconciliation.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reconcilePending.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
+    onSuccess: () => {
+      invalidateKeys(qc, [
+        API_ENDPOINTS.reconciliation.key,
+        API_ENDPOINTS.reconcilePending.key,
+        API_ENDPOINTS.review.key,
       ]);
     },
   });
@@ -337,11 +332,8 @@ export function useSetReconcileEnabled() {
   return useFinanceMutation<OkResult, { enabled: boolean }>({
     endpoint: API_ENDPOINTS.setReconcileEnabled.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reconciliation.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reconcilePending.key] }),
-      ]);
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.reconciliation.key, API_ENDPOINTS.reconcilePending.key]);
     },
   });
 }
@@ -456,7 +448,7 @@ export function useSetCategory() {
   return useFinanceMutation<CategorizeResult, SetCategoryVars>({
     endpoint: (v) => `/api/v1/transactions/${encodeURIComponent(v.id)}/category`,
     method: 'POST',
-    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
+    onSuccess: () => { invalidateTransactionDerivedData(qc); },
   });
 }
 
@@ -471,11 +463,8 @@ export function useSetBudget() {
   return useFinanceMutation<OkResult, SetBudgetVars>({
     endpoint: API_ENDPOINTS.setBudget.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.budgets.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
-      ]);
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.budgets.key, API_ENDPOINTS.insights.key]);
     },
   });
 }
@@ -502,8 +491,8 @@ export function useSetRecurringOverride() {
   return useFinanceMutation<OkResult, SetRecurringVars>({
     endpoint: (v) => `/api/v1/recurring/${encodeURIComponent(v.key)}/override`,
     method: 'POST',
-    onSuccess: async () => {
-      await invalidateKeys(qc, RECURRING_OVERRIDE_DERIVED_KEYS);
+    onSuccess: () => {
+      invalidateKeys(qc, RECURRING_OVERRIDE_DERIVED_KEYS);
     },
   });
 }
@@ -518,11 +507,8 @@ export function useMarkRecurring() {
   return useFinanceMutation<OkResult, MarkRecurringVars>({
     endpoint: API_ENDPOINTS.markRecurring.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.recurring.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.bills.key] }),
-      ]);
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.recurring.key, API_ENDPOINTS.bills.key]);
     },
   });
 }
@@ -543,10 +529,8 @@ export interface SplitVars {
 
 // Everything a split/unsplit touches: lists, the single-txn detail, spending, etc.
 function invalidateAfterSplit(qc: ReturnType<typeof useQueryClient>) {
-  return Promise.all([
-    invalidateTransactionDerivedData(qc),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reimbLinks.key] }),
-  ]);
+  invalidateTransactionDerivedData(qc);
+  invalidateKeys(qc, [API_ENDPOINTS.reimbLinks.key]);
 }
 
 export function useSplitTransaction() {
@@ -554,8 +538,8 @@ export function useSplitTransaction() {
   return useFinanceMutation<OkResult, SplitVars>({
     endpoint: (v) => `/api/v1/transactions/${encodeURIComponent(v.id)}/split`,
     method: 'POST',
-    onSuccess: async () => {
-      await invalidateAfterSplit(qc);
+    onSuccess: () => {
+      invalidateAfterSplit(qc);
     },
   });
 }
@@ -571,8 +555,8 @@ export function useUnsplitTransaction() {
   return useFinanceMutation<OkResult, UnsplitVars>({
     endpoint: (v) => `/api/v1/transactions/${encodeURIComponent(v.id)}/unsplit`,
     method: 'POST',
-    onSuccess: async () => {
-      await invalidateAfterSplit(qc);
+    onSuccess: () => {
+      invalidateAfterSplit(qc);
     },
   });
 }
@@ -591,7 +575,7 @@ export function useDeleteTransaction() {
       return `/api/v1/transactions/${encodeURIComponent(v.id)}${q ? `?${q}` : ''}`;
     },
     method: 'DELETE',
-    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
+    onSuccess: () => { invalidateTransactionDerivedData(qc); },
   });
 }
 
@@ -608,7 +592,7 @@ export function useSetPayee() {
   return useFinanceMutation<OkResult, SetPayeeVars>({
     endpoint: (v) => `/api/v1/transactions/${encodeURIComponent(v.id)}/payee`,
     method: 'POST',
-    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
+    onSuccess: () => { invalidateTransactionDerivedData(qc); },
   });
 }
 
@@ -618,8 +602,8 @@ export function useBankSync() {
   return useFinanceMutation<{ ok: boolean; warning?: string | null; at?: string; phantom?: { deletedCount: number; dryRun?: boolean } | null }, void>({
     endpoint: API_ENDPOINTS.bankSync.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await qc.invalidateQueries();
+    onSuccess: () => {
+      scheduleQueryInvalidation(qc);
     },
   });
 }
@@ -642,13 +626,13 @@ export interface SaveRuleVars {
 // Invalidate everything a fresh categorization touches — a rule can recategorize
 // many past transactions at once.
 function invalidateAfterRules(qc: ReturnType<typeof useQueryClient>) {
-  return Promise.all([
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.rules.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactions.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.spending.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.budgets.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
+  invalidateKeys(qc, [
+    API_ENDPOINTS.rules.key,
+    API_ENDPOINTS.transactions.key,
+    API_ENDPOINTS.spending.key,
+    API_ENDPOINTS.insights.key,
+    API_ENDPOINTS.budgets.key,
+    API_ENDPOINTS.review.key,
   ]);
 }
 
@@ -657,8 +641,8 @@ export function useSaveRule() {
   return useFinanceMutation<OkResult, SaveRuleVars>({
     endpoint: API_ENDPOINTS.saveRule.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await invalidateAfterRules(qc);
+    onSuccess: () => {
+      invalidateAfterRules(qc);
     },
   });
 }
@@ -668,8 +652,8 @@ export function useApplyRules() {
   return useFinanceMutation<OkResult, void>({
     endpoint: API_ENDPOINTS.applyRules.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await invalidateAfterRules(qc);
+    onSuccess: () => {
+      invalidateAfterRules(qc);
     },
   });
 }
@@ -679,8 +663,8 @@ export function useDeleteRule() {
   return useFinanceMutation<OkResult, { id: string }>({
     endpoint: (v) => `/api/v1/rules/${encodeURIComponent(v.id)}`,
     method: 'DELETE',
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.rules.key] });
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.rules.key]);
     },
   });
 }
@@ -707,8 +691,8 @@ export function useSaveEvent() {
   return useFinanceMutation<{ ok: boolean; event: TripEvent }, SaveEventVars>({
     endpoint: API_ENDPOINTS.saveEvent.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.events.key] });
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.events.key]);
     },
   });
 }
@@ -718,8 +702,8 @@ export function useDeleteEvent() {
   return useFinanceMutation<OkResult, { slug: string }>({
     endpoint: (v) => `/api/v1/events/${encodeURIComponent(v.slug)}`,
     method: 'DELETE',
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.events.key] });
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.events.key]);
     },
   });
 }
@@ -738,7 +722,7 @@ export function useSetNotes() {
   return useFinanceMutation<CategorizeResult, SetNotesVars>({
     endpoint: (v) => `/api/v1/transactions/${encodeURIComponent(v.id)}/notes`,
     method: 'POST',
-    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
+    onSuccess: () => { invalidateTransactionDerivedData(qc); },
   });
 }
 
@@ -754,7 +738,7 @@ export function useSetDate() {
   return useFinanceMutation<{ ok: boolean; date: string }, SetDateVars>({
     endpoint: (v) => `/api/v1/transactions/${encodeURIComponent(v.id)}/date`,
     method: 'POST',
-    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
+    onSuccess: () => { invalidateTransactionDerivedData(qc); },
   });
 }
 
@@ -770,8 +754,8 @@ export function useMarkBillPaid() {
   return useFinanceMutation<OkResult, MarkBillVars>({
     endpoint: API_ENDPOINTS.markBillPaid.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.bills.key] });
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.bills.key]);
     },
   });
 }
@@ -799,8 +783,8 @@ export function useAddReimbLink() {
   return useFinanceMutation<OkResult, AddReimbLinkVars>({
     endpoint: API_ENDPOINTS.addReimbLink.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reimbLinks.key] });
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.reimbLinks.key]);
     },
   });
 }
@@ -815,8 +799,8 @@ export function useDeleteReimbLink() {
   return useFinanceMutation<OkResult, DeleteReimbLinkVars>({
     endpoint: API_ENDPOINTS.deleteReimbLink.endpoint,
     method: 'DELETE',
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reimbLinks.key] });
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.reimbLinks.key]);
     },
   });
 }
@@ -835,15 +819,15 @@ export function useRepaymentSuggestions(options?: { enabled?: boolean }) {
 // Confirming files the inflow under Reimbursement + writes links, so it touches
 // spending/reimbursement/links/transactions — refresh them all.
 function invalidateAfterRepayment(qc: ReturnType<typeof useQueryClient>) {
-  return Promise.all([
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.repaymentSuggestions.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reimbursement.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.reimbLinks.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactions.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.transactionById.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.spending.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.insights.key] }),
-    qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
+  invalidateKeys(qc, [
+    API_ENDPOINTS.repaymentSuggestions.key,
+    API_ENDPOINTS.reimbursement.key,
+    API_ENDPOINTS.reimbLinks.key,
+    API_ENDPOINTS.transactions.key,
+    API_ENDPOINTS.transactionById.key,
+    API_ENDPOINTS.spending.key,
+    API_ENDPOINTS.insights.key,
+    API_ENDPOINTS.review.key,
   ]);
 }
 export function useConfirmRepayment() {
@@ -851,7 +835,7 @@ export function useConfirmRepayment() {
   return useFinanceMutation<{ ok: boolean; linked: number; inflowId: string }, { id: string }>({
     endpoint: (v) => `/api/v1/repayments/${encodeURIComponent(v.id)}/confirm`,
     method: 'POST',
-    onSuccess: async () => { await invalidateAfterRepayment(qc); },
+    onSuccess: () => { invalidateAfterRepayment(qc); },
   });
 }
 export function useDismissRepayment() {
@@ -859,11 +843,8 @@ export function useDismissRepayment() {
   return useFinanceMutation<{ ok: boolean; dismissed: string }, { id: string; inflowId?: string }>({
     endpoint: (v) => `/api/v1/repayments/${encodeURIComponent(v.id)}/dismiss`,
     method: 'POST',
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.repaymentSuggestions.key] }),
-        qc.invalidateQueries({ queryKey: [API_ENDPOINTS.review.key] }),
-      ]);
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.repaymentSuggestions.key, API_ENDPOINTS.review.key]);
     },
   });
 }
@@ -896,7 +877,7 @@ export function useAddReceipt() {
   return useFinanceMutation<Receipt, AddReceiptVars>({
     endpoint: API_ENDPOINTS.addReceipt.endpoint,
     method: 'POST',
-    onSuccess: async () => { await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.receipts.key] }); },
+    onSuccess: () => { invalidateKeys(qc, [API_ENDPOINTS.receipts.key]); },
   });
 }
 export function useDeleteReceipt() {
@@ -904,7 +885,7 @@ export function useDeleteReceipt() {
   return useFinanceMutation<OkResult, { id: string }>({
     endpoint: (v) => `/api/v1/receipts/${encodeURIComponent(v.id)}`,
     method: 'DELETE',
-    onSuccess: async () => { await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.receipts.key] }); },
+    onSuccess: () => { invalidateKeys(qc, [API_ENDPOINTS.receipts.key]); },
   });
 }
 // Authed <Image> source for a server-stored receipt (expo-image forwards headers).
@@ -920,7 +901,7 @@ export function useCreateTransaction() {
   return useFinanceMutation<OkResult, CreateTransactionInput>({
     endpoint: API_ENDPOINTS.createTransaction.endpoint,
     method: 'POST',
-    onSuccess: async () => { await invalidateTransactionDerivedData(qc); },
+    onSuccess: () => { invalidateTransactionDerivedData(qc); },
   });
 }
 
@@ -929,9 +910,8 @@ export function useSaveGoal() {
   return useFinanceMutation<OkResult, GoalInput>({
     endpoint: API_ENDPOINTS.saveGoal.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.goals.key] });
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.today.key] });
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.goals.key, API_ENDPOINTS.today.key]);
     },
   });
 }
@@ -941,9 +921,8 @@ export function useDeleteGoal() {
   return useFinanceMutation<OkResult, { id: string }>({
     endpoint: (v) => `/api/v1/goals/${encodeURIComponent(v.id)}`,
     method: 'DELETE',
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.goals.key] });
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.today.key] });
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.goals.key, API_ENDPOINTS.today.key]);
     },
   });
 }
@@ -988,8 +967,8 @@ export function useSaveManualAsset() {
   return useFinanceMutation<OkResult, SaveManualAssetVars>({
     endpoint: API_ENDPOINTS.saveManualAsset.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.manualAssets.key] });
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.manualAssets.key]);
     },
   });
 }
@@ -999,8 +978,8 @@ export function useDeleteManualAsset() {
   return useFinanceMutation<OkResult, { id: string }>({
     endpoint: (v) => `/api/v1/manual-assets/${encodeURIComponent(v.id)}`,
     method: 'DELETE',
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: [API_ENDPOINTS.manualAssets.key] });
+    onSuccess: () => {
+      invalidateKeys(qc, [API_ENDPOINTS.manualAssets.key]);
     },
   });
 }
@@ -1021,8 +1000,8 @@ export function useSetAccountOverride() {
   return useFinanceMutation<OkResult, SetAccountOverrideVars>({
     endpoint: (v) => `/api/v1/accounts/${encodeURIComponent(v.id)}/override`,
     method: 'POST',
-    onSuccess: async () => {
-      await invalidateKeys(qc, ACCOUNT_OVERRIDE_DERIVED_KEYS);
+    onSuccess: () => {
+      invalidateKeys(qc, ACCOUNT_OVERRIDE_DERIVED_KEYS);
     },
   });
 }
@@ -1032,8 +1011,8 @@ export function useRefresh() {
   return useFinanceMutation<{ ok: boolean }, void>({
     endpoint: API_ENDPOINTS.refresh.endpoint,
     method: 'POST',
-    onSuccess: async () => {
-      await qc.invalidateQueries();
+    onSuccess: () => {
+      scheduleQueryInvalidation(qc);
     },
   });
 }

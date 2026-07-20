@@ -39,11 +39,9 @@ export function FinanceDateProvider({ children }: { children: React.ReactNode })
     store.tick();
   }, [store]);
 
-  const snapshot = useSyncExternalStore(
-    useCallback((listener) => store.subscribe(listener), [store]),
-    () => store.getSnapshot(),
-    () => store.getSnapshot(),
-  );
+  const subscribe = useCallback((listener: () => void) => store.subscribe(listener), [store]);
+  const getSnapshot = useCallback(() => store.getSnapshot(), [store]);
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   const value = useMemo<FinanceDateContextValue>(() => ({
     ...snapshot,
