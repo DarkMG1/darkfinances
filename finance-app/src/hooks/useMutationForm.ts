@@ -317,6 +317,9 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   }, [formId, formIdentityKey, profileGeneration, scopeDigest]);
 
   const runMutation = useCallback((variables: TVariables) => {
+    if (__DEV__ && formId === 'add-transaction') {
+      console.log('[mutation-debug] form runMutation');
+    }
     if (pendingLockRef.current) return;
     const lease = acquireAdmission();
     if (lease == null) return;
@@ -333,6 +336,9 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     try {
       mutation.mutate(variables, {
         onSuccess: () => {
+          if (__DEV__ && formId === 'add-transaction') {
+            console.log('[mutation-debug] form per-call onSuccess');
+          }
           if (!isDispatchTokenCurrent(token)) return;
           variablesRef.current = null;
           setPhase('success');
@@ -345,14 +351,23 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
           successClosePendingRef.current = true;
         },
         onError: (error) => {
+          if (__DEV__ && formId === 'add-transaction') {
+            console.log('[mutation-debug] form per-call onError', error);
+          }
           errorReconciliation = startMutationErrorReconciliation(() => handleError(error, token));
         },
         onSettled: async () => {
+          if (__DEV__ && formId === 'add-transaction') {
+            console.log('[mutation-debug] form per-call onSettled start');
+          }
           await awaitMutationErrorReconciliation(errorReconciliation);
           releaseAdmissionForLease(lease);
           if (!isDispatchTokenCurrent(token)) return;
           pendingLockRef.current = false;
           setDispatchPending(false);
+          if (__DEV__ && formId === 'add-transaction') {
+            console.log('[mutation-debug] form per-call onSettled unlocked');
+          }
         },
       });
     } catch (error) {

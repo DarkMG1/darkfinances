@@ -242,6 +242,9 @@ export function useFinanceMutation<R = void, V = void>({
     ...options,
     mutationFn: (variables: V) => {
       const resolvedEndpoint = typeof endpoint === 'function' ? endpoint(variables) : endpoint;
+      if (__DEV__ && resolvedEndpoint === '/api/v1/transactions') {
+        console.log('[mutation-debug] create mutationFn start');
+      }
       const scopeDigest = financeOperationProfileScope(serverUrl, token, demo);
       if (!demo && !scopeDigest) {
         throw createError('Finance server profile is not configured', 400, 'PROFILE_NOT_CONFIGURED');
@@ -264,7 +267,7 @@ export function useFinanceMutation<R = void, V = void>({
           scopeDigest,
         });
       }
-      return executeMutationWithIdempotency<R | undefined>({
+      const execution = executeMutationWithIdempotency<R | undefined>({
         demo,
         machine: financeOperationMachine,
         demoDispatch: () => buildQuery<R, V>({
@@ -299,6 +302,13 @@ export function useFinanceMutation<R = void, V = void>({
             queryOperationStatus<R | undefined>(serverUrl, token, idempotencyKey),
         },
       });
+      if (__DEV__ && resolvedEndpoint === '/api/v1/transactions') {
+        execution.then(
+          () => console.log('[mutation-debug] create mutationFn resolved'),
+          (error) => console.log('[mutation-debug] create mutationFn rejected', error),
+        );
+      }
+      return execution;
     },
     retry: REACT_QUERY_MUTATION_RETRY,
     // Centralized mutation outcome haptics (L5): one success or error haptic per
@@ -306,6 +316,9 @@ export function useFinanceMutation<R = void, V = void>({
     onSuccess: (...args: Parameters<NonNullable<typeof onSuccess>>) => {
       const [, variables] = args;
       const resolvedEndpoint = typeof endpoint === 'function' ? endpoint(variables as V) : endpoint;
+      if (__DEV__ && resolvedEndpoint === '/api/v1/transactions') {
+        console.log('[mutation-debug] create global onSuccess start');
+      }
       const scopeDigest = financeOperationProfileScope(serverUrl, token, demo);
       if (demo) {
         if (!suppressOutcomeHaptic) mutationOutcomeHaptics.emitDemoSuccess();
@@ -318,7 +331,11 @@ export function useFinanceMutation<R = void, V = void>({
         );
         if (!suppressOutcomeHaptic) mutationOutcomeHaptics.emitSuccess(requestDigest);
       }
-      return onSuccess?.(...args);
+      const result = onSuccess?.(...args);
+      if (__DEV__ && resolvedEndpoint === '/api/v1/transactions') {
+        console.log('[mutation-debug] create global onSuccess return', result);
+      }
+      return result;
     },
     onError: (...args: Parameters<NonNullable<typeof onError>>) => {
       const [error, variables] = args;
