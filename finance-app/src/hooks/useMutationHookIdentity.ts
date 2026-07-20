@@ -69,6 +69,8 @@ export function useMutationHookIdentity(options: UseMutationHookIdentityOptions 
     setDispatchPending(false);
   }, [pendingLockKind]);
 
+  const isPendingLocked = useCallback(() => Boolean(pendingLockRef.current), []);
+
   return {
     scopeDigest,
     profileGeneration,
@@ -80,6 +82,7 @@ export function useMutationHookIdentity(options: UseMutationHookIdentityOptions 
     setDispatchPending,
     captureDispatchToken,
     isDispatchTokenCurrent,
+    isPendingLocked,
     resetPendingLock,
   };
 }

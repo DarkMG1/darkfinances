@@ -64,6 +64,10 @@ appId: ${MAESTRO_APP_ID}
     text: "Amount: Highest"
 - tapOn:
     id: category-sort-control
+- assertVisible:
+    id: category-sort-sheet
+- assertVisible:
+    id: category-sort-option-amountLow
 - tapOn:
     id: category-sort-option-amountLow
 - assertNotVisible:
@@ -74,6 +78,10 @@ appId: ${MAESTRO_APP_ID}
     text: "Amount: Lowest"
 - tapOn:
     id: category-sort-control
+- assertVisible:
+    id: category-sort-sheet
+- assertVisible:
+    id: category-sort-option-oldest
 - tapOn:
     id: category-sort-option-oldest
 - assertNotVisible:
@@ -84,6 +92,10 @@ appId: ${MAESTRO_APP_ID}
     text: "Date: Oldest"
 - tapOn:
     id: category-sort-control
+- assertVisible:
+    id: category-sort-sheet
+- assertVisible:
+    id: category-sort-option-newest
 - tapOn:
     id: category-sort-option-newest
 - assertNotVisible:

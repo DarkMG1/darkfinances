@@ -109,6 +109,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     setDispatchPending,
     captureDispatchToken,
     isDispatchTokenCurrent,
+    isPendingLocked,
   } = identity;
   const pendingLockRef = identity.pendingLockRef as React.MutableRefObject<boolean>;
   const { acquireAdmission, releaseAdmissionForLease } = useMutationAdmissionLifecycle(admissionRef, identityKey);
@@ -219,7 +220,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     if (!shouldScheduleDeferredSuccessClose({
       phase,
       dispatchPending,
-      pendingLocked: pendingLockRef.current,
+      pendingLocked: isPendingLocked(),
       successPending: successClosePendingRef.current,
     })) {
       return;
@@ -233,7 +234,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
       if (!shouldRunDeferredSuccessClose({
         phase,
         tokenCurrent: closeToken != null && isDispatchTokenCurrent(closeToken),
-        pendingLocked: pendingLockRef.current,
+        pendingLocked: isPendingLocked(),
         dispatchPending,
         alreadyClosed: closedRef.current,
       })) {
@@ -255,7 +256,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
         successCloseFrameRef.current = null;
       }
     };
-  }, [dispatchPending, isDispatchTokenCurrent, onSuccessClose, phase]);
+  }, [dispatchPending, isDispatchTokenCurrent, isPendingLocked, onSuccessClose, phase]);
 
   useEffect(() => {
     if (!shouldInvalidateValidationOutcome(phase, outcome, fields, submittedFieldsRef.current)) return;
@@ -369,7 +370,6 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     isDispatchTokenCurrent,
     mutation,
     mutationLabel,
-    onSuccessClose,
     pendingLockRef,
     releaseAdmissionForLease,
     setDispatchPending,

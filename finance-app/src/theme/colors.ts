@@ -1,5 +1,5 @@
 // Shared dark palette, mirrors the web dashboard (darkfinances).
-import { daysUntilDateOnly } from '@/lib/date-only';
+import { daysUntilDateOnly } from '@/lib/finance-date-core.js';
 
 export const colors = {
   bg: '#0a0a0f',

@@ -11,6 +11,8 @@ test('MutationSheet keeps sheet container non-accessible with separate backdrop'
   assert.match(source, /importantForAccessibility="no"/);
   assert.doesNotMatch(source, /testID=\{testID\}[\s\S]*accessibilityLabel=\{title\}/);
   assert.match(source, /accessibilityLabel="Dismiss sheet"/);
+  assert.match(source, /modalDismissRegion:\s*\{\s*flex:\s*1/);
+  assert.doesNotMatch(source, /modalDismissRegion:\s*\{[\s\S]*StyleSheet\.absoluteFill/);
 });
 
 test('MutationFormBanner exposes summary as accessibility label', () => {
@@ -32,6 +34,9 @@ test('SortSheet uses sibling backdrop and selection accessibilityState', () => {
   assert.match(source, /testID="category-sort-sheet"[\s\S]*accessible=\{false\}/);
   assert.match(source, /accessibilityState=\{\{ selected \}\}/);
   assert.doesNotMatch(source, /<Pressable testID="category-sort-sheet" style=\{styles\.sheetCard\} onPress/);
+  assert.match(source, /sheetBackdrop:\s*\{\s*flex:\s*1/);
+  assert.match(source, /paddingBottom:\s*insets\.bottom\s*\+\s*16/);
+  assert.doesNotMatch(source, /sheetBackdrop:\s*\{[\s\S]*StyleSheet\.absoluteFill/);
 });
 
 test('Maestro goals validation flows target sheet banner and field errors', () => {

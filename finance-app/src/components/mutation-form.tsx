@@ -174,9 +174,10 @@ export function MutationSheet({
       accessibilityViewIsModal
     >
       <View style={styles.modalRoot} accessibilityViewIsModal>
+        <View pointerEvents="none" style={styles.modalDim} />
         <Pressable
           testID={backdropTestID}
-          style={styles.modalBg}
+          style={styles.modalDismissRegion}
           onPress={handleClose}
           accessibilityRole="button"
           accessibilityLabel="Dismiss sheet"
@@ -274,9 +275,13 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'flex-end',
   },
-  modalBg: {
+  modalDim: {
     ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  modalDismissRegion: {
+    flex: 1,
+    alignSelf: 'stretch',
   },
   sheet: {
     backgroundColor: colors.bg,

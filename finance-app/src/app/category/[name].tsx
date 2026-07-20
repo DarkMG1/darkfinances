@@ -307,9 +307,11 @@ function MiniCategoryBars({ months, selected, onSelect }: { months: { month: str
 }
 
 function SortSheet({ visible, value, onSelect, onClose }: { visible: boolean; value: SortKey; onSelect: (key: SortKey) => void; onClose: () => void }) {
+  const insets = useSafeAreaInsets();
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} accessibilityViewIsModal>
       <View style={styles.sheetRoot}>
+        <View pointerEvents="none" style={styles.sheetDim} />
         <Pressable
           testID="category-sort-sheet-backdrop"
           style={styles.sheetBackdrop}
@@ -317,7 +319,12 @@ function SortSheet({ visible, value, onSelect, onClose }: { visible: boolean; va
           accessibilityRole="button"
           accessibilityLabel="Dismiss sort sheet"
         />
-        <View testID="category-sort-sheet" accessible={false} importantForAccessibility="no" style={styles.sheetCard}>
+        <View
+          testID="category-sort-sheet"
+          accessible={false}
+          importantForAccessibility="no"
+          style={[styles.sheetCard, { paddingBottom: insets.bottom + 16 }]}
+        >
           <View style={styles.sheetHandle} />
           <Text accessibilityRole="header" style={styles.sheetTitle}>Sort transactions</Text>
           {SORTS.map((option) => {
@@ -330,6 +337,7 @@ function SortSheet({ visible, value, onSelect, onClose }: { visible: boolean; va
                 accessibilityLabel={option.label}
                 accessibilityState={{ selected }}
                 onPress={() => onSelect(option.key)}
+                hitSlop={4}
                 style={({ pressed }) => [styles.sheetOption, pressed && { opacity: 0.7 }]}
               >
                 <Text style={[styles.sheetOptionText, selected && styles.sheetOptionTextOn]}>{option.label}</Text>
@@ -377,8 +385,9 @@ const styles = StyleSheet.create({
   footerLabel: { color: colors.muted, fontSize: 13, fontWeight: '700' },
   footerValue: { color: colors.text, fontSize: 17, fontWeight: '900' },
   sheetRoot: { flex: 1, justifyContent: 'flex-end' },
-  sheetBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.48)' },
-  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, borderColor: colors.border, borderWidth: 1, paddingHorizontal: 18, paddingTop: 10, paddingBottom: 28 },
+  sheetDim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.48)' },
+  sheetBackdrop: { flex: 1, alignSelf: 'stretch' },
+  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, borderColor: colors.border, borderWidth: 1, paddingHorizontal: 18, paddingTop: 10 },
   sheetHandle: { alignSelf: 'center', width: 42, height: 4, borderRadius: 2, backgroundColor: colors.border, marginBottom: 16 },
   sheetTitle: { color: colors.text, fontSize: 18, fontWeight: '800', marginBottom: 10 },
   sheetOption: { minHeight: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
