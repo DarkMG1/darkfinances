@@ -134,6 +134,15 @@ function resetStores(referenceId = original.id) {
   });
 }
 
+function canonicalizeSplitLegPayees(rows) {
+  for (const row of rows) {
+    if (!row.is_parent || !Array.isArray(row.subtransactions)) continue;
+    for (const leg of row.subtransactions) {
+      if (leg.payee == null || leg.payee === '') leg.payee = row.payee;
+    }
+  }
+}
+
 function materializeAdded(transaction, id, accountId = 'account') {
   const subtransactions = (transaction.subtransactions || []).map((leg, index) => ({
     ...structuredClone(leg),
@@ -243,6 +252,7 @@ function durableActual({
         Object.assign(row, patch);
         delete row.category;
         if (patch.imported_id === '') row.imported_id = null;
+        canonicalizeSplitLegPayees(state.rows);
         return;
       }
       if (row.is_parent
@@ -263,6 +273,7 @@ function durableActual({
       if (deferImportedIdUntilSync) {
         for (const row of state.rows) delete row._staleImportedId;
       }
+      canonicalizeSplitLegPayees(state.rows);
     },
   };
   return adapter;
@@ -578,15 +589,17 @@ test('manual split metadata restore clears temporary imported identity on Actual
     added.subtransactions.reduce((sum, leg) => sum + leg.amount, 0),
     added.amount,
   );
-  for (const leg of added.subtransactions) {
-    assert.equal(leg.payee ?? null, null, 'full payload restore must not normalize leg payees');
-  }
   assert.equal(latestSaga().phase, 'sync_pending');
   assert.equal(api.state.counts.update, 1);
   assert.ok(api.state.counts.sync >= 1);
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
   const persisted = api.state.rows.find((row) => row.id === added.id);
   assert.equal(persisted.imported_id, null);
   assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
+  for (const leg of persisted.subtransactions) {
+    assert.equal(leg.payee, manualOriginal.payee, 'Actual canonicalizes unnamed legs to parent payee');
+  }
 });
 
 const forwardBoundaries = [

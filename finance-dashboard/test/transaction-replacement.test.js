@@ -22,6 +22,11 @@ const {
   replaceActualTransaction,
   transactionReplacementMap,
 } = require('../dataModule');
+const {
+  shapeMatches,
+  transactionFingerprint,
+  transactionShape,
+} = require('../lib/transaction-replacement-saga');
 test.beforeEach(() => {
   fs.rmSync(process.env.TRANSACTION_SAGAS_PATH, { force: true });
 });
@@ -89,6 +94,56 @@ test('addable transaction preserves import identity and parent metadata', () => 
     category: 'old-category',
     subtransactions: undefined,
   });
+});
+
+const parentPayee = 'payee-id';
+const splitShapeBase = {
+  date: '2026-07-09',
+  amount: -1000,
+  payee: parentPayee,
+  notes: 'parent notes',
+  cleared: false,
+  imported_id: null,
+  category: null,
+  subtransactions: [
+    { amount: -400, category: 'cat-1', notes: 'leg one' },
+    { amount: -600, category: 'cat-2', notes: 'leg two' },
+  ],
+};
+
+test('shape comparison treats null leg payee as parent payee inheritance', () => {
+  const withNullLegPayee = structuredClone(splitShapeBase);
+  const withParentLegPayee = {
+    ...structuredClone(splitShapeBase),
+    subtransactions: splitShapeBase.subtransactions.map((leg) => ({
+      ...leg,
+      payee: parentPayee,
+    })),
+  };
+  assert.equal(shapeMatches(withNullLegPayee, withParentLegPayee), true);
+  assert.equal(
+    transactionFingerprint(withNullLegPayee),
+    transactionFingerprint(withParentLegPayee),
+  );
+});
+
+test('shape comparison rejects explicit different leg payee', () => {
+  const withNullLegPayee = structuredClone(splitShapeBase);
+  const withDistinctLegPayee = {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [
+      { ...splitShapeBase.subtransactions[0], payee: 'leg-payee-1' },
+      { ...splitShapeBase.subtransactions[1] },
+    ],
+  };
+  assert.equal(shapeMatches(withNullLegPayee, withDistinctLegPayee), false);
+});
+
+test('transactionShape does not mutate stored leg payee values', () => {
+  const txn = structuredClone(splitShapeBase);
+  transactionShape(txn);
+  assert.equal(txn.subtransactions[0].payee, undefined);
+  assert.equal(txn.subtransactions[1].payee, undefined);
 });
 
 test('replacement identifies the new parent and generated leg IDs', async () => {

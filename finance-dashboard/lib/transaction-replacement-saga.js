@@ -199,6 +199,12 @@ function normalizedValue(value) {
   return value == null || value === '' ? null : value;
 }
 
+function canonicalLegPayee(legPayee, parentPayee) {
+  const normalizedLeg = normalizedValue(legPayee);
+  if (normalizedLeg == null) return normalizedValue(parentPayee);
+  return normalizedLeg;
+}
+
 const METADATA_CONVERGE_ATTEMPTS = 5;
 
 function restorableImportedId(value) {
@@ -217,10 +223,11 @@ function metadataRestoreFields(row, intendedImportedId) {
 
 function transactionShape(transaction, importedId = transaction?.imported_id) {
   const legs = Array.isArray(transaction?.subtransactions) ? transaction.subtransactions : [];
+  const parentPayee = normalizedValue(transaction?.payee);
   return {
     date: String(transaction?.date || ''),
     amount: transaction?.amount,
-    payee: normalizedValue(transaction?.payee),
+    payee: parentPayee,
     notes: normalizedValue(transaction?.notes),
     cleared: transaction?.cleared == null ? true : Boolean(transaction.cleared),
     imported_id: normalizedValue(importedId),
@@ -230,7 +237,7 @@ function transactionShape(transaction, importedId = transaction?.imported_id) {
       amount: leg?.amount,
       category: normalizedValue(leg?.category),
       notes: normalizedValue(leg?.notes),
-      payee: normalizedValue(leg?.payee),
+      payee: canonicalLegPayee(leg?.payee, parentPayee),
     })),
   };
 }
@@ -1314,6 +1321,8 @@ module.exports = {
   addableTransaction,
   assertReconstructableTransaction,
   createTransactionReplacementSaga,
+  shapeMatches,
   transactionFingerprint,
   transactionReplacementMap,
+  transactionShape,
 };

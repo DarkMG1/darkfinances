@@ -7,6 +7,15 @@ let sequence = 0;
 let createPayeeCalls = 0;
 let syncError = null;
 
+function canonicalizeSplitLegPayees() {
+  for (const row of rows) {
+    if (!row.is_parent || !Array.isArray(row.subtransactions)) continue;
+    for (const leg of row.subtransactions) {
+      if (leg.payee == null || leg.payee === '') leg.payee = row.payee;
+    }
+  }
+}
+
 function configure({ transactions, payeeRows = [], accountRows = null }) {
   rows = structuredClone(transactions || []);
   payees = structuredClone(payeeRows);
@@ -35,6 +44,7 @@ async function init() {}
 async function downloadBudget() {}
 async function sync() {
   if (syncError) throw syncError;
+  canonicalizeSplitLegPayees();
 }
 async function shutdown() {}
 async function getAccounts() {
@@ -84,6 +94,7 @@ async function updateTransaction(id, fields) {
     Object.assign(row, patch);
     delete row.category;
     if (patch.imported_id === '') row.imported_id = null;
+    canonicalizeSplitLegPayees();
     return;
   }
   Object.assign(row, patch);
