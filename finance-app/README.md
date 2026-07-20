@@ -204,7 +204,7 @@ Shared helpers live under `src/lib/mutation-form-*.js`, `src/hooks/useMutationFo
 Tests: `test/mutation-form-*.test.js`, `test/mutation-inventory.test.js`,
 `test/mutation-banner-coordinator.test.js`,
 `test/request-operation-state.test.js`, `test/request-operation-fake-server.test.js`.
-Maestro: `.maestro/mutation-validation-errors.yaml`, `.maestro/mutation-retry-dismiss.yaml`,
+Maestro: `.maestro/mutation-validation-errors.yaml`, `.maestro/mutation-validation-banner-dismiss.yaml`,
 `.maestro/mutation-offline-retry.yaml`.
 
 ## Demo mode

@@ -9,9 +9,6 @@ import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
 
 export default function DebtScreen() {
   const investments = useInvestments();
-  const data = investments.data;
-
-  const hasDebts = !!data && data.debts.length > 0;
 
   return (
     <PushScreen testID="debt-screen" onRefresh={investments.refetch}>
@@ -19,21 +16,22 @@ export default function DebtScreen() {
         query={investments}
         loading={<Loading />}
         empty={<EmptyState icon="creditcard">No debt plan configured</EmptyState>}
-        hasContent={hasDebts}
+        hasContent={Boolean(investments.data?.debts?.length)}
         refetchBannerTestID="debt-refetch-banner"
-      >
+        renderContent={(data) => (
+          <>
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               'Debt payoff',
-              fmtMoney(-data!.debtTotals.balance),
-              `${fmtPos(data!.debtTotals.minPayment)} per month minimum · ${data!.debtTotals.weightedApr}% weighted APR`,
+              fmtMoney(-(data.debtTotals?.balance ?? 0)),
+              `${fmtPos(data.debtTotals?.minPayment ?? 0)} per month minimum · ${data.debtTotals?.weightedApr ?? 0}% weighted APR`,
             )}
           >
             <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">DEBT PAYOFF</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(-data!.debtTotals.balance)}</Text>
-            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{fmtPos(data!.debtTotals.minPayment)}/mo minimum · {data!.debtTotals.weightedApr}% weighted APR</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(-(data.debtTotals?.balance ?? 0))}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{fmtPos(data.debtTotals?.minPayment ?? 0)}/mo minimum · {data.debtTotals?.weightedApr ?? 0}% weighted APR</Text>
           </View>
 
           <Card style={{ marginBottom: 16 }}>
@@ -42,7 +40,7 @@ export default function DebtScreen() {
           </Card>
 
           <Card>
-            {data!.debts.map((d) => (
+            {(data.debts ?? []).map((d) => (
               <View key={d.id} testID={`debt-row-${d.id}`} style={styles.row}>
                 <Avatar label={d.name} size={36} />
                 <View style={{ flex: 1, minWidth: 0 }}>
@@ -54,7 +52,9 @@ export default function DebtScreen() {
               </View>
             ))}
           </Card>
-      </QueryScreenBody>
+          </>
+        )}
+      />
     </PushScreen>
   );
 }

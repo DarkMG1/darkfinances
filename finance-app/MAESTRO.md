@@ -50,7 +50,7 @@ independently and cannot inherit a live server token.
 From `finance-app`:
 
 ```bash
-# Every flow
+# Every flow (privacy matcher runs for the full suite lifetime)
 npm run test:e2e:ios
 
 # Onboarding, Home, Activity, and Settings
@@ -80,8 +80,13 @@ From the monorepo root, `npm run test:e2e:ios` runs the complete app suite.
 Run one flow directly while iterating:
 
 ```bash
-maestro test .maestro/home-dashboard.yaml
+bash scripts/run-maestro-ios.sh .maestro/home-dashboard.yaml
 ```
+
+iOS Maestro scripts route through `scripts/run-maestro-ios.sh`, which resolves `MAESTRO_APP_ID`, enrolls
+simulator biometrics, and—when the target includes `privacy-unlock.yaml` or the full `.maestro` directory—
+posts biometric match notifications for exactly the Maestro process lifetime. Override the booted simulator
+with `DEVICE=booted` (default) or a specific UDID.
 
 ## Suite map
 
@@ -115,7 +120,8 @@ npm run test:e2e:ios:privacy:animation
 ```
 
 Outputs are written under `build/privacy-animation/`. Override the booted simulator, app ID, output
-directory, or flow with `DEVICE`, `APP_ID`, `OUT_DIR`, and `FLOW`.
+directory, or flow with `DEVICE`, `APP_ID`, `OUT_DIR`, and `FLOW`. The animation script reuses
+`scripts/run-maestro-ios.sh` for biometric matching instead of a fixed-duration loop.
 
 The analyzer reports frame counts, meaningful pixel deltas, longest changing-frame run, and peak delta.
 It is a regression aid, not a substitute for human review of captured frames.
@@ -144,7 +150,7 @@ directory, which is under the ignored `build/` tree by default.
 - **Onboarding cannot reach demo:** verify the demo-only dashboard is listening on `127.0.0.1:5007`.
 - **Unexpected live-server state:** uninstall/reset the app, then rerun a flow with `clearState: true`.
 - **Deep-link Open prompt appears:** flows handle the simulator's optional **Open** confirmation.
-- **Face ID flow times out:** enroll simulator biometrics and verify biometric matching is available.
+- **Face ID flow times out:** run through `npm run test:e2e:ios:privacy` so the in-repo biometric matcher wrapper is active; do not rely on manual background `simctl` loops.
 - **Element not found:** run the single flow, inspect the Maestro hierarchy/artifacts, and prefer adding a
   stable `testID` over timing sleeps.
 - **Data-dependent row missing:** update the synthetic demo fixture and its tests; do not switch E2E to a

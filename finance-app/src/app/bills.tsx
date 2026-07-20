@@ -136,21 +136,22 @@ export default function Bills() {
         query={bills}
         loading={<SkeletonList hero rows={5} />}
         empty={<EmptyState icon="calendar">No upcoming bills detected</EmptyState>}
-        hasContent={!!data && data.count > 0}
+        hasContent={Boolean(data?.horizonDays != null && (data?.count ?? 0) > 0)}
         refetchBannerTestID="bills-refetch-banner"
-      >
+        renderContent={(billData) => (
+          <>
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
-              `Unpaid next ${data!.horizonDays} days`,
-              fmtMoney(data!.total),
-              `${data!.unpaidCount} of ${data!.count} bills unpaid`,
+              `Unpaid next ${billData.horizonDays} days`,
+              fmtMoney(billData.total),
+              `${billData.unpaidCount} of ${billData.count} bills unpaid`,
             )}
           >
-            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">UNPAID · NEXT {data!.horizonDays} DAYS</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(data!.total)}</Text>
-            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{data!.unpaidCount} of {data!.count} bills unpaid</Text>
+            <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">UNPAID · NEXT {billData.horizonDays} DAYS</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(billData.total)}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{billData.unpaidCount} of {billData.count} bills unpaid</Text>
           </View>
 
           {months.map((m) => {
@@ -168,7 +169,7 @@ export default function Bills() {
                 {dayItems ? (
                   <View style={{ marginTop: 6 }}>
                     <View style={styles.selHead}>
-                      <SectionLabel>{dueLabel(selected!, financeToday)}</SectionLabel>
+                      <SectionLabel>{selected ? dueLabel(selected, financeToday) : ''}</SectionLabel>
                       <Text style={styles.clearSelText} onPress={() => setSelected(null)}>Show all</Text>
                     </View>
                     {dayItems.length ? (
@@ -190,7 +191,9 @@ export default function Bills() {
                 </View>
               ))
             : null}
-      </QueryScreenBody>
+          </>
+        )}
+      />
     </PushScreen>
   );
 }

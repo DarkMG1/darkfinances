@@ -14,14 +14,6 @@ export default function CashFlow() {
   const { width } = useWindowDimensions();
   const router = useRouter();
   const trends = useTrends(12);
-  const months = trends.data?.months ?? [];
-  const cur = months[months.length - 1];
-
-  const labels = months.map((m) => m.month.slice(5));
-  const monthComplete = trendPeriodComplete;
-  const income = months.map((m) => (monthComplete(m) ? m.income! : null));
-  const spend = months.map((m) => (monthComplete(m) ? m.spend! : null));
-  const chartHasIncomplete = months.some((m) => !monthComplete(m));
 
   return (
     <PushScreen testID="cashflow-screen" onRefresh={trends.refetch}>
@@ -29,9 +21,18 @@ export default function CashFlow() {
         query={trends}
         loading={<Loading />}
         empty={<EmptyState icon="chart.bar">No cash flow data</EmptyState>}
-        hasContent={months.length > 0}
+        hasContent={Boolean(trends.data?.months?.length)}
         refetchBannerTestID="cashflow-refetch-banner"
-      >
+        renderContent={(trendData) => {
+          const months = trendData.months ?? [];
+          const cur = months[months.length - 1];
+          const labels = months.map((m) => m.month.slice(5));
+          const monthComplete = trendPeriodComplete;
+          const income = months.map((m) => (monthComplete(m) ? m.income! : null));
+          const spend = months.map((m) => (monthComplete(m) ? m.spend! : null));
+          const chartHasIncomplete = months.some((m) => !monthComplete(m));
+          return (
+          <>
           <View style={styles.statsRow}>
             <StatCard testID="cashflow-money-in" label="Money In" value={cur && monthComplete(cur) ? fmtPos(cur.income!) : 'Unavailable'} valueColor={colors.green} />
             <StatCard testID="cashflow-money-out" label="Money Out" value={cur && monthComplete(cur) ? fmtPos(cur.spend!) : 'Unavailable'} valueColor={colors.red} />
@@ -72,7 +73,10 @@ export default function CashFlow() {
               </View>
             ))}
           </Card>
-      </QueryScreenBody>
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }

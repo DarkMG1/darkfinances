@@ -2,9 +2,10 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
 - assertVisible:
     id: home-screen
 - assertVisible:
@@ -21,7 +22,12 @@ appId: ${MAESTRO_APP_ID}
 - assertVisible:
     id: home-action-budgets
 - assertVisible:
+    id: home-action-goals
+- assertVisible:
+    id: home-action-who-owes-me
+- assertNotVisible:
     id: home-action-reports
+    optional: true
 - assertVisible:
     id: home-review-banner
 - tapOn:

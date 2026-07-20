@@ -41,10 +41,6 @@ export default function ForecastScreen() {
   const { width } = useWindowDimensions();
   const [days, setDays] = useState<(typeof WINDOWS)[number]>(90);
   const forecast = useForecast(days);
-  const data = forecast.data;
-  const values = data?.points.map((p) => p.balance) ?? [];
-  const events = data?.events.slice(0, 20) ?? [];
-  const ending = data ? endingBalanceDisplay(data) : null;
 
   return (
     <PushScreen testID="forecast-screen" onRefresh={forecast.refetch}>
@@ -52,11 +48,12 @@ export default function ForecastScreen() {
         query={forecast}
         loading={<Loading />}
         empty={<EmptyState icon="chart.line.uptrend.xyaxis">No forecast available</EmptyState>}
-        hasContent={!!data}
+        hasContent={Boolean(forecast.data)}
         refetchBannerTestID="forecast-refetch-banner"
-      >
-        {data ? (() => {
-          const forecastData = data;
+        renderContent={(data) => {
+          const values = data.points?.map((p) => p.balance) ?? [];
+          const events = data.events?.slice(0, 20) ?? [];
+          const ending = endingBalanceDisplay(data);
           return (
           <>
           <View style={styles.rangeRow}>
@@ -70,21 +67,21 @@ export default function ForecastScreen() {
           <View style={styles.statsRow}>
             <StatCard
               testID="forecast-ending"
-              label={ending?.label ?? 'Ending'}
-              value={ending?.value ?? 'Unavailable'}
-              valueColor={ending?.valueColor ?? colors.muted}
-              sub={ending?.sub}
+              label={ending.label}
+              value={ending.value}
+              valueColor={ending.valueColor}
+              sub={ending.sub}
               subColor={colors.yellow}
             />
-            <StatCard testID="forecast-lowest" label="Lowest" value={fmtMoney(forecastData.lowest.balance)} valueColor={forecastData.lowest.balance >= 0 ? colors.text : colors.red} sub={fmtDate(forecastData.lowest.date)} />
-            <StatCard testID="forecast-net" label="Net" value={fmtSignedMoney(forecastData.totals.inflow - forecastData.totals.outflow)} valueColor={forecastData.totals.inflow >= forecastData.totals.outflow ? colors.green : colors.red} />
+            <StatCard testID="forecast-lowest" label="Lowest" value={fmtMoney(data.lowest.balance)} valueColor={data.lowest.balance >= 0 ? colors.text : colors.red} sub={fmtDate(data.lowest.date)} />
+            <StatCard testID="forecast-net" label="Net" value={fmtSignedMoney(data.totals.inflow - data.totals.outflow)} valueColor={data.totals.inflow >= data.totals.outflow ? colors.green : colors.red} />
           </View>
 
-          {forecastData.warnings.length ? (
+          {data.warnings.length ? (
             <Card testID="forecast-warnings" style={styles.warning}>
               <SymbolView name="exclamationmark.triangle.fill" tintColor={colors.red} size={20} resizeMode="scaleAspectFit" />
               <View style={styles.warningList}>
-                {forecastData.warnings.map((warning, index) => (
+                {data.warnings.map((warning, index) => (
                   <Text key={`${index}-${warning}`} style={styles.warningText}>{warning}</Text>
                 ))}
               </View>
@@ -93,13 +90,13 @@ export default function ForecastScreen() {
 
           <Card style={{ marginTop: 12 }}>
             <CardTitle>Illustrative Cash Plan</CardTitle>
-            <LineChart width={width - 64} values={values} color={forecastData.lowest.balance < 0 ? colors.red : colors.accentLight} />
-            <Text style={styles.hint}>Starts at {fmtPos(forecastData.startBalance)} estimated cash and models inferred income, inferred bills, and planned budget spending. It is not a prediction.</Text>
-            {projectionIncomplete(forecastData) ? (
+            <LineChart width={width - 64} values={values} color={data.lowest.balance < 0 ? colors.red : colors.accentLight} />
+            <Text style={styles.hint}>Starts at {fmtPos(data.startBalance)} estimated cash and models inferred income, inferred bills, and planned budget spending. It is not a prediction.</Text>
+            {projectionIncomplete(data) ? (
               <Text style={styles.hint}>Projection containment is incomplete; balances may omit budget, goal, or scheduled cash commitments.</Text>
             ) : null}
-            {forecastData.possibleReimbursement ? (
-              <Text style={styles.hint}>A possible {fmtPos(forecastData.possibleReimbursement.amount)} reimbursement is excluded from every balance shown.</Text>
+            {data.possibleReimbursement ? (
+              <Text style={styles.hint}>A possible {fmtPos(data.possibleReimbursement.amount)} reimbursement is excluded from every balance shown.</Text>
             ) : null}
           </Card>
 
@@ -118,8 +115,8 @@ export default function ForecastScreen() {
           </Card>
           </>
           );
-        })() : null}
-      </QueryScreenBody>
+        }}
+      />
     </PushScreen>
   );
 }

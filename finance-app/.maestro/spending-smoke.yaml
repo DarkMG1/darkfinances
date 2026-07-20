@@ -2,9 +2,12 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
+- assertVisible:
+    id: home-screen
 - openLink: darkfinances:///spending
 - tapOn:
     text: Open
@@ -55,8 +58,8 @@ appId: ${MAESTRO_APP_ID}
 - assertVisible:
     id: spending-summary-spending-row
 - takeScreenshot: spending-overview
-- scroll
-- assertVisible: Your Budget
+- assertVisible:
+    id: spending-budget-left
 - assertVisible: Breakdown
 - assertVisible:
     id: spending-breakdown-circle

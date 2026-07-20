@@ -2,9 +2,12 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
+- assertVisible:
+    id: home-screen
 - openLink: darkfinances:///budgets
 - tapOn:
     text: Open
@@ -33,13 +36,13 @@ appId: ${MAESTRO_APP_ID}
     id: forecast-range-30-selected
 - assertVisible:
     id: forecast-event-0
-- openLink: darkfinances:///reports
+- openLink: darkfinances:///review
 - tapOn:
     text: Open
     optional: true
 - assertVisible:
-    id: reports-screen
-- assertVisible: Monthly Review
+    id: review-screen
+- assertVisible: TODAY REVIEW
 - openLink: darkfinances:///income
 - tapOn:
     text: Open

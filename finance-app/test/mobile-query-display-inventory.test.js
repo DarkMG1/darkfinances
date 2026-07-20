@@ -340,9 +340,33 @@ test('multi-query refetch helper consolidates failed queries and respects enable
 test('query display component module exports reusable screen helpers', () => {
   const source = readScreen('src/components/query-display.tsx');
   assert.match(source, /export function QueryScreenBody/);
+  assert.match(source, /renderContent: \(data: TData\) => React\.ReactNode/);
+  assert.match(source, /shouldInvokeQueryScreenContent/);
   assert.match(source, /export function QueryRefetchBanners/);
   assert.match(source, /export function resolveQueryDisplay/);
   assert.match(source, /export function refetchEnabledQueries/);
+});
+
+test('QueryScreenBody consumers use lazy renderContent instead of eager children', () => {
+  const consumers = [
+    'src/app/bills.tsx',
+    'src/app/income.tsx',
+    'src/app/debt.tsx',
+    'src/app/investments.tsx',
+    'src/app/forecast.tsx',
+    'src/app/cashflow.tsx',
+    'src/app/goals.tsx',
+    'src/app/review.tsx',
+    'src/app/reconcile.tsx',
+    'src/app/subscriptions.tsx',
+    'src/app/merchant/[name].tsx',
+    'src/app/tag/[tag].tsx',
+  ];
+  for (const file of consumers) {
+    const source = readScreen(file);
+    assert.match(source, /renderContent=\{/, `${file} must pass renderContent callback`);
+    assert.doesNotMatch(source, /<\/QueryScreenBody>/, `${file} must not use eager QueryScreenBody children`);
+  }
 });
 
 test('collectRefetchErrorQueries retries only failed queries passed to QueryRefetchBanners', () => {

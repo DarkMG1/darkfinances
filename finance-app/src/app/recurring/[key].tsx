@@ -34,7 +34,7 @@ export default function RecurringDetail() {
     overrideAction.run(vars, opts);
   };
 
-  const item = recurring.data?.items.find((i) => i.key === key);
+  const item = (recurring.data?.items ?? []).find((i) => i.key === key);
   const recurringDisplay = resolveQueryDisplay(recurring);
 
   if (recurringDisplay.initialLoad) {

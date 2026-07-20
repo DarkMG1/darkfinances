@@ -1,5 +1,6 @@
 appId: ${MAESTRO_APP_ID}
 ---
+# Client validation banner: no retry action; editing a field invalidates/dismisses the banner.
 - launchApp:
     clearState: true
 - assertVisible:
@@ -17,15 +18,15 @@ appId: ${MAESTRO_APP_ID}
 - tapOn:
     id: goals-add-button
 - tapOn:
-    id: goals-name-input
-- inputText: "Retry draft"
-- tapOn:
     id: goals-save-button
 - assertVisible:
     id: mutation-form-banner
-- back
+- assertNotVisible:
+    id: mutation-form-banner-action
 - tapOn:
-    id: goals-add-button
-- assertVisible:
     id: goals-name-input
-    text: "Retry draft"
+- inputText: "Retry draft"
+- assertNotVisible:
+    id: mutation-form-banner
+- assertVisible:
+    id: goals-edit-sheet

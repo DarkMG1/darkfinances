@@ -91,7 +91,7 @@ export default function Spending() {
   const tags = useTags();
   const spendingQuery = useCurrentToday ? today : spending;
   const spendingPayload = useCurrentToday ? today.data : spending.data;
-  const cur = useCurrentToday ? today.data?.spending.current : spending.data?.current;
+  const cur = useCurrentToday ? today.data?.spending?.current : spending.data?.current;
   const spendingLoading = shouldShowInitialLoad(spendingQuery.isLoading, spendingPayload);
   const spendingError = spendingQuery.error;
   const spendingFatal = shouldShowFatalError(spendingQuery.isError, spendingPayload);

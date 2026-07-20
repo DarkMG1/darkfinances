@@ -114,24 +114,32 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
           empty={<EmptyState icon="checkmark.circle">No transactions to reconcile in {monthLabel(month)}</EmptyState>}
           hasContent={total > 0}
           refetchBannerTestID="reconcile-refetch-banner"
-        >
+          renderContent={(reconData) => {
+            const reconItems = reconData.items ?? [];
+            const reconTotal = reconData.total ?? 0;
+            const reconDone = reconData.reconciledCount ?? 0;
+            const reconAllDone = reconTotal > 0 && reconDone >= reconTotal;
+            const reconMonthClosed = !!reconData.done;
+            const reconPct = reconTotal > 0 ? (reconDone / reconTotal) * 100 : 0;
+            return (
+            <>
           <Card style={styles.head}>
-            {monthClosed ? (
+            {reconMonthClosed ? (
               <View style={styles.closedRow}>
                 <SymbolView name="checkmark.seal.fill" tintColor={colors.green} size={22} resizeMode="scaleAspectFit" />
                 <Text style={styles.closedText}>{monthLabel(month)} reconciled</Text>
               </View>
             ) : (
               <>
-                <Text style={styles.headTitle}>{done} of {total} reviewed</Text>
-                <View style={styles.track}><View style={[styles.fill, { width: `${pct}%` }]} /></View>
-                <Text style={styles.headSub}>{allDone ? 'All transactions reviewed — close the month below.' : `${total - done} left to review`}</Text>
+                <Text style={styles.headTitle}>{reconDone} of {reconTotal} reviewed</Text>
+                <View style={styles.track}><View style={[styles.fill, { width: `${reconPct}%` }]} /></View>
+                <Text style={styles.headSub}>{reconAllDone ? 'All transactions reviewed — close the month below.' : `${reconTotal - reconDone} left to review`}</Text>
               </>
             )}
           </Card>
 
           <Card style={styles.list}>
-            {items.map((it, i) => (
+            {reconItems.map((it, i) => (
               <View key={it.id} testID={`reconcile-item-${i}`} style={[styles.row, i > 0 && styles.rowDiv]}>
                 <Pressable testID={`reconcile-item-toggle-${i}`} onPress={() => toggle(it)} hitSlop={8} disabled={banner.isLocked} style={({ pressed }) => [pressed && !banner.isLocked && { opacity: 0.6 }, banner.isLocked && { opacity: 0.5 }]}>
                   <SymbolView name={it.reconciled ? 'checkmark.circle.fill' : 'circle'} tintColor={it.reconciled ? colors.green : colors.muted} size={26} resizeMode="scaleAspectFit" />
@@ -147,16 +155,19 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
             ))}
           </Card>
 
-          {!monthClosed ? (
-            <Pressable testID="reconcile-close-month-button" onPress={doClose} disabled={!allDone || banner.isLocked} style={({ pressed }) => [styles.closeBtn, (!allDone || banner.isLocked) && styles.closeBtnOff, pressed && allDone && !banner.isLocked && { opacity: 0.8 }]}>
+          {!reconMonthClosed ? (
+            <Pressable testID="reconcile-close-month-button" onPress={doClose} disabled={!reconAllDone || banner.isLocked} style={({ pressed }) => [styles.closeBtn, (!reconAllDone || banner.isLocked) && styles.closeBtnOff, pressed && reconAllDone && !banner.isLocked && { opacity: 0.8 }]}>
               {closeAction.isLocked ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.closeBtnText}>{allDone ? `Reconcile ${monthLabel(month)}` : `${total - done} left to review`}</Text>
+                <Text style={styles.closeBtnText}>{reconAllDone ? `Reconcile ${monthLabel(month)}` : `${reconTotal - reconDone} left to review`}</Text>
               )}
             </Pressable>
           ) : null}
-        </QueryScreenBody>
+            </>
+            );
+          }}
+        />
       )}
     </PushScreen>
   );

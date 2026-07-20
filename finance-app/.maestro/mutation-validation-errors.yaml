@@ -1,7 +1,19 @@
 appId: ${MAESTRO_APP_ID}
 ---
-# Validates inline client validation on add-transaction without submitting.
-- launchApp
+- launchApp:
+    clearState: true
+- assertVisible:
+    id: onboarding-screen
+- tapOn:
+    id: onboarding-demo-button
+- assertVisible:
+    id: home-screen
+- openLink: darkfinances:///transactions
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: activity-screen
 - tapOn:
     id: activity-add-transaction-button
 - assertVisible:

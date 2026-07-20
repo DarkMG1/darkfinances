@@ -2,9 +2,12 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
+- assertVisible:
+    id: home-screen
 - openLink: darkfinances:///spending
 - tapOn:
     text: Open
@@ -53,18 +56,30 @@ appId: ${MAESTRO_APP_ID}
     text: "Amount: Lowest"
 - tapOn:
     id: category-sort-option-amountHigh
+- assertNotVisible:
+    id: category-sort-sheet
+- waitForAnimationToEnd
 - tapOn:
     id: category-sort-control
 - tapOn:
     id: category-sort-option-amountLow
+- assertNotVisible:
+    id: category-sort-sheet
+- waitForAnimationToEnd
 - tapOn:
     id: category-sort-control
 - tapOn:
     id: category-sort-option-oldest
+- assertNotVisible:
+    id: category-sort-sheet
+- waitForAnimationToEnd
 - tapOn:
     id: category-sort-control
 - tapOn:
     id: category-sort-option-newest
+- assertNotVisible:
+    id: category-sort-sheet
+- waitForAnimationToEnd
 - assertVisible:
     id: category-total-footer
 - openLink: darkfinances:///category/Spending?bucket=spending&start=2026-06-01&end=2026-06-30&label=Jun%202026

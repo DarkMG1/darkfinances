@@ -9,10 +9,6 @@ import { colors, fmtMoney, fmtPos, fmtSignedMoney } from '@/theme/colors';
 
 export default function InvestmentsScreen() {
   const investments = useInvestments();
-  const data = investments.data;
-  const allocation = Object.entries(data?.allocation.byAssetClass ?? {}).sort((a, b) => b[1] - a[1]);
-
-  const hasHoldings = !!data && data.holdings.length > 0;
 
   return (
     <PushScreen testID="investments-screen" onRefresh={investments.refetch}>
@@ -20,27 +16,32 @@ export default function InvestmentsScreen() {
         query={investments}
         loading={<Loading />}
         empty={<EmptyState icon="chart.pie">No investment holdings configured</EmptyState>}
-        hasContent={hasHoldings}
+        hasContent={Boolean(investments.data?.holdings?.length)}
         refetchBannerTestID="investments-refetch-banner"
-      >
+        renderContent={(data) => {
+          const allocation = Object.entries(data.allocation?.byAssetClass ?? {}).sort((a, b) => b[1] - a[1]);
+          const totalValue = data.totals?.value ?? 0;
+          const gainLoss = data.totals?.gainLoss ?? 0;
+          return (
+          <>
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               'Investments',
-              fmtMoney(data!.totals.value),
-              `${fmtSignedMoney(data!.totals.gainLoss)} tracked gain or loss`,
+              fmtMoney(totalValue),
+              `${fmtSignedMoney(gainLoss)} tracked gain or loss`,
             )}
           >
             <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">INVESTMENTS</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(data!.totals.value)}</Text>
-            <Text style={[styles.heroSub, { color: data!.totals.gainLoss >= 0 ? colors.green : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">{fmtSignedMoney(data!.totals.gainLoss)} tracked gain/loss</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(totalValue)}</Text>
+            <Text style={[styles.heroSub, { color: gainLoss >= 0 ? colors.green : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">{fmtSignedMoney(gainLoss)} tracked gain/loss</Text>
           </View>
 
           <Card style={{ marginBottom: 16 }}>
             <CardTitle>Allocation</CardTitle>
             {allocation.map(([name, value]) => {
-              const pct = data!.totals.value > 0 ? (value / data!.totals.value) * 100 : 0;
+              const pct = totalValue > 0 ? (value / totalValue) * 100 : 0;
               return (
                 <View key={name} testID={`investments-allocation-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`} style={styles.allocRow}>
                   <Text style={styles.allocName}>{name}</Text>
@@ -53,7 +54,7 @@ export default function InvestmentsScreen() {
 
           <Card>
             <CardTitle>Holdings</CardTitle>
-            {data!.holdings.map((h) => (
+            {(data.holdings ?? []).map((h) => (
               <View key={`${h.account}-${h.symbol}-${h.name}`} testID={`investments-holding-${h.symbol || h.name}`} style={styles.row}>
                 <Avatar label={h.symbol || h.name} size={36} />
                 <View style={{ flex: 1, minWidth: 0 }}>
@@ -67,7 +68,10 @@ export default function InvestmentsScreen() {
               </View>
             ))}
           </Card>
-      </QueryScreenBody>
+          </>
+          );
+        }}
+      />
     </PushScreen>
   );
 }

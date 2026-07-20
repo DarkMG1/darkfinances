@@ -34,9 +34,8 @@ export default function MerchantDetail() {
     [hist.data]
   );
 
-  // Default to the most recent month that actually has spend (falls back to current).
   const selectedMonth = selected || [...(hist.data?.months ?? [])].reverse().find((m) => m.count > 0)?.month || currentKey;
-  const selMonth = hist.data?.months.find((m) => m.month === selectedMonth);
+  const selMonth = (hist.data?.months ?? []).find((m) => m.month === selectedMonth);
   const rows = selMonth?.items ?? [];
 
   return (
@@ -48,21 +47,22 @@ export default function MerchantDetail() {
         empty={null}
         hasContent={hist.data != null}
         refetchBannerTestID="merchant-refetch-banner"
-      >
+        renderContent={(merchantData) => (
+          <>
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               name || 'Merchant',
-              fmtMoney(hist.data?.total ?? 0),
-              `${hist.data?.count ?? 0} transactions${hist.data?.avg ? `, ${fmtMoney(hist.data.avg)} net average` : ''}, last ${months} months`,
+              fmtMoney(merchantData.total ?? 0),
+              `${merchantData.count ?? 0} transactions${merchantData.avg ? `, ${fmtMoney(merchantData.avg)} net average` : ''}, last ${months} months`,
             )}
           >
             <Avatar label={name} size={52} style={{ marginBottom: 10 }} />
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(hist.data?.total ?? 0)}</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(merchantData.total ?? 0)}</Text>
             <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
-              {hist.data?.count ?? 0} transaction{(hist.data?.count ?? 0) === 1 ? '' : 's'}
-              {hist.data?.avg ? ` · ${fmtMoney(hist.data.avg)} net avg` : ''}
+              {merchantData.count ?? 0} transaction{(merchantData.count ?? 0) === 1 ? '' : 's'}
+              {merchantData.avg ? ` · ${fmtMoney(merchantData.avg)} net avg` : ''}
               {` · last ${months}mo`}
             </Text>
           </View>
@@ -120,7 +120,9 @@ export default function MerchantDetail() {
               ))}
             </Card>
           )}
-      </QueryScreenBody>
+          </>
+        )}
+      />
     </PushScreen>
   );
 }

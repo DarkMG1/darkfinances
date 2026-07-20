@@ -94,7 +94,7 @@ test('generated contract includes obligation graph reservation types', () => {
 
 test('app and web render reserved obligations from graph', () => {
   assert.match(appHome, /Cash Reserved/);
-  assert.match(appHome, /obligations\.reserved/);
+  assert.match(appHome, /obligations\?\.reserved/);
   assert.match(browser, /safeToSpendReserved/);
 });
 
@@ -110,7 +110,7 @@ test('app and web render incomplete Safe-to-Spend as unavailable, never zero', (
 
   assert.match(appHome, /safeToSpend\?\.complete && safeToSpend\.value != null/);
   assert.match(appHome, /Safe to Spend unavailable/);
-  assert.match(appHome, /liquidity\.safeToSpend\.incompleteReasons/);
+  assert.match(appHome, /safeToSpend\?\.incompleteReasons/);
   assert.doesNotMatch(appHome, /fmtMoney\(safeToSpend\.value\s*\|\|\s*0\)/);
 });
 
@@ -169,7 +169,8 @@ test('generated contract includes goal feasibility and advisory types', () => {
 test('app surfaces advisory goal feasibility without fabricating Safe-to-Spend', () => {
   const goals = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'goals.tsx'), 'utf8');
   assert.match(goals, /feasibility\?\.overAllocated/);
-  assert.match(goals, /\(goals\.data \?\? \[\]\)\.map/);
+  assert.match(goals, /renderContent=\{\(goalList\)/);
+  assert.match(goals, /\(goalList \?\? \[\]\)\.map/);
   assert.match(appHome, /goalAdvisory/);
   assert.match(appHome, /does not reduce Safe to Spend/);
 });

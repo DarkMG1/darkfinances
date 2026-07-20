@@ -96,8 +96,8 @@ export default function Overview() {
 
   const financeToday = useFinanceToday();
   const curMonth = financeToday.slice(0, 7);
-  const cur = today.data?.spending.current;
-  const prev = today.data?.spending.prev;
+  const cur = today.data?.spending?.current;
+  const prev = today.data?.spending?.prev;
   const spendingComplete = cur?.completeness?.complete !== false;
   const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
   const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
@@ -129,12 +129,12 @@ export default function Overview() {
     { title: 'Investments & Other', items: invest },
   ].filter((g) => g.items.length);
 
-  const upcoming = (today.data?.obligations.bills ?? []).slice(0, 3);
-  const reserved = today.data?.obligations.reserved ?? today.data?.obligationGraph?.reservations ?? [];
-  const nextIncome = today.data?.obligations.nextIncome;
-  const safeToSpend = today.data?.liquidity.safeToSpend;
-  const goalAdvisory = today.data?.liquidity.goalAdvisory;
-  const incompleteReasons = today.data?.liquidity.safeToSpend.incompleteReasons ?? [];
+  const upcoming = (today.data?.obligations?.bills ?? []).slice(0, 3);
+  const reserved = today.data?.obligations?.reserved ?? today.data?.obligationGraph?.reservations ?? [];
+  const nextIncome = today.data?.obligations?.nextIncome;
+  const safeToSpend = today.data?.liquidity?.safeToSpend;
+  const goalAdvisory = today.data?.liquidity?.goalAdvisory;
+  const incompleteReasons = safeToSpend?.incompleteReasons ?? [];
   const todayInitialLoad = shouldShowInitialLoad(today.isLoading, today.data);
   const todayFatal = shouldShowFatalError(today.isError, today.data);
 

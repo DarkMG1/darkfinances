@@ -79,7 +79,8 @@ export default function Subscriptions() {
         empty={<EmptyState icon="repeat">No subscriptions detected yet</EmptyState>}
         hasContent={!!(active.length || inactive.length || hidden.length)}
         refetchBannerTestID="subscriptions-refetch-banner"
-      >
+        renderContent={() => (
+          <>
           <View
             style={styles.hero}
             accessible
@@ -147,7 +148,9 @@ export default function Subscriptions() {
               Recurring memberships & apps only. Utilities, rent & internet are tracked as Bills ›
             </Text>
           </Pressable>
-      </QueryScreenBody>
+          </>
+        )}
+      />
     </PushScreen>
   );
 }
