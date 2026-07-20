@@ -65,7 +65,10 @@ test('useMutationForm closes from post-settled effect via requestAnimationFrame'
   assert.match(source, /cancelAnimationFrame/);
   assert.match(source, /const isLocked = dispatchPending[\s\S]*phase === 'success'/);
   assert.match(source, /finally \{\s*setPhase\('idle'\)/);
-  assert.doesNotMatch(onSuccessBlock, /onSuccessClose/);
-  assert.doesNotMatch(onSettledBlock, /onSuccessClose/);
-  assert.match(source, /shouldRunDeferredSuccessClose[\s\S]*onSuccessClose\?\.\(\)/);
+  assert.doesNotMatch(onSuccessBlock, /onSuccessClose\?\.\(\)/);
+  assert.doesNotMatch(onSettledBlock, /onSuccessClose\?\.\(\)/);
+  assert.match(source, /successCloseCallbackRef\.current = onSuccessCloseRef\.current/);
+  assert.match(source, /shouldCloseSucceededForm = successClosePendingRef\.current && !closedRef\.current/);
+  assert.match(source, /shouldRunDeferredSuccessClose[\s\S]*closeSucceededForm\?\.\(\)/);
+  assert.match(source, /phase === 'reconciling' \|\| phase === 'success'/);
 });

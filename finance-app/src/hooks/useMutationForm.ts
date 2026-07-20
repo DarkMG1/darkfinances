@@ -137,7 +137,9 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   const dismissSeqRef = useRef({ value: 0 });
   const successClosePendingRef = useRef(false);
   const successCloseTokenRef = useRef<MutationDispatchToken | null>(null);
+  const successCloseCallbackRef = useRef<(() => void) | undefined>(undefined);
   const successCloseFrameRef = useRef<number | null>(null);
+  const onSuccessCloseRef = useRef(onSuccessClose);
 
   const bumpActivity = useCallback(() => {
     const seq = nextMutationActivationSeq();
@@ -154,6 +156,12 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   }, [setFields]);
 
   useEffect(() => {
+    onSuccessCloseRef.current = onSuccessClose;
+  }, [onSuccessClose]);
+
+  useEffect(() => {
+    const shouldCloseSucceededForm = successClosePendingRef.current && !closedRef.current;
+    const closeSucceededForm = successCloseCallbackRef.current;
     const draft = persistDraft ? getMutationFormDraft(scopeDigest, formId, profileGeneration) : null;
     const next = resolveMutationFormBaseline(fieldsRef.current, draft) as TFields;
     setBaseline(next);
@@ -171,12 +179,20 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     rebaselineAfterSuccessRef.current = false;
     successClosePendingRef.current = false;
     successCloseTokenRef.current = null;
+    successCloseCallbackRef.current = undefined;
     if (successCloseFrameRef.current != null) {
       cancelAnimationFrame(successCloseFrameRef.current);
       successCloseFrameRef.current = null;
     }
     closedRef.current = false;
     dismissSeqRef.current.value += 1;
+    if (shouldCloseSucceededForm) {
+      try {
+        closeSucceededForm?.();
+      } catch {
+        // Identity reset must still complete if the user close hook throws.
+      }
+    }
   }, [formId, formIdentityKey, persistDraft, profileGeneration, scopeDigest]);
 
   useLayoutEffect(() => {
@@ -255,9 +271,11 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
       }
       successClosePendingRef.current = false;
       successCloseTokenRef.current = null;
+      const closeSucceededForm = successCloseCallbackRef.current;
+      successCloseCallbackRef.current = undefined;
       closedRef.current = true;
       try {
-        onSuccessClose?.();
+        closeSucceededForm?.();
       } catch {
         // User close hook must not leak lock/draft state.
       } finally {
@@ -271,7 +289,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
         successCloseFrameRef.current = null;
       }
     };
-  }, [dispatchPending, isDispatchTokenCurrent, isPendingLocked, onSuccessClose, phase]);
+  }, [dispatchPending, isDispatchTokenCurrent, isPendingLocked, phase]);
 
   useEffect(() => {
     if (!shouldInvalidateValidationOutcome(phase, outcome, fields, submittedFieldsRef.current)) return;
@@ -357,6 +375,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
           setBaseline({ ...fieldsRef.current });
           submittedFieldsRef.current = null;
           successCloseTokenRef.current = token;
+          successCloseCallbackRef.current = onSuccessCloseRef.current;
           successClosePendingRef.current = true;
         },
         onError: (error) => {
@@ -391,7 +410,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   ]);
 
   const submit = useCallback(() => {
-    if (pendingLockRef.current || phase === 'submitting' || phase === 'reconciling') return;
+    if (pendingLockRef.current || phase === 'submitting' || phase === 'reconciling' || phase === 'success') return;
     if (validate) {
       const clientErrors = validate(fields);
       if (Object.keys(clientErrors).length) {
@@ -410,7 +429,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   }, [buildVariables, bumpActivity, fieldOrder, fields, focusFirstInvalid, phase, pendingLockRef, runMutation, validate]);
 
   const retry = useCallback(() => {
-    if (pendingLockRef.current || phase === 'submitting' || phase === 'reconciling') return;
+    if (pendingLockRef.current || phase === 'submitting' || phase === 'reconciling' || phase === 'success') return;
     const submitted = submittedFieldsRef.current;
     if (submitted && !mutationFieldsEqual(fieldsRef.current, submitted)) {
       submit();
