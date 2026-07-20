@@ -42,6 +42,9 @@ const {
   normalizeReleaseIdentity,
   captureDashboardReleaseIdentity,
   runPostRestartHealthChecks,
+  resolveActualServerDataDir,
+  checkActualContainerHealth,
+  checkSystemdUnitHealth,
 } = require('../lib/coordinated-backup-health');
 const { verifyBackupBundleArchive } = require('../lib/backup-bundle-verify');
 const { buildBackupBundle } = require('../lib/build-backup-bundle');
@@ -460,7 +463,7 @@ test('container stop failure refuses snapshot', async (t) => {
   });
   const env = envFor(root, dashboard, {
     BACKUP_INCLUDE_ACTUAL_DATA: '1',
-    ACTUAL_DATA_DIR: actualData,
+    ACTUAL_SERVER_DATA_DIR: actualData,
     ACTUAL_COMPOSE_FILE: path.join(root, 'compose.yml'),
   });
   fs.writeFileSync(env.ACTUAL_COMPOSE_FILE, 'services:\n  actual:\n    image: test\n');
@@ -693,7 +696,7 @@ test('restart order restores actual container before dashboard and timers last',
   });
   const env = envFor(root, dashboard, {
     BACKUP_INCLUDE_ACTUAL_DATA: '1',
-    ACTUAL_DATA_DIR: actualData,
+    ACTUAL_SERVER_DATA_DIR: actualData,
     ACTUAL_COMPOSE_FILE: path.join(root, 'compose.yml'),
   });
   fs.writeFileSync(env.ACTUAL_COMPOSE_FILE, 'services:\n  actual:\n    image: test\n');
@@ -932,7 +935,7 @@ test('post-restart health fails on actual data generation mismatch', async () =>
   const env = {
     ...process.env,
     BACKUP_INCLUDE_ACTUAL_DATA: '1',
-    ACTUAL_DATA_DIR: actualDataDir,
+    ACTUAL_SERVER_DATA_DIR: actualDataDir,
   };
   const health = await runPostRestartHealthChecks({
     writers: loadWriterInventory().writers,
@@ -2007,4 +2010,300 @@ esac
   });
   assert.equal(result.status, 2, result.stderr || result.stdout);
   assert.equal(fs.existsSync(path.join(env.DARKFINANCES_BACKUP_DIR, '.darkfinances-coordinated')), false);
+});
+
+test('restartWriter skips inactive static oneshot services but restores enabled timers', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-static-oneshot-');
+  const dashboard = path.join(root, 'dashboard');
+  fs.mkdirSync(dashboard, { recursive: true });
+  const inventory = loadWriterInventory();
+  const runners = createBackupRunners({
+    units: {
+      'actual-sync.timer': { active: 'active', enabled: 'enabled' },
+      'actual-sync.service': { active: 'inactive', enabled: 'static' },
+      'finance-event-sync.timer': { active: 'inactive', enabled: 'disabled' },
+      'finance-event-sync.service': { active: 'inactive', enabled: 'static' },
+      'finance-dashboard.service': { active: 'active', enabled: 'enabled' },
+    },
+  });
+  const context = {
+    inventory,
+    env: envFor(root, dashboard, { FINANCE_EVENT_SYNC_CONFIGURED: '1' }),
+    runners,
+    dashboardDir: dashboard,
+  };
+  const { writers, snapshots } = discoverWriters(context);
+  context.writers = writers;
+  const map = snapshotsMap(snapshots);
+  const serviceSnapshot = map.get('actual-sync.service');
+  const timerSnapshot = map.get('actual-sync.timer');
+  assert.equal(serviceSnapshot.originallyActive, false);
+  assert.equal(serviceSnapshot.enabled, true);
+  assert.equal(serviceSnapshot.originallyEnabled, false);
+  assert.equal(timerSnapshot.originallyEnabled, true);
+  await restartWritersByPhase(context, map, 'jobs-timers');
+  assert.equal(
+    runners.commands.some((entry) => entry.includes('actual-sync.service') && entry.includes('start')),
+    false,
+  );
+  assert.equal(
+    runners.commands.some((entry) => entry.includes('finance-event-sync.service') && entry.includes('start')),
+    false,
+  );
+  assert.equal(
+    runners.commands.some((entry) => entry.includes('actual-sync.timer') && entry.includes('start')),
+    true,
+  );
+  await restartWritersByPhase(context, map, 'dashboard');
+  assert.equal(
+    runners.commands.some((entry) => entry.includes('finance-dashboard.service') && entry.includes('start')),
+    true,
+  );
+});
+
+test('restart failure records recovery_required before health and never marks complete', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restart-journal-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const runners = createBackupRunners({
+    units: defaultActiveUnits(),
+    restartFailures: new Set(['finance-dashboard.service']),
+  });
+  const env = envFor(root, dashboard);
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, runners, { stopDeadlineMs: 500 }),
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /restart failures: finance-dashboard/,
+  );
+  const journal = readRunJournal(path.join(env.DARKFINANCES_BACKUP_DIR, '.darkfinances-coordinated/run-journal.json'));
+  assert.equal(journal.phase, PHASE.RECOVERY_REQUIRED);
+  assert.notEqual(journal.phase, PHASE.COMPLETE);
+  assert.ok(journal.healthResults.length > 0);
+  assert.ok(journal.errors.some((entry) => /restart failures/.test(entry.message)));
+});
+
+test('resolveActualServerDataDir prefers ACTUAL_SERVER_DATA_DIR over ACTUAL_DATA_DIR', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'df-server-data-dir-'));
+  try {
+    const serverData = path.join(root, 'actual', 'data');
+    const dashboardCache = path.join(root, 'cache');
+    assert.equal(
+      resolveActualServerDataDir({
+        HOME: root,
+        ACTUAL_SERVER_DATA_DIR: serverData,
+        ACTUAL_DATA_DIR: dashboardCache,
+      }),
+      path.resolve(serverData),
+    );
+    assert.equal(
+      resolveActualServerDataDir({ HOME: root, ACTUAL_DATA_DIR: dashboardCache }),
+      path.resolve(root, 'actual', 'data'),
+    );
+    assert.equal(
+      resolveActualServerDataDir({ HOME: root }, { actualDataDir: dashboardCache }),
+      path.resolve(dashboardCache),
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ACTUAL_SERVER_DATA_DIR wins over ACTUAL_DATA_DIR for actual archive and generation', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-server-data-archive-');
+  const dashboard = path.join(root, 'dashboard');
+  const serverData = path.join(root, 'actual', 'data');
+  const dashboardCache = path.join(root, 'cache', 'actual-dashboard');
+  fs.mkdirSync(serverData, { recursive: true });
+  fs.mkdirSync(dashboardCache, { recursive: true });
+  fs.writeFileSync(path.join(serverData, 'db'), 'server-data\n');
+  fs.writeFileSync(path.join(dashboardCache, 'db'), 'dashboard-cache\n');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const runners = createBackupRunners({
+    units: defaultActiveUnits(),
+    containers: { actual: 'running' },
+  });
+  const env = envFor(root, dashboard, {
+    BACKUP_INCLUDE_ACTUAL_DATA: '1',
+    ACTUAL_SERVER_DATA_DIR: serverData,
+    ACTUAL_DATA_DIR: dashboardCache,
+    ACTUAL_COMPOSE_FILE: path.join(root, 'compose.yml'),
+  });
+  fs.writeFileSync(env.ACTUAL_COMPOSE_FILE, 'services:\n  actual:\n    image: test\n');
+  const { computeActualDataGeneration } = require('../lib/writer-quiescence');
+  const result = await runCoordinatedBackup({
+    ...backupOptions(env, runners),
+    includeActual: true,
+    dashboardDir: dashboard,
+    destination: env.DARKFINANCES_BACKUP_DIR,
+  });
+  const tarCmd = runners.commands.find((entry) => entry[0] === 'tar');
+  assert.ok(tarCmd);
+  assert.ok(tarCmd.includes(path.basename(serverData)));
+  assert.equal(tarCmd.includes(path.basename(dashboardCache)), false);
+  assert.equal(result.actualDataGeneration, computeActualDataGeneration(serverData));
+  assert.notEqual(result.actualDataGeneration, computeActualDataGeneration(dashboardCache));
+});
+
+test('options.actualDataDir threads into post-restart actual container health checks', async () => {
+  const customDir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-options-actual-data-'));
+  const defaultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'df-default-actual-data-'));
+  fs.writeFileSync(path.join(customDir, 'db'), 'options-tree\n');
+  fs.writeFileSync(path.join(defaultDir, 'db'), 'default-tree\n');
+  const { computeActualDataGeneration } = require('../lib/writer-quiescence');
+  const expected = computeActualDataGeneration(customDir);
+  const runners = createBackupRunners({ containers: { actual: 'running' } });
+  const env = {
+    ...process.env,
+    BACKUP_INCLUDE_ACTUAL_DATA: '1',
+    ACTUAL_SERVER_DATA_DIR: defaultDir,
+    ACTUAL_DATA_DIR: path.join(os.tmpdir(), 'dashboard-cache-unrelated'),
+  };
+  const healthWrong = await checkActualContainerHealth({
+    env,
+    runners,
+    expectedGeneration: expected,
+  });
+  assert.equal(healthWrong.ok, false);
+  const healthExact = await checkActualContainerHealth({
+    env,
+    runners,
+    expectedGeneration: expected,
+    actualServerDataDir: customDir,
+  });
+  assert.equal(healthExact.ok, true);
+});
+
+test('options.actualDataDir drives coordinated backup health end-to-end', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-options-actual-data-');
+  const dashboard = path.join(root, 'dashboard');
+  const customServerData = path.join(root, 'custom-server-data');
+  const defaultServerData = path.join(root, 'actual', 'data');
+  const dashboardCache = path.join(root, 'cache', 'actual-dashboard');
+  fs.mkdirSync(customServerData, { recursive: true });
+  fs.mkdirSync(defaultServerData, { recursive: true });
+  fs.mkdirSync(dashboardCache, { recursive: true });
+  fs.writeFileSync(path.join(customServerData, 'db'), 'custom-options\n');
+  fs.writeFileSync(path.join(defaultServerData, 'db'), 'default-home\n');
+  fs.writeFileSync(path.join(dashboardCache, 'db'), 'dashboard-cache\n');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const runners = createBackupRunners({
+    units: defaultActiveUnits(),
+    containers: { actual: 'running' },
+  });
+  const env = envFor(root, dashboard, {
+    BACKUP_INCLUDE_ACTUAL_DATA: '1',
+    ACTUAL_SERVER_DATA_DIR: defaultServerData,
+    ACTUAL_DATA_DIR: dashboardCache,
+    ACTUAL_COMPOSE_FILE: path.join(root, 'compose.yml'),
+  });
+  fs.writeFileSync(env.ACTUAL_COMPOSE_FILE, 'services:\n  actual:\n    image: test\n');
+  const result = await runCoordinatedBackup({
+    ...backupOptions(env, runners),
+    includeActual: true,
+    actualDataDir: customServerData,
+    dashboardDir: dashboard,
+    destination: env.DARKFINANCES_BACKUP_DIR,
+  });
+  assert.equal(result.ok, true);
+  const { computeActualDataGeneration } = require('../lib/writer-quiescence');
+  assert.equal(result.actualDataGeneration, computeActualDataGeneration(customServerData));
+  fs.writeFileSync(path.join(defaultServerData, 'db'), 'mutated-default\n');
+  const journal = readRunJournal(path.join(env.DARKFINANCES_BACKUP_DIR, '.darkfinances-coordinated/run-journal.json'));
+  assert.equal(journal.phase, PHASE.COMPLETE);
+});
+
+test('linked timer restart skips inactive linked and restores originally active linked', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-linked-timer-');
+  const dashboard = path.join(root, 'dashboard');
+  fs.mkdirSync(dashboard, { recursive: true });
+  const inventory = loadWriterInventory();
+  const runners = createBackupRunners({
+    units: {
+      'actual-sync.timer': { active: 'inactive', enabled: 'linked' },
+      'actual-sync.service': { active: 'inactive', enabled: 'static' },
+      'backup-coordinated.timer': { active: 'active', enabled: 'linked' },
+      'finance-dashboard.service': { active: 'inactive', enabled: 'disabled' },
+    },
+  });
+  const context = {
+    inventory,
+    env: envFor(root, dashboard),
+    runners,
+    dashboardDir: dashboard,
+  };
+  const { writers, snapshots } = discoverWriters(context);
+  context.writers = writers;
+  const map = snapshotsMap(snapshots);
+  const inactiveLinked = map.get('actual-sync.timer');
+  const activeLinked = map.get('backup-coordinated.timer');
+  assert.equal(inactiveLinked.enabled, true);
+  assert.equal(inactiveLinked.originallyEnabled, false);
+  assert.equal(inactiveLinked.originallyActive, false);
+  assert.equal(activeLinked.enabled, true);
+  assert.equal(activeLinked.originallyEnabled, false);
+  assert.equal(activeLinked.originallyActive, true);
+  await restartWritersByPhase(context, map, 'jobs-timers');
+  assert.equal(
+    runners.commands.some((entry) => entry.includes('actual-sync.timer') && entry.includes('start')),
+    false,
+  );
+  assert.equal(
+    runners.commands.some((entry) => entry.includes('backup-coordinated.timer') && entry.includes('start')),
+    true,
+  );
+});
+
+test('post-restart health accepts waiting linked timer that was originally active', async () => {
+  const inventory = loadWriterInventory();
+  const writer = inventory.writers.find((entry) => entry.id === 'backup-coordinated.timer');
+  const runners = createBackupRunners({
+    units: { 'backup-coordinated.timer': { active: 'waiting', enabled: 'linked' } },
+  });
+  const result = await checkSystemdUnitHealth(
+    { ...writer, originallyActive: true, originallyEnabled: false },
+    { runners, env: {} },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.diagnostics.state, 'waiting');
+});
+
+test('post-restart health rejects inactive timer state for originally active linked timer', async () => {
+  const inventory = loadWriterInventory();
+  const writer = inventory.writers.find((entry) => entry.id === 'backup-coordinated.timer');
+  const runners = createBackupRunners({
+    units: { 'backup-coordinated.timer': { active: 'inactive', enabled: 'linked' } },
+  });
+  const result = await checkSystemdUnitHealth(
+    { ...writer, originallyActive: true, originallyEnabled: false },
+    { runners, env: {} },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /timer state=inactive/);
 });

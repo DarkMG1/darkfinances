@@ -74,12 +74,25 @@ ACTUAL_SERVER_URL=http://127.0.0.1:5006
 ACTUAL_PASSWORD=...
 ACTUAL_SYNC_ID=...
 ACTUAL_DATA_DIR=/home/<user>/.cache/actual-dashboard
+# Dashboard client cache only — not Actual Server data. Coordinated server backup/archive
+# uses ACTUAL_SERVER_DATA_DIR (set in ~/.openclaw/finance-dashboard.env or shell when needed):
+# ACTUAL_SERVER_DATA_DIR=/home/<user>/actual/data
 FINANCE_API_TOKEN=...
 SESSION_SECRET=...
 PUBLIC_ORIGIN=https://finances.example.com
 FINANCE_TRUST_PROXY_HOPS=1
 FINANCE_TIME_ZONE=America/Los_Angeles
 TZ=America/Los_Angeles
+```
+
+`ACTUAL_DATA_DIR` is the dashboard/API client cache for downloaded budget data (for example
+`/home/<user>/.cache/actual-dashboard` on openclaw). Coordinated Actual Server backup, generation
+binding, and post-restart health use `ACTUAL_SERVER_DATA_DIR` (default `$HOME/actual/data`) — never
+the dashboard cache. Set both explicitly when they differ:
+
+```dotenv
+ACTUAL_DATA_DIR=/home/<user>/.cache/actual-dashboard
+ACTUAL_SERVER_DATA_DIR=/home/<user>/actual/data
 ```
 
 Install it privately:
@@ -529,7 +542,8 @@ Environment:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BACKUP_INCLUDE_ACTUAL_DATA` | `0` | Also archive `ACTUAL_DATA_DIR` and bind Actual generation |
+| `BACKUP_INCLUDE_ACTUAL_DATA` | `0` | Also archive `ACTUAL_SERVER_DATA_DIR` and bind Actual generation |
+| `ACTUAL_SERVER_DATA_DIR` | `$HOME/actual/data` | Actual Server data tree for coordinated archive/generation binding (not dashboard cache) |
 | `BACKUP_PRE_QUIESCED` | unset | Pre-quiesced backup: writers were stopped out-of-band; skips stop commands but still polls until all inventoried writers are quiescent; never mints restore authority |
 | `BACKUP_DRY_RUN` | `0` | Discovery/plan only |
 | `FINANCE_EVENT_SYNC_CONFIGURED` | unset | When `1`, coordinated backup quiesces `finance-event-sync.timer`/`.service` and rejects active legacy `owes-snapshot.js` cron entries |

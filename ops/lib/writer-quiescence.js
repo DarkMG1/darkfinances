@@ -57,9 +57,12 @@ function captureWriterState(writer, context) {
       snapshot.state = normalizeState(active.state);
       snapshot.active = ['active', 'activating', 'running'].includes(snapshot.state);
       snapshot.running = snapshot.active;
-      snapshot.enabled = ['enabled', 'enabled-runtime', 'static', 'linked'].includes(normalizeState(enabled.state));
+      const enabledState = normalizeState(enabled.state);
+      // linked/static appear in snapshot.enabled for diagnostics; only enabled/enabled-runtime
+      // are startup-enabled. originallyActive still drives restart for active linked units.
+      snapshot.enabled = ['enabled', 'enabled-runtime', 'static', 'linked'].includes(enabledState);
       snapshot.originallyActive = snapshot.active;
-      snapshot.originallyEnabled = snapshot.enabled;
+      snapshot.originallyEnabled = ['enabled', 'enabled-runtime'].includes(enabledState);
       snapshot.originallyRunning = snapshot.running;
       return snapshot;
     }
@@ -299,7 +302,19 @@ async function verifyAllQuiescent(context, snapshotsById) {
 
 async function restartWriter(writer, snapshot, context) {
   const { runners, env } = context;
-  if (!snapshot.originallyActive && !snapshot.originallyEnabled && !snapshot.originallyRunning) {
+  if (writer.type === 'systemd-service') {
+    if (!snapshot.originallyActive && !snapshot.originallyRunning) {
+      snapshot.restartAttempted = false;
+      snapshot.restartOk = true;
+      return { ok: true, skipped: true, reason: 'service was not active' };
+    }
+  } else if (writer.type === 'systemd-timer') {
+    if (!snapshot.originallyEnabled && !snapshot.originallyActive) {
+      snapshot.restartAttempted = false;
+      snapshot.restartOk = true;
+      return { ok: true, skipped: true, reason: 'timer was not enabled or active' };
+    }
+  } else if (!snapshot.originallyActive && !snapshot.originallyEnabled && !snapshot.originallyRunning) {
     snapshot.restartAttempted = false;
     snapshot.restartOk = true;
     return { ok: true, skipped: true, reason: 'originally inactive' };
@@ -307,10 +322,6 @@ async function restartWriter(writer, snapshot, context) {
   snapshot.restartAttempted = true;
   try {
     if (writer.type === 'systemd-timer' || writer.type === 'systemd-service') {
-      if (!snapshot.originallyEnabled && writer.type === 'systemd-timer') {
-        snapshot.restartOk = true;
-        return { ok: true, skipped: true, reason: 'timer was not enabled' };
-      }
       const result = runners.systemctlStart(writer.scope, writer.unit);
       if (result.status !== 0) {
         snapshot.restartOk = false;
@@ -364,7 +375,7 @@ async function restartWritersByPhase(context, snapshotsById, phase) {
 
 function admissionStateFromSnapshot(snapshot) {
   if (!snapshot) return null;
-  if (['inactive', 'dead', 'failed', 'stopped', 'absent', 'not-present'].includes(snapshot.state)) {
+  if (['inactive', 'dead', 'failed', 'stopped', 'exited', 'absent', 'not-present'].includes(snapshot.state)) {
     return snapshot.state === 'not-present' ? 'not-present' : 'stopped';
   }
   if (!snapshot.originallyActive && !snapshot.originallyRunning) {

@@ -93,7 +93,7 @@
       "restartPhase": "actual-container",
       "optional": true,
       "requireWhenEnv": "BACKUP_INCLUDE_ACTUAL_DATA",
-      "quiescentStates": ["stopped", "not-present"]
+      "quiescentStates": ["stopped", "exited", "not-present"]
     },
     {
       "id": "restore-process",

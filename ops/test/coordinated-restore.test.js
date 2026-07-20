@@ -948,3 +948,46 @@ test('admission token path rejects symlink outside trusted roots', (t) => {
     /outside trusted coordinator roots/,
   );
 });
+
+test('coordinated restore restart failure records recovery_required and preserves health evidence', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-restart-fail-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  fs.mkdirSync(dashboard, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dashboard, 'rules.json'), '[]\n', { mode: 0o600 });
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  const runners = createBackupRunners({
+    units: defaultActiveUnits(),
+    restartFailures: new Set(['finance-dashboard.service']),
+  });
+  await assert.rejects(
+    () => runCoordinatedRestore({
+      archivePath: archive,
+      destinationRoot: dashboard,
+      coordinatorRoot,
+      privateKey: keys.pair.privateKey,
+      releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+      ...restoreOptions({
+        ...process.env,
+        HOME: root,
+        FINANCE_DASHBOARD_DIR: dashboard,
+        DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+        COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+        COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+        COORDINATED_TEST_SKIP_LOCK: '1',
+        FINANCE_API_TOKEN: 'test-token',
+      }, runners),
+      runStagedRestore: () => ({ ok: true, phase: 'complete' }),
+    }),
+    /restart failures: finance-dashboard/,
+  );
+  const journal = require('../lib/coordinated-run-journal').readRunJournal(layout.journalPath);
+  assert.equal(journal.phase, PHASE.RECOVERY_REQUIRED);
+  assert.notEqual(journal.phase, PHASE.COMPLETE);
+  assert.ok(journal.healthResults.length > 0);
+  assert.ok(journal.errors.some((entry) => /restart failures/.test(entry.message)));
+});
