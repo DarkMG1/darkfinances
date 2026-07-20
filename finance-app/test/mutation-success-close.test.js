@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const {
   shouldDeferSuccessClose,
   shouldInvokeDeferredSuccessClose,
+  shouldScheduleDeferredSuccessClose,
+  shouldRunDeferredSuccessClose,
 } = require('../src/lib/mutation-success-close.js');
 
 test('shouldDeferSuccessClose requires pending success and current token', () => {
@@ -18,13 +20,50 @@ test('shouldInvokeDeferredSuccessClose only after unlock and before duplicate cl
   assert.equal(shouldInvokeDeferredSuccessClose({ tokenCurrent: true, pendingLocked: false, alreadyClosed: true }), false);
 });
 
-test('useMutationForm defers onSuccessClose until after onSettled unlock', () => {
+test('shouldScheduleDeferredSuccessClose waits for success phase and unlocked dispatch', () => {
+  assert.equal(shouldScheduleDeferredSuccessClose({
+    phase: 'success',
+    dispatchPending: false,
+    pendingLocked: false,
+    successPending: true,
+  }), true);
+  assert.equal(shouldScheduleDeferredSuccessClose({
+    phase: 'success',
+    dispatchPending: true,
+    pendingLocked: false,
+    successPending: true,
+  }), false);
+});
+
+test('shouldRunDeferredSuccessClose requires post-unlock render-ready state', () => {
+  assert.equal(shouldRunDeferredSuccessClose({
+    phase: 'success',
+    tokenCurrent: true,
+    pendingLocked: false,
+    dispatchPending: false,
+    alreadyClosed: false,
+  }), true);
+  assert.equal(shouldRunDeferredSuccessClose({
+    phase: 'idle',
+    tokenCurrent: true,
+    pendingLocked: false,
+    dispatchPending: false,
+    alreadyClosed: false,
+  }), false);
+});
+
+test('useMutationForm closes from post-settled effect via requestAnimationFrame', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const source = fs.readFileSync(path.join(__dirname, '../src/hooks/useMutationForm.ts'), 'utf8');
   const onSuccessBlock = source.match(/onSuccess: \(\) => \{[\s\S]*?\n        \},/)?.[0] ?? '';
-  assert.match(source, /successClosePendingRef\.current = true/);
-  assert.match(source, /shouldInvokeDeferredSuccessClose/);
+  const onSettledBlock = source.match(/onSettled: async \(\) => \{[\s\S]*?\n        \},/)?.[0] ?? '';
+  assert.match(source, /successCloseTokenRef\.current = token/);
+  assert.match(source, /setBaseline\(\{ \.\.\.fieldsRef\.current \}\)/);
+  assert.match(source, /shouldScheduleDeferredSuccessClose/);
+  assert.match(source, /requestAnimationFrame/);
+  assert.match(source, /cancelAnimationFrame/);
   assert.doesNotMatch(onSuccessBlock, /onSuccessClose/);
-  assert.match(source, /onSettled:[\s\S]*shouldInvokeDeferredSuccessClose[\s\S]*onSuccessClose\?\.\(\)/);
+  assert.doesNotMatch(onSettledBlock, /onSuccessClose/);
+  assert.match(source, /shouldRunDeferredSuccessClose[\s\S]*onSuccessClose\?\.\(\)/);
 });

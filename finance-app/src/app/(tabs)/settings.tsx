@@ -422,7 +422,7 @@ export default function Settings() {
         {!notificationsAvailable ? (
           <View testID="settings-notifications-unavailable">
             <Text style={styles.switchLabel}>Alerts unavailable</Text>
-            <Text style={styles.switchSub}>
+            <Text style={styles.switchSub} testID={demo ? 'settings-notifications-unavailable-demo-copy' : undefined}>
               {demo
                 ? 'Notification alerts do not run in demo mode. Turn off demo mode to configure alerts.'
                 : capabilities.freeSideload

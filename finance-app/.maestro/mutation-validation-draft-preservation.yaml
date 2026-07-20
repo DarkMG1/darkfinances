@@ -20,9 +20,11 @@ appId: ${MAESTRO_APP_ID}
     id: goals-name-input
 - inputText: "Draft goal"
 - tapOn:
+    point: 50%,20%
+- tapOn:
     id: goals-save-button
 - assertVisible:
-    id: mutation-form-banner
+    id: goals-sheet-mutation-banner
 - assertVisible:
     id: goals-target-error
 - assertVisible:

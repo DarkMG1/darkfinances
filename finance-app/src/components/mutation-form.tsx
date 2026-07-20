@@ -38,6 +38,9 @@ export function MutationFormBanner({
     <View
       testID={testID}
       accessibilityRole="alert"
+      accessibilityLabel={outcome.summary}
+      accessibilityLiveRegion="polite"
+      importantForAccessibility="yes"
       style={[
         styles.banner,
         outcome.kind === 'terminal' || outcome.kind === 'conflict_ownership'
@@ -181,8 +184,9 @@ export function MutationSheet({
         />
         <View
           testID={testID}
+          accessible={false}
+          importantForAccessibility="no"
           style={[styles.sheet, { paddingBottom: bottomInset + 16 }]}
-          accessibilityLabel={title}
         >
           <Text accessibilityRole="header" style={styles.sheetTitle}>{title}</Text>
           {children}

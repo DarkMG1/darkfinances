@@ -20,13 +20,19 @@ appId: ${MAESTRO_APP_ID}
 - tapOn:
     id: goals-save-button
 - assertVisible:
-    id: mutation-form-banner
+    id: goals-sheet-mutation-banner
+- assertVisible:
+    id: goals-name-error
 - assertNotVisible:
-    id: mutation-form-banner-action
+    id: goals-sheet-mutation-banner-action
 - tapOn:
     id: goals-name-input
 - inputText: "Retry draft"
+- tapOn:
+    point: 50%,20%
 - assertNotVisible:
-    id: mutation-form-banner
+    id: goals-sheet-mutation-banner
+- assertNotVisible:
+    id: goals-name-error
 - assertVisible:
     id: goals-edit-sheet

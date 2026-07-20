@@ -162,7 +162,9 @@ export default function Goals() {
   return (
     <PushScreen testID="goals-screen" onRefresh={refreshGoals}>
       <MutationLiveRegion message={banner.announce} />
-      <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => goals.refetch()} />
+      {!editing ? (
+        <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => goals.refetch()} />
+      ) : null}
       <QueryScreenBody
         query={goals}
         compoundRefetchQueries={goalsRefetchQueries}
@@ -212,7 +214,12 @@ export default function Goals() {
         canDismiss={form.canDismiss && !banner.isLocked}
         onRequestClose={closeSheet}
       >
-        <MutationFormBanner outcome={banner.outcome} onRetry={banner.retry} onRefetch={() => goals.refetch()} />
+        <MutationFormBanner
+          testID="goals-sheet-mutation-banner"
+          outcome={banner.outcome}
+          onRetry={banner.retry}
+          onRefetch={() => goals.refetch()}
+        />
 
         <Text style={[styles.field, form.getFieldError('name') && styles.fieldErrorLabel]}>Name</Text>
         <TextInput

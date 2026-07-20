@@ -23,9 +23,9 @@ appId: ${MAESTRO_APP_ID}
 - tapOn:
     id: add-transaction-amount-input
 - eraseText
+- inputText: "12.34"
 - tapOn:
     id: add-transaction-payee-input
-- eraseText
 - inputText: Maestro Coffee
 - tapOn:
     point: 50%,20%

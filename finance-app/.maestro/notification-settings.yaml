@@ -21,7 +21,8 @@ appId: ${MAESTRO_APP_ID}
     timeout: 15000
 - assertVisible:
     id: settings-notifications-unavailable
-- assertVisible: Notification alerts do not run in demo mode
+- assertVisible:
+    id: settings-notifications-unavailable-demo-copy
 - assertNotVisible:
     id: settings-notif-bills
     optional: true

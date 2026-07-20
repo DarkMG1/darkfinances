@@ -59,8 +59,11 @@ npm run test:e2e:ios:core
 # Planning, recurring items, bills, subscriptions, and goals
 npm run test:e2e:ios:planning
 
-# Review, reconciliation, reimbursement, rules, events, and transaction creation
+# Review, reconciliation, reimbursement, rules, events, transaction creation, and mutation validation
 npm run test:e2e:ios:workflows
+
+# Notification unavailable demo copy
+npm run test:e2e:ios:notification
 
 # Spending and drilldowns
 npm run test:e2e:ios:spending
@@ -96,12 +99,16 @@ with `DEVICE=booted` (default) or a specific UDID.
 | `home-dashboard.yaml` | Home hero, balances, and key dashboard sections. |
 | `activity-workflows.yaml` | Activity list, search/filter, and transaction routing. |
 | `settings-workflows.yaml` | Connection, privacy, notification, and diagnostic controls. |
+| `notification-settings.yaml` | Demo-mode notification unavailable copy and controls stay hidden. |
 | `planning-analytics.yaml` | Planning and analytics screens. |
 | `recurring-bills-subscriptions.yaml` | Recurring, bill, and subscription details. |
 | `goals-workflows.yaml` | Goal list and edit/create behavior. |
 | `review-reconcile-reimbursement.yaml` | Review inbox, reconciliation, and reimbursement screens. |
 | `rules-events.yaml` | Categorization rules and event/trip management. |
 | `add-transaction.yaml` | Manual transaction creation. |
+| `mutation-validation-errors.yaml` | Add-transaction client validation for amount and date fields. |
+| `mutation-validation-banner-dismiss.yaml` | Goals sheet validation banner clears after editing a field. |
+| `mutation-validation-draft-preservation.yaml` | Goals sheet keeps entered name when target validation fails. |
 | `spending-smoke.yaml` | Spending overview and lower-page sections. |
 | `spending-drilldown.yaml` | Total-spend transaction drilldown. |
 | `bills-utilities-drilldown.yaml` | Bills/Utilities category drilldown. |

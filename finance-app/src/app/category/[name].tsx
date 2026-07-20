@@ -308,18 +308,27 @@ function MiniCategoryBars({ months, selected, onSelect }: { months: { month: str
 
 function SortSheet({ visible, value, onSelect, onClose }: { visible: boolean; value: SortKey; onSelect: (key: SortKey) => void; onClose: () => void }) {
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable testID="category-sort-sheet-backdrop" style={styles.sheetBackdrop} onPress={onClose}>
-        <Pressable testID="category-sort-sheet" style={styles.sheetCard} onPress={() => undefined}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} accessibilityViewIsModal>
+      <View style={styles.sheetRoot}>
+        <Pressable
+          testID="category-sort-sheet-backdrop"
+          style={styles.sheetBackdrop}
+          onPress={onClose}
+          accessibilityRole="button"
+          accessibilityLabel="Dismiss sort sheet"
+        />
+        <View testID="category-sort-sheet" accessible={false} importantForAccessibility="no" style={styles.sheetCard}>
           <View style={styles.sheetHandle} />
-          <Text style={styles.sheetTitle}>Sort transactions</Text>
+          <Text accessibilityRole="header" style={styles.sheetTitle}>Sort transactions</Text>
           {SORTS.map((option) => {
             const selected = option.key === value;
             return (
               <Pressable
                 key={option.key}
                 testID={`category-sort-option-${option.key}`}
+                accessibilityRole="button"
                 accessibilityLabel={option.label}
+                accessibilityState={{ selected }}
                 onPress={() => onSelect(option.key)}
                 style={({ pressed }) => [styles.sheetOption, pressed && { opacity: 0.7 }]}
               >
@@ -328,8 +337,8 @@ function SortSheet({ visible, value, onSelect, onClose }: { visible: boolean; va
               </Pressable>
             );
           })}
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
@@ -367,7 +376,8 @@ const styles = StyleSheet.create({
   footer: { position: 'absolute', left: 14, right: 14, minHeight: 50, paddingHorizontal: 16, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16 },
   footerLabel: { color: colors.muted, fontSize: 13, fontWeight: '700' },
   footerValue: { color: colors.text, fontSize: 17, fontWeight: '900' },
-  sheetBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.48)' },
+  sheetRoot: { flex: 1, justifyContent: 'flex-end' },
+  sheetBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.48)' },
   sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, borderColor: colors.border, borderWidth: 1, paddingHorizontal: 18, paddingTop: 10, paddingBottom: 28 },
   sheetHandle: { alignSelf: 'center', width: 42, height: 4, borderRadius: 2, backgroundColor: colors.border, marginBottom: 16 },
   sheetTitle: { color: colors.text, fontSize: 18, fontWeight: '800', marginBottom: 10 },

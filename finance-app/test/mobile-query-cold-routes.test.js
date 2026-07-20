@@ -117,6 +117,7 @@ test('reimbursement summary uses fail-closed money fallbacks for absent aggregat
   const source = read('src/app/reimbursement.tsx');
   assert.match(source, /formatOptionalPos\(summary\?\.fronted/);
   assert.match(source, /formatOptionalPos\(summary\?\.paidBack/);
+  assert.match(source, /reimbursementWindowNet\(summary\)/);
   assert.doesNotMatch(source, /fmtPos\(summary\?\.fronted \?\? 0\)/);
 });
 

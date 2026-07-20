@@ -10,7 +10,23 @@ function shouldInvokeDeferredSuccessClose({ tokenCurrent, pendingLocked, already
   return !!tokenCurrent && !pendingLocked && !alreadyClosed;
 }
 
+function shouldScheduleDeferredSuccessClose({ phase, dispatchPending, pendingLocked, successPending }) {
+  return phase === 'success' && !dispatchPending && !pendingLocked && !!successPending;
+}
+
+function shouldRunDeferredSuccessClose({ phase, tokenCurrent, pendingLocked, dispatchPending, alreadyClosed }) {
+  return (
+    phase === 'success'
+    && !!tokenCurrent
+    && !pendingLocked
+    && !dispatchPending
+    && !alreadyClosed
+  );
+}
+
 module.exports = {
   shouldDeferSuccessClose,
   shouldInvokeDeferredSuccessClose,
+  shouldScheduleDeferredSuccessClose,
+  shouldRunDeferredSuccessClose,
 };

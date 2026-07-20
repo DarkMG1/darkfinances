@@ -20,11 +20,14 @@ appId: ${MAESTRO_APP_ID}
     id: goals-row-goal-ef
 - assertVisible:
     id: goals-edit-sheet
-- waitForAnimationToEnd
 - tapOn:
-    point: 50%,20%
+    id: goals-edit-sheet-backdrop
+- tapOn:
+    text: Discard
+    optional: true
+- assertNotVisible:
+    id: goals-edit-sheet
 - tapOn:
     id: goals-add-button
 - assertVisible:
     id: goals-edit-sheet
-- waitForAnimationToEnd

@@ -13,7 +13,8 @@ import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinat
 import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { OwesPerson, ReimbLeg, RepaymentSuggestion } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
-import { formatOptionalPos } from '@/lib/money-display.js';
+import { formatOptionalPos, formatOptionalSignedMoney } from '@/lib/money-display.js';
+import { reimbursementWindowNet } from '@/lib/reimbursement-window-net.js';
 import { colors, fmtDate, fmtPos, fmtSignedMoney } from '@/theme/colors';
 import { reimbursementWindow, type ReimbursementRangeKey, useFinanceToday } from '@/lib/date-only';
 
@@ -98,10 +99,13 @@ export default function Reimbursement() {
   const debtorCount = reimb.data?.debtorCount ?? owes.length;
   const sugg = suggestions.data?.complete === false ? [] : (suggestions.data?.suggestions ?? []);
   const snapshot = snapshotLabel(reimb.data?.owesSource, reimb.data?.owesGeneratedAt, reimb.data?.owesWarning);
-  const windowNet = (summary?.paidBack ?? 0) - (summary?.fronted ?? 0);
+  const windowNet = reimbursementWindowNet(summary);
   const netValue = range === 'life'
     ? (summary?.outstanding ?? (totalOwedMetric?.complete ? totalOwedMetric.value : null))
     : windowNet;
+  const netDisplay = range === 'life'
+    ? (netValue != null ? fmtPos(netValue) : '—')
+    : formatOptionalSignedMoney(netValue, fmtSignedMoney);
   const netGood = range === 'life'
     ? (netValue != null && netValue <= 0.5)
     : netValue != null && netValue >= -0.005;
@@ -234,9 +238,7 @@ export default function Reimbursement() {
               </View>
               <View style={styles.sumChip}>
                 <Text style={[styles.sumVal, { color: netGood ? colors.green : colors.red }]}>
-                  {range === 'life'
-                    ? (netValue != null ? fmtPos(netValue) : '—')
-                    : (netValue != null ? fmtSignedMoney(netValue) : '—')}
+                  {netDisplay}
                 </Text>
                 <Text style={styles.sumLabel}>{range === 'life' ? 'still owed' : 'net cash flow'}</Text>
               </View>
