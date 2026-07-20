@@ -69,6 +69,30 @@ function intendedSplit(source = original) {
   });
 }
 
+const manualOriginal = Object.freeze({
+  id: 'manual-parent',
+  account: 'account',
+  date: '2026-07-09',
+  amount: -1234,
+  payee: 'payee-id',
+  notes: '[clone-smoke]',
+  cleared: false,
+  imported_id: null,
+  category: 'cat-1',
+  is_parent: false,
+  subtransactions: [],
+});
+
+function manualCloneSplit(source = manualOriginal) {
+  return addableTransaction(source, {
+    category: undefined,
+    subtransactions: [
+      { amount: -500, category: 'cat-1', notes: 'first' },
+      { amount: -734, category: 'cat-1', notes: 'second' },
+    ],
+  });
+}
+
 function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -131,6 +155,8 @@ function durableActual({
   applyThenThrowRestoration = false,
   applyThenThrowRollbackDelete = false,
   addError = null,
+  ignoreSparseNullImportedIdUpdates = false,
+  deferImportedIdUntilSync = false,
 } = {}) {
   const state = {
     rows: structuredClone(rows),
@@ -157,7 +183,13 @@ function durableActual({
       }
       return state.rows
         .filter((row) => row.account === accountId && row.date >= start && row.date <= end)
-        .map((row) => structuredClone(row));
+        .map((row) => {
+          const copy = structuredClone(row);
+          if (deferImportedIdUntilSync && row._staleImportedId !== undefined) {
+            copy.imported_id = row._staleImportedId;
+          }
+          return copy;
+        });
     },
     async deleteTransaction(id) {
       state.counts.delete += 1;
@@ -195,10 +227,42 @@ function durableActual({
     async updateTransaction(id, fields) {
       state.counts.update += 1;
       const row = state.rows.find((candidate) => String(candidate.id) === String(id));
-      if (row) Object.assign(row, structuredClone(fields));
+      if (!row) return;
+      const patch = structuredClone(fields);
+      if (ignoreSparseNullImportedIdUpdates
+        && Object.keys(patch).length === 1
+        && patch.imported_id === null) {
+        return;
+      }
+      if (Array.isArray(patch.subtransactions) && row.is_parent) {
+        patch.subtransactions = patch.subtransactions.map((leg, index) => ({
+          ...structuredClone(leg),
+          id: row.subtransactions?.[index]?.id || `${id}-leg-${index + 1}`,
+          parent_id: id,
+        }));
+        Object.assign(row, patch);
+        delete row.category;
+        if (patch.imported_id === '') row.imported_id = null;
+        return;
+      }
+      if (row.is_parent
+        && Object.keys(patch).length === 1
+        && Object.prototype.hasOwnProperty.call(patch, 'imported_id')) {
+        for (const leg of row.subtransactions || []) {
+          if (leg.payee == null) leg.payee = row.payee;
+        }
+      }
+      if (deferImportedIdUntilSync && Object.prototype.hasOwnProperty.call(patch, 'imported_id')) {
+        row._staleImportedId = row.imported_id;
+      }
+      Object.assign(row, patch);
+      if (patch.imported_id === '') row.imported_id = null;
     },
     async sync() {
       state.counts.sync += 1;
+      if (deferImportedIdUntilSync) {
+        for (const row of state.rows) delete row._staleImportedId;
+      }
     },
   };
   return adapter;
@@ -495,6 +559,36 @@ async function interruptReplacement(api, replacement, injector) {
   );
   assert.ok(injector.entries.every((entry) => entry.fired), 'requested fault was reached');
 }
+
+test('manual split metadata restore clears temporary imported identity on Actual-like updates', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActual({
+    rows: [manualOriginal, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+  });
+  const replacement = manualCloneSplit();
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement,
+  });
+  assert.equal(added.imported_id == null || added.imported_id === '', true);
+  assert.equal(added.subtransactions.length, 2);
+  assert.equal(
+    added.subtransactions.reduce((sum, leg) => sum + leg.amount, 0),
+    added.amount,
+  );
+  for (const leg of added.subtransactions) {
+    assert.equal(leg.payee ?? null, null, 'full payload restore must not normalize leg payees');
+  }
+  assert.equal(latestSaga().phase, 'sync_pending');
+  assert.equal(api.state.counts.update, 1);
+  assert.ok(api.state.counts.sync >= 1);
+  assert.match(
+    JSON.stringify(api.state.rows.find((row) => row.id === added.id)),
+    /"imported_id":null|"imported_id":""/,
+  );
+});
 
 const forwardBoundaries = [
   'initial-saga-write',
@@ -930,6 +1024,38 @@ test('imported identity collision introduced after admission blocks original del
   assert.equal(api.state.counts.delete, 0);
   assert.ok(api.state.rows.some((row) => row.id === original.id));
   assert.equal(api.state.rows.filter((row) => row.imported_id === original.imported_id).length, 2);
+});
+
+test('metadata restore converges when imported_id read lags behind update until sync', async () => {
+  resetStores();
+  const manualOriginalLocal = {
+    ...original,
+    imported_id: null,
+    imported_payee: null,
+    category: 'cat-1',
+    is_parent: false,
+    subtransactions: [],
+  };
+  const api = durableActual({
+    rows: [manualOriginalLocal, unrelated],
+    deferImportedIdUntilSync: true,
+  });
+  const replacement = addableTransaction(manualOriginalLocal, {
+    category: undefined,
+    subtransactions: [
+      { amount: -333, category: 'cat-1', notes: 'first leg', payee: 'leg-payee-1' },
+      { amount: -667, category: 'cat-2', notes: 'second leg', payee: 'leg-payee-2' },
+    ],
+  });
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginalLocal,
+    replacement,
+  });
+  assert.equal(added.imported_id ?? null, null);
+  assert.equal(added.subtransactions[0].payee, 'leg-payee-1');
+  assert.equal(added.subtransactions[1].payee, 'leg-payee-2');
+  assert.ok(api.state.counts.sync >= 1);
 });
 
 test('late imported identity collision remains nonterminal without assigning the duplicate ID', async () => {

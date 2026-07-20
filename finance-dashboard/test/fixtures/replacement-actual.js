@@ -73,7 +73,21 @@ async function addTransactions(accountId, [transaction]) {
 
 async function updateTransaction(id, fields) {
   const row = rows.find((candidate) => String(candidate.id) === String(id));
-  if (row) Object.assign(row, structuredClone(fields));
+  if (!row) return;
+  const patch = structuredClone(fields);
+  if (Array.isArray(patch.subtransactions) && row.is_parent) {
+    patch.subtransactions = patch.subtransactions.map((leg, index) => ({
+      ...structuredClone(leg),
+      id: row.subtransactions?.[index]?.id || `${id}-leg-${index + 1}`,
+      parent_id: id,
+    }));
+    Object.assign(row, patch);
+    delete row.category;
+    if (patch.imported_id === '') row.imported_id = null;
+    return;
+  }
+  Object.assign(row, patch);
+  if (patch.imported_id === '') row.imported_id = null;
 }
 
 async function getPayees() {

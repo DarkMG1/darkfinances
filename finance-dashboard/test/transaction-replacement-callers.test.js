@@ -218,6 +218,30 @@ function assertReferenceMoved(id) {
   assert.equal(receipts.byTxn['old-leg-1'], undefined);
 }
 
+test('split caller clears temporary imported identity for manual transactions', async () => {
+  const manual = {
+    ...simple,
+    imported_id: null,
+    imported_payee: null,
+  };
+  configure(manual);
+  const result = await splitTransaction({
+    id: manual.id,
+    accountId: 'account',
+    date: manual.date,
+    legs: [
+      { amount: -4, categoryId: 'category-1', name: 'Leg One', notes: 'leg one' },
+      { amount: -6, categoryId: 'category-2', name: 'Leg Two', notes: 'leg two' },
+    ],
+  });
+  assertResponseCompatibility(result, 'create');
+  const parent = actual.inspect().rows[0];
+  assert.equal(parent.imported_id ?? null, null);
+  await syncNow();
+  const saga = Object.values(JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas)[0];
+  assert.equal(saga.phase, 'completed');
+});
+
 test('split caller returns replacement IDs and preserves response shape', async () => {
   configure(simple);
   const result = await splitTransaction({

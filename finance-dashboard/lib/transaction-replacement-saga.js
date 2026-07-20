@@ -199,6 +199,21 @@ function normalizedValue(value) {
   return value == null || value === '' ? null : value;
 }
 
+const METADATA_CONVERGE_ATTEMPTS = 5;
+
+function restorableImportedId(value) {
+  const normalized = normalizedValue(value);
+  return normalized == null ? '' : normalized;
+}
+
+function metadataRestoreFields(row, intendedImportedId) {
+  const payload = addableTransaction(row, { imported_id: restorableImportedId(intendedImportedId) });
+  if (!Array.isArray(row.subtransactions) || !row.subtransactions.length) {
+    delete payload.subtransactions;
+  }
+  return payload;
+}
+
 function transactionShape(transaction, importedId = transaction?.imported_id) {
   const legs = Array.isArray(transaction?.subtransactions) ? transaction.subtransactions : [];
   return {
@@ -635,6 +650,56 @@ function createTransactionReplacementSaga({
     await checkpoint(saga, { phase: donePhase, referenceStep: null }, 'references-migrated-checkpoint', faultInjector);
   }
 
+  async function restoreImportedMetadataAndConverge(api, saga, faultInjector, {
+    boundaryPrefix,
+    parentId,
+    temporaryIdentity,
+    intendedId,
+    expected,
+    absentReason,
+    conflictReason,
+    ambiguousReason,
+    convergeReason,
+  }) {
+    let rows = await transactionsFor(api, saga);
+    let row = rowById(rows, parentId);
+    if (!row) return unresolved(saga, absentReason, faultInjector);
+    if (importedIdentityConflict(rows, intendedId, [row.id])) {
+      return unresolved(saga, conflictReason, faultInjector);
+    }
+
+    const currentImported = normalizedValue(row.imported_id);
+    if (currentImported === temporaryIdentity) {
+      await boundary(faultInjector, `${boundaryPrefix}-restore`, saga, () => api.updateTransaction(
+        row.id,
+        metadataRestoreFields(row, intendedId),
+      ));
+    } else if (currentImported !== intendedId) {
+      return unresolved(saga, ambiguousReason, faultInjector);
+    }
+
+    for (let attempt = 0; attempt < METADATA_CONVERGE_ATTEMPTS; attempt += 1) {
+      rows = await boundary(faultInjector, `${boundaryPrefix}-reconcile`, saga, async () => {
+        if (typeof api.sync === 'function') await api.sync();
+        return transactionsFor(api, saga);
+      });
+      row = rowById(rows, parentId);
+      if (row
+        && !importedIdentityConflict(rows, intendedId, [row.id])
+        && shapeMatches(row, expected)) {
+        return { row };
+      }
+    }
+
+    row = rowById(rows, parentId);
+    if (!row
+      || importedIdentityConflict(rows, intendedId, [row.id])
+      || !shapeMatches(row, expected)) {
+      return unresolved(saga, convergeReason, faultInjector);
+    }
+    return { row };
+  }
+
   async function reconcileReplacementIdentity(api, saga, faultInjector) {
     const matches = await boundary(faultInjector, 'replacement-reconcile', saga, async () => {
       const rows = await transactionsFor(api, saga);
@@ -738,28 +803,19 @@ function createTransactionReplacementSaga({
       }
 
       if (saga.phase === 'replacement_metadata_pending') {
-        let rows = await transactionsFor(api, saga);
-        let added = rowById(rows, saga.replacementIds?.parentId);
-        if (!added) return unresolved(saga, 'checkpointed replacement id is absent', faultInjector);
         const intendedId = normalizedValue(saga.replacement.imported_id);
-        if (importedIdentityConflict(rows, intendedId, [added.id])) {
-          return unresolved(saga, 'replacement imported identity is owned by another live transaction', faultInjector);
-        }
-        if (normalizedValue(added.imported_id) === saga.identity.value) {
-          await boundary(faultInjector, 'replacement-metadata-restore', saga, () => api.updateTransaction(
-            added.id,
-            { imported_id: intendedId },
-          ));
-        } else if (normalizedValue(added.imported_id) !== intendedId) {
-          return unresolved(saga, 'replacement import metadata is ambiguous', faultInjector);
-        }
-        rows = await boundary(faultInjector, 'replacement-metadata-reconcile', saga, () => transactionsFor(api, saga));
-        added = rowById(rows, saga.replacementIds?.parentId);
-        if (!added
-          || importedIdentityConflict(rows, intendedId, [added.id])
-          || !shapeMatches(added, saga.replacement)) {
-          return unresolved(saga, 'replacement metadata or financial shape did not converge', faultInjector);
-        }
+        const converged = await restoreImportedMetadataAndConverge(api, saga, faultInjector, {
+          boundaryPrefix: 'replacement-metadata',
+          parentId: saga.replacementIds?.parentId,
+          temporaryIdentity: saga.identity.value,
+          intendedId,
+          expected: saga.replacement,
+          absentReason: 'checkpointed replacement id is absent',
+          conflictReason: 'replacement imported identity is owned by another live transaction',
+          ambiguousReason: 'replacement import metadata is ambiguous',
+          convergeReason: 'replacement metadata or financial shape did not converge',
+        });
+        if (converged.unresolved) return converged;
         await checkpoint(saga, { phase: 'replacement_ready', lastError: null }, 'replacement-ready-checkpoint', faultInjector);
         continue;
       }
@@ -919,31 +975,22 @@ function createTransactionReplacementSaga({
       }
 
       if (saga.phase === 'restore_metadata_pending') {
-        let rows = await transactionsFor(api, saga);
-        let restored = rowById(rows, saga.restoredIds?.parentId);
-        if (!restored) return unresolved(saga, 'checkpointed restored id is absent', faultInjector);
         const intendedId = normalizedValue(saga.original.imported_id);
-        if (importedIdentityConflict(rows, intendedId, [restored.id])) {
-          return unresolved(saga, 'restored imported identity is owned by another live transaction', faultInjector);
-        }
-        if (normalizedValue(restored.imported_id) === saga.restoreIdentity.value) {
-          await boundary(faultInjector, 'restored-metadata-restore', saga, () => api.updateTransaction(
-            restored.id,
-            { imported_id: intendedId },
-          ));
-        } else if (normalizedValue(restored.imported_id) !== intendedId) {
-          return unresolved(saga, 'restored import metadata is ambiguous', faultInjector);
-        }
-        rows = await boundary(faultInjector, 'restored-metadata-reconcile', saga, () => transactionsFor(api, saga));
-        restored = rowById(rows, saga.restoredIds?.parentId);
-        if (!restored
-          || importedIdentityConflict(rows, intendedId, [restored.id])
-          || !shapeMatches(restored, saga.original)) {
-          return unresolved(saga, 'restored transaction did not converge', faultInjector);
-        }
+        const converged = await restoreImportedMetadataAndConverge(api, saga, faultInjector, {
+          boundaryPrefix: 'restored-metadata',
+          parentId: saga.restoredIds?.parentId,
+          temporaryIdentity: saga.restoreIdentity.value,
+          intendedId,
+          expected: saga.original,
+          absentReason: 'checkpointed restored id is absent',
+          conflictReason: 'restored imported identity is owned by another live transaction',
+          ambiguousReason: 'restored import metadata is ambiguous',
+          convergeReason: 'restored transaction did not converge',
+        });
+        if (converged.unresolved) return converged;
         await checkpoint(saga, {
           phase: 'restored_ready',
-          rollbackIdMap: rollbackMapFor(saga, restored),
+          rollbackIdMap: rollbackMapFor(saga, converged.row),
           lastError: null,
         }, 'restored-ready-checkpoint', faultInjector);
         continue;
