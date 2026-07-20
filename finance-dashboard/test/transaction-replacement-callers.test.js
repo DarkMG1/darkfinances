@@ -236,8 +236,11 @@ test('split caller clears temporary imported identity for manual transactions', 
   });
   assertResponseCompatibility(result, 'create');
   const parent = actual.inspect().rows[0];
-  assert.equal(parent.imported_id ?? null, null);
+  assert.equal(parent.imported_id, null);
   await syncNow();
+  const persisted = actual.inspect().rows[0];
+  assert.equal(persisted.imported_id, null);
+  assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
   const saga = Object.values(JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas)[0];
   assert.equal(saga.phase, 'completed');
 });
@@ -259,6 +262,7 @@ test('split caller returns replacement IDs and preserves response shape', async 
   assert.equal(parent.id, result.id);
   assert.equal(parent.subtransactions.reduce((sum, leg) => sum + leg.amount, 0), parent.amount);
   assert.equal(parent.imported_id, simple.imported_id);
+  assert.equal(actual.inspect().rows[0].imported_id, 'bank-import');
   assertReferenceMoved(parent.id);
   let saga = Object.values(JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas)[0];
   assert.equal(saga.phase, 'sync_pending');

@@ -202,12 +202,13 @@ function normalizedValue(value) {
 const METADATA_CONVERGE_ATTEMPTS = 5;
 
 function restorableImportedId(value) {
-  const normalized = normalizedValue(value);
-  return normalized == null ? '' : normalized;
+  return normalizedValue(value);
 }
 
 function metadataRestoreFields(row, intendedImportedId) {
-  const payload = addableTransaction(row, { imported_id: restorableImportedId(intendedImportedId) });
+  const payload = addableTransaction(row, {
+    imported_id: restorableImportedId(intendedImportedId),
+  });
   if (!Array.isArray(row.subtransactions) || !row.subtransactions.length) {
     delete payload.subtransactions;
   }

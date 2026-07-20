@@ -572,7 +572,7 @@ test('manual split metadata restore clears temporary imported identity on Actual
     original: manualOriginal,
     replacement,
   });
-  assert.equal(added.imported_id == null || added.imported_id === '', true);
+  assert.equal(added.imported_id, null);
   assert.equal(added.subtransactions.length, 2);
   assert.equal(
     added.subtransactions.reduce((sum, leg) => sum + leg.amount, 0),
@@ -584,10 +584,9 @@ test('manual split metadata restore clears temporary imported identity on Actual
   assert.equal(latestSaga().phase, 'sync_pending');
   assert.equal(api.state.counts.update, 1);
   assert.ok(api.state.counts.sync >= 1);
-  assert.match(
-    JSON.stringify(api.state.rows.find((row) => row.id === added.id)),
-    /"imported_id":null|"imported_id":""/,
-  );
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.imported_id, null);
+  assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
 });
 
 const forwardBoundaries = [
@@ -1052,10 +1051,13 @@ test('metadata restore converges when imported_id read lags behind update until 
     original: manualOriginalLocal,
     replacement,
   });
-  assert.equal(added.imported_id ?? null, null);
+  assert.equal(added.imported_id, null);
   assert.equal(added.subtransactions[0].payee, 'leg-payee-1');
   assert.equal(added.subtransactions[1].payee, 'leg-payee-2');
   assert.ok(api.state.counts.sync >= 1);
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.imported_id, null);
+  assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
 });
 
 test('late imported identity collision remains nonterminal without assigning the duplicate ID', async () => {
