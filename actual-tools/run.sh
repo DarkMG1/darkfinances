@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Reusable runner for the Actual reporting tools. Usage: bash ~/actual-tools/run.sh <script.js>
 set -euo pipefail
+umask 077
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/.actual.env"
 # Optional: Splitwise creds so reporting tools can pull live authoritative balances. Non-fatal.
@@ -31,5 +32,6 @@ print(p)
 PY
 )"
 rm -rf "$SAFE_DATA_DIR"
-mkdir -p -m 700 "$SAFE_DATA_DIR"
+mkdir -p "$SAFE_DATA_DIR"
+chmod 700 "$SAFE_DATA_DIR"
 node "$DIR/$SCRIPT" 2>&1 | awk '!/Breadcrumb|Syncing|Got messages|Loading|message:|^}/'
