@@ -103,10 +103,17 @@ function sameLegShape(left, right, parentPayee) {
   return JSON.stringify(legShape(left, parentPayee)) === JSON.stringify(legShape(right, parentPayee));
 }
 
-function canonicalLegShapes(legs, parentPayee) {
-  return legs
+function canonicalLegShapeKey(shape) {
+  return JSON.stringify(shape);
+}
+
+// Multiset contract: normalize each leg to a fixed record shape, then sort by stable
+// serialization. Duplicate shapes remain separate entries; structured collisions are
+// only possible when two legs normalize to identical records.
+function canonicalLegMultiset(legs, parentPayee) {
+  return (Array.isArray(legs) ? legs : [])
     .map((leg) => legShape(leg, parentPayee))
-    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    .sort((left, right) => canonicalLegShapeKey(left).localeCompare(canonicalLegShapeKey(right)));
 }
 
 function deriveLegOwnership(original, replacement, requestedLegs) {
@@ -250,7 +257,7 @@ function transactionShape(transaction, importedId = transaction?.imported_id) {
     imported_id: normalizedValue(importedId),
     imported_payee: normalizedValue(transaction?.imported_payee),
     category: legs.length ? null : normalizedValue(transaction?.category),
-    legs: canonicalLegShapes(legs, parentPayee),
+    legs: canonicalLegMultiset(legs, parentPayee),
   };
 }
 
@@ -1333,6 +1340,7 @@ module.exports = {
   addableSplitLeg,
   addableTransaction,
   assertReconstructableTransaction,
+  canonicalLegMultiset,
   createTransactionReplacementSaga,
   shapeMatches,
   transactionFingerprint,
