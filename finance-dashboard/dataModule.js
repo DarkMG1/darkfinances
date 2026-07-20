@@ -119,6 +119,7 @@ const {
 const { buildImportedIdCounts, enrichReviewTask, reviewTaskStableKey } = require('./lib/review-task-fingerprint');
 const {
   SagaInterruption,
+  addableSplitLeg,
   addableTransaction,
   assertReconstructableTransaction,
   createTransactionReplacementSaga,
@@ -3536,12 +3537,11 @@ async function setTransactionCategory({ id, categoryId, isLeg, parentId, account
     const txns = await api.getTransactions(accountId, date, date);
     const parent = txns.find((t) => t.id === parentId);
     if (!parent || !Array.isArray(parent.subtransactions)) throw new Error('parent split not found');
-    const subs = parent.subtransactions.map((s) => ({
-      amount: s.amount,
-      category: s.id === id ? categoryId || null : s.category || null,
-      notes: s.notes || undefined,
-      payee: s.payee || undefined,
-    }));
+    const subs = parent.subtransactions.map((s) => addableSplitLeg(
+      s,
+      parent.payee,
+      s.id === id ? { category: categoryId || null } : {},
+    ));
     const replacement = addableTransaction(parent, { category: undefined, subtransactions: subs });
     const added = await replaceActualTransaction(api, {
       accountId,
@@ -5250,12 +5250,10 @@ async function splitTransaction({ id, accountId, date, legs } = {}) {
     for (const l of norm) l.payeeId = l.name ? await resolvePayeeId(api, l.name) : null;
     const replacement = addableTransaction(target, {
       category: undefined,
-      subtransactions: norm.map((leg) => ({
-        amount: leg.cents,
-        category: leg.categoryId || null,
-        notes: leg.notes || undefined,
-        payee: leg.payeeId || undefined,
-      })),
+      subtransactions: norm.map((leg) => addableSplitLeg(
+        { amount: leg.cents, category: leg.categoryId, notes: leg.notes, payee: leg.payeeId },
+        target.payee,
+      )),
     });
     const added = await replaceActualTransaction(api, { accountId, original: target, replacement, requestedLegs: target.is_parent ? norm : undefined });
     const { references } = replacementSagaResult(added);
@@ -5304,12 +5302,11 @@ async function reconcileSplitDeltas(api, { months = 3, apply = false } = {}) {
         console.error(`[split-delta] ${t.id} needs manual re-split (Δ ${(delta / 100).toFixed(2)})`);
         continue;
       }
-      const subs = t.subtransactions.map((s, i) => ({
-        amount: i === 0 ? newMaster : s.amount,
-        category: s.category || null,
-        notes: s.notes || undefined,
-        payee: s.payee || undefined,
-      }));
+      const subs = t.subtransactions.map((s, i) => addableSplitLeg(
+        s,
+        t.payee,
+        i === 0 ? { amount: newMaster } : {},
+      ));
       try {
         assertTransactionMutationAvailable({
           accountId: a.id,
@@ -5380,12 +5377,7 @@ async function sweepReimbursementTags({ tags, from, to } = {}) {
           const subs = t.subtransactions.map((s) => {
             const hit = s.amount < 0 && isSpendKind(s.category) && hasTargetTag(s.notes || t.notes);
             if (hit) { changed = true; moved.push({ id: s.id, amount: d2(s.amount), leg: true }); }
-            return {
-              amount: s.amount,
-              category: hit ? reimbId : s.category || null,
-              notes: s.notes || undefined,
-              payee: s.payee || undefined,
-            };
+            return addableSplitLeg(s, t.payee, hit ? { category: reimbId } : {});
           });
           if (changed) {
             assertTransactionMutationAvailable({
@@ -5989,12 +5981,11 @@ async function setPayee({ id, payee, isLeg, parentId, accountId, date } = {}) {
     assertReconstructableTransaction(parent);
     await assertTransactionImportedIdentityAvailable(api, { accountId, original: parent });
     const payeeId = await resolvePayeeId(api, payee);
-    const subs = parent.subtransactions.map((s) => ({
-      amount: s.amount,
-      category: s.category || null,
-      notes: s.notes || undefined,
-      payee: s.id === id ? payeeId || null : s.payee || undefined,
-    }));
+    const subs = parent.subtransactions.map((s) => addableSplitLeg(
+      s,
+      parent.payee,
+      s.id === id ? { payee: payeeId || null } : {},
+    ));
     const replacement = addableTransaction(parent, { category: undefined, subtransactions: subs });
     const added = await replaceActualTransaction(api, {
       accountId,
@@ -6397,12 +6388,11 @@ async function setTransactionNotes({ id, notes, isLeg, parentId, accountId, date
     const txns = await api.getTransactions(accountId, date, date);
     const parent = txns.find((t) => t.id === parentId);
     if (!parent || !Array.isArray(parent.subtransactions)) throw new Error('parent split not found');
-    const subs = parent.subtransactions.map((s) => ({
-      amount: s.amount,
-      category: s.category || null,
-      notes: s.id === id ? (notes || undefined) : (s.notes || undefined),
-      payee: s.payee || undefined,
-    }));
+    const subs = parent.subtransactions.map((s) => addableSplitLeg(
+      s,
+      parent.payee,
+      s.id === id ? { notes: notes || undefined } : {},
+    ));
     const replacement = addableTransaction(parent, { category: undefined, subtransactions: subs });
     const added = await replaceActualTransaction(api, {
       accountId,
@@ -6843,6 +6833,7 @@ module.exports = {
   getReconcilePending,
   getTransactionById,
   SagaInterruption,
+  addableSplitLeg,
   addableTransaction,
   assertReconstructableTransaction,
   assertTransactionDeletionAvailable,

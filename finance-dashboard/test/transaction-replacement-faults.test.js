@@ -602,6 +602,102 @@ test('manual split metadata restore clears temporary imported identity on Actual
   }
 });
 
+function manualSplitParent(source = manualOriginal) {
+  return {
+    id: 'manual-split-parent',
+    account: 'account',
+    date: source.date,
+    amount: source.amount,
+    payee: source.payee,
+    notes: source.notes,
+    cleared: false,
+    imported_id: null,
+    is_parent: true,
+    subtransactions: [
+      {
+        id: 'manual-leg-1',
+        parent_id: 'manual-split-parent',
+        amount: -500,
+        category: 'cat-1',
+        notes: 'first',
+        payee: source.payee,
+      },
+      {
+        id: 'manual-leg-2',
+        parent_id: 'manual-split-parent',
+        amount: -734,
+        category: 'cat-1',
+        notes: 'second',
+        payee: source.payee,
+      },
+    ],
+  };
+}
+
+function durableActualIgnoringNullImportedWhenInheritedLegPayeePresent({
+  rows = [manualOriginal],
+} = {}) {
+  const api = durableActual({ rows, ignoreSparseNullImportedIdUpdates: true });
+  const baseUpdate = api.updateTransaction.bind(api);
+  api.updateTransaction = async (id, fields) => {
+    const row = api.state.rows.find((candidate) => String(candidate.id) === String(id));
+    const patch = structuredClone(fields);
+    const hasInheritedPayee = Array.isArray(patch.subtransactions)
+      && row?.is_parent
+      && patch.subtransactions.some((leg) => leg.payee === row.payee);
+    if (Object.prototype.hasOwnProperty.call(patch, 'imported_id')
+      && patch.imported_id === null
+      && hasInheritedPayee) {
+      delete patch.imported_id;
+    }
+    return baseUpdate(id, patch);
+  };
+  return api;
+}
+
+test('manual split leg note rebuild clears temporary imported identity when Actual stores inherited leg payees', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActualIgnoringNullImportedWhenInheritedLegPayeePresent();
+  const splitAdded = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement: manualCloneSplit(),
+  });
+  await recoverTransactionSagas(api);
+  const parent = manualSplitParent();
+  parent.id = splitAdded.id;
+  parent.subtransactions = splitAdded.subtransactions.map((leg, index) => ({
+    ...parent.subtransactions[index],
+    id: leg.id,
+    parent_id: splitAdded.id,
+    payee: manualOriginal.payee,
+  }));
+  api.state.rows = api.state.rows.filter((row) => row.id !== splitAdded.id);
+  api.state.rows.push(parent);
+
+  const noteReplacement = addableTransaction(parent, {
+    category: undefined,
+    subtransactions: [
+      { amount: -500, category: 'cat-1', notes: 'updated' },
+      { amount: -734, category: 'cat-1', notes: 'second' },
+    ],
+  });
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: parent,
+    replacement: noteReplacement,
+    requestedLegs: parent.subtransactions.map((leg) => ({ id: String(leg.id) })),
+  });
+  assert.equal(added.subtransactions[0].notes, 'updated');
+  assert.equal(added.imported_id, null);
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.imported_id, null);
+  assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
+  assert.equal(persisted.subtransactions[0].notes, 'updated');
+});
+
 const forwardBoundaries = [
   'initial-saga-write',
   'original-deletion',

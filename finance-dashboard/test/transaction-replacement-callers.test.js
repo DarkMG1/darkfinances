@@ -548,6 +548,60 @@ test('notes leg rebuild preserves all unchanged parent and sibling fields', asyn
   assertReferenceMoved(result.id);
 });
 
+test('manual split leg note rebuild omits inherited payee and preserves SQL null imported_id', async () => {
+  const manual = {
+    ...simple,
+    id: 'manual-split-parent',
+    amount: -1234,
+    imported_id: null,
+    imported_payee: null,
+    category: null,
+    is_parent: true,
+    subtransactions: [
+      {
+        id: 'manual-leg-1',
+        parent_id: 'manual-split-parent',
+        amount: -500,
+        category: 'category-1',
+        notes: 'first',
+        payee: 'payee-original',
+      },
+      {
+        id: 'manual-leg-2',
+        parent_id: 'manual-split-parent',
+        amount: -734,
+        category: 'category-2',
+        notes: 'second',
+        payee: 'payee-original',
+      },
+    ],
+  };
+  configure(manual, 'manual-leg-1');
+  const result = await setTransactionNotes({
+    id: 'manual-leg-1',
+    notes: 'updated',
+    isLeg: true,
+    parentId: manual.id,
+    accountId: 'account',
+    date: manual.date,
+  });
+  assertResponseCompatibility(result, 'rebuild-split');
+  const rebuilt = actual.inspect().rows[0];
+  assert.equal(rebuilt.imported_id, null);
+  assert.equal(rebuilt.subtransactions[0].notes, 'updated');
+  assert.equal(rebuilt.subtransactions[0].payee, 'payee-original');
+  assert.equal(rebuilt.subtransactions[1].notes, 'second');
+  assert.equal(rebuilt.subtransactions[1].payee, 'payee-original');
+  await syncNow();
+  const persisted = actual.inspect().rows[0];
+  assert.equal(persisted.imported_id, null);
+  assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
+  const saga = Object.values(JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas).pop();
+  assert.equal(saga.phase, 'completed');
+  assert.equal(saga.replacement.subtransactions[0].payee, undefined);
+  assert.equal(saga.replacement.subtransactions[1].payee, undefined);
+});
+
 test('child transfer rejection precedes payee creation, saga writes, and Actual mutation', async () => {
   const parent = splitParent({ transferChild: true });
   configure(parent, parent.subtransactions[0].id);

@@ -50,13 +50,23 @@ class TransactionImportedIdConflictError extends KnownPreApplyError {
   }
 }
 
-function addableSubtransaction(transaction) {
-  return {
-    amount: transaction.amount,
-    category: transaction.category || null,
-    notes: transaction.notes || undefined,
-    payee: transaction.payee || undefined,
+function addableSplitLeg(subtransaction, parentPayee, overrides = {}) {
+  const merged = { ...subtransaction, ...overrides };
+  const payload = {
+    amount: merged.amount,
+    category: merged.category || null,
+    notes: merged.notes || undefined,
   };
+  const legPayee = canonicalLegPayee(merged.payee, parentPayee);
+  const normalizedParent = normalizedValue(parentPayee);
+  if (legPayee != null && legPayee !== normalizedParent) {
+    payload.payee = legPayee;
+  }
+  return payload;
+}
+
+function addableSubtransaction(subtransaction, parentPayee) {
+  return addableSplitLeg(subtransaction, parentPayee);
 }
 
 function addableTransaction(transaction, overrides = {}) {
@@ -75,22 +85,22 @@ function addableTransaction(transaction, overrides = {}) {
     : transaction.subtransactions;
   if (Array.isArray(sourceSubs) && sourceSubs.length) {
     delete value.category;
-    value.subtransactions = sourceSubs.map(addableSubtransaction);
+    value.subtransactions = sourceSubs.map((sub) => addableSplitLeg(sub, value.payee));
   }
   return { ...value, ...overrides, subtransactions: value.subtransactions };
 }
 
-function legShape(transaction) {
+function legShape(transaction, parentPayee) {
   return {
     amount: transaction?.amount,
     category: normalizedValue(transaction?.category),
     notes: normalizedValue(transaction?.notes),
-    payee: normalizedValue(transaction?.payee),
+    payee: canonicalLegPayee(transaction?.payee, parentPayee),
   };
 }
 
-function sameLegShape(left, right) {
-  return JSON.stringify(legShape(left)) === JSON.stringify(legShape(right));
+function sameLegShape(left, right, parentPayee) {
+  return JSON.stringify(legShape(left, parentPayee)) === JSON.stringify(legShape(right, parentPayee));
 }
 
 function deriveLegOwnership(original, replacement, requestedLegs) {
@@ -133,6 +143,7 @@ function transactionReplacementMap(
   const intendedSubs = Array.isArray(intendedReplacement?.subtransactions)
     ? intendedReplacement.subtransactions
     : [];
+  const parentPayee = intendedReplacement?.payee ?? replacement?.payee ?? original?.payee;
   if (newSubs.length !== intendedSubs.length || legOwnership.length !== intendedSubs.length) {
     throw new Error('replacement generated-leg identity is incomplete');
   }
@@ -144,7 +155,7 @@ function transactionReplacementMap(
     if (!originalIds.has(String(oldId)) || retained.has(String(oldId))) {
       throw new Error('replacement retained-leg ownership is invalid');
     }
-    const matches = newSubs.filter((leg) => sameLegShape(leg, intendedSubs[index]));
+    const matches = newSubs.filter((leg) => sameLegShape(leg, intendedSubs[index], parentPayee));
     if (matches.length !== 1 || !matches[0]?.id) {
       throw new Error('replacement retained-leg successor is absent or ambiguous');
     }
@@ -1318,6 +1329,7 @@ module.exports = {
   SagaOutcomeUnknownError,
   TransactionImportedIdConflictError,
   TransactionReplacementInProgressError,
+  addableSplitLeg,
   addableTransaction,
   assertReconstructableTransaction,
   createTransactionReplacementSaga,

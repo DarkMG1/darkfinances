@@ -17,6 +17,7 @@ for (const [key, name] of Object.entries({
 })) process.env[key] = path.join(dir, name);
 
 const {
+  addableSplitLeg,
   addableTransaction,
   recoverTransactionSagas,
   replaceActualTransaction,
@@ -144,6 +145,56 @@ test('transactionShape does not mutate stored leg payee values', () => {
   transactionShape(txn);
   assert.equal(txn.subtransactions[0].payee, undefined);
   assert.equal(txn.subtransactions[1].payee, undefined);
+});
+
+test('addableSplitLeg omits inherited parent payee but keeps explicit different payee', () => {
+  assert.deepEqual(addableSplitLeg(
+    { amount: -500, category: 'cat-1', notes: 'first', payee: parentPayee },
+    parentPayee,
+  ), {
+    amount: -500,
+    category: 'cat-1',
+    notes: 'first',
+  });
+  assert.deepEqual(addableSplitLeg(
+    { amount: -500, category: 'cat-1', notes: 'named', payee: 'leg-payee-1' },
+    parentPayee,
+  ), {
+    amount: -500,
+    category: 'cat-1',
+    notes: 'named',
+    payee: 'leg-payee-1',
+  });
+});
+
+test('replacement map treats Actual canonicalized inherited payee as unnamed intent', () => {
+  const original = {
+    id: 'old-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one' },
+      { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two' },
+    ],
+  };
+  const replacement = {
+    id: 'new-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'new-leg-1', amount: -400, category: 'cat-1', notes: 'updated', payee: parentPayee },
+      { id: 'new-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: parentPayee },
+    ],
+  };
+  const intended = addableTransaction(original, {
+    category: undefined,
+    subtransactions: [
+      { amount: -400, category: 'cat-1', notes: 'updated' },
+      { amount: -600, category: 'cat-2', notes: 'leg two' },
+    ],
+  });
+  assert.deepEqual(
+    transactionReplacementMap(original, replacement, ['old-leg-1', 'old-leg-2'], intended),
+    { 'old-parent': 'new-parent', 'old-leg-1': 'new-leg-1', 'old-leg-2': 'new-leg-2' },
+  );
 });
 
 test('replacement identifies the new parent and generated leg IDs', async () => {
