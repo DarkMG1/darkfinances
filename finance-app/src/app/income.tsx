@@ -8,6 +8,7 @@ import { Avatar, Card, EmptyState, SectionLabel } from '@/components/ui';
 import { SkeletonList } from '@/components/skeleton';
 import { useFinanceToday } from '@/lib/date-only';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { formatOptionalMoney, formatOptionalPos } from '@/lib/money-display.js';
 import { cadenceLabel, colors, dueLabel, fmtDay, fmtMoney, fmtPos } from '@/theme/colors';
 
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
@@ -47,6 +48,13 @@ export default function Income() {
         renderContent={(incomeData) => {
           const activeStreams = (incomeData.streams ?? []).filter((s) => s.active);
           const inactiveStreams = (incomeData.streams ?? []).filter((s) => !s.active);
+          const monthlyTotalLabel = formatOptionalMoney(incomeData.monthlyTotal, fmtMoney);
+          const nextAmountLabel = incomeData.nextPayday
+            ? formatOptionalPos(incomeData.nextPaydayAmount, fmtPos)
+            : null;
+          const nextSub = incomeData.nextPayday
+            ? `Next: ${cap(incomeData.nextPaydayPayee ?? 'paycheck')} · ${dueLabel(incomeData.nextPayday, financeToday)} · ${nextAmountLabel}`
+            : `${incomeData.activeCount ?? 0} active stream${(incomeData.activeCount ?? 0) === 1 ? '' : 's'}`;
           return (
           <>
           <View
@@ -54,19 +62,13 @@ export default function Income() {
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               'Monthly income',
-              fmtMoney(incomeData.monthlyTotal),
-              incomeData.nextPayday
-                ? `Next: ${cap(incomeData.nextPaydayPayee ?? 'paycheck')}, ${dueLabel(incomeData.nextPayday, financeToday)}, ${fmtPos(incomeData.nextPaydayAmount ?? 0)}`
-                : `${incomeData.activeCount} active stream${incomeData.activeCount === 1 ? '' : 's'}`,
+              monthlyTotalLabel,
+              nextSub,
             )}
           >
             <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">MONTHLY INCOME</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(incomeData.monthlyTotal)}</Text>
-            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
-              {incomeData.nextPayday
-                ? `Next: ${cap(incomeData.nextPaydayPayee ?? 'paycheck')} · ${dueLabel(incomeData.nextPayday, financeToday)} · ${fmtPos(incomeData.nextPaydayAmount ?? 0)}`
-                : `${incomeData.activeCount} active stream${incomeData.activeCount === 1 ? '' : 's'}`}
-            </Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{monthlyTotalLabel}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{nextSub}</Text>
           </View>
 
           {activeStreams.length ? (

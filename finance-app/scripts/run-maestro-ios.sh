@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 export DEVICE
 
+mkdir -p "$APP_ROOT/build/maestro/screenshots"
+
 needs_biometric_matcher() {
   for arg in "$@"; do
     if [[ "$arg" == *privacy-unlock* ]]; then

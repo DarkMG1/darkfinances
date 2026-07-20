@@ -26,6 +26,13 @@ import {
   nextDismissRequest,
   shouldApplyFormDismiss,
 } from '@/lib/mutation-form-dismiss';
+import {
+  captureValidationFieldSnapshot,
+  shouldInvalidateValidationOutcome,
+} from '@/lib/mutation-form-validation-invalidation.js';
+import {
+  shouldInvokeDeferredSuccessClose,
+} from '@/lib/mutation-success-close.js';
 import { useMutationAdmissionLifecycle } from '@/hooks/useMutationAdmissionLifecycle';
 import { useMutationHookIdentity } from '@/hooks/useMutationHookIdentity';
 import type { MutationDispatchToken } from '@/hooks/useMutationHookIdentity';
@@ -125,6 +132,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   const suppressPersistRef = useRef(false);
   const hydrationTargetRef = useRef<{ identity: string; target: TFields } | null>(null);
   const dismissSeqRef = useRef({ value: 0 });
+  const successClosePendingRef = useRef(false);
 
   const bumpActivity = useCallback(() => {
     const seq = nextMutationActivationSeq();
@@ -156,6 +164,8 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
     submittedFieldsRef.current = null;
     suppressPersistRef.current = false;
     rebaselineAfterSuccessRef.current = false;
+    successClosePendingRef.current = false;
+    closedRef.current = false;
     dismissSeqRef.current.value += 1;
   }, [formId, formIdentityKey, persistDraft, profileGeneration, scopeDigest]);
 
@@ -191,14 +201,12 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
   const isDirty = useMemo(() => !mutationFieldsEqual(fields, baseline), [baseline, fields]);
 
   useEffect(() => {
-    if (phase !== 'error' || !outcome || !submittedFieldsRef.current) return;
-    if (!mutationFieldsEqual(fields, submittedFieldsRef.current)) {
-      setOutcome(null);
-      setPhase('idle');
-      setAnnounce('');
-      variablesRef.current = null;
-      submittedFieldsRef.current = null;
-    }
+    if (!shouldInvalidateValidationOutcome(phase, outcome, fields, submittedFieldsRef.current)) return;
+    setOutcome(null);
+    setPhase('idle');
+    setAnnounce('');
+    variablesRef.current = null;
+    submittedFieldsRef.current = null;
   }, [fields, outcome, phase]);
 
   const fieldErrors = useMemo(() => {
@@ -275,14 +283,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
           clearMutationFormDraft(token.scope, formId, token.generation);
           rebaselineAfterSuccessRef.current = true;
           submittedFieldsRef.current = null;
-          if (!closedRef.current) {
-            closedRef.current = true;
-            try {
-              onSuccessClose?.();
-            } catch {
-              // User close hook must not leak lock/draft state.
-            }
-          }
+          successClosePendingRef.current = true;
         },
         onError: (error) => {
           errorReconciliation = startMutationErrorReconciliation(() => handleError(error, token));
@@ -293,6 +294,22 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
           if (!isDispatchTokenCurrent(token)) return;
           pendingLockRef.current = false;
           setDispatchPending(false);
+          if (
+            successClosePendingRef.current
+            && shouldInvokeDeferredSuccessClose({
+              tokenCurrent: isDispatchTokenCurrent(token),
+              pendingLocked: pendingLockRef.current,
+              alreadyClosed: closedRef.current,
+            })
+          ) {
+            successClosePendingRef.current = false;
+            closedRef.current = true;
+            try {
+              onSuccessClose?.();
+            } catch {
+              // User close hook must not leak lock/draft state.
+            }
+          }
         },
       });
     } catch (error) {
@@ -322,6 +339,7 @@ export function useMutationForm<TFields extends Record<string, unknown>, TVariab
       const clientErrors = validate(fields);
       if (Object.keys(clientErrors).length) {
         bumpActivity();
+        submittedFieldsRef.current = captureValidationFieldSnapshot(fields);
         const mapped = mapClientValidationOutcome(clientErrors, fieldOrder);
         setOutcome(mapped);
         setPhase('error');

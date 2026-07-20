@@ -5,6 +5,7 @@ import { PushScreen } from '@/components/screen';
 import { QueryScreenBody } from '@/components/query-display';
 import { Avatar, Card, CardTitle, EmptyState, Loading } from '@/components/ui';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { formatOptionalPos, isKnownMoney } from '@/lib/money-display.js';
 import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
 
 export default function DebtScreen() {
@@ -18,20 +19,27 @@ export default function DebtScreen() {
         empty={<EmptyState icon="creditcard">No debt plan configured</EmptyState>}
         hasContent={Boolean(investments.data?.debts?.length)}
         refetchBannerTestID="debt-refetch-banner"
-        renderContent={(data) => (
+        renderContent={(data) => {
+          const balance = data.debtTotals?.balance;
+          const minPayment = data.debtTotals?.minPayment;
+          const weightedApr = data.debtTotals?.weightedApr;
+          const heroBalance = isKnownMoney(balance) ? fmtMoney(-balance) : 'Unavailable';
+          const heroMin = formatOptionalPos(minPayment, fmtPos);
+          const heroApr = isKnownMoney(weightedApr) ? `${weightedApr}%` : 'Unavailable';
+          return (
           <>
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               'Debt payoff',
-              fmtMoney(-(data.debtTotals?.balance ?? 0)),
-              `${fmtPos(data.debtTotals?.minPayment ?? 0)} per month minimum · ${data.debtTotals?.weightedApr ?? 0}% weighted APR`,
+              heroBalance,
+              `${heroMin} per month minimum · ${heroApr} weighted APR`,
             )}
           >
             <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">DEBT PAYOFF</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(-(data.debtTotals?.balance ?? 0))}</Text>
-            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{fmtPos(data.debtTotals?.minPayment ?? 0)}/mo minimum · {data.debtTotals?.weightedApr ?? 0}% weighted APR</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{heroBalance}</Text>
+            <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">{heroMin}/mo minimum · {heroApr} weighted APR</Text>
           </View>
 
           <Card style={{ marginBottom: 16 }}>
@@ -53,7 +61,8 @@ export default function DebtScreen() {
             ))}
           </Card>
           </>
-        )}
+          );
+        }}
       />
     </PushScreen>
   );

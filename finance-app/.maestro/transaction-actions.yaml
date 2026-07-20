@@ -2,9 +2,12 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
+- assertVisible:
+    id: home-screen
 - openLink: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
 - tapOn:
     text: Open

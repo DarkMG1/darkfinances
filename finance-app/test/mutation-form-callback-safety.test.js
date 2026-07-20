@@ -5,7 +5,15 @@ const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
 
-test('onSuccessClose errors are caught and rebaseline flags set before invocation', () => {
+test('MutationSheet exposes backdrop and sheet as siblings for accessibility', () => {
+  const source = fs.readFileSync(path.join(root, 'src/components/mutation-form.tsx'), 'utf8');
+  assert.match(source, /testID=\{backdropTestID\}/);
+  assert.match(source, /`\$\{testID\}-backdrop`/);
+  assert.match(source, /styles\.modalRoot/);
+  assert.doesNotMatch(source, /<Pressable[\s\S]*testID=\{testID\}[\s\S]*onPress=\{\(\) => \{\}\}/);
+});
+
+test('onSuccessClose errors are caught and rebaseline flags set before deferred close', () => {
   const source = fs.readFileSync(path.join(root, 'src/hooks/useMutationForm.ts'), 'utf8');
   assert.match(source, /rebaselineAfterSuccessRef\.current = true/);
   assert.match(source, /try\s*\{\s*onSuccessClose\?\.\(\)/);

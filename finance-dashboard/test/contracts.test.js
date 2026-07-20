@@ -198,7 +198,7 @@ test('forecast screen labels partial ending balance and renders all warnings whe
   const forecast = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'forecast.tsx'), 'utf8');
   assert.match(forecast, /projectionContainment\?\.complete === false/);
   assert.match(forecast, /Partial projection/);
-  assert.match(forecast, /(?:data|forecastData)\.warnings\.map/);
+  assert.match(forecast, /(?:data|forecastData)\.warnings(?:\?\.|\.)map|warnings\.map/);
   assert.doesNotMatch(forecast, /(?:data|forecastData)\.warnings\[0\]/);
   assert.match(forecast, /Projection containment is incomplete/);
 });

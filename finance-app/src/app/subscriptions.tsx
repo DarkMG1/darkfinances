@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useRecurring, useSetRecurringOverride } from '@/api/hooks/finance.hooks';
@@ -11,9 +11,29 @@ import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { useMutationAction } from '@/hooks/useMutationAction';
 import { SkeletonList } from '@/components/skeleton';
 import { useFinanceToday } from '@/lib/date-only';
+import { formatOptionalMoney, formatOptionalPos, isKnownMoney } from '@/lib/money-display.js';
 import { cadenceLabel, colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const sid = (s: string) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+
+function subscriptionTotals(data: NonNullable<ReturnType<typeof useRecurring>['data']>) {
+  const subs = (data.items ?? []).filter((i) => !i.isBill);
+  const active = subs.filter((i) => i.status === 'active');
+  const monthlyKnown = isKnownMoney(data.subMonthlyTotal)
+    ? data.subMonthlyTotal
+    : isKnownMoney(data.monthlyTotal)
+      ? data.monthlyTotal
+      : null;
+  const monthlyFromItems = active.reduce((s, i) => s + i.monthlyEquivalent, 0);
+  const monthlyDisplay = monthlyKnown ?? (active.length ? monthlyFromItems : null);
+  return {
+    active,
+    inactive: subs.filter((i) => i.status !== 'active'),
+    hidden: data.hiddenItems ?? [],
+    monthlyDisplay,
+    annual: monthlyDisplay != null && Number.isFinite(monthlyDisplay) ? monthlyDisplay * 12 : null,
+  };
+}
 
 // Subscriptions = discretionary recurring charges (streaming, software, gym,
 // cloud). True must-pay bills (rent/utilities/phone/loan) live in the Bills
@@ -28,20 +48,6 @@ export default function Subscriptions() {
     mutationLabel: 'Restore subscription',
     onRefetch: () => recurring.refetch(),
   });
-  const data = recurring.data;
-
-  const { active, inactive, hidden, monthly, annual } = useMemo(() => {
-    const subs = (data?.items ?? []).filter((i) => !i.isBill);
-    const act = subs.filter((i) => i.status === 'active');
-    const monthlyTotal = data?.subMonthlyTotal ?? act.reduce((s, i) => s + i.monthlyEquivalent, 0);
-    return {
-      active: act,
-      inactive: subs.filter((i) => i.status !== 'active'),
-      hidden: data?.hiddenItems ?? [],
-      monthly: monthlyTotal,
-      annual: monthlyTotal * 12,
-    };
-  }, [data]);
 
   const Row = ({ item }: { item: RecurringItem }) => {
     const dim = item.status !== 'active';
@@ -77,23 +83,27 @@ export default function Subscriptions() {
         query={recurring}
         loading={<SkeletonList hero rows={6} />}
         empty={<EmptyState icon="repeat">No subscriptions detected yet</EmptyState>}
-        hasContent={!!(active.length || inactive.length || hidden.length)}
+        hasContent={Boolean(recurring.data?.items?.some((i) => !i.isBill))}
         refetchBannerTestID="subscriptions-refetch-banner"
-        renderContent={() => (
+        renderContent={(data) => {
+          const { active, inactive, hidden, monthlyDisplay, annual } = subscriptionTotals(data);
+          const monthlyLabel = formatOptionalMoney(monthlyDisplay, fmtMoney);
+          const annualLabel = formatOptionalPos(annual, fmtPos);
+          return (
           <>
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               'Monthly subscriptions',
-              fmtMoney(monthly),
-              `${active.length} active · ${fmtPos(annual)} per year`,
+              monthlyLabel,
+              `${active.length} active · ${annualLabel} per year`,
             )}
           >
             <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">MONTHLY SUBSCRIPTIONS</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(monthly)}</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{monthlyLabel}</Text>
             <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
-              {active.length} active · {fmtPos(annual)}/yr
+              {active.length} active · {annualLabel}/yr
             </Text>
           </View>
 
@@ -149,7 +159,8 @@ export default function Subscriptions() {
             </Text>
           </Pressable>
           </>
-        )}
+          );
+        }}
       />
     </PushScreen>
   );

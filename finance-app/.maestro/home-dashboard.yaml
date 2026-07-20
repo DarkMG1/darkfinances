@@ -10,6 +10,18 @@ appId: ${MAESTRO_APP_ID}
     id: home-screen
 - assertVisible:
     id: home-networth-hero
+- assertVisible:
+    id: home-review-banner
+- tapOn:
+    id: home-review-banner
+- assertVisible:
+    id: review-screen
+- openLink: darkfinances:///
+- tapOn:
+    text: Open
+    optional: true
+- assertVisible:
+    id: home-screen
 - scroll
 - assertVisible:
     id: home-stat-spent
@@ -28,18 +40,6 @@ appId: ${MAESTRO_APP_ID}
 - assertNotVisible:
     id: home-action-reports
     optional: true
-- assertVisible:
-    id: home-review-banner
-- tapOn:
-    id: home-review-banner
-- assertVisible:
-    id: review-screen
-- openLink: darkfinances:///
-- tapOn:
-    text: Open
-    optional: true
-- assertVisible:
-    id: home-screen
 - scroll
 - assertVisible:
     id: home-account-acc-check

@@ -48,7 +48,39 @@ test('Maestro flows stay at .maestro root so directory runs do not pick up helpe
 
 test('mutation validation banner flow filename matches client-validation intent', () => {
   assert.ok(fs.existsSync(path.join(root, '.maestro/mutation-validation-banner-dismiss.yaml')));
+  assert.ok(fs.existsSync(path.join(root, '.maestro/mutation-validation-draft-preservation.yaml')));
   assert.ok(!fs.existsSync(path.join(root, '.maestro/mutation-retry-dismiss.yaml')));
+  assert.ok(!fs.existsSync(path.join(root, '.maestro/mutation-offline-retry.yaml')));
   const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
   assert.match(readme, /mutation-validation-banner-dismiss\.yaml/);
+  assert.match(readme, /mutation-validation-draft-preservation\.yaml/);
+});
+
+test('run-maestro-ios creates screenshot output directory under build/', () => {
+  const source = fs.readFileSync(path.join(root, 'scripts/run-maestro-ios.sh'), 'utf8');
+  assert.match(source, /mkdir -p "\$APP_ROOT\/build\/maestro\/screenshots"/);
+});
+
+test('Maestro flows write screenshots under build/maestro/screenshots only', () => {
+  const maestroDir = path.join(root, '.maestro');
+  for (const name of fs.readdirSync(maestroDir).filter((entry) => entry.endsWith('.yaml'))) {
+    const source = fs.readFileSync(path.join(maestroDir, name), 'utf8');
+    const shots = [...source.matchAll(/takeScreenshot:\s*(.+)$/gm)].map((m) => m[1].trim());
+    for (const shot of shots) {
+      assert.match(shot, /^build\/maestro\/screenshots\//, `${name} screenshot ${shot} must live under build/maestro/screenshots/`);
+    }
+  }
+});
+
+test('all Maestro flows use strict demo bootstrap before deep links', () => {
+  const maestroDir = path.join(root, '.maestro');
+  const flows = fs.readdirSync(maestroDir).filter((name) => name.endsWith('.yaml'));
+  assert.equal(flows.length, 21);
+  for (const name of flows) {
+    const source = fs.readFileSync(path.join(maestroDir, name), 'utf8');
+    assert.match(source, /id: onboarding-screen/, `${name} must assert onboarding-screen`);
+    assert.match(source, /id: onboarding-demo-button/, `${name} must tap onboarding-demo-button`);
+    assert.match(source, /id: home-screen/, `${name} must assert home-screen before deep links`);
+    assert.doesNotMatch(source, /id: onboarding-demo-button\s*\n\s*optional: true/, `${name} must require demo bootstrap`);
+  }
 });

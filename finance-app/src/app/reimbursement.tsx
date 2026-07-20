@@ -13,6 +13,7 @@ import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinat
 import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { OwesPerson, ReimbLeg, RepaymentSuggestion } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
+import { formatOptionalPos } from '@/lib/money-display.js';
 import { colors, fmtDate, fmtPos, fmtSignedMoney } from '@/theme/colors';
 import { reimbursementWindow, type ReimbursementRangeKey, useFinanceToday } from '@/lib/date-only';
 
@@ -224,11 +225,11 @@ export default function Reimbursement() {
 
             <View style={styles.sumRow}>
               <View style={styles.sumChip}>
-                <Text style={styles.sumVal}>{fmtPos(summary?.fronted ?? 0)}</Text>
+                <Text style={styles.sumVal}>{formatOptionalPos(summary?.fronted, fmtPos)}</Text>
                 <Text style={styles.sumLabel}>fronted</Text>
               </View>
               <View style={styles.sumChip}>
-                <Text style={[styles.sumVal, { color: colors.green }]}>{fmtPos(summary?.paidBack ?? 0)}</Text>
+                <Text style={[styles.sumVal, { color: colors.green }]}>{formatOptionalPos(summary?.paidBack, fmtPos)}</Text>
                 <Text style={styles.sumLabel}>paid back</Text>
               </View>
               <View style={styles.sumChip}>

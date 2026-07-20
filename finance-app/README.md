@@ -205,7 +205,7 @@ Tests: `test/mutation-form-*.test.js`, `test/mutation-inventory.test.js`,
 `test/mutation-banner-coordinator.test.js`,
 `test/request-operation-state.test.js`, `test/request-operation-fake-server.test.js`.
 Maestro: `.maestro/mutation-validation-errors.yaml`, `.maestro/mutation-validation-banner-dismiss.yaml`,
-`.maestro/mutation-offline-retry.yaml`.
+`.maestro/mutation-validation-draft-preservation.yaml`.
 
 ## Demo mode
 

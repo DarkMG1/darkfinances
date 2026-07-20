@@ -10,6 +10,7 @@ import { MonthNavigator } from '@/components/charts';
 import { SkeletonList } from '@/components/skeleton';
 import { useFinanceToday } from '@/lib/date-only';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { formatOptionalMoney, isKnownMoney } from '@/lib/money-display.js';
 import { colors, fmtDate, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -47,22 +48,25 @@ export default function MerchantDetail() {
         empty={null}
         hasContent={hist.data != null}
         refetchBannerTestID="merchant-refetch-banner"
-        renderContent={(merchantData) => (
+        renderContent={(merchantData) => {
+          const totalLabel = formatOptionalMoney(merchantData.total, fmtMoney);
+          const avgLabel = isKnownMoney(merchantData.avg) ? fmtMoney(merchantData.avg) : null;
+          return (
           <>
           <View
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               name || 'Merchant',
-              fmtMoney(merchantData.total ?? 0),
-              `${merchantData.count ?? 0} transactions${merchantData.avg ? `, ${fmtMoney(merchantData.avg)} net average` : ''}, last ${months} months`,
+              totalLabel,
+              `${merchantData.count ?? 0} transactions${avgLabel ? `, ${avgLabel} net average` : ''}, last ${months} months`,
             )}
           >
             <Avatar label={name} size={52} style={{ marginBottom: 10 }} />
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(merchantData.total ?? 0)}</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{totalLabel}</Text>
             <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">
               {merchantData.count ?? 0} transaction{(merchantData.count ?? 0) === 1 ? '' : 's'}
-              {merchantData.avg ? ` · ${fmtMoney(merchantData.avg)} net avg` : ''}
+              {avgLabel ? ` · ${avgLabel} net avg` : ''}
               {` · last ${months}mo`}
             </Text>
           </View>
@@ -121,7 +125,8 @@ export default function MerchantDetail() {
             </Card>
           )}
           </>
-        )}
+          );
+        }}
       />
     </PushScreen>
   );

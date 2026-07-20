@@ -65,12 +65,7 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
   };
 
   const data = recon.data;
-  const items = data?.items ?? [];
   const total = data?.total ?? 0;
-  const done = data?.reconciledCount ?? 0;
-  const allDone = total > 0 && done >= total;
-  const monthClosed = !!data?.done;
-  const pct = total > 0 ? (done / total) * 100 : 0;
   const canNext = month < curKey;
 
   const openTxn = (it: ReconItem) => {
@@ -81,7 +76,12 @@ function ReconcileContent({ initialMonth }: { initialMonth: string }) {
     });
   };
   const doClose = () => {
-    if (!allDone || monthClosed || banner.isLocked) return;
+    const reconData = recon.data;
+    const reconTotal = reconData?.total ?? 0;
+    const reconDone = reconData?.reconciledCount ?? 0;
+    const reconAllDone = reconTotal > 0 && reconDone >= reconTotal;
+    const reconMonthClosed = !!reconData?.done;
+    if (!reconAllDone || reconMonthClosed || banner.isLocked) return;
     closeAction.run({ month, done: true });
   };
 

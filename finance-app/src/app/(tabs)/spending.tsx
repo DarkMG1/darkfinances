@@ -99,6 +99,7 @@ export default function Spending() {
     () => buildSpendingRefetchQueries({ spendingQuery, trends, budgets, reimb, insights, tags }),
     [budgets, insights, reimb, spendingQuery, tags, trends],
   );
+  const largestCharges = insights.data?.largestCharges ?? [];
   const spendingComplete = cur?.completeness?.complete !== false;
   const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
   const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
@@ -358,12 +359,12 @@ export default function Spending() {
             </>
           ) : null}
 
-          {insights.data?.largestCharges.length ? (
+          {largestCharges.length ? (
             <>
               <SectionTitle>Largest Purchases</SectionTitle>
               <Card style={styles.groupCard}>
                 <Text style={styles.cardCopy}>Tap a transaction to edit its details.</Text>
-                {insights.data.largestCharges.slice(0, 3).map((c, i) => (
+                {largestCharges.slice(0, 3).map((c, i) => (
                   <PurchaseRow
                     key={c.id ?? i}
                     payee={c.payee}
@@ -371,7 +372,7 @@ export default function Spending() {
                     date={c.date}
                     pending={c.cleared === false}
                     amount={Math.abs(c.amount)}
-                    last={i === Math.min(insights.data!.largestCharges.length, 3) - 1}
+                    last={i === Math.min(largestCharges.length, 3) - 1}
                     onPress={() => {
                       haptics.tap();
                       if (c.id) {

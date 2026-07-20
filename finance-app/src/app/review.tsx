@@ -164,6 +164,7 @@ export default function ReviewScreen() {
           return (
           <>
           <Card
+            testID="review-hero"
             style={styles.hero}
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel('Today review', String(reviewTasks.length), 'Prioritized from categorization, reimbursements, large charges, subscription changes, and reconciliation.')}

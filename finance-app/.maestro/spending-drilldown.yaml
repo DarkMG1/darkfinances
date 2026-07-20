@@ -56,30 +56,50 @@ appId: ${MAESTRO_APP_ID}
     text: "Amount: Lowest"
 - tapOn:
     id: category-sort-option-amountHigh
+- tapOn:
+    id: category-sort-sheet-backdrop
+    optional: true
 - assertNotVisible:
     id: category-sort-sheet
-- waitForAnimationToEnd
+- assertVisible:
+    id: category-sort-control-label
+    text: "Amount: Highest"
 - tapOn:
     id: category-sort-control
 - tapOn:
     id: category-sort-option-amountLow
+- tapOn:
+    id: category-sort-sheet-backdrop
+    optional: true
 - assertNotVisible:
     id: category-sort-sheet
-- waitForAnimationToEnd
+- assertVisible:
+    id: category-sort-control-label
+    text: "Amount: Lowest"
 - tapOn:
     id: category-sort-control
 - tapOn:
     id: category-sort-option-oldest
+- tapOn:
+    id: category-sort-sheet-backdrop
+    optional: true
 - assertNotVisible:
     id: category-sort-sheet
-- waitForAnimationToEnd
+- assertVisible:
+    id: category-sort-control-label
+    text: "Date: Oldest"
 - tapOn:
     id: category-sort-control
 - tapOn:
     id: category-sort-option-newest
+- tapOn:
+    id: category-sort-sheet-backdrop
+    optional: true
 - assertNotVisible:
     id: category-sort-sheet
-- waitForAnimationToEnd
+- assertVisible:
+    id: category-sort-control-label
+    text: "Date: Newest"
 - assertVisible:
     id: category-total-footer
 - openLink: darkfinances:///category/Spending?bucket=spending&start=2026-06-01&end=2026-06-30&label=Jun%202026
@@ -108,5 +128,4 @@ appId: ${MAESTRO_APP_ID}
     id: category-detail-screen
 - assertVisible: Earnings
 - assertVisible: This month
-- takeScreenshot: spending-drilldown
-
+- takeScreenshot: build/maestro/screenshots/spending-drilldown

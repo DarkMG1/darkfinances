@@ -5,6 +5,7 @@ import { PushScreen } from '@/components/screen';
 import { QueryScreenBody } from '@/components/query-display';
 import { Avatar, Card, CardTitle, EmptyState, Loading } from '@/components/ui';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
+import { formatOptionalMoney, formatOptionalSignedMoney, isKnownMoney } from '@/lib/money-display.js';
 import { colors, fmtMoney, fmtPos, fmtSignedMoney } from '@/theme/colors';
 
 export default function InvestmentsScreen() {
@@ -20,8 +21,11 @@ export default function InvestmentsScreen() {
         refetchBannerTestID="investments-refetch-banner"
         renderContent={(data) => {
           const allocation = Object.entries(data.allocation?.byAssetClass ?? {}).sort((a, b) => b[1] - a[1]);
-          const totalValue = data.totals?.value ?? 0;
-          const gainLoss = data.totals?.gainLoss ?? 0;
+          const totalValue = data.totals?.value;
+          const gainLoss = data.totals?.gainLoss;
+          const heroValue = formatOptionalMoney(totalValue, fmtMoney);
+          const heroGain = formatOptionalSignedMoney(gainLoss, fmtSignedMoney);
+          const gainColor = isKnownMoney(gainLoss) && gainLoss >= 0 ? colors.green : colors.red;
           return (
           <>
           <View
@@ -29,19 +33,19 @@ export default function InvestmentsScreen() {
             accessible
             accessibilityLabel={heroMetricAccessibilityLabel(
               'Investments',
-              fmtMoney(totalValue),
-              `${fmtSignedMoney(gainLoss)} tracked gain or loss`,
+              heroValue,
+              isKnownMoney(gainLoss) ? `${heroGain} tracked gain or loss` : 'Tracked gain or loss unavailable',
             )}
           >
             <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">INVESTMENTS</Text>
-            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{fmtMoney(totalValue)}</Text>
-            <Text style={[styles.heroSub, { color: gainLoss >= 0 ? colors.green : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">{fmtSignedMoney(gainLoss)} tracked gain/loss</Text>
+            <Text style={styles.heroValue} accessibilityElementsHidden importantForAccessibility="no">{heroValue}</Text>
+            <Text style={[styles.heroSub, { color: isKnownMoney(gainLoss) ? gainColor : colors.muted }]} accessibilityElementsHidden importantForAccessibility="no">{isKnownMoney(gainLoss) ? `${heroGain} tracked gain/loss` : 'Tracked gain/loss unavailable'}</Text>
           </View>
 
           <Card style={{ marginBottom: 16 }}>
             <CardTitle>Allocation</CardTitle>
             {allocation.map(([name, value]) => {
-              const pct = totalValue > 0 ? (value / totalValue) * 100 : 0;
+              const pct = isKnownMoney(totalValue) && totalValue > 0 ? (value / totalValue) * 100 : 0;
               return (
                 <View key={name} testID={`investments-allocation-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`} style={styles.allocRow}>
                   <Text style={styles.allocName}>{name}</Text>

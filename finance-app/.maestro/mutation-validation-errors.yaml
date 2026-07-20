@@ -19,14 +19,23 @@ appId: ${MAESTRO_APP_ID}
 - assertVisible:
     id: add-transaction-screen
 - tapOn:
+    id: add-transaction-amount-input
+- eraseText
+- tapOn:
+    point: 50%,20%
+- tapOn:
     id: add-transaction-submit-button
 - assertVisible:
     id: add-transaction-amount-error
+- tapOn:
+    id: add-transaction-amount-input
 - inputText: "12.50"
 - tapOn:
     id: add-transaction-date-input
 - eraseText
 - inputText: "2026-02-30"
+- tapOn:
+    point: 50%,20%
 - tapOn:
     id: add-transaction-submit-button
 - assertVisible:

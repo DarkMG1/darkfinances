@@ -42,7 +42,8 @@ appId: ${MAESTRO_APP_ID}
     optional: true
 - assertVisible:
     id: review-screen
-- assertVisible: TODAY REVIEW
+- assertVisible:
+    id: review-hero
 - openLink: darkfinances:///income
 - tapOn:
     text: Open

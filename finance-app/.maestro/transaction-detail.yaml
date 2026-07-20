@@ -2,9 +2,12 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+- assertVisible:
+    id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
-    optional: true
+- assertVisible:
+    id: home-screen
 - openLink: darkfinances:///spending
 - tapOn:
     text: Open
@@ -35,5 +38,4 @@ appId: ${MAESTRO_APP_ID}
     id: transaction-notes-row
 - assertVisible:
     id: transaction-split-row
-- takeScreenshot: transaction-detail
-
+- takeScreenshot: build/maestro/screenshots/transaction-detail

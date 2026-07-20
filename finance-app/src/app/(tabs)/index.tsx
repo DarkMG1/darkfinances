@@ -18,6 +18,7 @@ import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { QueryRefetchBanners, refetchEnabledQueries } from '@/components/query-display';
 import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
 import { buildHomeRefetchQueries } from '@/lib/screen-query-display-config.js';
+import { formatOptionalPos } from '@/lib/money-display.js';
 import { colors, dueLabel, fmtMoney, fmtPos } from '@/theme/colors';
 
 const RANGES: { label: string; v: number }[] = [
@@ -52,8 +53,25 @@ export default function Overview() {
     mutationLabel: 'Bank sync',
     onRefetch: () => today.refetch(),
   });
-  const reviewCount = today.data?.review.count ?? 0;
-  const topReview = today.data?.review.tasks?.[0] ?? null;
+  const reviewPayload = today.data?.review;
+  const reviewKnown = reviewPayload != null;
+  const reviewCount = reviewKnown && reviewPayload.count != null ? reviewPayload.count : null;
+  const topReview = reviewKnown ? (reviewPayload.tasks?.[0] ?? null) : null;
+  const healthPayload = today.data?.health;
+  const healthKnown = healthPayload != null;
+  const healthReady = healthKnown ? healthPayload.ready === true : null;
+  const healthDotColor = ping.isError
+    ? colors.red
+    : !healthKnown
+      ? colors.muted
+      : healthReady
+        ? colors.green
+        : colors.yellow;
+  const healthStatusText = ping.isError
+    ? `Offline · showing data loaded this session · as of ${today.data?.asOf ?? today.data?.financeDate ?? 'unknown'}`
+    : !healthKnown
+      ? `Ledger status unavailable · as of ${today.data?.financeDate ?? 'unknown'}`
+      : `${healthReady ? 'Ledger ready' : 'Ledger needs attention'} · as of ${today.data?.financeDate ?? 'unknown'}`;
 
   const doBankSync = () => {
     if (bankSyncAction.isLocked) return;
@@ -150,15 +168,11 @@ export default function Overview() {
         <>
           <QueryRefetchBanners queries={homeRefetchQueries} testID="home-refetch-banner" />
           <View testID="today-health-strip" style={styles.healthStrip}>
-            <View style={[styles.healthDot, { backgroundColor: ping.isError ? colors.red : today.data?.health.ready ? colors.green : colors.yellow }]} />
-            <Text style={styles.healthText}>
-              {ping.isError
-                ? `Offline · showing data loaded this session · as of ${today.data?.asOf ?? today.data?.financeDate}`
-                : `${today.data?.health.ready ? 'Ledger ready' : 'Ledger needs attention'} · as of ${today.data?.financeDate}`}
-            </Text>
+            <View style={[styles.healthDot, { backgroundColor: healthDotColor }]} />
+            <Text style={styles.healthText}>{healthStatusText}</Text>
           </View>
 
-          {reviewCount > 0 ? (
+          {reviewCount != null && reviewCount > 0 ? (
             <Pressable testID="home-review-banner" onPress={() => { haptics.tap(); router.push('/review' as never); }} style={({ pressed }) => pressed && { opacity: 0.6 }}>
               <Card style={{ ...styles.bannerCard, ...styles.reviewBanner }}>
                 <View style={[styles.bannerIcon, { backgroundColor: colors.yellow + '22' }]}>
@@ -171,10 +185,15 @@ export default function Overview() {
                 <Text style={[styles.bannerValue, { color: colors.yellow }]}>{reviewCount} ›</Text>
               </Card>
             </Pressable>
-          ) : (
-            <Card style={styles.allClearCard}>
+          ) : reviewCount === 0 ? (
+            <Card testID="home-review-all-clear" style={styles.allClearCard}>
               <SymbolView name="checkmark.circle.fill" tintColor={colors.green} size={20} resizeMode="scaleAspectFit" />
               <Text style={styles.allClearText}>Nothing needs review</Text>
+            </Card>
+          ) : (
+            <Card testID="home-review-unavailable" style={styles.incompleteCard}>
+              <Text style={styles.incompleteTitle}>Review status unavailable</Text>
+              <Text style={styles.incompleteText}>Today&apos;s review count is missing from the server payload.</Text>
             </Card>
           )}
 
@@ -335,7 +354,7 @@ export default function Overview() {
                   <Text style={styles.bannerLabel}>Next income</Text>
                   <Text style={styles.bannerSub} numberOfLines={1}>{nextIncome.payee || 'Income'} · estimated {dueLabel(nextIncome.nextPay, financeToday)}</Text>
                 </View>
-                <Text style={[styles.bannerValue, { color: colors.green }]}>+{fmtPos(nextIncome.amount ?? 0)} ›</Text>
+                <Text style={[styles.bannerValue, { color: colors.green }]}>+{formatOptionalPos(nextIncome.amount, fmtPos)} ›</Text>
               </Card>
             </Pressable>
           ) : null}

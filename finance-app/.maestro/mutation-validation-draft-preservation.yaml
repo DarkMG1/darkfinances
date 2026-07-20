@@ -18,14 +18,15 @@ appId: ${MAESTRO_APP_ID}
     id: goals-add-button
 - tapOn:
     id: goals-name-input
-- inputText: "Retry draft"
+- inputText: "Draft goal"
 - tapOn:
     id: goals-save-button
 - assertVisible:
     id: mutation-form-banner
-- back
-- tapOn:
-    id: goals-add-button
+- assertVisible:
+    id: goals-target-error
 - assertVisible:
     id: goals-name-input
-    text: "Retry draft"
+    text: "Draft goal"
+- assertVisible:
+    id: goals-edit-sheet

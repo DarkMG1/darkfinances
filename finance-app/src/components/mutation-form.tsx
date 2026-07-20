@@ -161,6 +161,7 @@ export function MutationSheet({
     if (canDismiss === false) return;
     onRequestClose();
   };
+  const backdropTestID = testID ? `${testID}-backdrop` : 'mutation-sheet-backdrop';
   return (
     <Modal
       visible={visible}
@@ -169,22 +170,24 @@ export function MutationSheet({
       onRequestClose={handleClose}
       accessibilityViewIsModal
     >
-      <Pressable
-        style={styles.modalBg}
-        onPress={handleClose}
-        accessibilityLabel="Dismiss sheet"
-        disabled={canDismiss === false}
-      >
+      <View style={styles.modalRoot} accessibilityViewIsModal>
         <Pressable
+          testID={backdropTestID}
+          style={styles.modalBg}
+          onPress={handleClose}
+          accessibilityRole="button"
+          accessibilityLabel="Dismiss sheet"
+          disabled={canDismiss === false}
+        />
+        <View
           testID={testID}
           style={[styles.sheet, { paddingBottom: bottomInset + 16 }]}
-          onPress={() => {}}
           accessibilityLabel={title}
         >
           <Text accessibilityRole="header" style={styles.sheetTitle}>{title}</Text>
           {children}
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
@@ -263,10 +266,13 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '600',
   },
-  modalBg: {
+  modalRoot: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
     justifyContent: 'flex-end',
+  },
+  modalBg: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(0,0,0,0.45)',
   },
   sheet: {
     backgroundColor: colors.bg,

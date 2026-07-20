@@ -8,6 +8,7 @@ import { QueryScreenBody } from '@/components/query-display';
 import { Card, CardTitle, EmptyState, Loading, StatCard } from '@/components/ui';
 import { LineChart } from '@/components/charts';
 import { haptics } from '@/lib/haptics';
+import { formatOptionalMoney, formatOptionalPos, formatOptionalSignedMoney, isKnownMoney } from '@/lib/money-display.js';
 import { colors, fmtDate, fmtMoney, fmtPos, fmtSignedMoney } from '@/theme/colors';
 
 const WINDOWS = [30, 60, 90] as const;
@@ -18,7 +19,7 @@ function projectionIncomplete(data: NonNullable<ReturnType<typeof useForecast>['
 }
 
 function endingBalanceDisplay(data: NonNullable<ReturnType<typeof useForecast>['data']>) {
-  if (data.endingBalance == null || !Number.isFinite(data.endingBalance)) {
+  if (!isKnownMoney(data.endingBalance)) {
     return { label: 'Ending', value: 'Unavailable', valueColor: colors.muted, sub: undefined as string | undefined };
   }
   if (projectionIncomplete(data)) {
@@ -53,7 +54,14 @@ export default function ForecastScreen() {
         renderContent={(data) => {
           const values = data.points?.map((p) => p.balance) ?? [];
           const events = data.events?.slice(0, 20) ?? [];
+          const warnings = data.warnings ?? [];
           const ending = endingBalanceDisplay(data);
+          const lowestBalance = data.lowest?.balance;
+          const lowestDate = data.lowest?.date;
+          const inflow = data.totals?.inflow;
+          const outflow = data.totals?.outflow;
+          const netKnown = isKnownMoney(inflow) && isKnownMoney(outflow);
+          const lineColor = isKnownMoney(lowestBalance) && lowestBalance < 0 ? colors.red : colors.accentLight;
           return (
           <>
           <View style={styles.rangeRow}>
@@ -73,15 +81,26 @@ export default function ForecastScreen() {
               sub={ending.sub}
               subColor={colors.yellow}
             />
-            <StatCard testID="forecast-lowest" label="Lowest" value={fmtMoney(data.lowest.balance)} valueColor={data.lowest.balance >= 0 ? colors.text : colors.red} sub={fmtDate(data.lowest.date)} />
-            <StatCard testID="forecast-net" label="Net" value={fmtSignedMoney(data.totals.inflow - data.totals.outflow)} valueColor={data.totals.inflow >= data.totals.outflow ? colors.green : colors.red} />
+            <StatCard
+              testID="forecast-lowest"
+              label="Lowest"
+              value={formatOptionalMoney(lowestBalance, fmtMoney)}
+              valueColor={isKnownMoney(lowestBalance) && lowestBalance >= 0 ? colors.text : colors.red}
+              sub={lowestDate ? fmtDate(lowestDate) : undefined}
+            />
+            <StatCard
+              testID="forecast-net"
+              label="Net"
+              value={netKnown ? fmtSignedMoney(inflow - outflow) : 'Unavailable'}
+              valueColor={netKnown && inflow - outflow >= 0 ? colors.green : colors.red}
+            />
           </View>
 
-          {data.warnings.length ? (
+          {warnings.length ? (
             <Card testID="forecast-warnings" style={styles.warning}>
               <SymbolView name="exclamationmark.triangle.fill" tintColor={colors.red} size={20} resizeMode="scaleAspectFit" />
               <View style={styles.warningList}>
-                {data.warnings.map((warning, index) => (
+                {warnings.map((warning, index) => (
                   <Text key={`${index}-${warning}`} style={styles.warningText}>{warning}</Text>
                 ))}
               </View>
@@ -90,12 +109,12 @@ export default function ForecastScreen() {
 
           <Card style={{ marginTop: 12 }}>
             <CardTitle>Illustrative Cash Plan</CardTitle>
-            <LineChart width={width - 64} values={values} color={data.lowest.balance < 0 ? colors.red : colors.accentLight} />
-            <Text style={styles.hint}>Starts at {fmtPos(data.startBalance)} estimated cash and models inferred income, inferred bills, and planned budget spending. It is not a prediction.</Text>
+            <LineChart width={width - 64} values={values} color={lineColor} />
+            <Text style={styles.hint}>Starts at {formatOptionalPos(data.startBalance, fmtPos)} estimated cash and models inferred income, inferred bills, and planned budget spending. It is not a prediction.</Text>
             {projectionIncomplete(data) ? (
               <Text style={styles.hint}>Projection containment is incomplete; balances may omit budget, goal, or scheduled cash commitments.</Text>
             ) : null}
-            {data.possibleReimbursement ? (
+            {data.possibleReimbursement && isKnownMoney(data.possibleReimbursement.amount) ? (
               <Text style={styles.hint}>A possible {fmtPos(data.possibleReimbursement.amount)} reimbursement is excluded from every balance shown.</Text>
             ) : null}
           </Card>
@@ -109,7 +128,7 @@ export default function ForecastScreen() {
                   <Text style={styles.eventName} numberOfLines={1}>{e.label}</Text>
                   <Text style={styles.eventMeta}>{fmtDate(e.date)} · {e.provenance} {e.kind}</Text>
                 </View>
-                <Text style={[styles.eventAmt, { color: e.amount >= 0 ? colors.green : colors.red }]}>{fmtSignedMoney(e.amount)}</Text>
+                <Text style={[styles.eventAmt, { color: e.amount >= 0 ? colors.green : colors.red }]}>{formatOptionalSignedMoney(e.amount, fmtSignedMoney)}</Text>
               </View>
             )) : <EmptyState icon="calendar">No upcoming events</EmptyState>}
           </Card>

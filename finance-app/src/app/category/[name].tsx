@@ -198,7 +198,7 @@ export default function CategoryDetail() {
                 }}
                 style={({ pressed }) => [styles.sortPill, pressed && { opacity: 0.7 }]}
               >
-                <Text style={styles.sortText}>{SORTS.find((s) => s.key === sort)?.label ?? 'Date: Newest'}</Text>
+                <Text testID="category-sort-control-label" style={styles.sortText}>{SORTS.find((s) => s.key === sort)?.label ?? 'Date: Newest'}</Text>
                 <SymbolView name="chevron.down" tintColor={colors.text} size={10} resizeMode="scaleAspectFit" />
               </Pressable>
             </View>
