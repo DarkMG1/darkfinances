@@ -919,6 +919,48 @@ const OWNERSHIP_ADVERSARIAL = [
     }),
     pattern: /cannot weaken ownership/,
   },
+  {
+    name: 'transactionSagas',
+    buildOriginal: (stamp) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          id: 'active',
+          recordVersion: 2,
+          phase: 'rollback_references_pending',
+          updatedAt: stamp,
+          original: { id: 'txn-original', subtransactions: [{ id: 'txn-leg-old' }] },
+          restoredIds: { parentId: 'txn-restored', legIds: ['txn-restored-leg-live'] },
+          retiredRestoredLegIds: ['txn-restored-leg-retired'],
+          rollbackIdMap: {
+            'txn-original': 'txn-restored',
+            'txn-leg-old': 'txn-restored-leg-live',
+            'txn-restored-leg-retired': 'txn-restored-leg-live',
+          },
+          referenceMigration: {
+            direction: 'rollback',
+            idMap: {
+              'txn-original': 'txn-restored',
+              'txn-leg-old': 'txn-restored-leg-live',
+              'txn-restored-leg-retired': 'txn-restored-leg-live',
+            },
+            stats: {},
+            completed: ['receipts'],
+          },
+        },
+      },
+    }),
+    buildAttack: (original) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          ...original.sagas.active,
+          retiredRestoredLegIds: [],
+        },
+      },
+    }),
+    pattern: /cannot weaken ownership/,
+  },
 ];
 
 for (const scenario of OWNERSHIP_ADVERSARIAL) {

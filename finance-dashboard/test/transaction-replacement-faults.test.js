@@ -1918,9 +1918,9 @@ test('migrated legacy terminal statuses block until authoritative v2 reconciliat
       },
     });
     const api = durableActual({ rows: [decoy, unrelated, restored] });
-    const interruption = faultSchedule([{ point: 'before:restored-id-checkpoint' }]);
+    const interruption = faultSchedule([{ point: 'before:reference-plan-checkpoint' }]);
     await assert.rejects(recoverTransactionSagas(api, { faultInjector: interruption }));
-    assert.equal(readSagaState().sagas.legacy.phase, 'legacy_reconcile_rollback');
+    assert.equal(readSagaState().sagas.legacy.phase, 'restored_ready');
     assert.throws(
       () => assertTransactionReplacementAvailable({
         accountId: 'account',
@@ -2412,6 +2412,256 @@ test('retired restored leg ids block concurrent admission until rollback saga te
     accountId: 'account',
     ids: [...latestSaga().restoredIds.legIds, latestSaga().restoredIds.parentId],
   }));
+});
+
+test('rollback restored_ready pre-reference refresh converges second-generation leg churn', async () => {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const injector = faultSchedule([
+    { point: 'before:reference-plan-checkpoint', mode: 'error' },
+    { point: 'after:restored-ready-checkpoint' },
+  ]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector: injector,
+    }),
+  );
+  const gen1LegIds = [...(latestSaga().restoredIds?.legIds || [])];
+  assert.equal(latestSaga().phase, 'restored_ready');
+  const parent = api.state.rows.find((row) => row.id === latestSaga().restoredIds.parentId);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...structuredClone(leg),
+    id: `${leg.id}-gen2-${index}`,
+  }));
+  await recoverPastFault(api, injector);
+  const saga = latestSaga();
+  assert.equal(saga.phase, 'rolled_back');
+  assert.ok(saga.retiredRestoredLegIds.length >= gen1LegIds.length + 1);
+  for (const gen1Id of gen1LegIds) {
+    assert.ok(saga.retiredRestoredLegIds.includes(String(gen1Id)));
+    const successor = saga.rollbackIdMap[String(gen1Id)];
+    assert.ok(successor, `gen1 id ${gen1Id} must alias to live successor`);
+    assert.ok(saga.restoredIds.legIds.includes(String(successor)));
+  }
+  assertReferencesAreLive(api);
+});
+
+test('rollback restored_ready pre-reference refresh converges second-generation churn with reversed leg order', async () => {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+    reverseSplitLegOrderOnSync: true,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const injector = faultSchedule([
+    { point: 'before:reference-plan-checkpoint', mode: 'error' },
+    { point: 'after:restored-ready-checkpoint' },
+  ]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector: injector,
+    }),
+  );
+  const parent = api.state.rows.find((row) => row.id === latestSaga().restoredIds.parentId);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...structuredClone(leg),
+    id: `${leg.id}-gen2-${index}`,
+  }));
+  await recoverPastFault(api, injector);
+  assert.equal(latestSaga().phase, 'rolled_back');
+  assertReferencesAreLive(api);
+});
+
+test('rollback pre-reference refresh converges across restored-pre-reference-id checkpoint boundaries', async (t) => {
+  for (const side of ['before', 'after']) {
+    await t.test(`${side}:restored-pre-reference-id-checkpoint`, async () => {
+      const source = rollbackSplitOriginalWithEvidence();
+      configureRollbackSplitEvidence(source);
+      const api = durableActual({
+        rows: [source, decoy, unrelated],
+        ignoreSparseNullImportedIdUpdates: true,
+        mutateSplitLegIdentityOnMetadataSync: true,
+      });
+      const replacement = rollbackSplitReplacement(source);
+      const injector = faultSchedule([
+        { point: 'before:reference-plan-checkpoint', mode: 'error' },
+        { point: 'after:restored-ready-checkpoint' },
+        { point: `${side}:restored-pre-reference-id-checkpoint` },
+      ]);
+      await assert.rejects(
+        replaceActualTransaction(api, {
+          accountId: 'account',
+          original: source,
+          replacement,
+          requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+          faultInjector: injector,
+        }),
+      );
+      const parent = api.state.rows.find((row) => row.id === latestSaga().restoredIds.parentId);
+      parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+        ...structuredClone(leg),
+        id: `${leg.id}-gen2-${index}`,
+      }));
+      await recoverPastFault(api, injector);
+      assert.ok(injector.entries.every((entry) => entry.fired));
+      assert.equal(latestSaga().phase, 'rolled_back');
+      assertReferencesAreLive(api);
+    });
+  }
+});
+
+test('rollback post-plan restored leg churn fails closed before sidecar mutation', async () => {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const injector = faultSchedule([
+    { point: 'before:reference-plan-checkpoint', mode: 'error' },
+    { point: 'after:reference-plan-checkpoint' },
+  ]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector: injector,
+    }),
+  );
+  assert.equal(latestSaga().phase, 'rollback_references_pending');
+  const storesBefore = readStores();
+  const saga = latestSaga();
+  const parent = api.state.rows.find((row) => row.id === saga.restoredIds.parentId);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...leg,
+    id: `${leg.id}-postplan-${index}`,
+  }));
+  await assert.rejects(
+    recoverTransactionSagas(api),
+    /drifted after reference migration started|reference migration targets are absent/,
+  );
+  assert.equal(latestSaga().phase, 'rollback_references_pending');
+  assert.deepEqual(readStores(), storesBefore);
+  assert.ok(latestSaga().lastError);
+});
+
+test('rollback_sync_pending terminalization fails closed when restored leg ids churn after reference migration', async () => {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const injector = faultSchedule([
+    { point: 'before:reference-plan-checkpoint', mode: 'error' },
+    { point: 'after:sync-pending-checkpoint' },
+  ]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector: injector,
+    }),
+  );
+  assert.equal(latestSaga().phase, 'rollback_sync_pending');
+  const saga = latestSaga();
+  const parent = api.state.rows.find((row) => row.id === saga.restoredIds.parentId);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...leg,
+    id: `${leg.id}-terminal-drift-${index}`,
+  }));
+  await assert.rejects(
+    recoverTransactionSagas(api),
+    /drifted after reference migration started|reference migration targets are absent/,
+  );
+  assert.equal(latestSaga().phase, 'rollback_sync_pending');
+  assert.ok(latestSaga().lastError);
+});
+
+test('legacy split rollback reconcile refreshes rollback map without weakening ownership', async () => {
+  resetStores();
+  const splitOriginal = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(splitOriginal);
+  const restored = materializeAdded(addableTransaction(splitOriginal, {
+    category: undefined,
+    subtransactions: splitOriginal.subtransactions.map((leg) => ({
+      amount: leg.amount,
+      category: leg.category,
+      notes: leg.notes,
+      payee: leg.payee,
+    })),
+  }), 'legacy-split-restored', 'account');
+  restored.subtransactions = restored.subtransactions.map((leg, index) => ({
+    ...splitOriginal.subtransactions[index],
+    id: leg.id,
+    parent_id: restored.id,
+  }));
+  writeJson(process.env.TRANSACTION_SAGAS_PATH, {
+    schemaVersion: 1,
+    sagas: {
+      legacy: legacySaga({
+        status: 'recovered',
+        original: splitOriginal,
+        replacement: rollbackSplitReplacement(splitOriginal),
+        replacementId: 'legacy-split-replacement',
+        replacementIds: { parentId: 'legacy-split-replacement', legIds: ['legacy-repl-leg-a', 'legacy-repl-leg-b'] },
+        idMap: {
+          [splitOriginal.id]: 'legacy-split-replacement',
+          'rollback-split-leg-a': 'legacy-repl-leg-a',
+          'rollback-split-leg-b': 'legacy-repl-leg-b',
+        },
+        recoveryTransactionId: restored.id,
+      }),
+    },
+  });
+  const api = durableActual({ rows: [decoy, unrelated, restored] });
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'rolled_back');
+  assertReferencesAreLive(api);
+});
+
+test('legacy rollback with replacementIds but no idMap fails closed', async () => {
+  resetStores();
+  const restored = materializeAdded(addableTransaction(original), 'legacy-restored', 'account');
+  writeJson(process.env.TRANSACTION_SAGAS_PATH, {
+    schemaVersion: 1,
+    sagas: {
+      legacy: legacySaga({
+        status: 'recovered',
+        replacementIds: { parentId: 'legacy-replacement', legIds: ['legacy-leg'] },
+        recoveryTransactionId: restored.id,
+      }),
+    },
+  });
+  const api = durableActual({ rows: [decoy, unrelated, restored] });
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'legacy_reconcile_rollback');
+  assert.match(latestSaga().lastError.message, /replacement mapping is incomplete/);
 });
 
 function bankImportSplitParent() {

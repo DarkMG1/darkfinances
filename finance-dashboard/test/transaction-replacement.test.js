@@ -34,6 +34,8 @@ const {
   transactionShape,
   rollbackReplacementMap,
   rollbackMapAfterRestoredLegRefresh,
+  rollbackReferenceMigrationLocked,
+  postMigrationRestoredDriftReason,
   retiredRestoredLegIds,
   metadataRestoreFields,
   forwardReferenceMigrationLocked,
@@ -458,7 +460,184 @@ test('rollbackMapAfterRestoredLegRefresh remaps churned restored legs by origina
   assert.notEqual(map['old-leg-1'], map['old-leg-2']);
 });
 
+test('rollbackMapAfterRestoredLegRefresh carries transitive gen0 gen1 gen2 aliases', () => {
+  const splitSaga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1', 'new-leg-2'] },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: { parentId: 'restored-parent', legIds: ['gen1-leg-a', 'gen1-leg-b'] },
+    retiredRestoredLegIds: ['gen0-leg-a', 'gen0-leg-b'],
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'gen1-leg-a',
+      'old-leg-2': 'gen1-leg-b',
+      'new-parent': 'restored-parent',
+      'new-leg-1': 'gen1-leg-a',
+      'new-leg-2': 'gen1-leg-b',
+      'gen0-leg-a': 'gen1-leg-a',
+      'gen0-leg-b': 'gen1-leg-b',
+    },
+  };
+  const restored = {
+    id: 'restored-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'gen2-leg-b', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      { id: 'gen2-leg-a', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+    ],
+  };
+  const map = rollbackMapAfterRestoredLegRefresh(splitSaga, restored);
+  assert.equal(map['gen0-leg-a'], 'gen2-leg-a');
+  assert.equal(map['gen1-leg-a'], 'gen2-leg-a');
+  assert.equal(map['gen0-leg-b'], 'gen2-leg-b');
+  assert.equal(map['gen1-leg-b'], 'gen2-leg-b');
+  assert.equal(map['old-leg-1'], 'gen2-leg-a');
+});
+
 test('rollbackMapAfterRestoredLegRefresh fails closed when churn remap is incomplete', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1', 'new-leg-2'] },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: { parentId: 'restored-parent', legIds: ['prior-leg-a', 'prior-leg-b'] },
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'prior-leg-a',
+    },
+  };
+  assert.throws(
+    () => rollbackMapAfterRestoredLegRefresh(saga, {
+      id: 'restored-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'postmeta-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'postmeta-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    }),
+    /incomplete/,
+  );
+});
+
+test('rollbackMapAfterRestoredLegRefresh fails closed on ambiguous restored alias correspondence', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1', 'new-leg-2'] },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: { parentId: 'restored-parent', legIds: ['shared-alias', 'gen1-leg-b'] },
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'shared-alias',
+      'old-leg-2': 'shared-alias',
+      'new-parent': 'restored-parent',
+      'new-leg-1': 'shared-alias',
+      'new-leg-2': 'gen1-leg-b',
+    },
+  };
+  assert.throws(
+    () => rollbackMapAfterRestoredLegRefresh(saga, {
+      id: 'restored-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'gen2-leg-a', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'gen2-leg-b', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    }),
+    /ambiguous/,
+  );
+});
+
+test('rollbackReferenceMigrationLocked mirrors forward lock semantics', () => {
+  assert.equal(rollbackReferenceMigrationLocked({
+    phase: 'restored_ready',
+    referenceMigration: { direction: 'rollback', idMap: { a: 'b' }, completed: [] },
+  }), true);
+  assert.equal(rollbackReferenceMigrationLocked({
+    phase: 'rollback_references_pending',
+    referenceMigration: { direction: 'rollback', idMap: { a: 'b' }, completed: [] },
+  }), true);
+  assert.equal(rollbackReferenceMigrationLocked({
+    phase: 'restore_metadata_pending',
+    referenceMigration: { direction: 'rollback', idMap: { a: 'b' }, completed: [] },
+  }), false);
+});
+
+test('postMigrationRestoredDriftReason rejects leg id drift after rollback reference plan', () => {
+  const saga = {
+    phase: 'rollback_references_pending',
+    original: { id: 'old-parent', subtransactions: [{ id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'one' }] },
+    restoredIds: { parentId: 'restored-parent', legIds: ['checkpoint-leg'] },
+    rollbackIdMap: { 'old-leg-1': 'checkpoint-leg' },
+    referenceMigration: {
+      direction: 'rollback',
+      idMap: { 'old-leg-1': 'checkpoint-leg' },
+      completed: [],
+    },
+  };
+  const reason = postMigrationRestoredDriftReason(saga, {
+    id: 'restored-parent',
+    subtransactions: [{ id: 'live-leg', amount: -400, category: 'cat-1', notes: 'one' }],
+  });
+  assert.match(reason, /drifted after reference migration started/);
+});
+
+test('rollback replacement map fails closed when checkpoint leg ids are absent from idMap', () => {
   const saga = {
     original: {
       id: 'old-parent',

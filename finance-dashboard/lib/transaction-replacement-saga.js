@@ -216,12 +216,97 @@ function retiredRestoredLegIds(saga, nextLegIds) {
   return [...retired];
 }
 
-function restoredLegChurnRemap(saga, restored, nextLegIds) {
-  const priorLegIds = (saga.restoredIds?.legIds || []).map(String);
-  const next = new Set((nextLegIds || []).map(String));
-  const churned = priorLegIds.filter((id) => !next.has(String(id)));
-  if (!churned.length) return {};
+function isRollbackSourceKey(saga, key) {
+  const k = String(key);
+  if (k === String(saga.original?.id)) return true;
+  for (const leg of saga.original?.subtransactions || []) {
+    if (k === String(leg.id)) return true;
+  }
+  if (saga.replacementIds && k === String(saga.replacementIds.parentId)) return true;
+  for (const id of saga.replacementIds?.legIds || []) {
+    if (k === String(id)) return true;
+  }
+  for (const id of saga.retiredReplacementLegIds || []) {
+    if (k === String(id)) return true;
+  }
+  if (saga.replacementId && k === String(saga.replacementId)) return true;
+  for (const sourceId of Object.keys(saga.idMap || {})) {
+    if (k === String(sourceId)) return true;
+  }
+  for (const sourceId of Object.values(saga.idMap || {})) {
+    if (k === String(sourceId)) return true;
+  }
+  return false;
+}
 
+function aliasChainTargets(map, startId) {
+  const targets = new Set([String(startId)]);
+  const queue = [String(startId)];
+  const seen = new Set();
+  while (queue.length) {
+    const id = queue.shift();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const next = map[id];
+    if (next == null) continue;
+    const nextId = String(next);
+    targets.add(nextId);
+    queue.push(nextId);
+  }
+  return targets;
+}
+
+function aliasReachableFromOriginalTarget(map, originalId, aliasId) {
+  let current = map[String(originalId)];
+  if (current == null) return false;
+  const seen = new Set();
+  while (current != null) {
+    const currentId = String(current);
+    if (currentId === String(aliasId)) return true;
+    if (seen.has(currentId)) return false;
+    seen.add(currentId);
+    current = map[currentId];
+  }
+  return false;
+}
+
+function originalLegForRestoredAlias(saga, aliasId, priorMap) {
+  const alias = String(aliasId);
+  if (Object.prototype.hasOwnProperty.call(priorMap, alias)) {
+    const successor = String(priorMap[alias]);
+    for (const leg of saga.original.subtransactions || []) {
+      const oid = String(leg.id);
+      if (String(priorMap[oid]) === successor) return oid;
+      if (priorMap[oid] != null && aliasChainTargets(priorMap, priorMap[oid]).has(successor)) return oid;
+    }
+    if (String(priorMap[String(saga.original.id)]) === successor) return String(saga.original.id);
+  }
+  const candidates = [];
+  for (const leg of saga.original.subtransactions || []) {
+    const oid = String(leg.id);
+    if (String(priorMap[oid]) === alias) {
+      candidates.push(oid);
+      continue;
+    }
+    if (priorMap[oid] != null && aliasChainTargets(priorMap, priorMap[oid]).has(alias)) {
+      candidates.push(oid);
+      continue;
+    }
+    if (aliasReachableFromOriginalTarget(priorMap, oid, alias)) candidates.push(oid);
+  }
+  const parentId = String(saga.original.id);
+  if (String(priorMap[parentId]) === alias
+    || (priorMap[parentId] != null && aliasChainTargets(priorMap, priorMap[parentId]).has(alias))
+    || aliasReachableFromOriginalTarget(priorMap, parentId, alias)) {
+    candidates.push(parentId);
+  }
+  const unique = [...new Set(candidates)];
+  if (unique.length > 1) throw new Error('restored leg churn remap is ambiguous');
+  return unique[0] || null;
+}
+
+function restoredLegAliasRemap(saga, restored, nextLegIds) {
+  const priorMap = saga.rollbackIdMap || {};
   const ownership = (saga.original.subtransactions || []).map((leg) => String(leg.id));
   const originalToSuccessor = transactionReplacementMap(
     saga.original,
@@ -229,44 +314,54 @@ function restoredLegChurnRemap(saga, restored, nextLegIds) {
     ownership,
     saga.original,
   );
-  const priorMap = saga.rollbackIdMap || {};
+  const next = new Set((nextLegIds || []).map(String));
+  const aliases = new Set();
+  for (const id of saga.retiredRestoredLegIds || []) aliases.add(String(id));
+  for (const id of saga.restoredIds?.legIds || []) {
+    if (!next.has(String(id))) aliases.add(String(id));
+  }
+  for (const key of Object.keys(priorMap)) {
+    if (!isRollbackSourceKey(saga, key) && !next.has(String(key))) aliases.add(String(key));
+  }
   const remap = {};
-  for (const [originalId, successorId] of Object.entries(originalToSuccessor)) {
-    const priorTarget = priorMap[String(originalId)];
-    if (priorTarget == null) continue;
-    if (!churned.includes(String(priorTarget))) continue;
-    const priorKey = String(priorTarget);
-    if (Object.prototype.hasOwnProperty.call(remap, priorKey)
-      && remap[priorKey] !== String(successorId)) {
+  for (const alias of aliases) {
+    if (next.has(alias)) continue;
+    const originalId = originalLegForRestoredAlias(saga, alias, priorMap);
+    if (originalId == null) throw new Error('restored leg churn remap is incomplete');
+    const successor = originalId === String(saga.original.id)
+      ? String(restored.id)
+      : originalToSuccessor[String(originalId)];
+    if (successor == null) throw new Error('restored leg churn remap is incomplete');
+    if (Object.prototype.hasOwnProperty.call(remap, alias) && remap[alias] !== String(successor)) {
       throw new Error('restored leg churn remap is ambiguous');
     }
-    remap[priorKey] = String(successorId);
-  }
-  for (const priorId of churned) {
-    if (!Object.prototype.hasOwnProperty.call(remap, String(priorId))) {
-      throw new Error('restored leg churn remap is incomplete');
-    }
+    remap[alias] = String(successor);
   }
   return remap;
 }
 
+function resolveRestoredAliasSuccessor(id, aliasRemap) {
+  let current = String(id);
+  const seen = new Set();
+  while (Object.prototype.hasOwnProperty.call(aliasRemap, current)) {
+    if (seen.has(current)) throw new Error('restored leg alias cycle');
+    seen.add(current);
+    current = aliasRemap[current];
+  }
+  return current;
+}
+
 function rollbackMapAfterRestoredLegRefresh(saga, restored) {
   const fresh = rollbackReplacementMap(saga, restored);
-  let nextLegIds;
-  try {
-    nextLegIds = transactionIds(restored).legIds;
-  } catch (error) {
-    throw error;
-  }
-  const churnRemap = restoredLegChurnRemap(saga, restored, nextLegIds);
-  if (!Object.keys(churnRemap).length) return fresh;
+  const nextLegIds = transactionIds(restored).legIds;
+  const aliasRemap = restoredLegAliasRemap(saga, restored, nextLegIds);
+  if (!Object.keys(aliasRemap).length) return fresh;
   const merged = { ...fresh };
-  for (const [priorTarget, successor] of Object.entries(churnRemap)) {
-    merged[priorTarget] = successor;
+  for (const [alias, successor] of Object.entries(aliasRemap)) {
+    merged[alias] = successor;
   }
   for (const [key, value] of Object.entries(merged)) {
-    const remapped = churnRemap[String(value)];
-    if (remapped) merged[key] = remapped;
+    merged[key] = resolveRestoredAliasSuccessor(value, aliasRemap);
   }
   return merged;
 }
@@ -279,7 +374,11 @@ function rollbackReplacementMap(saga, restored) {
     restoredOwnership,
     saga.original,
   );
-  if (!saga.replacementIds) return originalToRestored;
+  if (!saga.replacementIds) {
+    const map = { ...originalToRestored };
+    if (saga.replacementId) map[String(saga.replacementId)] = String(restored.id);
+    return map;
+  }
   if (!saga.idMap || typeof saga.idMap !== 'object') {
     throw new Error('rollback replacement mapping requires refreshed idMap');
   }
@@ -315,7 +414,13 @@ function rollbackReplacementMap(saga, restored) {
   if (saga.replacementId && String(saga.replacementId) !== replacementParentId) {
     replacementToRestored[String(saga.replacementId)] = String(restored.id);
   }
-  return mergeMaps(originalToRestored, replacementToRestored);
+  const map = saga.replacementIds
+    ? mergeMaps(originalToRestored, replacementToRestored)
+    : { ...originalToRestored };
+  if (saga.replacementId) {
+    map[String(saga.replacementId)] = String(restored.id);
+  }
+  return map;
 }
 
 function normalizedTransferId(value) {
@@ -387,6 +492,13 @@ const POST_REFERENCE_PLAN_PHASES = new Set([
   'completed',
 ]);
 
+const POST_ROLLBACK_REFERENCE_PLAN_PHASES = new Set([
+  'rollback_references_pending',
+  'rollback_references_migrated',
+  'rollback_sync_pending',
+  'rolled_back',
+]);
+
 function forwardReferenceMigrationLocked(saga) {
   const migration = saga?.referenceMigration;
   if (!migration || migration.direction !== 'forward') return false;
@@ -395,7 +507,19 @@ function forwardReferenceMigrationLocked(saga) {
   return saga.phase === 'replacement_ready' && migration.idMap != null;
 }
 
+function rollbackReferenceMigrationLocked(saga) {
+  const migration = saga?.referenceMigration;
+  if (!migration || migration.direction !== 'rollback') return false;
+  if ((migration.completed || []).length > 0) return true;
+  if (POST_ROLLBACK_REFERENCE_PLAN_PHASES.has(saga.phase)) return true;
+  return saga.phase === 'restored_ready' && migration.idMap != null;
+}
+
 function sortedReplacementLegIds(transaction) {
+  return (transaction?.subtransactions || []).map((leg) => String(leg.id)).sort();
+}
+
+function sortedRestoredLegIds(transaction) {
   return (transaction?.subtransactions || []).map((leg) => String(leg.id)).sort();
 }
 
@@ -403,9 +527,18 @@ function checkpointReplacementLegIds(saga) {
   return (saga.replacementIds?.legIds || []).map(String).sort();
 }
 
+function checkpointRestoredLegIds(saga) {
+  return (saga.restoredIds?.legIds || []).map(String).sort();
+}
+
 function replacementLegIdDrift(saga, transaction) {
   return JSON.stringify(sortedReplacementLegIds(transaction))
     !== JSON.stringify(checkpointReplacementLegIds(saga));
+}
+
+function restoredLegIdDrift(saga, transaction) {
+  return JSON.stringify(sortedRestoredLegIds(transaction))
+    !== JSON.stringify(checkpointRestoredLegIds(saga));
 }
 
 function replacementIdMapDrift(saga, transaction) {
@@ -417,9 +550,30 @@ function replacementIdMapDrift(saga, transaction) {
   }
 }
 
+function restoredCheckpointFromTransaction(saga, transaction) {
+  return {
+    restoredIds: transactionIds(transaction),
+    rollbackIdMap: rollbackMapAfterRestoredLegRefresh(saga, transaction),
+  };
+}
+
+function rollbackIdMapDrift(saga, transaction) {
+  try {
+    const live = restoredCheckpointFromTransaction(saga, transaction);
+    return JSON.stringify(live.rollbackIdMap) !== JSON.stringify(saga.rollbackIdMap || {});
+  } catch {
+    return true;
+  }
+}
+
 function referenceMigrationIdMapStale(saga) {
   if (!saga?.referenceMigration?.idMap) return false;
   return JSON.stringify(saga.idMap || {}) !== JSON.stringify(saga.referenceMigration.idMap);
+}
+
+function rollbackReferenceMigrationIdMapStale(saga) {
+  if (!saga?.referenceMigration?.idMap) return false;
+  return JSON.stringify(saga.rollbackIdMap || {}) !== JSON.stringify(saga.referenceMigration.idMap);
 }
 
 function migrationTargetsMissing(transaction, idMap) {
@@ -446,6 +600,23 @@ function postMigrationReplacementDriftReason(saga, transaction) {
   }
   if (migrationTargetsMissing(transaction, saga.referenceMigration?.idMap)) {
     return 'reference migration targets are absent from live replacement row';
+  }
+  return null;
+}
+
+function postMigrationRestoredDriftReason(saga, transaction) {
+  if (!rollbackReferenceMigrationLocked(saga)) return null;
+  if (rollbackReferenceMigrationIdMapStale(saga)) {
+    return 'rollback idMap drifted from reference migration plan';
+  }
+  if (restoredLegIdDrift(saga, transaction)) {
+    return 'restored leg ids drifted after reference migration started';
+  }
+  if (rollbackIdMapDrift(saga, transaction)) {
+    return 'rollback idMap drifted after reference migration started';
+  }
+  if (migrationTargetsMissing(transaction, saga.referenceMigration?.idMap)) {
+    return 'reference migration targets are absent from live restored row';
   }
   return null;
 }
@@ -940,6 +1111,17 @@ function createTransactionReplacementSaga({
     return added;
   }
 
+  async function verifyRestoredRowForMigration(api, saga) {
+    const rows = await transactionsFor(api, saga);
+    const restored = rowById(rows, saga.restoredIds?.parentId);
+    if (!restored || !shapeMatches(restored, saga.original)) {
+      throw new Error('restored row is absent or changed during reference migration');
+    }
+    const driftReason = postMigrationRestoredDriftReason(saga, restored);
+    if (driftReason) throw new Error(driftReason);
+    return restored;
+  }
+
   async function prepareReferenceMigration(saga, direction, idMap, phase, faultInjector) {
     const plan = planReferences(idMap);
     await checkpoint(saga, {
@@ -964,7 +1146,7 @@ function createTransactionReplacementSaga({
       if (direction === 'forward') {
         await verifyReplacementRowForMigration(api, saga);
       } else {
-        await transactionsFor(api, saga);
+        await verifyRestoredRowForMigration(api, saga);
       }
       await checkpoint(saga, { referenceStep: step }, `reference-${step}-pending-checkpoint`, faultInjector);
       await boundary(faultInjector, `reference-${step}-write`, saga, async () => {
@@ -1516,7 +1698,33 @@ function createTransactionReplacementSaga({
       }
 
       if (saga.phase === 'restored_ready') {
-        await transactionsFor(api, saga);
+        const rows = await transactionsFor(api, saga);
+        const restored = rowById(rows, saga.restoredIds?.parentId);
+        if (!restored || !shapeMatches(restored, saga.original)) {
+          return unresolved(saga, 'restored row is absent or changed', faultInjector);
+        }
+        const driftReason = postMigrationRestoredDriftReason(saga, restored);
+        if (driftReason) {
+          return unresolved(saga, driftReason, faultInjector);
+        }
+        if (!rollbackReferenceMigrationLocked(saga)) {
+          let refreshedRestoredIds;
+          let refreshedRollbackIdMap;
+          try {
+            refreshedRestoredIds = transactionIds(restored);
+            refreshedRollbackIdMap = rollbackMapAfterRestoredLegRefresh(saga, restored);
+          } catch (error) {
+            return unresolved(saga, error.message, faultInjector);
+          }
+          if (restoredLegIdDrift(saga, restored) || rollbackIdMapDrift(saga, restored)) {
+            await checkpoint(saga, {
+              restoredIds: refreshedRestoredIds,
+              recoveryTransactionId: refreshedRestoredIds.parentId,
+              rollbackIdMap: refreshedRollbackIdMap,
+              retiredRestoredLegIds: retiredRestoredLegIds(saga, refreshedRestoredIds.legIds),
+            }, 'restored-pre-reference-id-checkpoint', faultInjector);
+          }
+        }
         if (!saga.referenceMigration || saga.referenceMigration.direction !== 'rollback') {
           await prepareReferenceMigration(
             saga,
@@ -1546,6 +1754,10 @@ function createTransactionReplacementSaga({
           || importedIdentityConflict(rows, saga.original.imported_id, [restored.id])
           || !shapeMatches(restored, saga.original)) {
           return unresolved(saga, 'rollback final-state verification failed', faultInjector);
+        }
+        const driftReason = postMigrationRestoredDriftReason(saga, restored);
+        if (driftReason) {
+          return unresolved(saga, driftReason, faultInjector);
         }
         if (!referencesConverged(saga.referenceMigration.idMap, saga.referenceMigration)) {
           return unresolved(saga, 'rollback references are inconsistent', faultInjector);
@@ -1601,6 +1813,13 @@ function createTransactionReplacementSaga({
             || importedIdentityConflict(rows, saga.original.imported_id, [restored.id])
             || !shapeMatches(restored, saga.original)) {
             const error = new Error('rollback changed before terminal checkpoint');
+            await rememberError(saga, error, 'rollback_sync_pending', faultInjector);
+            firstError ||= error;
+            continue;
+          }
+          const driftReason = postMigrationRestoredDriftReason(saga, restored);
+          if (driftReason) {
+            const error = new Error(driftReason);
             await rememberError(saga, error, 'rollback_sync_pending', faultInjector);
             firstError ||= error;
             continue;
@@ -1752,16 +1971,24 @@ function createTransactionReplacementSaga({
     if (duplicateOriginal && String(duplicateOriginal.id) !== String(restored.id)) {
       return unresolved(saga, 'legacy rollback has multiple saga-owned originals', faultInjector);
     }
-    const ids = transactionIds(restored);
-    const rollbackIdMap = rollbackMapFor(saga, restored);
-    if (saga.replacementId) rollbackIdMap[String(saga.replacementId)] = ids.parentId;
-    await checkpoint(saga, {
-      phase: 'restored_ready',
-      restoredIds: ids,
-      recoveryTransactionId: ids.parentId,
-      rollbackIdMap,
-      lastError: null,
-    }, 'restored-id-checkpoint', faultInjector);
+    if (saga.replacementIds && !saga.idMap) {
+      return unresolved(saga, 'legacy rollback replacement mapping is incomplete', faultInjector);
+    }
+    try {
+      const ids = transactionIds(restored);
+      const rollbackIdMap = rollbackMapAfterRestoredLegRefresh(saga, restored);
+      if (saga.replacementId) rollbackIdMap[String(saga.replacementId)] = ids.parentId;
+      await checkpoint(saga, {
+        phase: 'restored_ready',
+        restoredIds: ids,
+        recoveryTransactionId: ids.parentId,
+        rollbackIdMap,
+        retiredRestoredLegIds: retiredRestoredLegIds(saga, ids.legIds),
+        lastError: null,
+      }, 'restored-id-checkpoint', faultInjector);
+    } catch (error) {
+      return unresolved(saga, error.message, faultInjector);
+    }
     return driveRollback(api, saga, { faultInjector });
   }
 
@@ -1855,10 +2082,13 @@ module.exports = {
   isTemporaryReplacementIdentity,
   rollbackReplacementMap,
   rollbackMapAfterRestoredLegRefresh,
+  rollbackReferenceMigrationLocked,
   retiredRestoredLegIds,
   forwardReferenceMigrationLocked,
   metadataRestoreFields,
   postMigrationReplacementDriftReason,
+  postMigrationRestoredDriftReason,
+  restoredCheckpointFromTransaction,
   replacementCheckpointFromTransaction,
   shapeMatches,
   shapeMismatchDiff,
