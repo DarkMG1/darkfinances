@@ -274,12 +274,26 @@ function originalLegForRestoredAlias(saga, aliasId, priorMap) {
   const alias = String(aliasId);
   if (Object.prototype.hasOwnProperty.call(priorMap, alias)) {
     const successor = String(priorMap[alias]);
+    const keyBranchMatches = [];
     for (const leg of saga.original.subtransactions || []) {
       const oid = String(leg.id);
-      if (String(priorMap[oid]) === successor) return oid;
-      if (priorMap[oid] != null && aliasChainTargets(priorMap, priorMap[oid]).has(successor)) return oid;
+      if (String(priorMap[oid]) === successor) {
+        keyBranchMatches.push(oid);
+        continue;
+      }
+      if (priorMap[oid] != null && aliasChainTargets(priorMap, priorMap[oid]).has(successor)) {
+        keyBranchMatches.push(oid);
+      }
     }
-    if (String(priorMap[String(saga.original.id)]) === successor) return String(saga.original.id);
+    const parentId = String(saga.original.id);
+    if (String(priorMap[parentId]) === successor
+      || (priorMap[parentId] != null && aliasChainTargets(priorMap, priorMap[parentId]).has(successor))) {
+      keyBranchMatches.push(parentId);
+    }
+    const uniqueKeyMatches = [...new Set(keyBranchMatches)];
+    if (uniqueKeyMatches.length > 1) throw new Error('restored leg churn remap is ambiguous');
+    if (uniqueKeyMatches.length === 1) return uniqueKeyMatches[0];
+    throw new Error('restored leg churn remap is incomplete');
   }
   const candidates = [];
   for (const leg of saga.original.subtransactions || []) {

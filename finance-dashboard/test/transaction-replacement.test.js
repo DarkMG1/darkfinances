@@ -603,7 +603,7 @@ test('rollbackMapAfterRestoredLegRefresh fails closed on ambiguous restored alia
   );
 });
 
-test('rollbackMapAfterRestoredLegRefresh resolves prior-map key branch shared target via first original leg', () => {
+test('rollbackMapAfterRestoredLegRefresh fails closed on prior-map key branch shared target ambiguity', () => {
   const saga = {
     original: {
       id: 'old-parent',
@@ -647,10 +647,10 @@ test('rollbackMapAfterRestoredLegRefresh resolves prior-map key branch shared ta
       { id: 'live-b', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
     ],
   };
-  const map = rollbackMapAfterRestoredLegRefresh(saga, restored);
-  assert.equal(map['alias-key'], 'live-a');
-  assert.equal(map['old-leg-1'], 'live-a');
-  assert.equal(map['old-leg-2'], 'live-b');
+  assert.throws(
+    () => rollbackMapAfterRestoredLegRefresh(saga, restored),
+    /ambiguous/,
+  );
 });
 
 test('rollbackReferenceMigrationLocked mirrors forward lock semantics', () => {
