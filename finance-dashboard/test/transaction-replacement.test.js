@@ -603,6 +603,56 @@ test('rollbackMapAfterRestoredLegRefresh fails closed on ambiguous restored alia
   );
 });
 
+test('rollbackMapAfterRestoredLegRefresh resolves prior-map key branch shared target via first original leg', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1', 'new-leg-2'] },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: { parentId: 'restored-parent', legIds: ['live-a', 'live-b'] },
+    retiredRestoredLegIds: ['alias-key'],
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'shared-target',
+      'old-leg-2': 'shared-target',
+      'alias-key': 'shared-target',
+      'new-parent': 'restored-parent',
+      'new-leg-1': 'live-a',
+      'new-leg-2': 'live-b',
+    },
+  };
+  const restored = {
+    id: 'restored-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'live-a', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+      { id: 'live-b', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+    ],
+  };
+  const map = rollbackMapAfterRestoredLegRefresh(saga, restored);
+  assert.equal(map['alias-key'], 'live-a');
+  assert.equal(map['old-leg-1'], 'live-a');
+  assert.equal(map['old-leg-2'], 'live-b');
+});
+
 test('rollbackReferenceMigrationLocked mirrors forward lock semantics', () => {
   assert.equal(rollbackReferenceMigrationLocked({
     phase: 'restored_ready',
