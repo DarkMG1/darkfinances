@@ -277,6 +277,9 @@ function ownedIdsForFamily(family, saga) {
       for (const id of saga.retiredReplacementLegIds || []) {
         if (id != null) ids.add(String(id));
       }
+      for (const id of saga.retiredRestoredLegIds || []) {
+        if (id != null) ids.add(String(id));
+      }
       for (const id of Object.values(saga.idMap || {})) {
         if (id != null) ids.add(String(id));
       }

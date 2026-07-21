@@ -207,6 +207,70 @@ function retiredReplacementLegIds(saga, nextLegIds) {
   return [...retired];
 }
 
+function retiredRestoredLegIds(saga, nextLegIds) {
+  const next = new Set((nextLegIds || []).map(String));
+  const retired = new Set((saga.retiredRestoredLegIds || []).map(String));
+  for (const id of saga.restoredIds?.legIds || []) {
+    if (!next.has(String(id))) retired.add(String(id));
+  }
+  return [...retired];
+}
+
+function restoredLegChurnRemap(saga, restored, nextLegIds) {
+  const priorLegIds = (saga.restoredIds?.legIds || []).map(String);
+  const next = new Set((nextLegIds || []).map(String));
+  const churned = priorLegIds.filter((id) => !next.has(String(id)));
+  if (!churned.length) return {};
+
+  const ownership = (saga.original.subtransactions || []).map((leg) => String(leg.id));
+  const originalToSuccessor = transactionReplacementMap(
+    saga.original,
+    restored,
+    ownership,
+    saga.original,
+  );
+  const priorMap = saga.rollbackIdMap || {};
+  const remap = {};
+  for (const [originalId, successorId] of Object.entries(originalToSuccessor)) {
+    const priorTarget = priorMap[String(originalId)];
+    if (priorTarget == null) continue;
+    if (!churned.includes(String(priorTarget))) continue;
+    const priorKey = String(priorTarget);
+    if (Object.prototype.hasOwnProperty.call(remap, priorKey)
+      && remap[priorKey] !== String(successorId)) {
+      throw new Error('restored leg churn remap is ambiguous');
+    }
+    remap[priorKey] = String(successorId);
+  }
+  for (const priorId of churned) {
+    if (!Object.prototype.hasOwnProperty.call(remap, String(priorId))) {
+      throw new Error('restored leg churn remap is incomplete');
+    }
+  }
+  return remap;
+}
+
+function rollbackMapAfterRestoredLegRefresh(saga, restored) {
+  const fresh = rollbackReplacementMap(saga, restored);
+  let nextLegIds;
+  try {
+    nextLegIds = transactionIds(restored).legIds;
+  } catch (error) {
+    throw error;
+  }
+  const churnRemap = restoredLegChurnRemap(saga, restored, nextLegIds);
+  if (!Object.keys(churnRemap).length) return fresh;
+  const merged = { ...fresh };
+  for (const [priorTarget, successor] of Object.entries(churnRemap)) {
+    merged[priorTarget] = successor;
+  }
+  for (const [key, value] of Object.entries(merged)) {
+    const remapped = churnRemap[String(value)];
+    if (remapped) merged[key] = remapped;
+  }
+  return merged;
+}
+
 function rollbackReplacementMap(saga, restored) {
   const restoredOwnership = (saga.original.subtransactions || []).map((leg) => String(leg.id));
   const originalToRestored = transactionReplacementMap(
@@ -494,6 +558,9 @@ function sagaOwnedIds(saga) {
     if (id != null) ids.add(String(id));
   }
   for (const id of saga?.retiredReplacementLegIds || []) {
+    if (id != null) ids.add(String(id));
+  }
+  for (const id of saga?.retiredRestoredLegIds || []) {
     if (id != null) ids.add(String(id));
   }
   for (const id of Object.values(saga?.idMap || {})) {
@@ -1441,7 +1508,8 @@ function createTransactionReplacementSaga({
           phase: 'restored_ready',
           restoredIds: refreshedRestoredIds,
           recoveryTransactionId: refreshedRestoredIds.parentId,
-          rollbackIdMap: rollbackMapFor(saga, converged.row),
+          rollbackIdMap: rollbackMapAfterRestoredLegRefresh(saga, converged.row),
+          retiredRestoredLegIds: retiredRestoredLegIds(saga, refreshedRestoredIds.legIds),
           lastError: null,
         }, 'restored-ready-checkpoint', faultInjector);
         continue;
@@ -1786,6 +1854,8 @@ module.exports = {
   isRepairableTemporaryCategoryMismatch,
   isTemporaryReplacementIdentity,
   rollbackReplacementMap,
+  rollbackMapAfterRestoredLegRefresh,
+  retiredRestoredLegIds,
   forwardReferenceMigrationLocked,
   metadataRestoreFields,
   postMigrationReplacementDriftReason,

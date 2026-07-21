@@ -2152,6 +2152,268 @@ test('forward replacement converges across metadata restore checkpoints with leg
   }
 });
 
+function rollbackSplitOriginalWithEvidence() {
+  return {
+    ...original,
+    id: 'rollback-split-original',
+    category: null,
+    is_parent: true,
+    subtransactions: [
+      {
+        id: 'rollback-split-leg-a',
+        parent_id: 'rollback-split-original',
+        amount: -400,
+        category: 'cat-1',
+        notes: 'rollback split leg a',
+        payee: 'leg-payee-1',
+      },
+      {
+        id: 'rollback-split-leg-b',
+        parent_id: 'rollback-split-original',
+        amount: -600,
+        category: 'cat-2',
+        notes: 'rollback split leg b',
+        payee: 'leg-payee-2',
+      },
+    ],
+  };
+}
+
+function configureRollbackSplitEvidence(source) {
+  const [legA, legB] = source.subtransactions;
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(process.env.RECEIPTS_DIR, { recursive: true });
+  writeJson(process.env.RECEIPTS_PATH, {
+    byTxn: {
+      [legA.id]: [{
+        id: 'rollback-receipt-a',
+        txnId: legA.id,
+        file: 'receipt-a.jpg',
+        amount: 4,
+        date: source.date,
+      }],
+      [legB.id]: [{
+        id: 'rollback-receipt-b',
+        txnId: legB.id,
+        file: 'receipt-b.jpg',
+        amount: 6,
+        date: source.date,
+      }],
+    },
+  });
+  fs.writeFileSync(path.join(process.env.RECEIPTS_DIR, 'receipt-a.jpg'), 'rollback receipt a bytes');
+  fs.writeFileSync(path.join(process.env.RECEIPTS_DIR, 'receipt-b.jpg'), 'rollback receipt b bytes');
+  writeJson(process.env.REIMB_LINKS_PATH, {
+    schemaVersion: 2,
+    links: [{
+      linkKey: `${legA.id}:${legB.id}`,
+      inflow: { id: legA.id, date: source.date, payee: 'Rollback inflow', amount: 4 },
+      expense: { id: legB.id, date: source.date, payee: 'Rollback expense', amount: -6 },
+      allocationCents: 400,
+      amount: 4,
+      version: 1,
+    }],
+  });
+  writeJson(process.env.REIMB_SUGGEST_PATH, {
+    dismissed: [legA.id],
+    confirmed: {
+      [`sg_${legB.id}`]: {
+        at: '2026-07-09T00:00:00.000Z',
+        inflowId: legB.id,
+        allocations: [{
+          expense: { id: legA.id, date: source.date, payee: 'Allocation expense', amount: -4 },
+          amount: 4,
+        }],
+      },
+    },
+  });
+  writeJson(process.env.RECON_PATH, {
+    enabled: true,
+    months: {
+      '2026-07': {
+        done: false,
+        items: {
+          [legA.id]: 'rollback-recon-a',
+          [legB.id]: 'rollback-recon-b',
+        },
+      },
+    },
+  });
+  writeJson(process.env.PHANTOM_SEEN_PATH, {
+    seen: {
+      [legA.id]: { firstSeen: source.date, source: 'rollback-a' },
+      [legB.id]: { firstSeen: source.date, source: 'rollback-b' },
+    },
+  });
+}
+
+function rollbackSplitReplacement(source) {
+  return addableTransaction(source, {
+    category: undefined,
+    subtransactions: source.subtransactions.map((leg, index) => ({
+      amount: leg.amount,
+      category: leg.category,
+      notes: index === 0 ? `${leg.notes} edited` : leg.notes,
+      payee: leg.payee,
+    })),
+  });
+}
+
+function assertRollbackRestoreRegeneration(api, source, {
+  staleLegIds = [],
+  staleReplacementLegIds = [],
+  preSyncRestoredLegIds = [],
+} = {}) {
+  const saga = latestSaga();
+  assert.equal(saga.phase, 'rolled_back');
+  assert.equal(saga.referenceMigration?.direction, 'rollback');
+  const restored = api.state.rows.find((row) => row.id === saga.restoredIds.parentId);
+  assert.ok(restored, 'restored split parent is live');
+  assert.equal(restored.imported_id, source.imported_id);
+  assert.equal(restored.imported_payee, source.imported_payee);
+  assert.ok(restored.subtransactions.every((leg) => String(leg.id).includes('-postmeta-')));
+  assert.ok(saga.restoredIds.legIds.every((id) => String(id).includes('-postmeta-')));
+  assert.deepEqual(
+    [...saga.restoredIds.legIds].sort(),
+    restored.subtransactions.map((leg) => String(leg.id)).sort(),
+  );
+  assert.ok((saga.retiredRestoredLegIds || []).length >= 1, 'expected retired restored leg ids after metadata churn');
+  for (const retiredId of saga.retiredRestoredLegIds || []) {
+    assert.ok(
+      (preSyncRestoredLegIds.length ? preSyncRestoredLegIds : staleLegIds).includes(String(retiredId))
+        || String(retiredId).includes('-leg-'),
+      `retired restored leg ${retiredId} should be a pre-sync restored id`,
+    );
+    assert.ok(!liveIds(api).has(String(retiredId)), `retired restored leg ${retiredId} must not remain live`);
+  }
+  const live = liveIds(api);
+  for (const target of Object.values(saga.rollbackIdMap || {})) {
+    assert.ok(live.has(String(target)), `rollbackIdMap target ${target} is live`);
+  }
+  for (const retiredId of saga.retiredRestoredLegIds || []) {
+    const successor = saga.rollbackIdMap?.[String(retiredId)];
+    assert.ok(successor, `rollbackIdMap must remap retired restored leg ${retiredId}`);
+    assert.ok(live.has(String(successor)), `successor ${successor} for retired restored leg ${retiredId} is live`);
+    assert.notEqual(String(successor), String(retiredId));
+  }
+  for (const staleId of [...staleLegIds, ...staleReplacementLegIds, ...(saga.retiredRestoredLegIds || [])]) {
+    assert.ok(!referencedIds(readStores()).includes(String(staleId)), `stale id ${staleId} must not remain referenced`);
+    assert.ok(!JSON.stringify(readStores()).includes(String(staleId)), `store payload must not retain stale id ${staleId}`);
+  }
+  assert.equal(temporaryIdentityRows(api).length, 0);
+  assertReferencesAreLive(api);
+}
+
+async function runRollbackSplitRestoreRegenerationCase({
+  reverseSplitLegOrderOnSync = false,
+  injectorRules,
+  injector = null,
+} = {}) {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const staleLegIds = source.subtransactions.map((leg) => String(leg.id));
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+    reverseSplitLegOrderOnSync,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const faultInjector = injector || faultSchedule(injectorRules);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector,
+    }),
+  );
+  const sagaBeforeRecovery = latestSaga();
+  const staleReplacementLegIds = [...(sagaBeforeRecovery.replacementIds?.legIds || [])];
+  const preSyncRestoredLegIds = [...(sagaBeforeRecovery.restoredIds?.legIds || [])];
+  await recoverPastFault(api, faultInjector);
+  assertRollbackRestoreRegeneration(api, source, {
+    staleLegIds,
+    staleReplacementLegIds,
+    preSyncRestoredLegIds,
+  });
+  return { api, staleLegIds, staleReplacementLegIds, preSyncRestoredLegIds, injector: faultInjector };
+}
+
+test('rollback restore metadata sync leg id regeneration refreshes restoredIds before reference migration', async () => {
+  await runRollbackSplitRestoreRegenerationCase({
+    injectorRules: [{ point: 'before:reference-plan-checkpoint', mode: 'error' }],
+  });
+});
+
+test('rollback restore metadata sync leg id regeneration converges across restore checkpoint boundaries', async (t) => {
+  const restoreRegenerationBoundaries = [
+    'restored-ready-checkpoint',
+    'restored-metadata-restore',
+    'restored-metadata-reconcile',
+  ];
+  for (const boundary of restoreRegenerationBoundaries) {
+    for (const side of ['before', 'after']) {
+      await t.test(`${side}:${boundary}:rollback-restore-regeneration`, async () => {
+        const injector = faultSchedule([
+          { point: 'before:reference-plan-checkpoint', mode: 'error' },
+          { point: `${side}:${boundary}` },
+        ]);
+        await runRollbackSplitRestoreRegenerationCase({ injector });
+        assert.ok(injector.entries.every((entry) => entry.fired));
+      });
+    }
+  }
+});
+
+test('rollback restore metadata sync leg id regeneration converges when Actual reverses split leg order', async () => {
+  await runRollbackSplitRestoreRegenerationCase({
+    reverseSplitLegOrderOnSync: true,
+    injectorRules: [{ point: 'before:reference-plan-checkpoint', mode: 'error' }],
+  });
+});
+
+test('retired restored leg ids block concurrent admission until rollback saga terminalizes', async () => {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const injector = faultSchedule([
+    { point: 'before:reference-plan-checkpoint', mode: 'error' },
+    { point: 'after:restored-ready-checkpoint' },
+  ]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector: injector,
+    }),
+  );
+  const saga = latestSaga();
+  assert.equal(saga.phase, 'restored_ready');
+  const retiredIds = saga.retiredRestoredLegIds || [];
+  assert.ok(retiredIds.length >= 1);
+  for (const retiredId of retiredIds) {
+    assert.throws(
+      () => assertTransactionReplacementAvailable({ accountId: 'account', ids: [retiredId] }),
+      (error) => error.code === 'TRANSACTION_REPLACEMENT_IN_PROGRESS',
+    );
+  }
+  await recoverPastFault(api, injector);
+  assert.equal(latestSaga().phase, 'rolled_back');
+  assert.doesNotThrow(() => assertTransactionReplacementAvailable({
+    accountId: 'account',
+    ids: [...latestSaga().restoredIds.legIds, latestSaga().restoredIds.parentId],
+  }));
+});
+
 function bankImportSplitParent() {
   return {
     ...original,

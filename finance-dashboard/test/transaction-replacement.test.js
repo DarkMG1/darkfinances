@@ -33,6 +33,8 @@ const {
   transactionFingerprint,
   transactionShape,
   rollbackReplacementMap,
+  rollbackMapAfterRestoredLegRefresh,
+  retiredRestoredLegIds,
   metadataRestoreFields,
   forwardReferenceMigrationLocked,
   postMigrationReplacementDriftReason,
@@ -382,6 +384,120 @@ test('rollback replacement map fails closed without refreshed idMap', () => {
   assert.throws(
     () => rollbackReplacementMap(saga, { id: 'restored-parent', subtransactions: [] }),
     /requires refreshed idMap/,
+  );
+});
+
+test('retiredRestoredLegIds accumulates churned restored leg ids', () => {
+  const saga = {
+    restoredIds: { parentId: 'restored-parent', legIds: ['prior-leg-a', 'prior-leg-b'] },
+    retiredRestoredLegIds: ['prior-leg-retired'],
+  };
+  assert.deepEqual(
+    retiredRestoredLegIds(saga, ['postmeta-leg-a', 'postmeta-leg-b']),
+    ['prior-leg-retired', 'prior-leg-a', 'prior-leg-b'],
+  );
+  assert.deepEqual(
+    retiredRestoredLegIds(saga, ['prior-leg-a', 'postmeta-leg-b']),
+    ['prior-leg-retired', 'prior-leg-b'],
+  );
+});
+
+test('rollbackMapAfterRestoredLegRefresh remaps churned restored legs by original correspondence', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: {
+      parentId: 'new-parent',
+      legIds: ['new-leg-1', 'new-leg-2'],
+    },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: {
+      parentId: 'restored-parent',
+      legIds: ['prior-restored-leg-2', 'prior-restored-leg-1'],
+    },
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'prior-restored-leg-1',
+      'old-leg-2': 'prior-restored-leg-2',
+      'new-parent': 'restored-parent',
+      'new-leg-1': 'prior-restored-leg-1',
+      'new-leg-2': 'prior-restored-leg-2',
+    },
+  };
+  const restored = {
+    id: 'restored-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'postmeta-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      { id: 'postmeta-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+    ],
+  };
+  const map = rollbackMapAfterRestoredLegRefresh(saga, restored);
+  assert.equal(map['old-leg-1'], 'postmeta-leg-1');
+  assert.equal(map['old-leg-2'], 'postmeta-leg-2');
+  assert.equal(map['prior-restored-leg-1'], 'postmeta-leg-1');
+  assert.equal(map['prior-restored-leg-2'], 'postmeta-leg-2');
+  assert.notEqual(map['old-leg-1'], map['old-leg-2']);
+});
+
+test('rollbackMapAfterRestoredLegRefresh fails closed when churn remap is incomplete', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1', 'new-leg-2'] },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: { parentId: 'restored-parent', legIds: ['prior-leg-a', 'prior-leg-b'] },
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'prior-leg-a',
+    },
+  };
+  assert.throws(
+    () => rollbackMapAfterRestoredLegRefresh(saga, {
+      id: 'restored-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'postmeta-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'postmeta-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    }),
+    /incomplete/,
   );
 });
 
