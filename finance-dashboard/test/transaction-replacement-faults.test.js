@@ -18,6 +18,11 @@ for (const [key, name] of Object.entries({
 })) process.env[key] = path.join(dir, name);
 
 const {
+  applyMetadataSyncMutations,
+  markMetadataSyncMutation,
+  resetMetadataSyncMutationState,
+} = require('./fixtures/actual-metadata-sync-mutation');
+const {
   SagaInterruption,
   addableTransaction,
   assertTransactionReplacementAvailable,
@@ -69,6 +74,30 @@ function intendedSplit(source = original) {
   });
 }
 
+const manualOriginal = Object.freeze({
+  id: 'manual-parent',
+  account: 'account',
+  date: '2026-07-09',
+  amount: -1234,
+  payee: 'payee-id',
+  notes: '[clone-smoke]',
+  cleared: false,
+  imported_id: null,
+  category: 'cat-1',
+  is_parent: false,
+  subtransactions: [],
+});
+
+function manualCloneSplit(source = manualOriginal) {
+  return addableTransaction(source, {
+    category: undefined,
+    subtransactions: [
+      { amount: -500, category: 'cat-1', notes: 'first' },
+      { amount: -734, category: 'cat-1', notes: 'second' },
+    ],
+  });
+}
+
 function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -110,6 +139,15 @@ function resetStores(referenceId = original.id) {
   });
 }
 
+function canonicalizeSplitLegPayees(rows) {
+  for (const row of rows) {
+    if (!row.is_parent || !Array.isArray(row.subtransactions)) continue;
+    for (const leg of row.subtransactions) {
+      if (leg.payee == null || leg.payee === '') leg.payee = row.payee;
+    }
+  }
+}
+
 function materializeAdded(transaction, id, accountId = 'account') {
   const subtransactions = (transaction.subtransactions || []).map((leg, index) => ({
     ...structuredClone(leg),
@@ -131,6 +169,12 @@ function durableActual({
   applyThenThrowRestoration = false,
   applyThenThrowRollbackDelete = false,
   addError = null,
+  ignoreSparseNullImportedIdUpdates = false,
+  deferImportedIdUntilSync = false,
+  reverseSplitLegOrderOnSync = false,
+  mutateSplitLegIdentityOnMetadataSync = false,
+  alternateParentCategoryOnTemporaryAdd = null,
+  deferCategoryRepairUntilSync = false,
 } = {}) {
   const state = {
     rows: structuredClone(rows),
@@ -142,8 +186,20 @@ function durableActual({
     failAccountEnumeration: false,
     queryFailures: new Set(),
     sequence: 0,
+    legSequence: 0,
     fired: new Set(),
     counts: { add: 0, delete: 0, update: 0, sync: 0 },
+    mutateSplitLegIdentityOnMetadataSync,
+    alternateParentCategoryOnTemporaryAdd,
+    deferCategoryRepairUntilSync,
+  };
+  const applyMetadataSplitLegMutation = (row) => {
+    if (!row.is_parent || !Array.isArray(row.subtransactions) || row.subtransactions.length <= 1) return;
+    row.subtransactions = [...row.subtransactions].reverse().map((leg) => ({
+      ...structuredClone(leg),
+      id: `${row.id}-postmeta-${++state.legSequence}`,
+      parent_id: row.id,
+    }));
   };
   const adapter = {
     state,
@@ -157,7 +213,13 @@ function durableActual({
       }
       return state.rows
         .filter((row) => row.account === accountId && row.date >= start && row.date <= end)
-        .map((row) => structuredClone(row));
+        .map((row) => {
+          const copy = structuredClone(row);
+          if (deferImportedIdUntilSync && row._staleImportedId !== undefined) {
+            copy.imported_id = row._staleImportedId;
+          }
+          return copy;
+        });
     },
     async deleteTransaction(id) {
       state.counts.delete += 1;
@@ -177,8 +239,14 @@ function durableActual({
         throw addError;
       }
       const id = `actual-${++state.sequence}`;
-      state.rows.push(materializeAdded(transaction, id, accountId));
+      const added = materializeAdded(transaction, id, accountId);
       const importedId = String(transaction.imported_id || '');
+      if (state.alternateParentCategoryOnTemporaryAdd != null
+        && (importedId.startsWith('df-replace:') || importedId.startsWith('df-restore:'))
+        && !(transaction.subtransactions || []).length) {
+        added.category = state.alternateParentCategoryOnTemporaryAdd;
+      }
+      state.rows.push(added);
       if (applyThenThrowReplacement
         && importedId.startsWith('df-replace:')
         && !state.fired.has('replacement-add')) {
@@ -195,10 +263,73 @@ function durableActual({
     async updateTransaction(id, fields) {
       state.counts.update += 1;
       const row = state.rows.find((candidate) => String(candidate.id) === String(id));
-      if (row) Object.assign(row, structuredClone(fields));
+      if (!row) return;
+      const patch = structuredClone(fields);
+      if (ignoreSparseNullImportedIdUpdates
+        && Object.keys(patch).length === 1
+        && patch.imported_id === null) {
+        return;
+      }
+      if (Array.isArray(patch.subtransactions) && row.is_parent) {
+        patch.subtransactions = patch.subtransactions.map((leg, index) => ({
+          ...structuredClone(leg),
+          id: row.subtransactions?.[index]?.id || `${id}-leg-${index + 1}`,
+          parent_id: id,
+        }));
+        Object.assign(row, patch);
+        delete row.category;
+        if (patch.imported_id === '') row.imported_id = null;
+        canonicalizeSplitLegPayees(state.rows);
+        return;
+      }
+      if (row.is_parent
+        && Object.keys(patch).length === 1
+        && Object.prototype.hasOwnProperty.call(patch, 'imported_id')) {
+        for (const leg of row.subtransactions || []) {
+          if (leg.payee == null) leg.payee = row.payee;
+        }
+      }
+      if (deferImportedIdUntilSync && Object.prototype.hasOwnProperty.call(patch, 'imported_id')) {
+        row._staleImportedId = row.imported_id;
+      }
+      if (state.deferCategoryRepairUntilSync
+        && Object.keys(patch).length === 1
+        && Object.prototype.hasOwnProperty.call(patch, 'category')) {
+        row._pendingCategoryRepair = patch.category;
+        return;
+      }
+      const metadataRestore = row.is_parent
+        && !Array.isArray(patch.subtransactions)
+        && Object.prototype.hasOwnProperty.call(patch, 'imported_id');
+      Object.assign(row, patch);
+      if (patch.imported_id === '') row.imported_id = null;
+      if (metadataRestore && state.mutateSplitLegIdentityOnMetadataSync) {
+        row._pendingMetadataSyncMutation = true;
+      }
     },
     async sync() {
       state.counts.sync += 1;
+      if (deferImportedIdUntilSync) {
+        for (const row of state.rows) delete row._staleImportedId;
+      }
+      for (const row of state.rows) {
+        if (row._pendingCategoryRepair !== undefined) {
+          row.category = row._pendingCategoryRepair;
+          delete row._pendingCategoryRepair;
+        }
+        if (state.mutateSplitLegIdentityOnMetadataSync && row._pendingMetadataSyncMutation) {
+          applyMetadataSplitLegMutation(row);
+          delete row._pendingMetadataSyncMutation;
+          continue;
+        }
+        if (reverseSplitLegOrderOnSync
+          && row.is_parent
+          && Array.isArray(row.subtransactions)
+          && row.subtransactions.length > 1) {
+          row.subtransactions = [...row.subtransactions].reverse();
+        }
+      }
+      canonicalizeSplitLegPayees(state.rows);
     },
   };
   return adapter;
@@ -496,18 +627,149 @@ async function interruptReplacement(api, replacement, injector) {
   assert.ok(injector.entries.every((entry) => entry.fired), 'requested fault was reached');
 }
 
+test('manual split metadata restore clears temporary imported identity on Actual-like updates', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActual({
+    rows: [manualOriginal, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+  });
+  const replacement = manualCloneSplit();
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement,
+  });
+  assert.equal(added.imported_id, null);
+  assert.equal(added.subtransactions.length, 2);
+  assert.equal(
+    added.subtransactions.reduce((sum, leg) => sum + leg.amount, 0),
+    added.amount,
+  );
+  assert.equal(latestSaga().phase, 'sync_pending');
+  assert.equal(api.state.counts.update, 1);
+  assert.ok(api.state.counts.sync >= 1);
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.imported_id, null);
+  assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
+  for (const leg of persisted.subtransactions) {
+    assert.equal(leg.payee, manualOriginal.payee, 'Actual canonicalizes unnamed legs to parent payee');
+  }
+});
+
+function manualSplitParent(source = manualOriginal) {
+  return {
+    id: 'manual-split-parent',
+    account: 'account',
+    date: source.date,
+    amount: source.amount,
+    payee: source.payee,
+    notes: source.notes,
+    cleared: false,
+    imported_id: null,
+    is_parent: true,
+    subtransactions: [
+      {
+        id: 'manual-leg-1',
+        parent_id: 'manual-split-parent',
+        amount: -500,
+        category: 'cat-1',
+        notes: 'first',
+        payee: source.payee,
+      },
+      {
+        id: 'manual-leg-2',
+        parent_id: 'manual-split-parent',
+        amount: -734,
+        category: 'cat-1',
+        notes: 'second',
+        payee: source.payee,
+      },
+    ],
+  };
+}
+
+function durableActualIgnoringNullImportedWhenInheritedLegPayeePresent({
+  rows = [manualOriginal],
+} = {}) {
+  const api = durableActual({ rows, ignoreSparseNullImportedIdUpdates: true });
+  const baseUpdate = api.updateTransaction.bind(api);
+  api.updateTransaction = async (id, fields) => {
+    const row = api.state.rows.find((candidate) => String(candidate.id) === String(id));
+    const patch = structuredClone(fields);
+    const hasInheritedPayee = Array.isArray(patch.subtransactions)
+      && row?.is_parent
+      && patch.subtransactions.some((leg) => leg.payee === row.payee);
+    if (Object.prototype.hasOwnProperty.call(patch, 'imported_id')
+      && patch.imported_id === null
+      && hasInheritedPayee) {
+      delete patch.imported_id;
+    }
+    return baseUpdate(id, patch);
+  };
+  return api;
+}
+
+test('manual split leg note rebuild clears temporary imported identity when Actual stores inherited leg payees', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActualIgnoringNullImportedWhenInheritedLegPayeePresent();
+  const splitAdded = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement: manualCloneSplit(),
+  });
+  await recoverTransactionSagas(api);
+  const parent = manualSplitParent();
+  parent.id = splitAdded.id;
+  parent.subtransactions = splitAdded.subtransactions.map((leg, index) => ({
+    ...parent.subtransactions[index],
+    id: leg.id,
+    parent_id: splitAdded.id,
+    payee: manualOriginal.payee,
+  }));
+  api.state.rows = api.state.rows.filter((row) => row.id !== splitAdded.id);
+  api.state.rows.push(parent);
+
+  const noteReplacement = addableTransaction(parent, {
+    category: undefined,
+    subtransactions: [
+      { amount: -500, category: 'cat-1', notes: 'updated' },
+      { amount: -734, category: 'cat-1', notes: 'second' },
+    ],
+  });
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: parent,
+    replacement: noteReplacement,
+    requestedLegs: parent.subtransactions.map((leg) => ({ id: String(leg.id) })),
+  });
+  assert.equal(added.subtransactions[0].notes, 'updated');
+  assert.equal(added.imported_id, null);
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.imported_id, null);
+  assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
+  assert.equal(persisted.subtransactions[0].notes, 'updated');
+});
+
 const forwardBoundaries = [
   'initial-saga-write',
   'original-deletion',
   'replacement-add',
   'replacement-reconcile',
   'replacement-id-checkpoint',
+  'replacement-ready-checkpoint',
+  'replacement-metadata-restore',
+  'replacement-metadata-reconcile',
   'reference-receipts-write',
   'reference-links-write',
   'reference-suggestions-write',
   'reference-reconciliation-write',
   'reference-phantomSeen-write',
   'reference-reviewState-write',
+  'replacement-return-id-checkpoint',
 ];
 
 test('forward replacement converges across every durable fault boundary', async (t) => {
@@ -932,6 +1194,233 @@ test('imported identity collision introduced after admission blocks original del
   assert.equal(api.state.rows.filter((row) => row.imported_id === original.imported_id).length, 2);
 });
 
+test('metadata restore converges when imported_id read lags behind update until sync', async () => {
+  resetStores();
+  const manualOriginalLocal = {
+    ...original,
+    imported_id: null,
+    imported_payee: null,
+    category: 'cat-1',
+    is_parent: false,
+    subtransactions: [],
+  };
+  const api = durableActual({
+    rows: [manualOriginalLocal, unrelated],
+    deferImportedIdUntilSync: true,
+  });
+  const replacement = addableTransaction(manualOriginalLocal, {
+    category: undefined,
+    subtransactions: [
+      { amount: -333, category: 'cat-1', notes: 'first leg', payee: 'leg-payee-1' },
+      { amount: -667, category: 'cat-2', notes: 'second leg', payee: 'leg-payee-2' },
+    ],
+  });
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginalLocal,
+    replacement,
+  });
+  assert.equal(added.imported_id, null);
+  assert.equal(added.subtransactions[0].payee, 'leg-payee-1');
+  assert.equal(added.subtransactions[1].payee, 'leg-payee-2');
+  assert.ok(api.state.counts.sync >= 1);
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.imported_id, null);
+  assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
+});
+
+test('metadata restore converges when Actual reverses split leg order after sync', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActual({
+    rows: [manualOriginal, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    reverseSplitLegOrderOnSync: true,
+  });
+  const replacement = manualCloneSplit();
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement,
+  });
+  assert.equal(added.imported_id, null);
+  assert.equal(added.subtransactions.length, 2);
+  assert.equal(latestSaga().phase, 'sync_pending');
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.imported_id, null);
+  assert.deepEqual(
+    persisted.subtransactions.map((leg) => ({ amount: leg.amount, notes: leg.notes })).sort((a, b) => a.notes.localeCompare(b.notes)),
+    [{ amount: -500, notes: 'first' }, { amount: -734, notes: 'second' }],
+  );
+});
+
+test('initial manual split and split-leg note edit converge when Actual reverses legs after sync', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActual({
+    rows: [manualOriginal, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    reverseSplitLegOrderOnSync: true,
+  });
+  const splitAdded = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement: manualCloneSplit(),
+  });
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+
+  const parent = manualSplitParent();
+  parent.id = splitAdded.id;
+  parent.subtransactions = splitAdded.subtransactions.map((leg, index) => ({
+    ...parent.subtransactions[index],
+    id: leg.id,
+    parent_id: splitAdded.id,
+    payee: manualOriginal.payee,
+  }));
+  api.state.rows = api.state.rows.filter((row) => row.id !== splitAdded.id);
+  api.state.rows.push(parent);
+
+  const noteReplacement = addableTransaction(parent, {
+    category: undefined,
+    subtransactions: [
+      { amount: -500, category: 'cat-1', notes: 'updated' },
+      { amount: -734, category: 'cat-1', notes: 'second' },
+    ],
+  });
+  const edited = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: parent,
+    replacement: noteReplacement,
+    requestedLegs: parent.subtransactions.map((leg) => ({ id: String(leg.id) })),
+  });
+  assert.equal(edited.imported_id, null);
+  assert.equal(edited.subtransactions.find((leg) => leg.amount === -500)?.notes, 'updated');
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const persisted = api.state.rows.find((row) => row.id === edited.id);
+  assert.equal(persisted.subtransactions.find((leg) => leg.amount === -500)?.notes, 'updated');
+});
+
+test('metadata restore preserves explicit different leg payees when Actual reverses order', async () => {
+  resetStores();
+  const api = durableActual({ reverseSplitLegOrderOnSync: true });
+  const replacement = intendedSplit();
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original,
+    replacement,
+  });
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.deepEqual(
+    [...persisted.subtransactions.map((leg) => leg.payee)].sort(),
+    ['leg-payee-1', 'leg-payee-2'],
+  );
+});
+
+test('metadata sync leg id regeneration refreshes replacement ids before reference migration', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActual({
+    rows: [manualOriginal, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement: manualCloneSplit(),
+  });
+  assert.ok(added.subtransactions.every((leg) => String(leg.id).includes('-postmeta-')));
+  await recoverTransactionSagas(api);
+  const saga = latestSaga();
+  assert.equal(saga.phase, 'completed');
+  assert.ok(saga.replacementIds.legIds.every((id) => String(id).includes('-postmeta-')));
+  assert.equal(saga.idMap[String(manualOriginal.id)], saga.replacementIds.parentId);
+  assert.ok((saga.retiredReplacementLegIds || []).length >= 1);
+  assertReferencesAreLive(api);
+});
+
+test('initial manual split and leg note edit converge when metadata sync regenerates leg ids', async () => {
+  resetStores(manualOriginal.id);
+  const api = durableActual({
+    rows: [manualOriginal, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const splitAdded = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: manualOriginal,
+    replacement: manualCloneSplit(),
+  });
+  await recoverTransactionSagas(api);
+
+  const templates = manualSplitParent().subtransactions;
+  const parent = {
+    ...manualSplitParent(),
+    id: splitAdded.id,
+    subtransactions: splitAdded.subtransactions.map((leg) => {
+      const template = templates.find((candidate) => candidate.notes === leg.notes)
+        || templates.find((candidate) => candidate.amount === leg.amount);
+      return {
+        ...template,
+        id: leg.id,
+        parent_id: splitAdded.id,
+        payee: manualOriginal.payee,
+      };
+    }),
+  };
+  api.state.rows = api.state.rows.filter((row) => row.id !== splitAdded.id);
+  api.state.rows.push(parent);
+
+  const noteReplacement = addableTransaction(parent, {
+    category: undefined,
+    subtransactions: [
+      { amount: -500, category: 'cat-1', notes: 'updated' },
+      { amount: -734, category: 'cat-1', notes: 'second' },
+    ],
+  });
+  const edited = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: parent,
+    replacement: noteReplacement,
+    requestedLegs: parent.subtransactions.map((leg) => ({ id: String(leg.id) })),
+  });
+  assert.equal(edited.subtransactions.find((leg) => leg.notes === 'updated')?.notes, 'updated');
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  assertReferencesAreLive(api);
+});
+
+test('rollback remaps regenerated replacement leg ids back to restored originals', async () => {
+  resetStores();
+  const api = durableActual({ mutateSplitLegIdentityOnMetadataSync: true });
+  const replacement = intendedSplit();
+  const injector = faultSchedule([{ point: 'before:reference-plan-checkpoint', mode: 'error' }]);
+  await interruptReplacement(api, replacement, injector);
+  await recoverPastFault(api, injector);
+  assert.equal(latestSaga().phase, 'rolled_back');
+  assertConverged(api, replacement);
+});
+
+test('metadata sync leg id regeneration preserves explicit different leg payees', async () => {
+  resetStores();
+  const api = durableActual({ mutateSplitLegIdentityOnMetadataSync: true });
+  const replacement = intendedSplit();
+  await replaceActualTransaction(api, {
+    accountId: 'account',
+    original,
+    replacement,
+  });
+  await recoverTransactionSagas(api);
+  const persisted = api.state.rows.find((row) => row.id.startsWith('actual-'));
+  assert.deepEqual(
+    [...persisted.subtransactions.map((leg) => leg.payee)].sort(),
+    ['leg-payee-1', 'leg-payee-2'],
+  );
+});
+
 test('late imported identity collision remains nonterminal without assigning the duplicate ID', async () => {
   resetStores();
   const api = durableActual();
@@ -969,6 +1458,9 @@ const rollbackBoundaries = [
   'original-restoration',
   'restored-reconcile',
   'restored-id-checkpoint',
+  'restored-metadata-restore',
+  'restored-metadata-reconcile',
+  'restored-ready-checkpoint',
   'reference-receipts-write',
   'reference-links-write',
   'reference-suggestions-write',
@@ -1426,9 +1918,9 @@ test('migrated legacy terminal statuses block until authoritative v2 reconciliat
       },
     });
     const api = durableActual({ rows: [decoy, unrelated, restored] });
-    const interruption = faultSchedule([{ point: 'before:restored-id-checkpoint' }]);
+    const interruption = faultSchedule([{ point: 'before:reference-plan-checkpoint' }]);
     await assert.rejects(recoverTransactionSagas(api, { faultInjector: interruption }));
-    assert.equal(readSagaState().sagas.legacy.phase, 'legacy_reconcile_rollback');
+    assert.equal(readSagaState().sagas.legacy.phase, 'restored_ready');
     assert.throws(
       () => assertTransactionReplacementAvailable({
         accountId: 'account',
@@ -1536,4 +2028,975 @@ test('stored saga errors are bounded and redact credentials', async () => {
   const serialized = fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8');
   assert.ok(!serialized.includes(secret));
   assert.ok(activeSaga().lastError.message.length <= 160);
+});
+
+test('metadata restore preserves bank imported_payee and split leg payees through convergence', async () => {
+  resetStores();
+  const api = durableActual();
+  const replacement = intendedSplit();
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original,
+    replacement,
+  });
+  assert.equal(latestSaga().phase, 'sync_pending');
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.imported_payee, original.imported_payee);
+  assert.deepEqual(
+    [...persisted.subtransactions.map((leg) => leg.payee)].sort(),
+    ['leg-payee-1', 'leg-payee-2'],
+  );
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const converged = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(converged.imported_id, original.imported_id);
+  assert.equal(converged.imported_payee, original.imported_payee);
+});
+
+test('retired replacement leg ids block concurrent admission until saga terminalizes', async () => {
+  resetStores();
+  const api = durableActual({ mutateSplitLegIdentityOnMetadataSync: true });
+  const replacement = intendedSplit();
+  const injector = faultSchedule([{ point: 'before:reference-plan-checkpoint' }]);
+  await interruptReplacement(api, replacement, injector);
+  const saga = latestSaga();
+  const retiredId = (saga.retiredReplacementLegIds || [])[0];
+  assert.ok(retiredId, 'expected a retired replacement leg id after pre-reference refresh');
+  assert.throws(
+    () => assertTransactionReplacementAvailable({ accountId: 'account', ids: [retiredId] }),
+    (error) => error.code === 'TRANSACTION_REPLACEMENT_IN_PROGRESS',
+  );
+  await recoverPastFault(api, injector);
+  assert.equal(latestSaga().phase, 'completed');
+  assert.doesNotThrow(() => assertTransactionReplacementAvailable({
+    accountId: 'account',
+    ids: [retiredId, latestSaga().replacementIds.parentId],
+  }));
+});
+
+test('sync_pending terminalization fails closed when replacement leg ids churn after reference migration', async () => {
+  resetStores();
+  const api = durableActual();
+  const replacement = intendedSplit();
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original,
+    replacement,
+  });
+  assert.equal(latestSaga().phase, 'sync_pending');
+  const parent = api.state.rows.find((row) => row.id === added.id);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...leg,
+    id: `${leg.id}-postmigration-${index}`,
+  }));
+  await assert.rejects(
+    recoverTransactionSagas(api),
+    /drifted after reference migration started|reference migration targets are absent/,
+  );
+  assert.equal(latestSaga().phase, 'sync_pending');
+  assert.ok(latestSaga().lastError);
+});
+
+test('references_pending recovery fails closed when live leg ids drift from migration plan', async () => {
+  resetStores();
+  const api = durableActual();
+  const replacement = intendedSplit();
+  const injector = faultSchedule([{ point: 'before:reference-receipts-pending-checkpoint' }]);
+  await interruptReplacement(api, replacement, injector);
+  assert.equal(latestSaga().phase, 'references_pending');
+  const saga = latestSaga();
+  const parent = api.state.rows.find((row) => row.id === saga.replacementIds.parentId);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...leg,
+    id: `${leg.id}-midmigration-${index}`,
+  }));
+  await assert.rejects(
+    recoverTransactionSagas(api),
+    /drifted after reference migration started|reference migration targets are absent/,
+  );
+  assert.equal(latestSaga().phase, 'references_pending');
+  assert.ok(latestSaga().lastError);
+});
+
+test('forward replacement converges across metadata restore checkpoints with leg id regeneration before reference migration', async (t) => {
+  for (const boundary of [
+    'replacement-ready-checkpoint',
+    'replacement-metadata-restore',
+    'replacement-metadata-reconcile',
+  ]) {
+    for (const side of ['before', 'after']) {
+      await t.test(`${side}:${boundary}:pre-reference-regeneration`, async () => {
+        resetStores(manualOriginal.id);
+        const api = durableActual({
+          rows: [manualOriginal, unrelated],
+          ignoreSparseNullImportedIdUpdates: true,
+          mutateSplitLegIdentityOnMetadataSync: true,
+        });
+        const replacement = manualCloneSplit();
+        const injector = faultSchedule([{ point: `${side}:${boundary}` }]);
+        await assert.rejects(
+          replaceActualTransaction(api, {
+            accountId: 'account',
+            original: manualOriginal,
+            replacement,
+            faultInjector: injector,
+          }),
+        );
+        assert.ok(injector.entries.every((entry) => entry.fired));
+        await recoverPastFault(api, injector);
+        assert.equal(latestSaga().phase, 'completed');
+        assert.ok(latestSaga().replacementIds.legIds.every((id) => String(id).includes('-postmeta-')));
+        assertReferencesAreLive(api);
+      });
+    }
+  }
+});
+
+function rollbackSplitOriginalWithEvidence() {
+  return {
+    ...original,
+    id: 'rollback-split-original',
+    category: null,
+    is_parent: true,
+    subtransactions: [
+      {
+        id: 'rollback-split-leg-a',
+        parent_id: 'rollback-split-original',
+        amount: -400,
+        category: 'cat-1',
+        notes: 'rollback split leg a',
+        payee: 'leg-payee-1',
+      },
+      {
+        id: 'rollback-split-leg-b',
+        parent_id: 'rollback-split-original',
+        amount: -600,
+        category: 'cat-2',
+        notes: 'rollback split leg b',
+        payee: 'leg-payee-2',
+      },
+    ],
+  };
+}
+
+function configureRollbackSplitEvidence(source) {
+  const [legA, legB] = source.subtransactions;
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(process.env.RECEIPTS_DIR, { recursive: true });
+  writeJson(process.env.RECEIPTS_PATH, {
+    byTxn: {
+      [legA.id]: [{
+        id: 'rollback-receipt-a',
+        txnId: legA.id,
+        file: 'receipt-a.jpg',
+        amount: 4,
+        date: source.date,
+      }],
+      [legB.id]: [{
+        id: 'rollback-receipt-b',
+        txnId: legB.id,
+        file: 'receipt-b.jpg',
+        amount: 6,
+        date: source.date,
+      }],
+    },
+  });
+  fs.writeFileSync(path.join(process.env.RECEIPTS_DIR, 'receipt-a.jpg'), 'rollback receipt a bytes');
+  fs.writeFileSync(path.join(process.env.RECEIPTS_DIR, 'receipt-b.jpg'), 'rollback receipt b bytes');
+  writeJson(process.env.REIMB_LINKS_PATH, {
+    schemaVersion: 2,
+    links: [{
+      linkKey: `${legA.id}:${legB.id}`,
+      inflow: { id: legA.id, date: source.date, payee: 'Rollback inflow', amount: 4 },
+      expense: { id: legB.id, date: source.date, payee: 'Rollback expense', amount: -6 },
+      allocationCents: 400,
+      amount: 4,
+      version: 1,
+    }],
+  });
+  writeJson(process.env.REIMB_SUGGEST_PATH, {
+    dismissed: [legA.id],
+    confirmed: {
+      [`sg_${legB.id}`]: {
+        at: '2026-07-09T00:00:00.000Z',
+        inflowId: legB.id,
+        allocations: [{
+          expense: { id: legA.id, date: source.date, payee: 'Allocation expense', amount: -4 },
+          amount: 4,
+        }],
+      },
+    },
+  });
+  writeJson(process.env.RECON_PATH, {
+    enabled: true,
+    months: {
+      '2026-07': {
+        done: false,
+        items: {
+          [legA.id]: 'rollback-recon-a',
+          [legB.id]: 'rollback-recon-b',
+        },
+      },
+    },
+  });
+  writeJson(process.env.PHANTOM_SEEN_PATH, {
+    seen: {
+      [legA.id]: { firstSeen: source.date, source: 'rollback-a' },
+      [legB.id]: { firstSeen: source.date, source: 'rollback-b' },
+    },
+  });
+}
+
+function rollbackSplitReplacement(source) {
+  return addableTransaction(source, {
+    category: undefined,
+    subtransactions: source.subtransactions.map((leg, index) => ({
+      amount: leg.amount,
+      category: leg.category,
+      notes: index === 0 ? `${leg.notes} edited` : leg.notes,
+      payee: leg.payee,
+    })),
+  });
+}
+
+function assertRollbackRestoreRegeneration(api, source, {
+  staleLegIds = [],
+  staleReplacementLegIds = [],
+  preSyncRestoredLegIds = [],
+} = {}) {
+  const saga = latestSaga();
+  assert.equal(saga.phase, 'rolled_back');
+  assert.equal(saga.referenceMigration?.direction, 'rollback');
+  const restored = api.state.rows.find((row) => row.id === saga.restoredIds.parentId);
+  assert.ok(restored, 'restored split parent is live');
+  assert.equal(restored.imported_id, source.imported_id);
+  assert.equal(restored.imported_payee, source.imported_payee);
+  assert.ok(restored.subtransactions.every((leg) => String(leg.id).includes('-postmeta-')));
+  assert.ok(saga.restoredIds.legIds.every((id) => String(id).includes('-postmeta-')));
+  assert.deepEqual(
+    [...saga.restoredIds.legIds].sort(),
+    restored.subtransactions.map((leg) => String(leg.id)).sort(),
+  );
+  assert.ok((saga.retiredRestoredLegIds || []).length >= 1, 'expected retired restored leg ids after metadata churn');
+  for (const retiredId of saga.retiredRestoredLegIds || []) {
+    assert.ok(
+      (preSyncRestoredLegIds.length ? preSyncRestoredLegIds : staleLegIds).includes(String(retiredId))
+        || String(retiredId).includes('-leg-'),
+      `retired restored leg ${retiredId} should be a pre-sync restored id`,
+    );
+    assert.ok(!liveIds(api).has(String(retiredId)), `retired restored leg ${retiredId} must not remain live`);
+  }
+  const live = liveIds(api);
+  for (const target of Object.values(saga.rollbackIdMap || {})) {
+    assert.ok(live.has(String(target)), `rollbackIdMap target ${target} is live`);
+  }
+  for (const retiredId of saga.retiredRestoredLegIds || []) {
+    const successor = saga.rollbackIdMap?.[String(retiredId)];
+    assert.ok(successor, `rollbackIdMap must remap retired restored leg ${retiredId}`);
+    assert.ok(live.has(String(successor)), `successor ${successor} for retired restored leg ${retiredId} is live`);
+    assert.notEqual(String(successor), String(retiredId));
+  }
+  for (const staleId of [...staleLegIds, ...staleReplacementLegIds, ...(saga.retiredRestoredLegIds || [])]) {
+    assert.ok(!referencedIds(readStores()).includes(String(staleId)), `stale id ${staleId} must not remain referenced`);
+    assert.ok(!JSON.stringify(readStores()).includes(String(staleId)), `store payload must not retain stale id ${staleId}`);
+  }
+  assert.equal(temporaryIdentityRows(api).length, 0);
+  assertReferencesAreLive(api);
+}
+
+async function runRollbackSplitRestoreRegenerationCase({
+  reverseSplitLegOrderOnSync = false,
+  injectorRules,
+  injector = null,
+} = {}) {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const staleLegIds = source.subtransactions.map((leg) => String(leg.id));
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+    reverseSplitLegOrderOnSync,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const faultInjector = injector || faultSchedule(injectorRules);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector,
+    }),
+  );
+  const sagaBeforeRecovery = latestSaga();
+  const staleReplacementLegIds = [...(sagaBeforeRecovery.replacementIds?.legIds || [])];
+  const preSyncRestoredLegIds = [...(sagaBeforeRecovery.restoredIds?.legIds || [])];
+  await recoverPastFault(api, faultInjector);
+  assertRollbackRestoreRegeneration(api, source, {
+    staleLegIds,
+    staleReplacementLegIds,
+    preSyncRestoredLegIds,
+  });
+  return { api, staleLegIds, staleReplacementLegIds, preSyncRestoredLegIds, injector: faultInjector };
+}
+
+test('rollback restore metadata sync leg id regeneration refreshes restoredIds before reference migration', async () => {
+  await runRollbackSplitRestoreRegenerationCase({
+    injectorRules: [{ point: 'before:reference-plan-checkpoint', mode: 'error' }],
+  });
+});
+
+test('rollback restore metadata sync leg id regeneration converges across restore checkpoint boundaries', async (t) => {
+  const restoreRegenerationBoundaries = [
+    'restored-ready-checkpoint',
+    'restored-metadata-restore',
+    'restored-metadata-reconcile',
+  ];
+  for (const boundary of restoreRegenerationBoundaries) {
+    for (const side of ['before', 'after']) {
+      await t.test(`${side}:${boundary}:rollback-restore-regeneration`, async () => {
+        const injector = faultSchedule([
+          { point: 'before:reference-plan-checkpoint', mode: 'error' },
+          { point: `${side}:${boundary}` },
+        ]);
+        await runRollbackSplitRestoreRegenerationCase({ injector });
+        assert.ok(injector.entries.every((entry) => entry.fired));
+      });
+    }
+  }
+});
+
+test('rollback restore metadata sync leg id regeneration converges when Actual reverses split leg order', async () => {
+  await runRollbackSplitRestoreRegenerationCase({
+    reverseSplitLegOrderOnSync: true,
+    injectorRules: [{ point: 'before:reference-plan-checkpoint', mode: 'error' }],
+  });
+});
+
+test('retired restored leg ids block concurrent admission until rollback saga terminalizes', async () => {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const injector = faultSchedule([
+    { point: 'before:reference-plan-checkpoint', mode: 'error' },
+    { point: 'after:restored-ready-checkpoint' },
+  ]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector: injector,
+    }),
+  );
+  const saga = latestSaga();
+  assert.equal(saga.phase, 'restored_ready');
+  const retiredIds = saga.retiredRestoredLegIds || [];
+  assert.ok(retiredIds.length >= 1);
+  for (const retiredId of retiredIds) {
+    assert.throws(
+      () => assertTransactionReplacementAvailable({ accountId: 'account', ids: [retiredId] }),
+      (error) => error.code === 'TRANSACTION_REPLACEMENT_IN_PROGRESS',
+    );
+  }
+  await recoverPastFault(api, injector);
+  assert.equal(latestSaga().phase, 'rolled_back');
+  assert.doesNotThrow(() => assertTransactionReplacementAvailable({
+    accountId: 'account',
+    ids: [...latestSaga().restoredIds.legIds, latestSaga().restoredIds.parentId],
+  }));
+});
+
+test('rollback restored_ready pre-reference refresh converges second-generation leg churn', async () => {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const injector = faultSchedule([
+    { point: 'before:reference-plan-checkpoint', mode: 'error' },
+    { point: 'after:restored-ready-checkpoint' },
+  ]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector: injector,
+    }),
+  );
+  const gen1LegIds = [...(latestSaga().restoredIds?.legIds || [])];
+  assert.equal(latestSaga().phase, 'restored_ready');
+  const parent = api.state.rows.find((row) => row.id === latestSaga().restoredIds.parentId);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...structuredClone(leg),
+    id: `${leg.id}-gen2-${index}`,
+  }));
+  await recoverPastFault(api, injector);
+  const saga = latestSaga();
+  assert.equal(saga.phase, 'rolled_back');
+  assert.ok(saga.retiredRestoredLegIds.length >= gen1LegIds.length + 1);
+  for (const gen1Id of gen1LegIds) {
+    assert.ok(saga.retiredRestoredLegIds.includes(String(gen1Id)));
+    const successor = saga.rollbackIdMap[String(gen1Id)];
+    assert.ok(successor, `gen1 id ${gen1Id} must alias to live successor`);
+    assert.ok(saga.restoredIds.legIds.includes(String(successor)));
+  }
+  assertReferencesAreLive(api);
+});
+
+test('rollback restored_ready pre-reference refresh converges second-generation churn with reversed leg order', async () => {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+    reverseSplitLegOrderOnSync: true,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const injector = faultSchedule([
+    { point: 'before:reference-plan-checkpoint', mode: 'error' },
+    { point: 'after:restored-ready-checkpoint' },
+  ]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector: injector,
+    }),
+  );
+  const parent = api.state.rows.find((row) => row.id === latestSaga().restoredIds.parentId);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...structuredClone(leg),
+    id: `${leg.id}-gen2-${index}`,
+  }));
+  await recoverPastFault(api, injector);
+  assert.equal(latestSaga().phase, 'rolled_back');
+  assertReferencesAreLive(api);
+});
+
+test('rollback pre-reference refresh converges across restored-pre-reference-id checkpoint boundaries', async (t) => {
+  for (const side of ['before', 'after']) {
+    await t.test(`${side}:restored-pre-reference-id-checkpoint`, async () => {
+      const source = rollbackSplitOriginalWithEvidence();
+      configureRollbackSplitEvidence(source);
+      const api = durableActual({
+        rows: [source, decoy, unrelated],
+        ignoreSparseNullImportedIdUpdates: true,
+        mutateSplitLegIdentityOnMetadataSync: true,
+      });
+      const replacement = rollbackSplitReplacement(source);
+      const injector = faultSchedule([
+        { point: 'before:reference-plan-checkpoint', mode: 'error' },
+        { point: 'after:restored-ready-checkpoint' },
+        { point: `${side}:restored-pre-reference-id-checkpoint` },
+      ]);
+      await assert.rejects(
+        replaceActualTransaction(api, {
+          accountId: 'account',
+          original: source,
+          replacement,
+          requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+          faultInjector: injector,
+        }),
+      );
+      const parent = api.state.rows.find((row) => row.id === latestSaga().restoredIds.parentId);
+      parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+        ...structuredClone(leg),
+        id: `${leg.id}-gen2-${index}`,
+      }));
+      await recoverPastFault(api, injector);
+      assert.ok(injector.entries.every((entry) => entry.fired));
+      assert.equal(latestSaga().phase, 'rolled_back');
+      assertReferencesAreLive(api);
+    });
+  }
+});
+
+test('rollback post-plan restored leg churn fails closed before sidecar mutation', async () => {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const injector = faultSchedule([
+    { point: 'before:reference-plan-checkpoint', mode: 'error' },
+    { point: 'after:reference-plan-checkpoint' },
+  ]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector: injector,
+    }),
+  );
+  assert.equal(latestSaga().phase, 'rollback_references_pending');
+  const storesBefore = readStores();
+  const saga = latestSaga();
+  const parent = api.state.rows.find((row) => row.id === saga.restoredIds.parentId);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...leg,
+    id: `${leg.id}-postplan-${index}`,
+  }));
+  await assert.rejects(
+    recoverTransactionSagas(api),
+    /drifted after reference migration started|reference migration targets are absent/,
+  );
+  assert.equal(latestSaga().phase, 'rollback_references_pending');
+  assert.deepEqual(readStores(), storesBefore);
+  assert.ok(latestSaga().lastError);
+});
+
+test('rollback_sync_pending terminalization fails closed when restored leg ids churn after reference migration', async () => {
+  const source = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(source);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    ignoreSparseNullImportedIdUpdates: true,
+    mutateSplitLegIdentityOnMetadataSync: true,
+  });
+  const replacement = rollbackSplitReplacement(source);
+  const injector = faultSchedule([
+    { point: 'before:reference-plan-checkpoint', mode: 'error' },
+    { point: 'after:sync-pending-checkpoint' },
+  ]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      requestedLegs: source.subtransactions.map((leg) => ({ id: String(leg.id) })),
+      faultInjector: injector,
+    }),
+  );
+  assert.equal(latestSaga().phase, 'rollback_sync_pending');
+  const saga = latestSaga();
+  const parent = api.state.rows.find((row) => row.id === saga.restoredIds.parentId);
+  parent.subtransactions = parent.subtransactions.map((leg, index) => ({
+    ...leg,
+    id: `${leg.id}-terminal-drift-${index}`,
+  }));
+  await assert.rejects(
+    recoverTransactionSagas(api),
+    /drifted after reference migration started|reference migration targets are absent/,
+  );
+  assert.equal(latestSaga().phase, 'rollback_sync_pending');
+  assert.ok(latestSaga().lastError);
+});
+
+test('legacy split rollback reconcile refreshes rollback map without weakening ownership', async () => {
+  resetStores();
+  const splitOriginal = rollbackSplitOriginalWithEvidence();
+  configureRollbackSplitEvidence(splitOriginal);
+  const restored = materializeAdded(addableTransaction(splitOriginal, {
+    category: undefined,
+    subtransactions: splitOriginal.subtransactions.map((leg) => ({
+      amount: leg.amount,
+      category: leg.category,
+      notes: leg.notes,
+      payee: leg.payee,
+    })),
+  }), 'legacy-split-restored', 'account');
+  restored.subtransactions = restored.subtransactions.map((leg, index) => ({
+    ...splitOriginal.subtransactions[index],
+    id: leg.id,
+    parent_id: restored.id,
+  }));
+  writeJson(process.env.TRANSACTION_SAGAS_PATH, {
+    schemaVersion: 1,
+    sagas: {
+      legacy: legacySaga({
+        status: 'recovered',
+        original: splitOriginal,
+        replacement: rollbackSplitReplacement(splitOriginal),
+        replacementId: 'legacy-split-replacement',
+        replacementIds: { parentId: 'legacy-split-replacement', legIds: ['legacy-repl-leg-a', 'legacy-repl-leg-b'] },
+        idMap: {
+          [splitOriginal.id]: 'legacy-split-replacement',
+          'rollback-split-leg-a': 'legacy-repl-leg-a',
+          'rollback-split-leg-b': 'legacy-repl-leg-b',
+        },
+        recoveryTransactionId: restored.id,
+      }),
+    },
+  });
+  const api = durableActual({ rows: [decoy, unrelated, restored] });
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'rolled_back');
+  assertReferencesAreLive(api);
+});
+
+test('legacy rollback with replacementIds but no idMap fails closed', async () => {
+  resetStores();
+  const restored = materializeAdded(addableTransaction(original), 'legacy-restored', 'account');
+  writeJson(process.env.TRANSACTION_SAGAS_PATH, {
+    schemaVersion: 1,
+    sagas: {
+      legacy: legacySaga({
+        status: 'recovered',
+        replacementIds: { parentId: 'legacy-replacement', legIds: ['legacy-leg'] },
+        recoveryTransactionId: restored.id,
+      }),
+    },
+  });
+  const api = durableActual({ rows: [decoy, unrelated, restored] });
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'legacy_reconcile_rollback');
+  assert.match(latestSaga().lastError.message, /replacement mapping is incomplete/);
+});
+
+function bankImportSplitParent() {
+  return {
+    ...original,
+    id: 'bank-split-parent',
+    category: null,
+    is_parent: true,
+    subtransactions: [
+      {
+        id: 'bank-leg-1',
+        parent_id: 'bank-split-parent',
+        amount: -400,
+        category: 'db2f5c1d-6256-49c5-9e14-8ba222a50411',
+        notes: 'leg one',
+        payee: 'leg-payee-1',
+      },
+      {
+        id: 'bank-leg-2',
+        parent_id: 'bank-split-parent',
+        amount: -600,
+        category: 'cat-2',
+        notes: 'leg two',
+        payee: 'leg-payee-2',
+      },
+    ],
+  };
+}
+
+function bankImportUnsplitReplacement(source = bankImportSplitParent(), categoryId = 'db2f5c1d-6256-49c5-9e14-8ba222a50411') {
+  const replacement = addableTransaction(source, {
+    category: categoryId === null ? null : categoryId,
+    subtransactions: [],
+  });
+  delete replacement.subtransactions;
+  if (categoryId === null) replacement.category = null;
+  return replacement;
+}
+
+test('bank-import unsplit repairs Actual parent category normalization before identity checkpoint', async () => {
+  const source = bankImportSplitParent();
+  resetStores(source.subtransactions[0].id);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    alternateParentCategoryOnTemporaryAdd: original.category,
+  });
+  const replacement = bankImportUnsplitReplacement(source);
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: source,
+    replacement,
+  });
+  assert.equal(added.category, replacement.category);
+  assert.equal(added.imported_id, original.imported_id);
+  assert.equal(added.imported_payee, original.imported_payee);
+  assert.equal(latestSaga().phase, 'sync_pending');
+  assert.ok(api.state.counts.update >= 1, 'category repair uses updateTransaction');
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.category, replacement.category);
+  assert.equal(persisted.imported_id, original.imported_id);
+  assert.equal(persisted.subtransactions.length, 0);
+});
+
+test('bank-import unsplit category repair converges when update lags until sync', async () => {
+  const source = bankImportSplitParent();
+  resetStores(source.subtransactions[0].id);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    alternateParentCategoryOnTemporaryAdd: original.category,
+    deferCategoryRepairUntilSync: true,
+  });
+  const replacement = bankImportUnsplitReplacement(source);
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: source,
+    replacement,
+  });
+  assert.equal(added.category, replacement.category);
+  assert.ok(api.state.counts.sync >= 1);
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+});
+
+test('bank-import unsplit rejects non-category temporary row drift', async () => {
+  const source = bankImportSplitParent();
+  resetStores(source.subtransactions[0].id);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+  });
+  const baseUpdate = api.updateTransaction.bind(api);
+  api.updateTransaction = async (id, fields) => baseUpdate(id, fields);
+  const baseAdd = api.addTransactions.bind(api);
+  api.addTransactions = async (accountId, transactions, options) => {
+    await baseAdd(accountId, transactions, options);
+    const payload = transactions[0];
+    if (String(payload.imported_id || '').startsWith('df-replace:')) {
+      const row = api.state.rows.find((candidate) => String(candidate.imported_id).startsWith('df-replace:'));
+      if (row) row.notes = 'mutated notes';
+    }
+  };
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement: bankImportUnsplitReplacement(source),
+    }),
+    (error) => error.code === 'TRANSACTION_REPLACEMENT_OUTCOME_UNKNOWN',
+  );
+  assert.equal(activeSaga().phase, 'replacement_add_pending');
+});
+
+test('rollback restores bank-import unsplit split parent after post-identification reference failure', async () => {
+  const source = bankImportSplitParent();
+  resetStores(source.subtransactions[0].id);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    alternateParentCategoryOnTemporaryAdd: original.category,
+  });
+  const replacement = bankImportUnsplitReplacement(source);
+  const injector = faultSchedule([{ point: 'before:reference-plan-checkpoint', mode: 'error' }]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      faultInjector: injector,
+    }),
+  );
+  await recoverPastFault(api, injector);
+  assert.equal(latestSaga().phase, 'rolled_back');
+  const restored = api.state.rows.find((row) => row.id.startsWith('actual-') || row.id === source.id);
+  assert.ok(restored);
+  assert.equal(restored.category ?? null, source.category ?? null);
+  assert.equal(restored.subtransactions.length, 2);
+  assertReferencesAreLive(api);
+});
+
+const forwardCategoryRepairBoundaries = [
+  'replacement-category-repair-checkpoint',
+  'replacement-category-category-repair',
+  'replacement-category-category-reconcile',
+];
+
+test('bank-import unsplit forward category repair converges across crash boundaries', async (t) => {
+  for (const boundary of forwardCategoryRepairBoundaries) {
+    for (const side of ['before', 'after']) {
+      await t.test(`${side}:${boundary}`, async () => {
+        const source = bankImportSplitParent();
+        resetStores(source.subtransactions[0].id);
+        const api = durableActual({
+          rows: [source, decoy, unrelated],
+          alternateParentCategoryOnTemporaryAdd: original.category,
+        });
+        const replacement = bankImportUnsplitReplacement(source);
+        const injector = faultSchedule([{ point: `${side}:${boundary}` }]);
+        await assert.rejects(
+          replaceActualTransaction(api, {
+            accountId: 'account',
+            original: source,
+            replacement,
+            faultInjector: injector,
+          }),
+        );
+        assert.ok(injector.entries.every((entry) => entry.fired));
+        await recoverPastFault(api, injector);
+        assert.equal(latestSaga().phase, 'completed');
+        const persisted = api.state.rows.find((row) => row.id.startsWith('actual-'));
+        assert.equal(persisted.category, replacement.category);
+        assert.equal(persisted.imported_id, original.imported_id);
+      });
+    }
+  }
+});
+
+test('bank-import unsplit with null category repairs normalization to explicit null', async () => {
+  const source = {
+    ...bankImportSplitParent(),
+    subtransactions: bankImportSplitParent().subtransactions.map((leg, index) => ({
+      ...leg,
+      category: index === 0 ? 'cat-1' : 'cat-2',
+    })),
+  };
+  resetStores(source.subtransactions[0].id);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    alternateParentCategoryOnTemporaryAdd: original.category,
+  });
+  const replacement = bankImportUnsplitReplacement(source, null);
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: source,
+    replacement,
+  });
+  assert.equal(added.category ?? null, null);
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+});
+
+const RECATEGORIZED_BANK_CATEGORY = 'db2f5c1d-6256-49c5-9e14-8ba222a50411';
+
+function temporaryIdentityRows(api) {
+  return api.state.rows.filter((row) => /^df-(replace|restore):/.test(String(row.imported_id || '')));
+}
+
+function assertSingleTemporaryReplacement(api, source) {
+  assert.equal(api.state.rows.some((row) => row.id === source.id), false, 'original remains deleted');
+  assert.equal(temporaryIdentityRows(api).length, 1, 'exactly one temporary replacement row');
+}
+
+test('category repair pre-identification errors stay forward-recoverable without inline rollback', async (t) => {
+  const adversarialPoints = [
+    'after:replacement-category-repair-checkpoint',
+    'before:replacement-category-category-repair',
+    'after:replacement-category-category-repair',
+    'before:replacement-category-category-reconcile',
+    'after:replacement-category-category-reconcile',
+  ];
+  for (const point of adversarialPoints) {
+    await t.test(point, async () => {
+      const source = bankImportSplitParent();
+      resetStores(source.subtransactions[0].id);
+      const api = durableActual({
+        rows: [source, decoy, unrelated],
+        alternateParentCategoryOnTemporaryAdd: original.category,
+      });
+      const replacement = bankImportUnsplitReplacement(source);
+      const injector = faultSchedule([{ point, mode: 'error' }]);
+      await assert.rejects(
+        replaceActualTransaction(api, {
+          accountId: 'account',
+          original: source,
+          replacement,
+          faultInjector: injector,
+        }),
+      );
+      assert.equal(activeSaga().phase, 'replacement_category_repair_pending');
+      assert.notEqual(activeSaga().phase, 'rollback_requested');
+      assert.notEqual(activeSaga().phase, 'rolled_back');
+      assertSingleTemporaryReplacement(api, source);
+      assert.equal(
+        api.state.rows.filter((row) => String(row.imported_id || '').startsWith('df-replace:')).length,
+        1,
+        'no duplicate temporary replacement rows',
+      );
+      await recoverPastFault(api, injector);
+      assert.equal(latestSaga().phase, 'completed');
+      assert.equal(temporaryIdentityRows(api).length, 0);
+      const persisted = api.state.rows.find((row) => row.id === latestSaga().replacementIds.parentId);
+      assert.equal(persisted.category, replacement.category);
+      assert.equal(persisted.imported_id, original.imported_id);
+      assert.equal(persisted.imported_payee, original.imported_payee);
+    });
+  }
+});
+
+const restoreCategoryRepairBoundaries = [
+  'restore-category-repair-checkpoint',
+  'restore-category-category-repair',
+  'restore-category-category-reconcile',
+];
+
+test('rollback restoration category repair converges across crash boundaries', async (t) => {
+  for (const boundary of restoreCategoryRepairBoundaries) {
+    for (const side of ['before', 'after']) {
+      await t.test(`${side}:${boundary}`, async () => {
+        const recategorized = {
+          ...original,
+          category: RECATEGORIZED_BANK_CATEGORY,
+        };
+        resetStores();
+        const api = durableActual({
+          rows: [recategorized, decoy, unrelated],
+          alternateParentCategoryOnTemporaryAdd: original.category,
+        });
+        const replacement = addableTransaction(recategorized, { notes: 'edited note' });
+        const injector = faultSchedule([
+          { point: 'before:reference-plan-checkpoint', mode: 'error' },
+          { point: `${side}:${boundary}` },
+        ]);
+        await assert.rejects(
+          replaceActualTransaction(api, {
+            accountId: 'account',
+            original: recategorized,
+            replacement,
+            faultInjector: injector,
+          }),
+        );
+        assert.ok(injector.entries.every((entry) => entry.fired));
+        await recoverPastFault(api, injector);
+        assert.equal(latestSaga().phase, 'rolled_back');
+        assert.equal(temporaryIdentityRows(api).length, 0);
+        const restored = api.state.rows.find((row) => row.id.startsWith('actual-'));
+        assert.equal(restored.category, recategorized.category);
+        assert.equal(restored.imported_id, original.imported_id);
+        assert.equal(restored.subtransactions.length, 0);
+      });
+    }
+  }
+});
+
+test('rollback restoration rejects non-category temporary row drift', async () => {
+  const recategorized = {
+    ...original,
+    category: RECATEGORIZED_BANK_CATEGORY,
+  };
+  resetStores();
+  const api = durableActual({
+    rows: [recategorized, decoy, unrelated],
+    alternateParentCategoryOnTemporaryAdd: original.category,
+  });
+  const baseAdd = api.addTransactions.bind(api);
+  api.addTransactions = async (accountId, transactions, options) => {
+    await baseAdd(accountId, transactions, options);
+    const payload = transactions[0];
+    if (String(payload.imported_id || '').startsWith('df-restore:')) {
+      const row = api.state.rows.find((candidate) => String(candidate.imported_id).startsWith('df-restore:'));
+      if (row) row.notes = 'mutated notes during restoration';
+    }
+  };
+  const injector = faultSchedule([{ point: 'before:reference-plan-checkpoint', mode: 'error' }]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: recategorized,
+      replacement: addableTransaction(recategorized, { notes: 'edited note' }),
+      faultInjector: injector,
+    }),
+  );
+  await recoverTransactionSagas(api);
+  await recoverTransactionSagas(api);
+  const saga = activeSaga();
+  assert.ok(saga);
+  assert.notEqual(saga.phase, 'rolled_back');
+  assert.equal(temporaryIdentityRows(api).length, 1);
+  assert.match(saga.lastError?.message || '', /does not match original|did not converge|ambiguous|absent/);
 });

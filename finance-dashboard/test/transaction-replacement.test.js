@@ -17,11 +17,30 @@ for (const [key, name] of Object.entries({
 })) process.env[key] = path.join(dir, name);
 
 const {
+  addableSplitLeg,
   addableTransaction,
   recoverTransactionSagas,
   replaceActualTransaction,
   transactionReplacementMap,
 } = require('../dataModule');
+const {
+  shapeMatches,
+  shapeMismatchDiff,
+  categoryRepairFields,
+  isNonSplitTransaction,
+  isRepairableTemporaryCategoryMismatch,
+  isTemporaryReplacementIdentity,
+  transactionFingerprint,
+  transactionShape,
+  rollbackReplacementMap,
+  rollbackMapAfterRestoredLegRefresh,
+  rollbackReferenceMigrationLocked,
+  postMigrationRestoredDriftReason,
+  retiredRestoredLegIds,
+  metadataRestoreFields,
+  forwardReferenceMigrationLocked,
+  postMigrationReplacementDriftReason,
+} = require('../lib/transaction-replacement-saga');
 test.beforeEach(() => {
   fs.rmSync(process.env.TRANSACTION_SAGAS_PATH, { force: true });
 });
@@ -89,6 +108,653 @@ test('addable transaction preserves import identity and parent metadata', () => 
     category: 'old-category',
     subtransactions: undefined,
   });
+});
+
+const parentPayee = 'payee-id';
+const splitShapeBase = {
+  date: '2026-07-09',
+  amount: -1000,
+  payee: parentPayee,
+  notes: 'parent notes',
+  cleared: false,
+  imported_id: null,
+  category: null,
+  subtransactions: [
+    { amount: -400, category: 'cat-1', notes: 'leg one' },
+    { amount: -600, category: 'cat-2', notes: 'leg two' },
+  ],
+};
+
+test('shape comparison treats null leg payee as parent payee inheritance', () => {
+  const withNullLegPayee = structuredClone(splitShapeBase);
+  const withParentLegPayee = {
+    ...structuredClone(splitShapeBase),
+    subtransactions: splitShapeBase.subtransactions.map((leg) => ({
+      ...leg,
+      payee: parentPayee,
+    })),
+  };
+  assert.equal(shapeMatches(withNullLegPayee, withParentLegPayee), true);
+  assert.equal(
+    transactionFingerprint(withNullLegPayee),
+    transactionFingerprint(withParentLegPayee),
+  );
+});
+
+test('shape comparison rejects explicit different leg payee', () => {
+  const withNullLegPayee = structuredClone(splitShapeBase);
+  const withDistinctLegPayee = {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [
+      { ...splitShapeBase.subtransactions[0], payee: 'leg-payee-1' },
+      { ...splitShapeBase.subtransactions[1] },
+    ],
+  };
+  assert.equal(shapeMatches(withNullLegPayee, withDistinctLegPayee), false);
+});
+
+test('transactionShape does not mutate stored leg payee values', () => {
+  const txn = structuredClone(splitShapeBase);
+  transactionShape(txn);
+  assert.equal(txn.subtransactions[0].payee, undefined);
+  assert.equal(txn.subtransactions[1].payee, undefined);
+});
+
+test('shape comparison treats reversed split leg order as the same multiset', () => {
+  const forward = structuredClone(splitShapeBase);
+  const reversed = {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [...splitShapeBase.subtransactions].reverse(),
+  };
+  assert.equal(shapeMatches(forward, reversed), true);
+  assert.equal(
+    transactionFingerprint(forward),
+    transactionFingerprint(reversed),
+  );
+  assert.deepEqual(transactionShape(forward).legs, transactionShape(reversed).legs);
+});
+
+test('shape comparison rejects different leg amounts even when order matches', () => {
+  const baseline = structuredClone(splitShapeBase);
+  const changed = {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [
+      { ...splitShapeBase.subtransactions[0], amount: -401 },
+      splitShapeBase.subtransactions[1],
+    ],
+  };
+  assert.equal(shapeMatches(baseline, changed), false);
+});
+
+test('temporary parent-only category mismatch is repairable on df-replace identity', () => {
+  const tempId = 'df-replace:test';
+  const expected = { ...original, category: 'intended-category', imported_id: tempId };
+  const actual = { ...expected, category: 'old-category' };
+  assert.equal(isTemporaryReplacementIdentity(tempId), true);
+  assert.equal(isTemporaryReplacementIdentity('df-restore:test'), true);
+  assert.equal(isTemporaryReplacementIdentity(original.imported_id), false);
+  assert.equal(isRepairableTemporaryCategoryMismatch(actual, expected, tempId), true);
+  assert.deepEqual(shapeMismatchDiff(actual, expected, tempId), {
+    field: 'category',
+    expected: 'intended-category',
+    actual: 'old-category',
+  });
+});
+
+test('shape comparison rejects different leg categories notes or payees', () => {
+  const baseline = structuredClone(splitShapeBase);
+  assert.equal(shapeMatches(baseline, {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [
+      { ...splitShapeBase.subtransactions[0], category: 'other-category' },
+      splitShapeBase.subtransactions[1],
+    ],
+  }), false);
+  assert.equal(shapeMatches(baseline, {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [
+      { ...splitShapeBase.subtransactions[0], notes: 'other notes' },
+      splitShapeBase.subtransactions[1],
+    ],
+  }), false);
+  assert.equal(shapeMatches(baseline, {
+    ...structuredClone(splitShapeBase),
+    subtransactions: [
+      { ...splitShapeBase.subtransactions[0], payee: 'other-payee' },
+      splitShapeBase.subtransactions[1],
+    ],
+  }), false);
+});
+
+test('shape comparison preserves duplicate leg multiplicity', () => {
+  const duplicateLeg = { amount: -500, category: 'cat-dup', notes: 'dup' };
+  const twoDupes = {
+    ...structuredClone(splitShapeBase),
+    amount: -2000,
+    subtransactions: [duplicateLeg, { ...duplicateLeg }],
+  };
+  const oneDupe = {
+    ...structuredClone(splitShapeBase),
+    amount: -1500,
+    subtransactions: [duplicateLeg],
+  };
+  assert.equal(shapeMatches(twoDupes, {
+    ...structuredClone(twoDupes),
+    subtransactions: [...twoDupes.subtransactions].reverse(),
+  }), true);
+  assert.equal(shapeMatches(twoDupes, oneDupe), false);
+});
+
+test('transactionShape does not mutate source subtransaction arrays', () => {
+  const txn = structuredClone(splitShapeBase);
+  const before = txn.subtransactions.map((leg) => ({ ...leg }));
+  transactionShape(txn);
+  assert.deepEqual(txn.subtransactions, before);
+});
+
+test('addableSplitLeg omits inherited parent payee but keeps explicit different payee', () => {
+  assert.deepEqual(addableSplitLeg(
+    { amount: -500, category: 'cat-1', notes: 'first', payee: parentPayee },
+    parentPayee,
+  ), {
+    amount: -500,
+    category: 'cat-1',
+    notes: 'first',
+  });
+  assert.deepEqual(addableSplitLeg(
+    { amount: -500, category: 'cat-1', notes: 'named', payee: 'leg-payee-1' },
+    parentPayee,
+  ), {
+    amount: -500,
+    category: 'cat-1',
+    notes: 'named',
+    payee: 'leg-payee-1',
+  });
+});
+
+test('replacement map treats Actual canonicalized inherited payee as unnamed intent', () => {
+  const original = {
+    id: 'old-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one' },
+      { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two' },
+    ],
+  };
+  const replacement = {
+    id: 'new-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'new-leg-1', amount: -400, category: 'cat-1', notes: 'updated', payee: parentPayee },
+      { id: 'new-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: parentPayee },
+    ],
+  };
+  const intended = addableTransaction(original, {
+    category: undefined,
+    subtransactions: [
+      { amount: -400, category: 'cat-1', notes: 'updated' },
+      { amount: -600, category: 'cat-2', notes: 'leg two' },
+    ],
+  });
+  assert.deepEqual(
+    transactionReplacementMap(original, replacement, ['old-leg-1', 'old-leg-2'], intended),
+    { 'old-parent': 'new-parent', 'old-leg-1': 'new-leg-1', 'old-leg-2': 'new-leg-2' },
+  );
+});
+
+test('replacement map matches retained legs when Actual returns reversed order', () => {
+  const original = {
+    id: 'old-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+      { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+    ],
+  };
+  const replacement = {
+    id: 'new-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'new-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      { id: 'new-leg-1', amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+    ],
+  };
+  const intended = addableTransaction(original, {
+    category: undefined,
+    subtransactions: [
+      { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+      { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+    ],
+  });
+  assert.deepEqual(
+    transactionReplacementMap(original, replacement, ['old-leg-1', 'old-leg-2'], intended),
+    { 'old-parent': 'new-parent', 'old-leg-1': 'new-leg-1', 'old-leg-2': 'new-leg-2' },
+  );
+});
+
+test('rollback replacement map resolves legs by idMap content not checkpoint order', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: {
+      parentId: 'new-parent',
+      legIds: ['new-leg-2', 'new-leg-1'],
+    },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+  };
+  const restored = {
+    id: 'restored-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'restored-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      { id: 'restored-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+    ],
+  };
+  assert.deepEqual(rollbackReplacementMap(saga, restored), {
+    'old-parent': 'restored-parent',
+    'old-leg-1': 'restored-leg-1',
+    'old-leg-2': 'restored-leg-2',
+    'new-parent': 'restored-parent',
+    'new-leg-1': 'restored-leg-1',
+    'new-leg-2': 'restored-leg-2',
+  });
+});
+
+test('rollback replacement map fails closed without refreshed idMap', () => {
+  const saga = {
+    original: { id: 'old-parent', subtransactions: [] },
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1'] },
+  };
+  assert.throws(
+    () => rollbackReplacementMap(saga, { id: 'restored-parent', subtransactions: [] }),
+    /requires refreshed idMap/,
+  );
+});
+
+test('retiredRestoredLegIds accumulates churned restored leg ids', () => {
+  const saga = {
+    restoredIds: { parentId: 'restored-parent', legIds: ['prior-leg-a', 'prior-leg-b'] },
+    retiredRestoredLegIds: ['prior-leg-retired'],
+  };
+  assert.deepEqual(
+    retiredRestoredLegIds(saga, ['postmeta-leg-a', 'postmeta-leg-b']),
+    ['prior-leg-retired', 'prior-leg-a', 'prior-leg-b'],
+  );
+  assert.deepEqual(
+    retiredRestoredLegIds(saga, ['prior-leg-a', 'postmeta-leg-b']),
+    ['prior-leg-retired', 'prior-leg-b'],
+  );
+});
+
+test('rollbackMapAfterRestoredLegRefresh remaps churned restored legs by original correspondence', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: {
+      parentId: 'new-parent',
+      legIds: ['new-leg-1', 'new-leg-2'],
+    },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: {
+      parentId: 'restored-parent',
+      legIds: ['prior-restored-leg-2', 'prior-restored-leg-1'],
+    },
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'prior-restored-leg-1',
+      'old-leg-2': 'prior-restored-leg-2',
+      'new-parent': 'restored-parent',
+      'new-leg-1': 'prior-restored-leg-1',
+      'new-leg-2': 'prior-restored-leg-2',
+    },
+  };
+  const restored = {
+    id: 'restored-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'postmeta-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      { id: 'postmeta-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+    ],
+  };
+  const map = rollbackMapAfterRestoredLegRefresh(saga, restored);
+  assert.equal(map['old-leg-1'], 'postmeta-leg-1');
+  assert.equal(map['old-leg-2'], 'postmeta-leg-2');
+  assert.equal(map['prior-restored-leg-1'], 'postmeta-leg-1');
+  assert.equal(map['prior-restored-leg-2'], 'postmeta-leg-2');
+  assert.notEqual(map['old-leg-1'], map['old-leg-2']);
+});
+
+test('rollbackMapAfterRestoredLegRefresh carries transitive gen0 gen1 gen2 aliases', () => {
+  const splitSaga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1', 'new-leg-2'] },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: { parentId: 'restored-parent', legIds: ['gen1-leg-a', 'gen1-leg-b'] },
+    retiredRestoredLegIds: ['gen0-leg-a', 'gen0-leg-b'],
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'gen1-leg-a',
+      'old-leg-2': 'gen1-leg-b',
+      'new-parent': 'restored-parent',
+      'new-leg-1': 'gen1-leg-a',
+      'new-leg-2': 'gen1-leg-b',
+      'gen0-leg-a': 'gen1-leg-a',
+      'gen0-leg-b': 'gen1-leg-b',
+    },
+  };
+  const restored = {
+    id: 'restored-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'gen2-leg-b', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      { id: 'gen2-leg-a', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+    ],
+  };
+  const map = rollbackMapAfterRestoredLegRefresh(splitSaga, restored);
+  assert.equal(map['gen0-leg-a'], 'gen2-leg-a');
+  assert.equal(map['gen1-leg-a'], 'gen2-leg-a');
+  assert.equal(map['gen0-leg-b'], 'gen2-leg-b');
+  assert.equal(map['gen1-leg-b'], 'gen2-leg-b');
+  assert.equal(map['old-leg-1'], 'gen2-leg-a');
+});
+
+test('rollbackMapAfterRestoredLegRefresh fails closed when churn remap is incomplete', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1', 'new-leg-2'] },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: { parentId: 'restored-parent', legIds: ['prior-leg-a', 'prior-leg-b'] },
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'prior-leg-a',
+    },
+  };
+  assert.throws(
+    () => rollbackMapAfterRestoredLegRefresh(saga, {
+      id: 'restored-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'postmeta-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'postmeta-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    }),
+    /incomplete/,
+  );
+});
+
+test('rollbackMapAfterRestoredLegRefresh fails closed on ambiguous restored alias correspondence', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1', 'new-leg-2'] },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: { parentId: 'restored-parent', legIds: ['shared-alias', 'gen1-leg-b'] },
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'shared-alias',
+      'old-leg-2': 'shared-alias',
+      'new-parent': 'restored-parent',
+      'new-leg-1': 'shared-alias',
+      'new-leg-2': 'gen1-leg-b',
+    },
+  };
+  assert.throws(
+    () => rollbackMapAfterRestoredLegRefresh(saga, {
+      id: 'restored-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'gen2-leg-a', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'gen2-leg-b', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    }),
+    /ambiguous/,
+  );
+});
+
+test('rollbackMapAfterRestoredLegRefresh fails closed on prior-map key branch shared target ambiguity', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1', 'new-leg-2'] },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: { parentId: 'restored-parent', legIds: ['live-a', 'live-b'] },
+    retiredRestoredLegIds: ['alias-key'],
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'shared-target',
+      'old-leg-2': 'shared-target',
+      'alias-key': 'shared-target',
+      'new-parent': 'restored-parent',
+      'new-leg-1': 'live-a',
+      'new-leg-2': 'live-b',
+    },
+  };
+  const restored = {
+    id: 'restored-parent',
+    payee: parentPayee,
+    subtransactions: [
+      { id: 'live-a', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+      { id: 'live-b', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+    ],
+  };
+  assert.throws(
+    () => rollbackMapAfterRestoredLegRefresh(saga, restored),
+    /ambiguous/,
+  );
+});
+
+test('rollbackReferenceMigrationLocked mirrors forward lock semantics', () => {
+  assert.equal(rollbackReferenceMigrationLocked({
+    phase: 'restored_ready',
+    referenceMigration: { direction: 'rollback', idMap: { a: 'b' }, completed: [] },
+  }), true);
+  assert.equal(rollbackReferenceMigrationLocked({
+    phase: 'rollback_references_pending',
+    referenceMigration: { direction: 'rollback', idMap: { a: 'b' }, completed: [] },
+  }), true);
+  assert.equal(rollbackReferenceMigrationLocked({
+    phase: 'restore_metadata_pending',
+    referenceMigration: { direction: 'rollback', idMap: { a: 'b' }, completed: [] },
+  }), false);
+});
+
+test('postMigrationRestoredDriftReason rejects leg id drift after rollback reference plan', () => {
+  const saga = {
+    phase: 'rollback_references_pending',
+    original: { id: 'old-parent', subtransactions: [{ id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'one' }] },
+    restoredIds: { parentId: 'restored-parent', legIds: ['checkpoint-leg'] },
+    rollbackIdMap: { 'old-leg-1': 'checkpoint-leg' },
+    referenceMigration: {
+      direction: 'rollback',
+      idMap: { 'old-leg-1': 'checkpoint-leg' },
+      completed: [],
+    },
+  };
+  const reason = postMigrationRestoredDriftReason(saga, {
+    id: 'restored-parent',
+    subtransactions: [{ id: 'live-leg', amount: -400, category: 'cat-1', notes: 'one' }],
+  });
+  assert.match(reason, /drifted after reference migration started/);
+});
+
+test('rollback replacement map fails closed when checkpoint leg ids are absent from idMap', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'old-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [
+        { amount: -400, category: 'cat-1', notes: 'updated', payee: 'leg-payee-1' },
+        { amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    },
+    legOwnership: ['old-leg-1', 'old-leg-2'],
+    replacementIds: { parentId: 'new-parent', legIds: ['new-leg-1', 'new-leg-2'] },
+    idMap: {
+      'old-parent': 'new-parent',
+      'old-leg-1': 'new-leg-1',
+      'old-leg-2': 'new-leg-2',
+    },
+    restoredIds: { parentId: 'restored-parent', legIds: ['prior-leg-a', 'prior-leg-b'] },
+    rollbackIdMap: {
+      'old-parent': 'restored-parent',
+      'old-leg-1': 'prior-leg-a',
+    },
+  };
+  assert.throws(
+    () => rollbackMapAfterRestoredLegRefresh(saga, {
+      id: 'restored-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'postmeta-leg-1', amount: -400, category: 'cat-1', notes: 'leg one', payee: 'leg-payee-1' },
+        { id: 'postmeta-leg-2', amount: -600, category: 'cat-2', notes: 'leg two', payee: 'leg-payee-2' },
+      ],
+    }),
+    /incomplete/,
+  );
+});
+
+test('rollback replacement map fails closed when checkpoint leg ids are absent from idMap', () => {
+  const saga = {
+    original: {
+      id: 'old-parent',
+      payee: parentPayee,
+      subtransactions: [
+        { id: 'old-leg-1', amount: -400, category: 'cat-1', notes: 'leg one' },
+      ],
+    },
+    replacement: {
+      payee: parentPayee,
+      subtransactions: [{ amount: -400, category: 'cat-1', notes: 'leg one' }],
+    },
+    legOwnership: ['old-leg-1'],
+    replacementIds: { parentId: 'new-parent', legIds: ['stale-leg-id'] },
+    idMap: { 'old-parent': 'new-parent', 'old-leg-1': 'live-leg-id' },
+  };
+  assert.throws(
+    () => rollbackReplacementMap(saga, {
+      id: 'restored-parent',
+      payee: parentPayee,
+      subtransactions: [{ id: 'restored-leg-1', amount: -400, category: 'cat-1', notes: 'leg one' }],
+    }),
+    /stale/,
+  );
 });
 
 test('replacement identifies the new parent and generated leg IDs', async () => {
@@ -175,4 +841,143 @@ test('startup recovery finishes sidecar migration after replacement commit', asy
   const saga = JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas.crash;
   assert.equal(saga.status, 'completed');
   assert.equal(synced, true);
+});
+
+test('metadataRestoreFields omits subtransactions from parent-only metadata patch', () => {
+  const parent = {
+    id: 'parent',
+    date: '2026-07-09',
+    amount: -1000,
+    payee: 'payee-id',
+    imported_id: 'df-replace:temp',
+    is_parent: true,
+    subtransactions: [
+      { id: 'leg-1', parent_id: 'parent', amount: -500, category: 'cat-1' },
+      { id: 'leg-2', parent_id: 'parent', amount: -500, category: 'cat-2' },
+    ],
+  };
+  const payload = metadataRestoreFields(parent, null);
+  assert.equal(payload.imported_id, null);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload, 'subtransactions'), false);
+});
+
+test('forwardReferenceMigrationLocked is false before plan and true after reference migration starts', () => {
+  const prePlan = {
+    phase: 'replacement_ready',
+    referenceMigration: null,
+  };
+  assert.equal(forwardReferenceMigrationLocked(prePlan), false);
+  const planned = {
+    phase: 'references_pending',
+    referenceMigration: {
+      direction: 'forward',
+      idMap: { 'old-parent': 'new-parent' },
+      completed: [],
+    },
+  };
+  assert.equal(forwardReferenceMigrationLocked(planned), true);
+});
+
+test('postMigrationReplacementDriftReason detects stale idMap after reference migration', () => {
+  const saga = {
+    phase: 'sync_pending',
+    replacementIds: { parentId: 'new-parent', legIds: ['leg-a', 'leg-b'] },
+    idMap: { 'old-parent': 'new-parent', 'old-leg-a': 'leg-a', 'old-leg-b': 'leg-b' },
+    referenceMigration: {
+      direction: 'forward',
+      idMap: { 'old-parent': 'new-parent', 'old-leg-a': 'leg-a', 'old-leg-b': 'leg-b' },
+      completed: ['receipts'],
+    },
+  };
+  const transaction = {
+    id: 'new-parent',
+    date: '2026-07-09',
+    amount: -1000,
+    payee: 'payee-id',
+    is_parent: true,
+    subtransactions: [
+      { id: 'leg-a-regenerated', parent_id: 'new-parent', amount: -500, category: 'cat-1' },
+      { id: 'leg-b-regenerated', parent_id: 'new-parent', amount: -500, category: 'cat-2' },
+    ],
+  };
+  assert.match(
+    postMigrationReplacementDriftReason(saga, transaction),
+    /drifted after reference migration started/,
+  );
+});
+
+test('isRepairableTemporaryCategoryMismatch accepts parent-only category drift on df-replace rows', () => {
+  const temporaryIdentity = 'df-replace:abc';
+  const expected = {
+    date: '2026-07-09',
+    amount: -1000,
+    payee: 'payee-id',
+    notes: 'parent note',
+    cleared: false,
+    imported_id: temporaryIdentity,
+    imported_payee: 'Original merchant',
+    category: 'requested-category',
+    subtransactions: [],
+  };
+  const actual = {
+    ...expected,
+    category: 'normalized-category',
+  };
+  assert.equal(isTemporaryReplacementIdentity(temporaryIdentity), true);
+  assert.equal(isNonSplitTransaction(actual), true);
+  assert.equal(isNonSplitTransaction(expected), true);
+  assert.deepEqual(shapeMismatchDiff(actual, expected, temporaryIdentity), {
+    field: 'category',
+    expected: 'requested-category',
+    actual: 'normalized-category',
+  });
+  assert.equal(isRepairableTemporaryCategoryMismatch(actual, expected, temporaryIdentity), true);
+});
+
+test('isRepairableTemporaryCategoryMismatch rejects amount date payee notes cleared imported_payee and leg drift', () => {
+  const temporaryIdentity = 'df-replace:abc';
+  const baseline = {
+    date: '2026-07-09',
+    amount: -1000,
+    payee: 'payee-id',
+    notes: 'parent note',
+    cleared: false,
+    imported_id: temporaryIdentity,
+    imported_payee: 'Original merchant',
+    category: 'requested-category',
+    subtransactions: [],
+  };
+  const cases = [
+    [{ ...baseline, amount: -999 }, 'amount'],
+    [{ ...baseline, date: '2026-07-10' }, 'date'],
+    [{ ...baseline, payee: 'other-payee' }, 'payee'],
+    [{ ...baseline, notes: 'other note' }, 'notes'],
+    [{ ...baseline, cleared: true }, 'cleared'],
+    [{ ...baseline, imported_payee: 'Other merchant' }, 'imported_payee'],
+    [{
+      ...baseline,
+      is_parent: true,
+      subtransactions: [{ amount: -1000, category: 'cat-1' }],
+    }, 'legs'],
+  ];
+  for (const [actual] of cases) {
+    assert.equal(isRepairableTemporaryCategoryMismatch(actual, baseline, temporaryIdentity), false);
+  }
+});
+
+test('isRepairableTemporaryCategoryMismatch rejects non-temporary imported identities', () => {
+  const expected = {
+    date: '2026-07-09',
+    amount: -1000,
+    category: 'requested-category',
+    imported_id: 'bank-import-id',
+    subtransactions: [],
+  };
+  const actual = { ...expected, category: 'other-category' };
+  assert.equal(isRepairableTemporaryCategoryMismatch(actual, expected, 'bank-import-id'), false);
+});
+
+test('categoryRepairFields preserves explicit null category', () => {
+  assert.deepEqual(categoryRepairFields(null), { category: null });
+  assert.deepEqual(categoryRepairFields('cat-1'), { category: 'cat-1' });
 });

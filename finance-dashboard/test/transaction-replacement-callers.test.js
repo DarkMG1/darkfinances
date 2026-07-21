@@ -218,6 +218,129 @@ function assertReferenceMoved(id) {
   assert.equal(receipts.byTxn['old-leg-1'], undefined);
 }
 
+test('split caller clears temporary imported identity for manual transactions', async () => {
+  const manual = {
+    ...simple,
+    imported_id: null,
+    imported_payee: null,
+  };
+  configure(manual);
+  const result = await splitTransaction({
+    id: manual.id,
+    accountId: 'account',
+    date: manual.date,
+    legs: [
+      { amount: -4, categoryId: 'category-1', name: 'Leg One', notes: 'leg one' },
+      { amount: -6, categoryId: 'category-2', name: 'Leg Two', notes: 'leg two' },
+    ],
+  });
+  assertResponseCompatibility(result, 'create');
+  const parent = actual.inspect().rows[0];
+  assert.equal(parent.imported_id, null);
+  await syncNow();
+  const persisted = actual.inspect().rows[0];
+  assert.equal(persisted.imported_id, null);
+  assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
+  const saga = Object.values(JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas)[0];
+  assert.equal(saga.phase, 'completed');
+});
+
+test('split caller converges when Actual reverses split leg order after sync', async () => {
+  const manual = {
+    ...simple,
+    imported_id: null,
+    imported_payee: null,
+  };
+  configure(manual);
+  actual.setReverseSplitLegOrderOnSync(true);
+  try {
+    const result = await splitTransaction({
+      id: manual.id,
+      accountId: 'account',
+      date: manual.date,
+      legs: [
+        { amount: -4, categoryId: 'category-1', notes: 'first' },
+        { amount: -6, categoryId: 'category-2', notes: 'second' },
+      ],
+    });
+    assertResponseCompatibility(result, 'create');
+    const parent = actual.inspect().rows[0];
+    assert.equal(parent.imported_id, null);
+    assert.deepEqual(
+      parent.subtransactions.map((leg) => ({ amount: leg.amount, notes: leg.notes })).sort((a, b) => a.notes.localeCompare(b.notes)),
+      [{ amount: -400, notes: 'first' }, { amount: -600, notes: 'second' }],
+    );
+    const saga = Object.values(JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas)[0];
+    assert.equal(saga.phase, 'sync_pending');
+    await syncNow();
+    assert.equal(
+      Object.values(JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas)[0].phase,
+      'completed',
+    );
+  } finally {
+    actual.setReverseSplitLegOrderOnSync(false);
+  }
+});
+
+test('split caller survives metadata sync leg reorder and id regeneration through note edit', async () => {
+  const manual = {
+    ...simple,
+    imported_id: null,
+    imported_payee: null,
+  };
+  configure(manual, manual.id);
+  actual.setMutateSplitLegIdentityOnMetadataSync(true);
+  try {
+    const split = await splitTransaction({
+      id: manual.id,
+      accountId: 'account',
+      date: manual.date,
+      legs: [
+        { amount: -4, categoryId: 'category-1', notes: 'first' },
+        { amount: -6, categoryId: 'category-2', notes: 'second' },
+      ],
+    });
+    assertResponseCompatibility(split, 'create');
+    assert.ok(split.legIds.every((id) => /-(meta|postmeta)-/.test(String(id))));
+    await syncNow();
+    const parent = actual.inspect().rows[0];
+    assert.ok(parent.subtransactions.every((leg) => /-(meta|postmeta)-/.test(String(leg.id))));
+    assert.deepEqual(new Set(split.legIds), new Set(parent.subtransactions.map((leg) => leg.id)));
+    assertReferenceMoved(parent.id);
+
+    const firstLeg = parent.subtransactions.find((leg) => leg.notes === 'first');
+    assert.ok(firstLeg);
+    const noteEdit = await setTransactionNotes({
+      id: firstLeg.id,
+      notes: 'updated first',
+      isLeg: true,
+      parentId: parent.id,
+      accountId: 'account',
+      date: manual.date,
+    });
+    assertResponseCompatibility(noteEdit, 'rebuild-split');
+    await syncNow();
+    const live = actual.inspect().rows[0];
+    const liveEditedLeg = live.subtransactions.find((leg) => leg.notes === 'updated first');
+    assert.ok(liveEditedLeg);
+    assert.equal(noteEdit.id, liveEditedLeg.id);
+    assert.equal(noteEdit.parentId, live.id);
+    assertReferenceMoved(live.id);
+
+    const unsplit = await removeSplit({
+      id: live.id,
+      accountId: 'account',
+      date: manual.date,
+      categoryId: 'category-final',
+    });
+    assertResponseCompatibility(unsplit, 'unsplit');
+    assertReferenceMoved(unsplit.id);
+    assert.equal(actual.inspect().rows[0].subtransactions.length, 0);
+  } finally {
+    actual.setMutateSplitLegIdentityOnMetadataSync(false);
+  }
+});
+
 test('split caller returns replacement IDs and preserves response shape', async () => {
   configure(simple);
   const result = await splitTransaction({
@@ -235,6 +358,7 @@ test('split caller returns replacement IDs and preserves response shape', async 
   assert.equal(parent.id, result.id);
   assert.equal(parent.subtransactions.reduce((sum, leg) => sum + leg.amount, 0), parent.amount);
   assert.equal(parent.imported_id, simple.imported_id);
+  assert.equal(actual.inspect().rows[0].imported_id, 'bank-import');
   assertReferenceMoved(parent.id);
   let saga = Object.values(JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas)[0];
   assert.equal(saga.phase, 'sync_pending');
@@ -518,6 +642,60 @@ test('notes leg rebuild preserves all unchanged parent and sibling fields', asyn
   assert.equal(rebuilt.notes, parent.notes);
   assert.equal(rebuilt.imported_payee, parent.imported_payee);
   assertReferenceMoved(result.id);
+});
+
+test('manual split leg note rebuild omits inherited payee and preserves SQL null imported_id', async () => {
+  const manual = {
+    ...simple,
+    id: 'manual-split-parent',
+    amount: -1234,
+    imported_id: null,
+    imported_payee: null,
+    category: null,
+    is_parent: true,
+    subtransactions: [
+      {
+        id: 'manual-leg-1',
+        parent_id: 'manual-split-parent',
+        amount: -500,
+        category: 'category-1',
+        notes: 'first',
+        payee: 'payee-original',
+      },
+      {
+        id: 'manual-leg-2',
+        parent_id: 'manual-split-parent',
+        amount: -734,
+        category: 'category-2',
+        notes: 'second',
+        payee: 'payee-original',
+      },
+    ],
+  };
+  configure(manual, 'manual-leg-1');
+  const result = await setTransactionNotes({
+    id: 'manual-leg-1',
+    notes: 'updated',
+    isLeg: true,
+    parentId: manual.id,
+    accountId: 'account',
+    date: manual.date,
+  });
+  assertResponseCompatibility(result, 'rebuild-split');
+  const rebuilt = actual.inspect().rows[0];
+  assert.equal(rebuilt.imported_id, null);
+  assert.equal(rebuilt.subtransactions[0].notes, 'updated');
+  assert.equal(rebuilt.subtransactions[0].payee, 'payee-original');
+  assert.equal(rebuilt.subtransactions[1].notes, 'second');
+  assert.equal(rebuilt.subtransactions[1].payee, 'payee-original');
+  await syncNow();
+  const persisted = actual.inspect().rows[0];
+  assert.equal(persisted.imported_id, null);
+  assert.doesNotMatch(JSON.stringify(persisted), /"imported_id":""/);
+  const saga = Object.values(JSON.parse(fs.readFileSync(process.env.TRANSACTION_SAGAS_PATH, 'utf8')).sagas).pop();
+  assert.equal(saga.phase, 'completed');
+  assert.equal(saga.replacement.subtransactions[0].payee, undefined);
+  assert.equal(saga.replacement.subtransactions[1].payee, undefined);
 });
 
 test('child transfer rejection precedes payee creation, saga writes, and Actual mutation', async () => {

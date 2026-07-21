@@ -1,11 +1,28 @@
 'use strict';
 
+const {
+  applyMetadataSyncMutations,
+  markMetadataSyncMutation,
+  resetMetadataSyncMutationState,
+} = require('./actual-metadata-sync-mutation');
+
 let rows = [];
 let payees = [];
 let accounts = [];
 let sequence = 0;
 let createPayeeCalls = 0;
 let syncError = null;
+let reverseSplitLegOrderOnSync = false;
+let mutateSplitLegIdentityOnMetadataSync = false;
+
+function canonicalizeSplitLegPayees() {
+  for (const row of rows) {
+    if (!row.is_parent || !Array.isArray(row.subtransactions)) continue;
+    for (const leg of row.subtransactions) {
+      if (leg.payee == null || leg.payee === '') leg.payee = row.payee;
+    }
+  }
+}
 
 function configure({ transactions, payeeRows = [], accountRows = null }) {
   rows = structuredClone(transactions || []);
@@ -20,6 +37,9 @@ function configure({ transactions, payeeRows = [], accountRows = null }) {
   sequence = 0;
   createPayeeCalls = 0;
   syncError = null;
+  reverseSplitLegOrderOnSync = false;
+  mutateSplitLegIdentityOnMetadataSync = false;
+  resetMetadataSyncMutationState();
 }
 
 function inspect() {
@@ -35,6 +55,16 @@ async function init() {}
 async function downloadBudget() {}
 async function sync() {
   if (syncError) throw syncError;
+  if (mutateSplitLegIdentityOnMetadataSync) {
+    applyMetadataSyncMutations(rows);
+  } else if (reverseSplitLegOrderOnSync) {
+    for (const row of rows) {
+      if (row.is_parent && Array.isArray(row.subtransactions) && row.subtransactions.length > 1) {
+        row.subtransactions = [...row.subtransactions].reverse();
+      }
+    }
+  }
+  canonicalizeSplitLegPayees();
 }
 async function shutdown() {}
 async function getAccounts() {
@@ -43,6 +73,14 @@ async function getAccounts() {
 
 function setSyncError(error) {
   syncError = error;
+}
+
+function setReverseSplitLegOrderOnSync(value) {
+  reverseSplitLegOrderOnSync = !!value;
+}
+
+function setMutateSplitLegIdentityOnMetadataSync(value) {
+  mutateSplitLegIdentityOnMetadataSync = !!value;
 }
 
 async function getTransactions(accountId, start, end) {
@@ -73,7 +111,29 @@ async function addTransactions(accountId, [transaction]) {
 
 async function updateTransaction(id, fields) {
   const row = rows.find((candidate) => String(candidate.id) === String(id));
-  if (row) Object.assign(row, structuredClone(fields));
+  if (!row) return;
+  const patch = structuredClone(fields);
+  if (Array.isArray(patch.subtransactions) && row.is_parent) {
+    patch.subtransactions = patch.subtransactions.map((leg, index) => ({
+      ...structuredClone(leg),
+      id: row.subtransactions?.[index]?.id || `${id}-leg-${index + 1}`,
+      parent_id: id,
+    }));
+    Object.assign(row, patch);
+    delete row.category;
+    if (patch.imported_id === '') row.imported_id = null;
+    canonicalizeSplitLegPayees();
+    return;
+  }
+  const metadataRestore = row.is_parent
+    && !Array.isArray(patch.subtransactions)
+    && Object.prototype.hasOwnProperty.call(patch, 'imported_id');
+  if (mutateSplitLegIdentityOnMetadataSync) markMetadataSyncMutation(row, patch);
+  Object.assign(row, patch);
+  if (patch.imported_id === '') row.imported_id = null;
+  if (metadataRestore && mutateSplitLegIdentityOnMetadataSync) {
+    row._pendingMetadataSyncMutation = true;
+  }
 }
 
 async function getPayees() {
@@ -98,7 +158,9 @@ module.exports = {
   getTransactions,
   init,
   inspect,
+  setMutateSplitLegIdentityOnMetadataSync,
   setSyncError,
+  setReverseSplitLegOrderOnSync,
   shutdown,
   sync,
   updateTransaction,

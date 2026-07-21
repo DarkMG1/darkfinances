@@ -845,6 +845,122 @@ const OWNERSHIP_ADVERSARIAL = [
     buildAttack: () => ({ schemaVersion: 1, operations: {} }),
     pattern: /cannot drop a nonterminal operation/,
   },
+  {
+    name: 'transactionSagas',
+    buildOriginal: (stamp) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          id: 'active',
+          recordVersion: 2,
+          phase: 'references_pending',
+          updatedAt: stamp,
+          original: { id: 'txn-original', subtransactions: [{ id: 'txn-leg-old' }] },
+          replacementIds: { parentId: 'txn-replacement', legIds: ['txn-leg-new'] },
+          idMap: { 'txn-original': 'txn-replacement', 'txn-leg-old': 'txn-leg-new' },
+          retiredReplacementLegIds: ['txn-leg-retired'],
+          referenceMigration: {
+            direction: 'forward',
+            idMap: { 'txn-original': 'txn-replacement', 'txn-leg-old': 'txn-leg-new' },
+            stats: {},
+            completed: ['receipts'],
+          },
+        },
+      },
+    }),
+    buildAttack: (original) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          ...original.sagas.active,
+          retiredReplacementLegIds: [],
+          idMap: { 'txn-original': 'txn-replacement' },
+        },
+      },
+    }),
+    pattern: /cannot weaken ownership/,
+  },
+  {
+    name: 'transactionSagas',
+    buildOriginal: (stamp) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          id: 'active',
+          recordVersion: 2,
+          phase: 'restored_ready',
+          updatedAt: stamp,
+          original: {
+            id: 'txn-original',
+            subtransactions: [
+              { id: 'txn-leg-old-1', amount: -400, category: 'cat-1', notes: 'one' },
+              { id: 'txn-leg-old-2', amount: -600, category: 'cat-2', notes: 'two' },
+            ],
+          },
+          replacementIds: { parentId: 'txn-replacement', legIds: ['txn-replacement-leg'] },
+          restoredIds: { parentId: 'txn-restored', legIds: ['txn-restored-leg-live'] },
+          retiredRestoredLegIds: ['txn-restored-leg-retired'],
+          rollbackIdMap: {
+            'txn-original': 'txn-restored',
+            'txn-leg-old-1': 'txn-restored-leg-live',
+            'txn-restored-leg-retired': 'txn-restored-leg-live',
+          },
+        },
+      },
+    }),
+    buildAttack: (original) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          ...original.sagas.active,
+          retiredRestoredLegIds: [],
+        },
+      },
+    }),
+    pattern: /cannot weaken ownership/,
+  },
+  {
+    name: 'transactionSagas',
+    buildOriginal: (stamp) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          id: 'active',
+          recordVersion: 2,
+          phase: 'rollback_references_pending',
+          updatedAt: stamp,
+          original: { id: 'txn-original', subtransactions: [{ id: 'txn-leg-old' }] },
+          restoredIds: { parentId: 'txn-restored', legIds: ['txn-restored-leg-live'] },
+          retiredRestoredLegIds: ['txn-restored-leg-retired'],
+          rollbackIdMap: {
+            'txn-original': 'txn-restored',
+            'txn-leg-old': 'txn-restored-leg-live',
+            'txn-restored-leg-retired': 'txn-restored-leg-live',
+          },
+          referenceMigration: {
+            direction: 'rollback',
+            idMap: {
+              'txn-original': 'txn-restored',
+              'txn-leg-old': 'txn-restored-leg-live',
+              'txn-restored-leg-retired': 'txn-restored-leg-live',
+            },
+            stats: {},
+            completed: ['receipts'],
+          },
+        },
+      },
+    }),
+    buildAttack: (original) => ({
+      schemaVersion: 1,
+      sagas: {
+        active: {
+          ...original.sagas.active,
+          retiredRestoredLegIds: [],
+        },
+      },
+    }),
+    pattern: /cannot weaken ownership/,
+  },
 ];
 
 for (const scenario of OWNERSHIP_ADVERSARIAL) {
