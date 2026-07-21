@@ -517,6 +517,14 @@ function presentTransactionIds(rows, targetIds) {
   return present;
 }
 
+function temporaryIdentityRows(rows, saga) {
+  const identities = new Set([
+    normalizedValue(saga?.identity?.value),
+    normalizedValue(saga?.restoreIdentity?.value),
+  ].filter(Boolean).map(String));
+  return rows.filter((row) => identities.has(String(normalizedValue(row?.imported_id))));
+}
+
 function isTerminalSaga(saga) {
   return saga?.recordVersion === RECORD_VERSION && TERMINAL_PHASES.has(saga.phase);
 }
@@ -1466,6 +1474,7 @@ function createTransactionReplacementSaga({
         const replacement = rowById(rows, saga.replacementIds?.parentId);
         if (!restored
           || replacement
+          || temporaryIdentityRows(rows, saga).length
           || importedIdentityConflict(rows, saga.original.imported_id, [restored.id])
           || !shapeMatches(restored, saga.original)) {
           return unresolved(saga, 'rollback final-state verification failed', faultInjector);
@@ -1520,6 +1529,7 @@ function createTransactionReplacementSaga({
           const restored = rowById(rows, saga.restoredIds?.parentId);
           if (!restored
             || rowById(rows, saga.replacementIds?.parentId)
+            || temporaryIdentityRows(rows, saga).length
             || importedIdentityConflict(rows, saga.original.imported_id, [restored.id])
             || !shapeMatches(restored, saga.original)) {
             const error = new Error('rollback changed before terminal checkpoint');
@@ -1553,7 +1563,6 @@ function createTransactionReplacementSaga({
 
   function canRollback(saga) {
     return [
-      'replacement_category_repair_pending',
       'replacement_identified',
       'replacement_metadata_pending',
       'replacement_ready',
@@ -1783,6 +1792,7 @@ module.exports = {
   replacementCheckpointFromTransaction,
   shapeMatches,
   shapeMismatchDiff,
+  temporaryIdentityRows,
   transactionFingerprint,
   transactionReplacementMap,
   transactionShape,

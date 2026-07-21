@@ -2263,7 +2263,7 @@ test('bank-import unsplit rejects non-category temporary row drift', async () =>
   assert.equal(activeSaga().phase, 'replacement_add_pending');
 });
 
-test('rollback restores bank-import unsplit rows after category repair checkpoint', async () => {
+test('rollback restores bank-import unsplit split parent after post-identification reference failure', async () => {
   const source = bankImportSplitParent();
   resetStores(source.subtransactions[0].id);
   const api = durableActual({
@@ -2348,4 +2348,143 @@ test('bank-import unsplit with null category repairs normalization to explicit n
   assert.equal(added.category ?? null, null);
   await recoverTransactionSagas(api);
   assert.equal(latestSaga().phase, 'completed');
+});
+
+const RECATEGORIZED_BANK_CATEGORY = 'db2f5c1d-6256-49c5-9e14-8ba222a50411';
+
+function temporaryIdentityRows(api) {
+  return api.state.rows.filter((row) => /^df-(replace|restore):/.test(String(row.imported_id || '')));
+}
+
+function assertSingleTemporaryReplacement(api, source) {
+  assert.equal(api.state.rows.some((row) => row.id === source.id), false, 'original remains deleted');
+  assert.equal(temporaryIdentityRows(api).length, 1, 'exactly one temporary replacement row');
+}
+
+test('category repair pre-identification errors stay forward-recoverable without inline rollback', async (t) => {
+  const adversarialPoints = [
+    'after:replacement-category-repair-checkpoint',
+    'before:replacement-category-category-repair',
+    'after:replacement-category-category-repair',
+    'before:replacement-category-category-reconcile',
+    'after:replacement-category-category-reconcile',
+  ];
+  for (const point of adversarialPoints) {
+    await t.test(point, async () => {
+      const source = bankImportSplitParent();
+      resetStores(source.subtransactions[0].id);
+      const api = durableActual({
+        rows: [source, decoy, unrelated],
+        alternateParentCategoryOnTemporaryAdd: original.category,
+      });
+      const replacement = bankImportUnsplitReplacement(source);
+      const injector = faultSchedule([{ point, mode: 'error' }]);
+      await assert.rejects(
+        replaceActualTransaction(api, {
+          accountId: 'account',
+          original: source,
+          replacement,
+          faultInjector: injector,
+        }),
+      );
+      assert.equal(activeSaga().phase, 'replacement_category_repair_pending');
+      assert.notEqual(activeSaga().phase, 'rollback_requested');
+      assert.notEqual(activeSaga().phase, 'rolled_back');
+      assertSingleTemporaryReplacement(api, source);
+      assert.equal(
+        api.state.rows.filter((row) => String(row.imported_id || '').startsWith('df-replace:')).length,
+        1,
+        'no duplicate temporary replacement rows',
+      );
+      await recoverPastFault(api, injector);
+      assert.equal(latestSaga().phase, 'completed');
+      assert.equal(temporaryIdentityRows(api).length, 0);
+      const persisted = api.state.rows.find((row) => row.id === latestSaga().replacementIds.parentId);
+      assert.equal(persisted.category, replacement.category);
+      assert.equal(persisted.imported_id, original.imported_id);
+      assert.equal(persisted.imported_payee, original.imported_payee);
+    });
+  }
+});
+
+const restoreCategoryRepairBoundaries = [
+  'restore-category-repair-checkpoint',
+  'restore-category-category-repair',
+  'restore-category-category-reconcile',
+];
+
+test('rollback restoration category repair converges across crash boundaries', async (t) => {
+  for (const boundary of restoreCategoryRepairBoundaries) {
+    for (const side of ['before', 'after']) {
+      await t.test(`${side}:${boundary}`, async () => {
+        const recategorized = {
+          ...original,
+          category: RECATEGORIZED_BANK_CATEGORY,
+        };
+        resetStores();
+        const api = durableActual({
+          rows: [recategorized, decoy, unrelated],
+          alternateParentCategoryOnTemporaryAdd: original.category,
+        });
+        const replacement = addableTransaction(recategorized, { notes: 'edited note' });
+        const injector = faultSchedule([
+          { point: 'before:reference-plan-checkpoint', mode: 'error' },
+          { point: `${side}:${boundary}` },
+        ]);
+        await assert.rejects(
+          replaceActualTransaction(api, {
+            accountId: 'account',
+            original: recategorized,
+            replacement,
+            faultInjector: injector,
+          }),
+        );
+        assert.ok(injector.entries.every((entry) => entry.fired));
+        await recoverPastFault(api, injector);
+        assert.equal(latestSaga().phase, 'rolled_back');
+        assert.equal(temporaryIdentityRows(api).length, 0);
+        const restored = api.state.rows.find((row) => row.id.startsWith('actual-'));
+        assert.equal(restored.category, recategorized.category);
+        assert.equal(restored.imported_id, original.imported_id);
+        assert.equal(restored.subtransactions.length, 0);
+      });
+    }
+  }
+});
+
+test('rollback restoration rejects non-category temporary row drift', async () => {
+  const recategorized = {
+    ...original,
+    category: RECATEGORIZED_BANK_CATEGORY,
+  };
+  resetStores();
+  const api = durableActual({
+    rows: [recategorized, decoy, unrelated],
+    alternateParentCategoryOnTemporaryAdd: original.category,
+  });
+  const baseAdd = api.addTransactions.bind(api);
+  api.addTransactions = async (accountId, transactions, options) => {
+    await baseAdd(accountId, transactions, options);
+    const payload = transactions[0];
+    if (String(payload.imported_id || '').startsWith('df-restore:')) {
+      const row = api.state.rows.find((candidate) => String(candidate.imported_id).startsWith('df-restore:'));
+      if (row) row.notes = 'mutated notes during restoration';
+    }
+  };
+  const injector = faultSchedule([{ point: 'before:reference-plan-checkpoint', mode: 'error' }]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: recategorized,
+      replacement: addableTransaction(recategorized, { notes: 'edited note' }),
+      faultInjector: injector,
+    }),
+  );
+  await recoverTransactionSagas(api);
+  await recoverTransactionSagas(api);
+  const saga = activeSaga();
+  assert.ok(saga);
+  assert.notEqual(saga.phase, 'rolled_back');
+  assert.equal(temporaryIdentityRows(api).length, 1);
+  assert.match(saga.lastError?.message || '', /does not match original|did not converge|ambiguous|absent/);
 });
