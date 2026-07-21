@@ -412,6 +412,52 @@ function shapeMatches(actual, expected, importedId = expected?.imported_id) {
   return JSON.stringify(transactionShape(actual)) === JSON.stringify(transactionShape(expected, importedId));
 }
 
+function shapeMismatchDiff(actual, expected, importedId = expected?.imported_id) {
+  const actualShape = transactionShape(actual, importedId);
+  const expectedShape = transactionShape(expected, importedId);
+  for (const field of [
+    'date',
+    'amount',
+    'payee',
+    'notes',
+    'cleared',
+    'imported_id',
+    'imported_payee',
+    'category',
+    'legs',
+  ]) {
+    if (JSON.stringify(actualShape[field]) !== JSON.stringify(expectedShape[field])) {
+      return { field, expected: expectedShape[field], actual: actualShape[field] };
+    }
+  }
+  return null;
+}
+
+function isTemporaryReplacementIdentity(value) {
+  const identity = normalizedValue(value);
+  if (identity == null) return false;
+  const normalized = String(identity);
+  return normalized.startsWith('df-replace:') || normalized.startsWith('df-restore:');
+}
+
+function isNonSplitTransaction(transaction) {
+  const legs = Array.isArray(transaction?.subtransactions) ? transaction.subtransactions : [];
+  return legs.length === 0 && transaction?.is_parent !== true;
+}
+
+function isRepairableTemporaryCategoryMismatch(actual, expected, temporaryIdentity) {
+  if (!isTemporaryReplacementIdentity(temporaryIdentity)) return false;
+  if (normalizedValue(actual?.imported_id) !== normalizedValue(temporaryIdentity)) return false;
+  if (!isNonSplitTransaction(actual) || !isNonSplitTransaction(expected)) return false;
+  const diff = shapeMismatchDiff(actual, expected, temporaryIdentity);
+  return diff?.field === 'category';
+}
+
+function categoryRepairFields(intendedCategory) {
+  const category = normalizedValue(intendedCategory);
+  return { category: category == null ? null : category };
+}
+
 function transactionIds(transaction) {
   if (!transaction?.id) throw new Error('replacement parent has no durable Actual id');
   const legIds = (transaction.subtransactions || []).map((leg) => {
@@ -911,22 +957,7 @@ function createTransactionReplacementSaga({
     return { row };
   }
 
-  async function reconcileReplacementIdentity(api, saga, faultInjector) {
-    const matches = await boundary(faultInjector, 'replacement-reconcile', saga, async () => {
-      const rows = await transactionsFor(api, saga);
-      return rowsByIdentity(rows, saga.identity.value);
-    });
-    if (matches.length !== 1) {
-      return unresolved(
-        saga,
-        matches.length ? 'replacement identity is ambiguous' : 'replacement identity is absent',
-        faultInjector,
-      );
-    }
-    const added = matches[0];
-    if (!shapeMatches(added, saga.replacement, saga.identity.value)) {
-      return unresolved(saga, 'replacement identity content does not match intent', faultInjector);
-    }
+  async function checkpointReplacementIdentified(api, saga, added, faultInjector) {
     const ids = transactionIds(added);
     let idMap;
     try {
@@ -942,6 +973,74 @@ function createTransactionReplacementSaga({
       lastError: null,
     }, 'replacement-id-checkpoint', faultInjector);
     return { transaction: added };
+  }
+
+  async function repairTemporaryCategoryAndConverge(api, saga, faultInjector, {
+    boundaryPrefix,
+    parentId,
+    temporaryIdentity,
+    expected,
+    absentReason,
+    mismatchReason,
+    convergeReason,
+  }) {
+    let rows = await transactionsFor(api, saga);
+    let row = rowById(rows, parentId);
+    if (!row) return unresolved(saga, absentReason, faultInjector);
+    if (shapeMatches(row, expected, temporaryIdentity)) {
+      return { row };
+    }
+    if (!isRepairableTemporaryCategoryMismatch(row, expected, temporaryIdentity)) {
+      return unresolved(saga, mismatchReason, faultInjector);
+    }
+
+    await boundary(faultInjector, `${boundaryPrefix}-category-repair`, saga, () => api.updateTransaction(
+      row.id,
+      categoryRepairFields(expected.category),
+    ));
+
+    for (let attempt = 0; attempt < METADATA_CONVERGE_ATTEMPTS; attempt += 1) {
+      rows = await boundary(faultInjector, `${boundaryPrefix}-category-reconcile`, saga, async () => {
+        if (typeof api.sync === 'function') await api.sync();
+        return transactionsFor(api, saga);
+      });
+      row = rowById(rows, parentId);
+      if (row && shapeMatches(row, expected, temporaryIdentity)) {
+        return { row };
+      }
+    }
+
+    row = rowById(rows, parentId);
+    if (!row || !shapeMatches(row, expected, temporaryIdentity)) {
+      return unresolved(saga, convergeReason, faultInjector);
+    }
+    return { row };
+  }
+
+  async function reconcileReplacementIdentity(api, saga, faultInjector) {
+    const matches = await boundary(faultInjector, 'replacement-reconcile', saga, async () => {
+      const rows = await transactionsFor(api, saga);
+      return rowsByIdentity(rows, saga.identity.value);
+    });
+    if (matches.length !== 1) {
+      return unresolved(
+        saga,
+        matches.length ? 'replacement identity is ambiguous' : 'replacement identity is absent',
+        faultInjector,
+      );
+    }
+    const added = matches[0];
+    if (!shapeMatches(added, saga.replacement, saga.identity.value)) {
+      if (!isRepairableTemporaryCategoryMismatch(added, saga.replacement, saga.identity.value)) {
+        return unresolved(saga, 'replacement identity content does not match intent', faultInjector);
+      }
+      await checkpoint(saga, {
+        phase: 'replacement_category_repair_pending',
+        replacementId: String(added.id),
+      }, 'replacement-category-repair-checkpoint', faultInjector);
+      return {};
+    }
+    return checkpointReplacementIdentified(api, saga, added, faultInjector);
   }
 
   async function driveForward(api, saga, { faultInjector, recovery }) {
@@ -997,6 +1096,37 @@ function createTransactionReplacementSaga({
         }
         const reconciled = await reconcileReplacementIdentity(api, saga, faultInjector);
         if (reconciled.unresolved) return reconciled;
+        continue;
+      }
+
+      if (saga.phase === 'replacement_category_repair_pending') {
+        const rows = await transactionsFor(api, saga);
+        const matches = rowsByIdentity(rows, saga.identity.value);
+        if (matches.length !== 1) {
+          return unresolved(
+            saga,
+            matches.length ? 'replacement identity is ambiguous' : 'replacement identity is absent',
+            faultInjector,
+          );
+        }
+        const added = matches[0];
+        if (!shapeMatches(added, saga.replacement, saga.identity.value)) {
+          const repaired = await repairTemporaryCategoryAndConverge(api, saga, faultInjector, {
+            boundaryPrefix: 'replacement-category',
+            parentId: String(added.id),
+            temporaryIdentity: saga.identity.value,
+            expected: saga.replacement,
+            absentReason: 'replacement identity is absent during category repair',
+            mismatchReason: 'replacement identity content does not match intent',
+            convergeReason: 'replacement category repair did not converge',
+          });
+          if (repaired.unresolved) return repaired;
+          const identified = await checkpointReplacementIdentified(api, saga, repaired.row, faultInjector);
+          if (identified.unresolved) return identified;
+          continue;
+        }
+        const identified = await checkpointReplacementIdentified(api, saga, added, faultInjector);
+        if (identified.unresolved) return identified;
         continue;
       }
 
@@ -1219,7 +1349,49 @@ function createTransactionReplacementSaga({
         }
         const restored = matches[0];
         if (!shapeMatches(restored, saga.original, saga.restoreIdentity.value)) {
-          return unresolved(saga, 'restored identity content does not match original', faultInjector);
+          if (!isRepairableTemporaryCategoryMismatch(restored, saga.original, saga.restoreIdentity.value)) {
+            return unresolved(saga, 'restored identity content does not match original', faultInjector);
+          }
+          await checkpoint(saga, {
+            phase: 'restore_category_repair_pending',
+            recoveryTransactionId: String(restored.id),
+          }, 'restore-category-repair-checkpoint', faultInjector);
+          continue;
+        }
+        const ids = transactionIds(restored);
+        await checkpoint(saga, {
+          phase: 'restored_identified',
+          recoveryTransactionId: ids.parentId,
+          restoredIds: ids,
+          rollbackIdMap: rollbackMapFor(saga, restored),
+          lastError: null,
+        }, 'restored-id-checkpoint', faultInjector);
+        continue;
+      }
+
+      if (saga.phase === 'restore_category_repair_pending') {
+        const rows = await transactionsFor(api, saga);
+        const matches = rowsByIdentity(rows, saga.restoreIdentity.value);
+        if (matches.length !== 1) {
+          return unresolved(
+            saga,
+            matches.length ? 'restoration identity is ambiguous' : 'restoration identity is absent',
+            faultInjector,
+          );
+        }
+        let restored = matches[0];
+        if (!shapeMatches(restored, saga.original, saga.restoreIdentity.value)) {
+          const repaired = await repairTemporaryCategoryAndConverge(api, saga, faultInjector, {
+            boundaryPrefix: 'restore-category',
+            parentId: String(restored.id),
+            temporaryIdentity: saga.restoreIdentity.value,
+            expected: saga.original,
+            absentReason: 'restoration identity is absent during category repair',
+            mismatchReason: 'restored identity content does not match original',
+            convergeReason: 'restored category repair did not converge',
+          });
+          if (repaired.unresolved) return repaired;
+          restored = repaired.row;
         }
         const ids = transactionIds(restored);
         await checkpoint(saga, {
@@ -1381,6 +1553,7 @@ function createTransactionReplacementSaga({
 
   function canRollback(saga) {
     return [
+      'replacement_category_repair_pending',
       'replacement_identified',
       'replacement_metadata_pending',
       'replacement_ready',
@@ -1532,7 +1705,13 @@ function createTransactionReplacementSaga({
         } else if (saga.phase === 'legacy_reconcile_rollback') {
           result = await reconcileLegacyRollback(api, saga, faultInjector);
         } else if (saga.phase.startsWith('rollback_')
-          || ['restored_identified', 'restore_add_pending', 'restore_metadata_pending', 'restored_ready'].includes(saga.phase)) {
+          || [
+            'restored_identified',
+            'restore_add_pending',
+            'restore_category_repair_pending',
+            'restore_metadata_pending',
+            'restored_ready',
+          ].includes(saga.phase)) {
           result = await driveRollback(api, saga, { faultInjector });
         } else {
           result = await driveForward(api, saga, { faultInjector, recovery: true });
@@ -1592,13 +1771,18 @@ module.exports = {
   addableTransaction,
   assertReconstructableTransaction,
   canonicalLegMultiset,
+  categoryRepairFields,
   createTransactionReplacementSaga,
+  isNonSplitTransaction,
+  isRepairableTemporaryCategoryMismatch,
+  isTemporaryReplacementIdentity,
   rollbackReplacementMap,
   forwardReferenceMigrationLocked,
   metadataRestoreFields,
   postMigrationReplacementDriftReason,
   replacementCheckpointFromTransaction,
   shapeMatches,
+  shapeMismatchDiff,
   transactionFingerprint,
   transactionReplacementMap,
   transactionShape,

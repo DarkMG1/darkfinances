@@ -25,6 +25,11 @@ const {
 } = require('../dataModule');
 const {
   shapeMatches,
+  shapeMismatchDiff,
+  categoryRepairFields,
+  isNonSplitTransaction,
+  isRepairableTemporaryCategoryMismatch,
+  isTemporaryReplacementIdentity,
   transactionFingerprint,
   transactionShape,
   rollbackReplacementMap,
@@ -175,6 +180,21 @@ test('shape comparison rejects different leg amounts even when order matches', (
     ],
   };
   assert.equal(shapeMatches(baseline, changed), false);
+});
+
+test('temporary parent-only category mismatch is repairable on df-replace identity', () => {
+  const tempId = 'df-replace:test';
+  const expected = { ...original, category: 'intended-category', imported_id: tempId };
+  const actual = { ...expected, category: 'old-category' };
+  assert.equal(isTemporaryReplacementIdentity(tempId), true);
+  assert.equal(isTemporaryReplacementIdentity('df-restore:test'), true);
+  assert.equal(isTemporaryReplacementIdentity(original.imported_id), false);
+  assert.equal(isRepairableTemporaryCategoryMismatch(actual, expected, tempId), true);
+  assert.deepEqual(shapeMismatchDiff(actual, expected, tempId), {
+    field: 'category',
+    expected: 'intended-category',
+    actual: 'old-category',
+  });
 });
 
 test('shape comparison rejects different leg categories notes or payees', () => {
@@ -539,4 +559,80 @@ test('postMigrationReplacementDriftReason detects stale idMap after reference mi
     postMigrationReplacementDriftReason(saga, transaction),
     /drifted after reference migration started/,
   );
+});
+
+test('isRepairableTemporaryCategoryMismatch accepts parent-only category drift on df-replace rows', () => {
+  const temporaryIdentity = 'df-replace:abc';
+  const expected = {
+    date: '2026-07-09',
+    amount: -1000,
+    payee: 'payee-id',
+    notes: 'parent note',
+    cleared: false,
+    imported_id: temporaryIdentity,
+    imported_payee: 'Original merchant',
+    category: 'requested-category',
+    subtransactions: [],
+  };
+  const actual = {
+    ...expected,
+    category: 'normalized-category',
+  };
+  assert.equal(isTemporaryReplacementIdentity(temporaryIdentity), true);
+  assert.equal(isNonSplitTransaction(actual), true);
+  assert.equal(isNonSplitTransaction(expected), true);
+  assert.deepEqual(shapeMismatchDiff(actual, expected, temporaryIdentity), {
+    field: 'category',
+    expected: 'requested-category',
+    actual: 'normalized-category',
+  });
+  assert.equal(isRepairableTemporaryCategoryMismatch(actual, expected, temporaryIdentity), true);
+});
+
+test('isRepairableTemporaryCategoryMismatch rejects amount date payee notes cleared imported_payee and leg drift', () => {
+  const temporaryIdentity = 'df-replace:abc';
+  const baseline = {
+    date: '2026-07-09',
+    amount: -1000,
+    payee: 'payee-id',
+    notes: 'parent note',
+    cleared: false,
+    imported_id: temporaryIdentity,
+    imported_payee: 'Original merchant',
+    category: 'requested-category',
+    subtransactions: [],
+  };
+  const cases = [
+    [{ ...baseline, amount: -999 }, 'amount'],
+    [{ ...baseline, date: '2026-07-10' }, 'date'],
+    [{ ...baseline, payee: 'other-payee' }, 'payee'],
+    [{ ...baseline, notes: 'other note' }, 'notes'],
+    [{ ...baseline, cleared: true }, 'cleared'],
+    [{ ...baseline, imported_payee: 'Other merchant' }, 'imported_payee'],
+    [{
+      ...baseline,
+      is_parent: true,
+      subtransactions: [{ amount: -1000, category: 'cat-1' }],
+    }, 'legs'],
+  ];
+  for (const [actual] of cases) {
+    assert.equal(isRepairableTemporaryCategoryMismatch(actual, baseline, temporaryIdentity), false);
+  }
+});
+
+test('isRepairableTemporaryCategoryMismatch rejects non-temporary imported identities', () => {
+  const expected = {
+    date: '2026-07-09',
+    amount: -1000,
+    category: 'requested-category',
+    imported_id: 'bank-import-id',
+    subtransactions: [],
+  };
+  const actual = { ...expected, category: 'other-category' };
+  assert.equal(isRepairableTemporaryCategoryMismatch(actual, expected, 'bank-import-id'), false);
+});
+
+test('categoryRepairFields preserves explicit null category', () => {
+  assert.deepEqual(categoryRepairFields(null), { category: null });
+  assert.deepEqual(categoryRepairFields('cat-1'), { category: 'cat-1' });
 });

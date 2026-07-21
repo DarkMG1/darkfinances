@@ -173,6 +173,8 @@ function durableActual({
   deferImportedIdUntilSync = false,
   reverseSplitLegOrderOnSync = false,
   mutateSplitLegIdentityOnMetadataSync = false,
+  alternateParentCategoryOnTemporaryAdd = null,
+  deferCategoryRepairUntilSync = false,
 } = {}) {
   const state = {
     rows: structuredClone(rows),
@@ -188,6 +190,8 @@ function durableActual({
     fired: new Set(),
     counts: { add: 0, delete: 0, update: 0, sync: 0 },
     mutateSplitLegIdentityOnMetadataSync,
+    alternateParentCategoryOnTemporaryAdd,
+    deferCategoryRepairUntilSync,
   };
   const applyMetadataSplitLegMutation = (row) => {
     if (!row.is_parent || !Array.isArray(row.subtransactions) || row.subtransactions.length <= 1) return;
@@ -235,8 +239,14 @@ function durableActual({
         throw addError;
       }
       const id = `actual-${++state.sequence}`;
-      state.rows.push(materializeAdded(transaction, id, accountId));
+      const added = materializeAdded(transaction, id, accountId);
       const importedId = String(transaction.imported_id || '');
+      if (state.alternateParentCategoryOnTemporaryAdd != null
+        && (importedId.startsWith('df-replace:') || importedId.startsWith('df-restore:'))
+        && !(transaction.subtransactions || []).length) {
+        added.category = state.alternateParentCategoryOnTemporaryAdd;
+      }
+      state.rows.push(added);
       if (applyThenThrowReplacement
         && importedId.startsWith('df-replace:')
         && !state.fired.has('replacement-add')) {
@@ -282,6 +292,12 @@ function durableActual({
       if (deferImportedIdUntilSync && Object.prototype.hasOwnProperty.call(patch, 'imported_id')) {
         row._staleImportedId = row.imported_id;
       }
+      if (state.deferCategoryRepairUntilSync
+        && Object.keys(patch).length === 1
+        && Object.prototype.hasOwnProperty.call(patch, 'category')) {
+        row._pendingCategoryRepair = patch.category;
+        return;
+      }
       const metadataRestore = row.is_parent
         && !Array.isArray(patch.subtransactions)
         && Object.prototype.hasOwnProperty.call(patch, 'imported_id');
@@ -297,6 +313,10 @@ function durableActual({
         for (const row of state.rows) delete row._staleImportedId;
       }
       for (const row of state.rows) {
+        if (row._pendingCategoryRepair !== undefined) {
+          row.category = row._pendingCategoryRepair;
+          delete row._pendingCategoryRepair;
+        }
         if (state.mutateSplitLegIdentityOnMetadataSync && row._pendingMetadataSyncMutation) {
           applyMetadataSplitLegMutation(row);
           delete row._pendingMetadataSyncMutation;
@@ -2130,4 +2150,202 @@ test('forward replacement converges across metadata restore checkpoints with leg
       });
     }
   }
+});
+
+function bankImportSplitParent() {
+  return {
+    ...original,
+    id: 'bank-split-parent',
+    category: null,
+    is_parent: true,
+    subtransactions: [
+      {
+        id: 'bank-leg-1',
+        parent_id: 'bank-split-parent',
+        amount: -400,
+        category: 'db2f5c1d-6256-49c5-9e14-8ba222a50411',
+        notes: 'leg one',
+        payee: 'leg-payee-1',
+      },
+      {
+        id: 'bank-leg-2',
+        parent_id: 'bank-split-parent',
+        amount: -600,
+        category: 'cat-2',
+        notes: 'leg two',
+        payee: 'leg-payee-2',
+      },
+    ],
+  };
+}
+
+function bankImportUnsplitReplacement(source = bankImportSplitParent(), categoryId = 'db2f5c1d-6256-49c5-9e14-8ba222a50411') {
+  const replacement = addableTransaction(source, {
+    category: categoryId === null ? null : categoryId,
+    subtransactions: [],
+  });
+  delete replacement.subtransactions;
+  if (categoryId === null) replacement.category = null;
+  return replacement;
+}
+
+test('bank-import unsplit repairs Actual parent category normalization before identity checkpoint', async () => {
+  const source = bankImportSplitParent();
+  resetStores(source.subtransactions[0].id);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    alternateParentCategoryOnTemporaryAdd: original.category,
+  });
+  const replacement = bankImportUnsplitReplacement(source);
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: source,
+    replacement,
+  });
+  assert.equal(added.category, replacement.category);
+  assert.equal(added.imported_id, original.imported_id);
+  assert.equal(added.imported_payee, original.imported_payee);
+  assert.equal(latestSaga().phase, 'sync_pending');
+  assert.ok(api.state.counts.update >= 1, 'category repair uses updateTransaction');
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+  const persisted = api.state.rows.find((row) => row.id === added.id);
+  assert.equal(persisted.category, replacement.category);
+  assert.equal(persisted.imported_id, original.imported_id);
+  assert.equal(persisted.subtransactions.length, 0);
+});
+
+test('bank-import unsplit category repair converges when update lags until sync', async () => {
+  const source = bankImportSplitParent();
+  resetStores(source.subtransactions[0].id);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    alternateParentCategoryOnTemporaryAdd: original.category,
+    deferCategoryRepairUntilSync: true,
+  });
+  const replacement = bankImportUnsplitReplacement(source);
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: source,
+    replacement,
+  });
+  assert.equal(added.category, replacement.category);
+  assert.ok(api.state.counts.sync >= 1);
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
+});
+
+test('bank-import unsplit rejects non-category temporary row drift', async () => {
+  const source = bankImportSplitParent();
+  resetStores(source.subtransactions[0].id);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+  });
+  const baseUpdate = api.updateTransaction.bind(api);
+  api.updateTransaction = async (id, fields) => baseUpdate(id, fields);
+  const baseAdd = api.addTransactions.bind(api);
+  api.addTransactions = async (accountId, transactions, options) => {
+    await baseAdd(accountId, transactions, options);
+    const payload = transactions[0];
+    if (String(payload.imported_id || '').startsWith('df-replace:')) {
+      const row = api.state.rows.find((candidate) => String(candidate.imported_id).startsWith('df-replace:'));
+      if (row) row.notes = 'mutated notes';
+    }
+  };
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement: bankImportUnsplitReplacement(source),
+    }),
+    (error) => error.code === 'TRANSACTION_REPLACEMENT_OUTCOME_UNKNOWN',
+  );
+  assert.equal(activeSaga().phase, 'replacement_add_pending');
+});
+
+test('rollback restores bank-import unsplit rows after category repair checkpoint', async () => {
+  const source = bankImportSplitParent();
+  resetStores(source.subtransactions[0].id);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    alternateParentCategoryOnTemporaryAdd: original.category,
+  });
+  const replacement = bankImportUnsplitReplacement(source);
+  const injector = faultSchedule([{ point: 'before:reference-plan-checkpoint', mode: 'error' }]);
+  await assert.rejects(
+    replaceActualTransaction(api, {
+      accountId: 'account',
+      original: source,
+      replacement,
+      faultInjector: injector,
+    }),
+  );
+  await recoverPastFault(api, injector);
+  assert.equal(latestSaga().phase, 'rolled_back');
+  const restored = api.state.rows.find((row) => row.id.startsWith('actual-') || row.id === source.id);
+  assert.ok(restored);
+  assert.equal(restored.category ?? null, source.category ?? null);
+  assert.equal(restored.subtransactions.length, 2);
+  assertReferencesAreLive(api);
+});
+
+const forwardCategoryRepairBoundaries = [
+  'replacement-category-repair-checkpoint',
+  'replacement-category-category-repair',
+  'replacement-category-category-reconcile',
+];
+
+test('bank-import unsplit forward category repair converges across crash boundaries', async (t) => {
+  for (const boundary of forwardCategoryRepairBoundaries) {
+    for (const side of ['before', 'after']) {
+      await t.test(`${side}:${boundary}`, async () => {
+        const source = bankImportSplitParent();
+        resetStores(source.subtransactions[0].id);
+        const api = durableActual({
+          rows: [source, decoy, unrelated],
+          alternateParentCategoryOnTemporaryAdd: original.category,
+        });
+        const replacement = bankImportUnsplitReplacement(source);
+        const injector = faultSchedule([{ point: `${side}:${boundary}` }]);
+        await assert.rejects(
+          replaceActualTransaction(api, {
+            accountId: 'account',
+            original: source,
+            replacement,
+            faultInjector: injector,
+          }),
+        );
+        assert.ok(injector.entries.every((entry) => entry.fired));
+        await recoverPastFault(api, injector);
+        assert.equal(latestSaga().phase, 'completed');
+        const persisted = api.state.rows.find((row) => row.id.startsWith('actual-'));
+        assert.equal(persisted.category, replacement.category);
+        assert.equal(persisted.imported_id, original.imported_id);
+      });
+    }
+  }
+});
+
+test('bank-import unsplit with null category repairs normalization to explicit null', async () => {
+  const source = {
+    ...bankImportSplitParent(),
+    subtransactions: bankImportSplitParent().subtransactions.map((leg, index) => ({
+      ...leg,
+      category: index === 0 ? 'cat-1' : 'cat-2',
+    })),
+  };
+  resetStores(source.subtransactions[0].id);
+  const api = durableActual({
+    rows: [source, decoy, unrelated],
+    alternateParentCategoryOnTemporaryAdd: original.category,
+  });
+  const replacement = bankImportUnsplitReplacement(source, null);
+  const added = await replaceActualTransaction(api, {
+    accountId: 'account',
+    original: source,
+    replacement,
+  });
+  assert.equal(added.category ?? null, null);
+  await recoverTransactionSagas(api);
+  assert.equal(latestSaga().phase, 'completed');
 });
