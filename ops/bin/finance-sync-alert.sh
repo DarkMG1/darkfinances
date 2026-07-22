@@ -1,9 +1,44 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-NODE_BIN="$(command -v node 2>/dev/null || true)"
+dry_run=0
+unit=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --)
+      echo "finance-sync-alert.sh: unsupported option: --" >&2
+      exit 2
+      ;;
+    -*)
+      echo "finance-sync-alert.sh: unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      if [ -n "$unit" ]; then
+        echo "finance-sync-alert.sh: too many arguments" >&2
+        exit 2
+      fi
+      unit="$1"
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$unit" ]; then
+  unit="actual-sync.service"
+fi
+
+if [ "${ALERT_DRY_RUN:-0}" = "1" ]; then
+  dry_run=1
+fi
+
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/usr/bin:/bin"
-unit="${1:-actual-sync.service}"
+NODE_BIN="$(command -v node 2>/dev/null || true)"
 target="$(
   openclaw cron list --json 2>/dev/null |
     "${NODE_BIN:-node}" -e '
@@ -33,7 +68,7 @@ esac
 
 message="DarkFinances alert: ${unit} failed at $(date '+%Y-%m-%d %H:%M:%S %Z'). ${impact} Check: systemctl --user status ${unit}"
 args=(message send --channel telegram --target "$target" --message "$message")
-if [ "${ALERT_DRY_RUN:-0}" = "1" ]; then
+if [ "$dry_run" = "1" ]; then
   args+=(--dry-run)
 fi
 openclaw "${args[@]}"
