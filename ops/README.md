@@ -389,9 +389,16 @@ install -m 700 ops/bin/finance-sync-alert.sh "$HOME/.local/bin/finance-sync-aler
 install -m 600 ops/systemd/finance-sync-failure@.service \
   "$HOME/.config/systemd/user/finance-sync-failure@.service"
 systemctl --user daemon-reload
+"$HOME/.local/bin/finance-sync-alert.sh" --dry-run actual-sync.service
+"$HOME/.local/bin/finance-sync-alert.sh" --dry-run finance-event-sync.service
+# ALERT_DRY_RUN=1 is equivalent to --dry-run for OpenClaw delivery.
 ALERT_DRY_RUN=1 "$HOME/.local/bin/finance-sync-alert.sh" actual-sync.service
-ALERT_DRY_RUN=1 "$HOME/.local/bin/finance-sync-alert.sh" finance-event-sync.service
 ```
+
+Usage: `finance-sync-alert.sh [--dry-run] [unit]`. `--dry-run` may appear before or after the unit
+name; unknown options, bare `--`, and extra positional arguments exit `2` before target discovery or
+send. Systemd unit names are plain service identifiers (no option-like tokens). Default unit is
+`actual-sync.service` (systemd `%i` still passes the failing unit on real alerts).
 
 The dry run still requires OpenClaw and a discoverable destination. If you do not use OpenClaw,
 replace `finance-sync-alert.sh` with your alert provider or remove `OnFailure` from the sync service.
