@@ -39,7 +39,7 @@
     "check:parity": "node --test test/finance-date-parity.test.js",
     "check:release": "node scripts/release-manifest.js --stdout >/dev/null",
     "check:shell": "bash scripts/check-shell.sh",
-    "check:systemd": "for unit in ops/systemd/*.service ops/systemd/*.timer; do systemd-analyze --user verify \"$unit\"; done",
+    "check:systemd": "node scripts/check-systemd.js",
     "check:shutdown-stress": "FINANCE_QUERY_SHUTDOWN_STRESS=1 NODE_ENV=test ALLOW_RAW_ACTUAL_API=1 node --test finance-dashboard/test/query-scaling-shutdown-stress.test.js",
     "check:compose": "docker compose -f ops/actual-compose.yml config >/dev/null",
     "check:expo": "npm --prefix finance-app exec expo-doctor",

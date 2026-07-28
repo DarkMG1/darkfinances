@@ -43,9 +43,13 @@ test('downloadVerifiedTarball rejects hash mismatch', async () => {
   );
 });
 
-test('downloadVerifiedTarball rejects redirect off allowlisted registry host', async () => {
+test('downloadVerifiedTarball rejects redirect off allowlisted registry host', async (t) => {
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-bootstrap-redirect-'));
+  t.after(() => fs.rmSync(cacheDir, { recursive: true, force: true }));
   await assert.rejects(
     () => downloadVerifiedTarball(contract, {
+      cacheDir,
+      forceDownload: true,
       fetchImpl: async (url, options) => {
         if (options?.redirect === 'manual') {
           return {
@@ -61,9 +65,13 @@ test('downloadVerifiedTarball rejects redirect off allowlisted registry host', a
   );
 });
 
-test('downloadVerifiedTarball rejects oversized downloads', async () => {
+test('downloadVerifiedTarball rejects oversized downloads', async (t) => {
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-bootstrap-oversize-'));
+  t.after(() => fs.rmSync(cacheDir, { recursive: true, force: true }));
   await assert.rejects(
     () => downloadVerifiedTarball(contract, {
+      cacheDir,
+      forceDownload: true,
       maxBytes: 8,
       fetchImpl: async () => ({
         ok: true,

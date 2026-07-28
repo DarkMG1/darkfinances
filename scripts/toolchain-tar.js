@@ -6,6 +6,7 @@ const { spawnSync } = require('child_process');
 const { normalizeMember } = require('./toolchain-extract-tar');
 
 const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
+const TAR_ENTRY_TYPES = new Set(['-', 'd', 'l', 'h', 'b', 'c', 'p', 's']);
 
 function fail(message) {
   throw new Error(message);
@@ -20,23 +21,35 @@ function findVerboseLine(lines, memberName) {
 }
 
 function parseVerboseTarLine(line) {
-  const symlinkMatch = line.match(/\s(\S+) -> (\S+)$/);
-  if (symlinkMatch) {
-    return {
-      type: 'L',
-      size: 0,
-      name: symlinkMatch[1].replace(/^\.\//, ''),
-    };
+  if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(line)) {
+    fail('unsafe tar verbose line: control characters are forbidden');
   }
-  const nameMatch = line.match(/\s(\S+)$/);
-  if (!nameMatch) fail(`unable to parse tar verbose line: ${line}`);
-  const name = nameMatch[1].replace(/^\.\//, '');
-  const beforeName = line.slice(0, line.length - nameMatch[1].length);
-  const sizeMatch = beforeName.match(/(\d+)\s+[A-Za-z]{3}\s+\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})\s*$/);
+  const trimmed = line.replace(/\r$/, '');
+  const type = trimmed[0];
+  if (!TAR_ENTRY_TYPES.has(type) || trimmed.length < 10) {
+    fail(`unable to parse tar verbose line: ${line}`);
+  }
+  if (!/^[rwx-]{9}$/.test(trimmed.slice(1, 10))) {
+    fail(`unable to parse tar verbose permissions: ${line}`);
+  }
+
+  const rest = trimmed.slice(10).trimStart();
+  const datePath = rest.match(/^([\s\S]+?) \d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})? ([\s\S]+)$/)
+    || rest.match(/^([\s\S]+?) [A-Za-z]{3} +\d{1,2} +(?:\d{2}:\d{2}|\d{4}) ([\s\S]+)$/);
+  if (!datePath) fail(`unable to parse tar verbose date/path: ${line}`);
+
+  const sizeTokens = datePath[1].trim().split(/\s+/);
+  const sizeToken = [...sizeTokens].reverse().find((token) => /^\d+$/.test(token));
+  if (!sizeToken) fail(`unable to parse tar verbose size: ${line}`);
+  let name = datePath[2];
+  if (type === 'l' && name.includes(' -> ')) name = name.slice(0, name.indexOf(' -> '));
+  if (type === 'h' && name.includes(' link to ')) name = name.slice(0, name.indexOf(' link to '));
+  if (!name || /[\x00-\x1f\x7f]/.test(name)) fail(`unsafe tar verbose path: ${line}`);
+
   return {
-    type: line[0],
-    size: sizeMatch ? Number(sizeMatch[1]) : 0,
-    name,
+    type,
+    size: Number(sizeToken),
+    name: name.replace(/^\.\//, ''),
   };
 }
 
@@ -69,8 +82,8 @@ function listTarArchive(archivePath, limits) {
     if (parsed.name !== member && parsed.name !== normalized) {
       fail(`tar verbose name mismatch for ${member}`);
     }
-    if (parsed.type === 'l') fail(`tar archive contains hard link member: ${normalized}`);
-    if (parsed.type === 'L' || parsed.type === 'K') fail(`tar archive contains symlink member: ${normalized}`);
+    if (parsed.type === 'h') fail(`tar archive contains hard link member: ${normalized}`);
+    if (parsed.type === 'l') fail(`tar archive contains symlink member: ${normalized}`);
     if (parsed.type === 'd' || member.endsWith('/')) {
       entries.push({ name: normalized, kind: 'directory', size: 0 });
       continue;

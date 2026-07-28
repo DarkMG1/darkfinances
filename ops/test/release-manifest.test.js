@@ -141,14 +141,6 @@ function createFixtureRepository() {
     path.join(REPOSITORY_ROOT, 'ops/toolchain/eas-cli-runtime-closure.json'),
     path.join(root, 'ops/toolchain/eas-cli-runtime-closure.json'),
   );
-  fs.mkdirSync(path.join(root, 'ops/publisher-toolchain/node_modules'), { recursive: true });
-  fs.cpSync(
-    path.join(REPOSITORY_ROOT, 'ops/publisher-toolchain/node_modules/eas-cli'),
-    path.join(root, 'ops/publisher-toolchain/node_modules/eas-cli'),
-    { recursive: true },
-  );
-  const nestedEasModules = path.join(root, 'ops/publisher-toolchain/node_modules/eas-cli/node_modules');
-  if (fs.existsSync(nestedEasModules)) fs.rmSync(nestedEasModules, { recursive: true, force: true });
   fs.copyFileSync(
     path.join(REPOSITORY_ROOT, 'ops/publisher-toolchain/package-lock.json'),
     path.join(root, 'ops/publisher-toolchain/package-lock.json'),

@@ -4,8 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
 const { loadWriterInventory, enumerateWriters } = require('../lib/writer-inventory');
+const { checkSystemdUnits } = require('../../scripts/check-systemd');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const systemdDir = path.join(repoRoot, 'ops/systemd');
@@ -178,16 +178,13 @@ test('finance-sync-failure@.service uses private umask for alert bridge', () => 
 });
 
 test('checked-in systemd units pass systemd-analyze verify when available', (t) => {
-  if (spawnSync('command', ['-v', 'systemd-analyze'], { shell: true, encoding: 'utf8' }).status !== 0) {
-    t.skip('systemd-analyze not installed');
+  const result = checkSystemdUnits();
+  if (result.skipped) {
+    t.skip(result.reason);
     return;
   }
-
-  for (const unitName of fs.readdirSync(systemdDir).sort()) {
-    const unitPath = path.join(systemdDir, unitName);
-    const result = spawnSync('systemd-analyze', ['--user', 'verify', unitPath], {
-      encoding: 'utf8',
-    });
-    assert.equal(result.status, 0, `${unitName}: ${result.stderr || result.stdout}`);
-  }
+  const expectedUnitCount = fs.readdirSync(systemdDir)
+    .filter((name) => name.endsWith('.service') || name.endsWith('.timer'))
+    .length;
+  assert.equal(result.unitCount, expectedUnitCount);
 });

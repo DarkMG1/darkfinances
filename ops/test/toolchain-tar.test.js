@@ -6,7 +6,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { extractTarMemberToFile, listTarArchive } = require('../../scripts/toolchain-tar');
+const {
+  extractTarMemberToFile,
+  listTarArchive,
+  parseVerboseTarLine,
+} = require('../../scripts/toolchain-tar');
 
 const LIMITS = {
   maxMemberCount: 16,
@@ -17,6 +21,34 @@ const LIMITS = {
 function runTar(args, cwd) {
   return spawnSync('tar', args, { cwd, encoding: 'utf8' });
 }
+
+test('parseVerboseTarLine accepts GNU and BSD date formats', () => {
+  assert.deepEqual(
+    parseVerboseTarLine(
+      '-rwxr-xr-x runner/docker     18 2026-07-28 06:00 shellcheck-v0.0.0/shellcheck',
+    ),
+    { type: '-', size: 18, name: 'shellcheck-v0.0.0/shellcheck' },
+  );
+  assert.deepEqual(
+    parseVerboseTarLine(
+      '-rwxr-xr-x  0 chiragbhat wheel      18 Jul 27 23:12 shellcheck-v0.0.0/shellcheck',
+    ),
+    { type: '-', size: 18, name: 'shellcheck-v0.0.0/shellcheck' },
+  );
+  assert.deepEqual(
+    parseVerboseTarLine(
+      '-rw-r--r--  0 chiragbhat wheel      18 Jul 17  2024 path with spaces.txt',
+    ),
+    { type: '-', size: 18, name: 'path with spaces.txt' },
+  );
+});
+
+test('parseVerboseTarLine fails closed on unparseable regular-file size', () => {
+  assert.throws(
+    () => parseVerboseTarLine('-rw-r--r-- owner/group ??? 2026-07-28 06:00 member.txt'),
+    /unable to parse tar verbose size/,
+  );
+});
 
 test('listTarArchive rejects symlink members', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'toolchain-tar-'));

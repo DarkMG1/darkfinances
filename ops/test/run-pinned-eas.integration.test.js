@@ -52,6 +52,16 @@ function copyRuntimeClosureContract(root) {
   );
 }
 
+function writeMinimalEasPackage(targetRoot) {
+  fs.mkdirSync(path.join(targetRoot, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(targetRoot, 'package.json'), JSON.stringify({
+    name: 'eas-cli',
+    version: '21.3.0',
+    bin: { eas: 'bin/run' },
+  }));
+  fs.writeFileSync(path.join(targetRoot, 'bin/run'), '#!/usr/bin/env node\n', { mode: 0o755 });
+}
+
 function writeEasFixture(root, { local = true, hoisted = false } = {}) {
   const appDir = path.join(root, 'finance-app');
   const publisherDir = path.join(root, 'ops/publisher-toolchain');
@@ -74,15 +84,9 @@ function writeEasFixture(root, { local = true, hoisted = false } = {}) {
     },
   };
   writeMinimalRuntimeContract(root, lockBody);
-  const copyFrom = path.join(repositoryRoot, 'ops/publisher-toolchain/node_modules/eas-cli');
-  function copyPackage(targetRoot) {
-    fs.cpSync(copyFrom, targetRoot, { recursive: true });
-    const nested = path.join(targetRoot, 'node_modules');
-    if (fs.existsSync(nested)) fs.rmSync(nested, { recursive: true, force: true });
-  }
 
-  if (local) copyPackage(path.join(publisherDir, 'node_modules', 'eas-cli'));
-  if (hoisted) copyPackage(path.join(root, 'node_modules', 'eas-cli'));
+  if (local) writeMinimalEasPackage(path.join(publisherDir, 'node_modules', 'eas-cli'));
+  if (hoisted) writeMinimalEasPackage(path.join(root, 'node_modules', 'eas-cli'));
 }
 
 test('runPinnedEas subprocess streams stdout/stderr/stdin and propagates exit code', () => {
