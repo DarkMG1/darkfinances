@@ -39,7 +39,7 @@ export function NotificationRouter() {
     if (!notificationsActive) return;
     const open = (data: unknown) => {
       const payload = parseNotificationRoute(data);
-      if (!payload || payload.scope !== scope || !payload.route.startsWith('/')) return;
+      if (!payload || payload.scope !== scope) return;
       if (handledGenerationRef.current === profileGeneration) return;
       handledGenerationRef.current = profileGeneration;
       router.push(payload.route as never);

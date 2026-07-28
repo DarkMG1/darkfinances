@@ -40,6 +40,7 @@ import { resolveTransactionDateAttempt } from '@/lib/mutation-transaction-date-a
 import { haptics } from '@/lib/haptics';
 import { formatAllocationDollars, parseStrictAllocationDollars } from '@/lib/allocation-parse';
 import { CapturedReceipt, pickReceiptFromLibrary, scanReceiptFromCamera } from '@/lib/receipts';
+import { RECEIPT_IMAGE_CACHE_POLICY } from '@/lib/receipt-image-cache';
 import { categoryIcon } from '@/theme/categoryIcons';
 import { cadenceLabel, colors, dueLabel, fmtDay, fmtMoney, fmtPos, monthLabel, NoteTag, parseNoteTags, tagKind, toTagToken } from '@/theme/colors';
 import { useFinanceToday } from '@/lib/date-only';
@@ -1047,7 +1048,7 @@ export default function TransactionDetail() {
         <View style={styles.receiptRow}>
           {receiptList.map((r) => (
             <Pressable testID={`transaction-receipt-${r.id}`} key={r.id} onPress={() => openReceiptViewer(r.id)} disabled={receiptViewerLocked} style={({ pressed }) => [styles.thumb, pressed && { opacity: 0.7 }, receiptViewerLocked && { opacity: 0.5 }]}>
-              <Image source={receiptSource(r.id)} style={styles.thumbImg} contentFit="cover" transition={120} cachePolicy="memory-disk" />
+              <Image source={receiptSource(r.id)} style={styles.thumbImg} contentFit="cover" transition={120} cachePolicy={RECEIPT_IMAGE_CACHE_POLICY} />
               {r.amount != null ? <Text style={styles.thumbAmt}>{fmtPos(r.amount)}</Text> : null}
             </Pressable>
           ))}
@@ -1350,7 +1351,7 @@ export default function TransactionDetail() {
             <Text style={[styles.viewerCloseText, receiptViewerLocked && { opacity: 0.4 }]}>Done</Text>
           </Pressable>
           {viewerId ? (
-            <Image source={receiptSource(viewerId)} style={styles.viewerImg} contentFit="contain" transition={150} cachePolicy="memory-disk" />
+            <Image source={receiptSource(viewerId)} style={styles.viewerImg} contentFit="contain" transition={150} cachePolicy={RECEIPT_IMAGE_CACHE_POLICY} />
           ) : null}
           {(() => {
             const r = receiptList.find((x) => x.id === viewerId);

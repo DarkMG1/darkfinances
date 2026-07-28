@@ -84,11 +84,13 @@ bash run.sh owes-snapshot.js
 
 The runner:
 
-1. Sources `.actual.env` and optional `.splitwise.env`.
-2. Requires an explicit script filename that exists in this directory.
-3. Resolves and validates `FIX_DATA_DIR`.
+1. Validates the requested script is a direct child of this directory (no traversal, symlinks, or options).
+2. Reads and validates `FIX_DATA_DIR` from `.actual.env` without loading secret-bearing variables.
+3. Sources `.actual.env` and optional `.splitwise.env` only after those checks succeed.
 4. Recreates the already-owned cache with private permissions.
-5. Runs Node with `pipefail`, preserving tool failures through output filtering.
+5. Re-validates the script immediately before execution, then runs Node with `pipefail`, preserving tool failures through output filtering.
+
+Python 3 is required for canonical path checks in `run.sh` (script allowlisting and disposable cache roots).
 
 Run commands from this directory unless an example includes an absolute path.
 
@@ -133,6 +135,13 @@ node sw-pairwise.js "Trip name"
 - `sw-pairwise.js` provides direct pairwise diagnostics.
 - Splitwise API requests use timeouts, bounded retries, and backoff.
 - Group-name resolution fails on no match or ambiguity; it does not guess.
+- HTTP failures surface as `SplitwiseRequestError` with endpoint, status, and allowlisted
+  machine codes only. Response bodies, names, IDs, and tokens are never included in thrown or
+  logged errors by default. Optional debug body capture requires
+  `SPLITWISE_DEBUG_RESPONSE_BODY=1` and remains non-enumerable on the error object.
+- Error-body parsing reads at most `SPLITWISE_ERROR_BODY_BYTES` (clamped to 64–4096; default 512).
+  Retryable 5xx/429 bodies are cancelled before backoff; terminal failures still become structured
+  safe errors.
 
 These diagnostics are read-only against Splitwise.
 
@@ -214,6 +223,17 @@ CONFIRM=1 bash run.sh build-rules.js
 
 The tool requires at least two categorized observations and at least 80% agreement. Customize exclusions
 in private `build-rules-config.json`.
+
+Operator regex configuration (`build-rules-config.json` skip patterns and
+`collection-rules.json` debtor patterns) is validated before any Actual or Splitwise calls:
+
+- Pattern count, per-pattern length, aggregate length, syntax, allowed flags (`i` only), and
+  catastrophic-backtracking safety (`safe-regex2`).
+- Zero-width or universal matchers that match empty input (for example `.*`, `|`, `(?:)`) are rejected.
+- `skipNames` entries are bounded by count, per-entry length, and aggregate length.
+
+Invalid operator regex configuration fails fast with stable `OPERATOR_REGEX_CONFIG_INVALID` errors and
+does not silently skip patterns.
 
 ### Event repayment collection
 

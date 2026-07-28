@@ -2,10 +2,18 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { DASHBOARD_RUNTIME_FILES } = require('./release-files');
+const { isProductionRuntime } = require('./finance-runtime-config');
 const {
   isPlainObject,
   validateManifestEnvelope,
 } = require('./release-schema');
+const {
+  isProductionMode,
+  readTrustedManifestFile,
+  requireKeyringPath,
+  resolveSigningPaths,
+  verifySignedManifest,
+} = require('./release-signing');
 
 const HASH_CHUNK_BYTES = 64 * 1024;
 
@@ -51,7 +59,10 @@ function hashRuntimeFile(runtimeDir, logicalPath, dependencies = {}) {
     throw new Error('deployed file escapes dashboard runtime directory');
   }
 
-  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  const noFollow = fs.constants.O_NOFOLLOW;
+  if (!noFollow) {
+    throw new Error('deployed file hashing requires O_NOFOLLOW support on this platform');
+  }
   const nonBlock = fs.constants.O_NONBLOCK || 0;
   const readSync = dependencies.readSync || fs.readSync;
   let descriptor;
@@ -185,20 +196,44 @@ function verifyDeployedFiles(content, runtimeDir, dependencies = {}) {
   return true;
 }
 
+function verifyManifestSignature(manifest, manifestPath, dependencies = {}) {
+  const mode = manifest.content?.mode;
+  if (!isProductionMode(mode)) return true;
+  if (!manifestPath) {
+    throw new Error('production release identity requires manifest path for signature verification');
+  }
+  const env = dependencies.env || process.env;
+  const keyringPath = requireKeyringPath(
+    resolveSigningPaths(dependencies, env).keyringPath,
+    'production release identity verification',
+  );
+  verifySignedManifest(manifest, manifestPath, keyringPath, dependencies);
+  return true;
+}
+
 function releaseIdentityFromManifest(manifest, options = {}) {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return null;
+  const env = options.env || process.env;
+  const productionRuntime = isProductionRuntime(env);
+  const allowLegacy = options.allowLegacyIdentity === true && !productionRuntime;
+
   let content;
   let schemaV2 = false;
   if (manifest.schemaVersion === 2) {
     if (!isPlainObject(manifest.content) || !hasValidContentDigest(manifest)) return null;
     content = manifest.content;
+    if (productionRuntime && content.mode !== 'dashboard') return null;
     try {
+      if (options.manifestPath || isProductionMode(content.mode)) {
+        verifyManifestSignature(manifest, options.manifestPath, options);
+      }
       verifyDeployedFiles(content, options.runtimeDir, options);
     } catch {
       return null;
     }
     schemaV2 = true;
   } else if (manifest.schemaVersion === 1) {
+    if (productionRuntime && !allowLegacy) return null;
     content = manifest;
   } else {
     return null;
@@ -220,10 +255,16 @@ function releaseIdentityFromManifest(manifest, options = {}) {
 
 function readReleaseIdentity(manifestPath, runtimeDir, dependencies = {}) {
   try {
-    const readFile = dependencies.readFile || fs.readFileSync;
+    let manifest;
+    if (dependencies.readFile) {
+      manifest = JSON.parse(dependencies.readFile(manifestPath, 'utf8'));
+    } else {
+      const { buffer } = readTrustedManifestFile(manifestPath, { label: 'release manifest' });
+      manifest = JSON.parse(buffer.toString('utf8'));
+    }
     return releaseIdentityFromManifest(
-      JSON.parse(readFile(manifestPath, 'utf8')),
-      { ...dependencies, runtimeDir },
+      manifest,
+      { ...dependencies, runtimeDir, manifestPath },
     );
   } catch {
     return null;
@@ -236,4 +277,5 @@ module.exports = {
   readReleaseIdentity,
   releaseIdentityFromManifest,
   verifyDeployedFiles,
+  verifyManifestSignature,
 };

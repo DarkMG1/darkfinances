@@ -3,6 +3,7 @@
 // so the dashboard / app can be shown to other people safely. Dates are computed
 // relative to "today" on each call so the demo always looks current.
 
+const { validateManualAssetsStore, manualAssetsRevision } = require('./lib/manual-assets-projection');
 const { metricValue } = require('./lib/metric-provenance');
 const { safeToSpendIncompleteReasons } = require('./lib/safe-to-spend');
 const {
@@ -249,7 +250,7 @@ function today() {
     operatingAccounts: cash,
     budgets: { supported: false },
     recurring: recurringData,
-    spendingCompleteness: currentSpending.current?.completeness,
+    spendingCompleteness: currentSpending.completeness,
     obligationGraph: graph,
     liabilityPolicies: graphInputs.liabilityPolicies,
   });
@@ -288,20 +289,22 @@ function today() {
     financeDate,
     metric: 'net_worth',
   });
+  const manualAssetsRev = manualAssetsRevision(validateManualAssetsStore({ items: manualAssetTotals.items }));
   return {
     asOf,
     financeDate,
-    revision: `demo-${currentMonth()}-${netWorthProjection.revision}`,
-    complete: safeToSpend.complete && currentSpending.current?.completeness?.complete !== false,
+    revision: `demo-${currentMonth()}-${netWorthProjection.revision}-${manualAssetsRev}`,
+    complete: safeToSpend.complete && currentSpending.completeness?.complete === true,
     incompleteReasons: [...new Set([
       ...safeToSpend.incompleteReasons,
-      ...(currentSpending.current?.completeness?.complete === false ? currentSpending.current.completeness.incompleteReasons : []),
+      ...(currentSpending.completeness?.complete === false ? currentSpending.completeness.incompleteReasons : []),
     ])],
     health: { ready: true, initializedAt: asOf, lastSyncAt: asOf, lastErrorAt: null, lastError: null },
     accounts: allAccounts,
     metrics: { netWorth, liquidCash, operatingCash },
     scope: {
       accountProjectionRevision: netWorthProjection.revision,
+      manualAssetsRevision: manualAssetsRev,
       netWorthIncludedAccountIds: [...netWorthProjection.includedIds],
       netWorthIncludesManualAssets: true,
       netWorthHistoryScope: 'live_balances',
@@ -471,7 +474,8 @@ function spending(opts = {}) {
     current,
     prev: previous,
     month: key || start.slice(0, 7),
-    completeness: mergeProjectionCompleteness([current.completeness, previous.completeness]),
+    completeness: current.completeness,
+    comparisonCompleteness: mergeProjectionCompleteness([current.completeness, previous.completeness]),
   };
 }
 

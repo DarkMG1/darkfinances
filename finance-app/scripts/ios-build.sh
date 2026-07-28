@@ -71,6 +71,7 @@ node "$REPO_ROOT/scripts/release-manifest.js" \
   --expected-source-digest="$expected_source_digest" \
   --artifact="$IPA_PATH" \
   "$MANIFEST_PATH"
+node "$REPO_ROOT/scripts/release-manifest.js" --verify="$MANIFEST_PATH"
 
 echo ""
 echo "Done. Unsigned IPA -> $IPA_PATH"

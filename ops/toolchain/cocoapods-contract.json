@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "package": "cocoapods",
+  "version": "1.17.0",
+  "platform": "macos",
+  "command": "pod",
+  "versionFlag": "--version",
+  "provenance": "https://rubygems.org/gems/cocoapods/versions/1.17.0",
+  "policy": {
+    "mode": "verify-only",
+    "autoInstall": false,
+    "ciPlatform": "macos",
+    "rationale": "Expo prebuild invokes pod install; CI verifies the pinned CLI without committing Podfile.lock or generated ios/ trees.",
+    "runnerImage": {
+      "label": "macos-15",
+      "verifiedBaselines": [
+        "actions/runner-images macos-15/20260715.0340",
+        "actions/runner-images macos-15/20260720.0353"
+      ],
+      "driftBehavior": "Mutable GitHub runner-image CocoaPods upgrades intentionally fail closed until this contract version is reviewed and updated."
+    }
+  }
+}

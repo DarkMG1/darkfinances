@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { AppError, RequestValidationError } = require('../lib/errors');
+const { AppError, KnownPreApplyError, ReceiptDuplicateError, RequestValidationError } = require('../lib/errors');
 const { writeJsonFile } = require('../lib/json-store');
 const {
   OperationJournal,
@@ -137,6 +137,27 @@ test('failure immediately after local mutation remains started and blocks retry'
   });
   await expectCode(run(), 'OUTCOME_UNKNOWN');
   assert.equal(journal.get('after-mutation-01').phase, 'started');
+  await expectCode(run(), 'OUTCOME_UNKNOWN');
+  assert.equal(mutations, 1);
+});
+
+test('KnownPreApplyError after partial durable mutation remains outcome-unknown', async (t) => {
+  const { journal } = fixture(t);
+  let mutations = 0;
+  const state = { effectRecorded: false };
+  const run = () => executeJournaledOperation({
+    journal,
+    key: 'partial-preapply-01',
+    request: request(),
+    handler: (operation) => operation.applyLocal(async () => {
+      mutations += 1;
+      state.effectRecorded = true;
+      throw new ReceiptDuplicateError();
+    }),
+  });
+  await expectCode(run(), 'OUTCOME_UNKNOWN');
+  assert.equal(journal.get('partial-preapply-01').phase, 'started');
+  assert.equal(state.effectRecorded, true);
   await expectCode(run(), 'OUTCOME_UNKNOWN');
   assert.equal(mutations, 1);
 });

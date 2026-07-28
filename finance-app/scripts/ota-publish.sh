@@ -7,8 +7,8 @@
 # (app.json -> runtimeVersion.policy = "appVersion") is unchanged.
 #
 # One-time setup (needs a free Expo account):
-#   npx eas-cli@latest login
-#   npx eas-cli@latest update:configure      # writes updates.url + extra.eas.projectId into app.json
+#   node scripts/run-pinned-eas.js login
+#   node scripts/run-pinned-eas.js update:configure      # writes updates.url + extra.eas.projectId into app.json
 #   # then rebuild + sideload one IPA so the native side knows the update URL.
 #
 # Usage:
@@ -76,8 +76,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+echo "==> Verifying pinned eas-cli publisher toolchain"
+node -e "const { verifyPublisherToolchain } = require('$REPO_ROOT/finance-dashboard/lib/publisher-toolchain'); console.log(JSON.stringify(verifyPublisherToolchain('$REPO_ROOT', { verifyInstalled: true })));"
+
 echo "==> Publishing OTA update to stable branch '$BRANCH' (channel '$CHANNEL', env '$ENVIRONMENT')"
-npx eas-cli@latest update \
+node "$ROOT/scripts/run-pinned-eas.js" update \
   --branch "$BRANCH" \
   --message "$MESSAGE" \
   --environment "$ENVIRONMENT" \

@@ -13,6 +13,17 @@ const {
 } = require('../../finance-dashboard/lib/operation-journal');
 const { runtimeArtifactId, runtimeEntriesFromManifest } = require('./backup-bundle-manifest');
 const {
+  isProductionMode,
+  readTrustedManifestFile,
+  requireKeyringPath,
+  resolveSigningPaths,
+  verifySignedManifest,
+} = require('../../finance-dashboard/lib/release-signing');
+const {
+  MAX_ACTUAL_GENERATION_EVIDENCE_BYTES,
+  readTrustedRegularFile,
+} = require('../../finance-dashboard/lib/trusted-regular-file-read');
+const {
   inventoryDigest,
   loadBackupStateInventory,
   isExcludedRuntimeBasename,
@@ -274,14 +285,35 @@ function readDestinationGenerationEvidence(options = {}) {
   let actualDataGeneration = options.actualDataGeneration ?? null;
 
   if (releaseManifestPath && fs.existsSync(releaseManifestPath)) {
-    const manifest = JSON.parse(fs.readFileSync(releaseManifestPath, 'utf8'));
-    releaseManifestDigest = manifest.contentDigest
+    const { buffer } = readTrustedManifestFile(releaseManifestPath, {
+      label: 'restore generation release manifest',
+    });
+    let manifest;
+    try {
+      manifest = JSON.parse(buffer.toString('utf8'));
+    } catch (error) {
+      throw new Error(`restore generation release manifest is not valid JSON: ${error.message}`);
+    }
+    const mode = manifest.content?.mode;
+    if (isProductionMode(mode)) {
+      const keyringPath = requireKeyringPath(
+        resolveSigningPaths({}, options.env || process.env).keyringPath,
+        'restore generation binding release verification',
+      );
+      verifySignedManifest(manifest, releaseManifestPath, keyringPath, options);
+    }
+    releaseManifestDigest = manifest.contentDigest?.value
       || manifest.content?.contentDigest
       || manifest.digest
       || releaseManifestDigest;
   }
   if (actualGenerationPath && fs.existsSync(actualGenerationPath)) {
-    actualDataGeneration = fs.readFileSync(actualGenerationPath, 'utf8').trim().split(/\s+/)[0]
+    const { buffer } = readTrustedRegularFile(actualGenerationPath, {
+      label: 'actual data generation evidence',
+      maxBytes: MAX_ACTUAL_GENERATION_EVIDENCE_BYTES,
+      allowedModes: [0o600, 0o644],
+    });
+    actualDataGeneration = buffer.toString('utf8').trim().split(/\s+/)[0]
       || actualDataGeneration;
   }
   return { releaseManifestDigest, actualDataGeneration };

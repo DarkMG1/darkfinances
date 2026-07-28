@@ -2,6 +2,7 @@
 'use strict';
 
 const path = require('path');
+const { parseStagedRestoreCliArgs } = require('./staged-restore-cli-args');
 
 function loadStagedRestore() {
   const libDir = path.basename(path.dirname(__filename)) === 'bin'
@@ -14,39 +15,31 @@ function usage() {
   console.error('Usage: restore-dashboard-runtime.js [--dry-run|--confirm] <bundle.tgz>');
   console.error('Environment:');
   console.error('  FINANCE_DASHBOARD_DIR            destination runtime directory');
-  console.error('  RESTORE_QUIESCENCE_ADMISSION_PATH path to PR-18 admission token JSON');
-  console.error('  RESTORE_QUIESCENCE_ADMISSION_TOKEN inline admission token JSON');
+  console.error('  RESTORE_QUIESCENCE_ADMISSION_PATH path to PR-18 admission token JSON (0600, trusted roots)');
   process.exit(2);
 }
 
-const args = process.argv.slice(2);
-let dryRun = true;
-let archivePath = null;
-
-for (const arg of args) {
-  if (arg === '--dry-run') dryRun = true;
-  else if (arg === '--confirm') dryRun = false;
-  else if (arg === '--help' || arg === '-h') usage();
-  else if (!archivePath) archivePath = arg;
-  else usage();
+let parsed;
+try {
+  parsed = parseStagedRestoreCliArgs(process.argv.slice(2), process.env);
+} catch (error) {
+  console.error(`restore failed: ${error.message}`);
+  process.exit(2);
 }
 
-if (!archivePath) usage();
+if (parsed.help) usage();
+if (!parsed.archivePath) usage();
 
 const destinationRoot = process.env.FINANCE_DASHBOARD_DIR
   || path.join(process.env.HOME || '/tmp', 'finance-dashboard');
 
-if (process.env.CONFIRM === '1') {
-  dryRun = false;
-}
-
 try {
   const { runStagedRestore } = loadStagedRestore();
   const result = runStagedRestore({
-    archivePath: path.resolve(archivePath),
+    archivePath: path.resolve(parsed.archivePath),
     destinationRoot: path.resolve(destinationRoot),
-    dryRun,
-    confirm: !dryRun,
+    dryRun: parsed.dryRun,
+    confirm: parsed.confirm,
     releaseManifestPath: process.env.RESTORE_RELEASE_MANIFEST_PATH || null,
     actualDataGenerationPath: process.env.RESTORE_ACTUAL_DATA_GENERATION_PATH || null,
   });

@@ -19,7 +19,21 @@ function buildWebAuthnVerifyCapturePreload() {
   return `
     'use strict';
     const fs = require('fs');
+    const path = require('path');
     const root = process.env.TEST_DASHBOARD_ROOT;
+    const dataPath = require.resolve(path.join(root, 'dataModule.js'));
+    require.cache[dataPath] = {
+      id: dataPath,
+      filename: dataPath,
+      loaded: true,
+      exports: {
+        initApi: async () => ({ ok: true }),
+        shutdownApi: async () => ({ ok: true }),
+        getHealth: () => ({ ready: true }),
+      },
+      children: [],
+      paths: [],
+    };
     const capturePath = process.env.PASSKEY_VERIFY_CAPTURE_PATH;
     const swuPath = require.resolve('@simplewebauthn/server', { paths: [root] });
     const real = require(swuPath);
@@ -117,7 +131,7 @@ async function spawnPasskeyOriginProbe({
       dir,
       instanceId,
       nodeEnv,
-      demoOnly: true,
+      demoOnly: nodeEnv !== 'production',
       port,
       preloadPath,
       extraEnv: {

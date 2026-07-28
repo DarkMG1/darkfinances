@@ -1,0 +1,44 @@
+{
+  "kind": "darkfinances-logrotate-contract",
+  "schemaVersion": 1,
+  "authoritativeLogging": "journald",
+  "rotation": {
+    "strategy": "rename-create",
+    "forbiddenDirectives": [
+      "copytruncate"
+    ],
+    "createMode": "0600",
+    "runAsUser": "dark",
+    "runAsGroup": "dark",
+    "postrotateRequired": false,
+    "postrotateReason": "Reviewed systemd units log to journald. Legacy file paths are rotated with rename/create, which is safe for short-lived per-invocation appenders and for held descriptors (writes continue into the rotated inode)."
+  },
+  "paths": [
+    {
+      "id": "bank-sync-log",
+      "pattern": "/home/dark/actual/bank-sync.log",
+      "status": "legacy-residual",
+      "writerKind": "short-lived-appender",
+      "reviewedSystemdUnit": "actual-sync.service",
+      "reviewedLogging": "journald",
+      "openSemantics": "Legacy cron or deployment-specific wrappers may append once per bank-sync invocation. The reviewed actual-sync.service unit captures stdout/stderr in the user journal and does not redirect to this file.",
+      "longRunningFileDescriptor": false
+    },
+    {
+      "id": "actual-tools-glob",
+      "pattern": "/home/dark/actual-tools/*.log",
+      "status": "legacy-residual",
+      "writerKind": "short-lived-appender",
+      "reviewedSystemdUnit": "finance-event-sync.service",
+      "reviewedLogging": "journald",
+      "openSemantics": "Legacy cron jobs redirected actual-tools output with shell append (for example owes-snapshot.log). The reviewed finance-event-sync.service unit logs to journald instead.",
+      "longRunningFileDescriptor": false
+    }
+  ],
+  "reviewedJournalUnits": [
+    "finance-dashboard.service",
+    "actual-sync.service",
+    "finance-event-sync.service",
+    "finance-sync-failure@.service"
+  ]
+}

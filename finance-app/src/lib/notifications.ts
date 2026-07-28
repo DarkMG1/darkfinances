@@ -2,7 +2,7 @@ import { useMemo, useSyncExternalStore } from 'react';
 import * as Notifications from 'expo-notifications';
 import { Account, Bill, RecurringItem, RepaymentSuggestion, Transaction } from '@/api/generated/types';
 import { type NotificationReconciliationToken } from '@/lib/notification-reconciliation';
-import { createNotificationReconciler, type NotificationReconcilerDeps } from '@/lib/notification-reconcile';
+import { createNotificationReconciler, NOTIFICATION_ROUTES, type NotificationCategory, type NotificationReconcilerDeps } from '@/lib/notification-reconcile';
 import { classifyBillReminder as classifyBillReminderCore } from '@/lib/notification-scheduling';
 import { kv, storage } from '@/lib/storage';
 import { fmtPos } from '@/theme/colors';
@@ -33,20 +33,13 @@ export const NOTIF = {
 } as const;
 
 export type NotificationPrivacy = 'private' | 'detailed';
-export type NotificationCategory = 'bills' | 'largeCharge' | 'newSub' | 'weekly' | 'lowBalance' | 'repayments';
+export type { NotificationCategory } from '@/lib/notification-reconcile';
 export type BillReminderKind = 'dayBefore' | 'sameDayLate' | 'overdue';
 
-export const NOTIFICATION_ROUTES = {
-  bills: '/bills',
-  largeCharge: '/(tabs)/transactions',
-  newSub: '/subscriptions',
-  weekly: '/review',
-  lowBalance: '/networth',
-  repayments: '/reimbursement',
-} as const;
+export { NOTIFICATION_ROUTES };
 
 export interface NotificationRoutePayload {
-  route: string;
+  route: (typeof NOTIFICATION_ROUTES)[NotificationCategory];
   category: NotificationCategory;
   scope: string;
 }

@@ -8,6 +8,7 @@ import { mutationOutcomeHaptics } from '@/lib/haptics';
 import { purgeMutationFormDrafts } from '@/lib/mutation-form-draft-store';
 import { purgeNotificationProfileState } from '@/lib/notifications';
 import { purgeProfileGeneration } from '@/lib/notification-reconciliation';
+import { purgeReceiptImageCaches } from '@/lib/receipt-image-cache';
 import { purgeReconnectRefreshProfileState } from '@/lib/reconnect-refresh-registry';
 import { abortFinanceRequests } from '@/lib/request-lifecycle';
 import { clearFinanceQueries, queryClient } from '@/lib/query-client';
@@ -27,6 +28,7 @@ export async function purgeFinanceProfile(
   scope: string | undefined,
   operationScope: string | null,
 ): Promise<void> {
+  await purgeReceiptImageCaches();
   prepareFinanceOperationProfilePurge(operationScope);
   purgeMutationFormDrafts(operationScope ?? undefined);
   purgeProfileGeneration(scope);

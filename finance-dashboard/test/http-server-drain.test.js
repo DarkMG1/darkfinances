@@ -118,16 +118,16 @@ function registerHttpResources(t, {
 }
 
 function waitForDrain(promise, timeoutMs = 150) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error(`drain did not settle within ${timeoutMs}ms`)),
-        timeoutMs,
-      );
-      timer.unref?.();
-    }),
-  ]);
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`drain did not settle within ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer != null) clearTimeout(timer);
+  });
 }
 
 test('closeHttpServer accepts null, undefined, and non-object inputs', async () => {
@@ -377,6 +377,39 @@ test('repeated idle sweeps drain keep-alive socket that becomes idle after drain
     await waitForDrain(closePromise),
     { wasListening: true, drained: true },
   );
+});
+
+test('production idle keep-alive sweep interval is unrefed', async () => {
+  const originalSetInterval = global.setInterval;
+  let capturedTimer = null;
+  let unrefCalls = 0;
+  global.setInterval = (...args) => {
+    capturedTimer = originalSetInterval(...args);
+    const originalUnref = capturedTimer.unref.bind(capturedTimer);
+    capturedTimer.unref = () => {
+      unrefCalls += 1;
+      return originalUnref();
+    };
+    return capturedTimer;
+  };
+  try {
+    let closeCallback = null;
+    const server = {
+      listening: true,
+      close(callback) {
+        closeCallback = callback;
+      },
+      closeIdleConnections() {},
+    };
+    const closePromise = closeHttpServer(server);
+    assert.ok(capturedTimer);
+    assert.equal(unrefCalls, 1);
+    closeCallback();
+    assert.deepEqual(await closePromise, { wasListening: true, drained: true });
+  } finally {
+    global.setInterval = originalSetInterval;
+    if (capturedTimer) clearInterval(capturedTimer);
+  }
 });
 
 test('real keep-alive server drain completes after in-flight response finishes', async (t) => {

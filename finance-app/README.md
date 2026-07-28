@@ -293,9 +293,27 @@ The normal config includes widgets, App Groups, notifications, the native privac
 Update. Build profiles live in `eas.json`:
 
 ```bash
-npx eas-cli@latest build --platform ios --profile preview
-npx eas-cli@latest build --platform ios --profile production
+npm exec -- eas-cli build --platform ios --profile preview
+npm exec -- eas-cli build --platform ios --profile production
 ```
+
+For OTA publishing, EAS resolves from the isolated publisher toolchain at `ops/publisher-toolchain/`
+(exact `eas-cli@21.3.0`). Prepare the publisher host before `npm run ota:publish`:
+
+```bash
+npm --prefix ops/publisher-toolchain ci --workspaces=false
+npm run check:publisher-closure
+node scripts/run-pinned-eas.js --version
+```
+
+Do not use global `eas`, `npx eas-cli`, or `npm exec` for signed OTA publication; use
+`scripts/run-pinned-eas.js` and `scripts/ota-publish.sh` only. At invoke time the wrapper copies the
+installed publisher tree into a private temp snapshot, verifies the full lock-derived byte closure on
+that snapshot, strips code-injection environment variables, and runs the snapshot's absolute
+`eas-cli/bin/run` with `cwd` still at `finance-app`.
+
+The `npm exec -- eas-cli build …` examples below are for optional native EAS builds only, not the
+signed OTA provenance path.
 
 A paid Apple Developer team and compatible provisioning are required for the full entitlement set.
 

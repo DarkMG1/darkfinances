@@ -26,6 +26,7 @@ chmod 600 "$dashboard/.backup-manifest.json"
 cleanup() { rm -f "$dashboard/.backup-manifest.json"; }
 trap cleanup EXIT
 
+export COPYFILE_DISABLE=1
 tar -C "$dashboard" -czf "$archive" "${files[@]}" .backup-manifest.json
 chmod 600 "$archive"
 printf '%s\n' "$manifest_json" > "$archive.manifest.json"

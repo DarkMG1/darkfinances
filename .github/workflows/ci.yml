@@ -6,22 +6,28 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   verify:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
-          cache: npm
       - run: node scripts/ensure-declared-npm.js
       - run: npm ci
+      - run: node scripts/check-github-action-pins.js --verify-upstream
+      - run: npm run check:vulnerabilities
       - run: npm run check
       - run: npm run check:shell
       - run: npm run check:systemd
@@ -29,14 +35,62 @@ jobs:
       - run: npm run check:expo
       - run: npm run check:browser
 
+  install-lifecycle:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+      - run: node scripts/ensure-declared-npm.js
+      - run: npm ci
+      - run: npm run check:install-lifecycle
+
+  app-install-lifecycle:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+      - run: node scripts/ensure-declared-npm.js
+      - run: npm --prefix finance-app ci --workspaces=false
+      - run: node finance-app/scripts/check-app-install-lifecycle.js
+
   lockfile-repro:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
-          cache: npm
       - run: node scripts/ensure-declared-npm.js
       - run: node scripts/check-lockfile-repro.js
+
+  publisher-closure:
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+      - run: node scripts/ensure-declared-npm.js
+      - name: Supply-chain preflight (pinned actions + vulnerability gate)
+        run: |
+          npm run check:action-pins:upstream
+          npm run check:vulnerabilities
+      - run: npm --prefix ops/publisher-toolchain ci --workspaces=false
+      - run: node scripts/check-publisher-closure.js
+      - run: node finance-app/scripts/run-pinned-eas.js --version

@@ -1,5 +1,8 @@
 const { JsonStoreError } = require('./json-store');
 
+const GENERIC_INTERNAL_MESSAGE = 'Internal finance service error';
+const GENERIC_INTERNAL_CODE = 'INTERNAL_ERROR';
+
 class AppError extends Error {
   constructor(message, { code = 'APP_ERROR', status = 500, expose = status < 500, cause } = {}) {
     super(message, { cause });
@@ -36,6 +39,17 @@ class AccountNotFoundError extends AppError {
       expose: true,
     });
     this.name = 'AccountNotFoundError';
+  }
+}
+
+class ImportedTransactionError extends AppError {
+  constructor() {
+    super('Bank-imported transactions can\u2019t be deleted \u2014 only ones you added manually.', {
+      code: 'IMPORTED_TRANSACTION',
+      status: 409,
+      expose: true,
+    });
+    this.name = 'ImportedTransactionError';
   }
 }
 
@@ -97,6 +111,28 @@ class TransactionNotFoundError extends AppError {
       expose: true,
     });
     this.name = 'TransactionNotFoundError';
+  }
+}
+
+class SplitLegDeleteError extends AppError {
+  constructor() {
+    super('Split legs cannot be deleted independently', {
+      code: 'INVALID_REQUEST',
+      status: 400,
+      expose: true,
+    });
+    this.name = 'SplitLegDeleteError';
+  }
+}
+
+class SplitParentNotFoundError extends AppError {
+  constructor() {
+    super('Split parent not found', {
+      code: 'NOT_FOUND',
+      status: 404,
+      expose: true,
+    });
+    this.name = 'SplitParentNotFoundError';
   }
 }
 
@@ -163,6 +199,64 @@ class ForecastMoneyValidationError extends AppError {
   }
 }
 
+class ReceiptValidationError extends KnownPreApplyError {
+  constructor(message = 'Receipt request is invalid') {
+    super(message, { code: 'INVALID_REQUEST', status: 400 });
+    this.name = 'ReceiptValidationError';
+  }
+}
+
+class ReceiptPayloadTooLargeError extends KnownPreApplyError {
+  constructor(message = 'Receipt image is too large') {
+    super(message, { code: 'PAYLOAD_TOO_LARGE', status: 413 });
+    this.name = 'ReceiptPayloadTooLargeError';
+  }
+}
+
+class ReceiptUnsupportedMediaTypeError extends KnownPreApplyError {
+  constructor(message = 'Receipt image format is not supported') {
+    super(message, { code: 'UNSUPPORTED_MEDIA_TYPE', status: 415 });
+    this.name = 'ReceiptUnsupportedMediaTypeError';
+  }
+}
+
+class ReceiptDuplicateError extends KnownPreApplyError {
+  constructor(message = 'This receipt image was already uploaded') {
+    super(message, { code: 'RECEIPT_DUPLICATE', status: 409 });
+    this.name = 'ReceiptDuplicateError';
+  }
+}
+
+class ManualAssetNotFoundError extends KnownPreApplyError {
+  constructor() {
+    super('Manual asset not found', {
+      code: 'NOT_FOUND',
+      status: 404,
+    });
+    this.name = 'ManualAssetNotFoundError';
+  }
+}
+
+class GoalLinkedAccountNotFoundError extends KnownPreApplyError {
+  constructor() {
+    super('Linked account not found', {
+      code: 'ACCOUNT_NOT_FOUND',
+      status: 404,
+    });
+    this.name = 'GoalLinkedAccountNotFoundError';
+  }
+}
+
+class GoalLinkedAccountClosedError extends KnownPreApplyError {
+  constructor() {
+    super('Linked account is closed', {
+      code: 'ACCOUNT_CLOSED',
+      status: 409,
+    });
+    this.name = 'GoalLinkedAccountClosedError';
+  }
+}
+
 function classifyError(error) {
   if (error instanceof AppError) return error;
   if (error instanceof JsonStoreError) {
@@ -171,40 +265,21 @@ function classifyError(error) {
       corrupt
         ? 'Stored finance metadata is corrupt; the original was preserved for recovery'
         : 'Stored finance metadata is temporarily unavailable',
-      { code: error.code, status: 500, expose: true, cause: error }
+      { code: error.code, status: 500, expose: true, cause: error },
     );
   }
   if (error?.name === 'RuntimeStateError' || String(error?.code || '').startsWith('RUNTIME_STATE_')) {
-    return new AppError(error.message, {
-      code: error.code || 'RUNTIME_STATE_ERROR',
+    return new AppError(GENERIC_INTERNAL_MESSAGE, {
+      code: 'RUNTIME_STATE_ERROR',
       status: 500,
-      expose: true,
+      expose: false,
       cause: error,
     });
   }
-
-  const message = String(error?.message || error || 'Unexpected error');
-  if (/not found/i.test(message)) {
-    return new AppError(message, { code: 'NOT_FOUND', status: 404, expose: true, cause: error });
-  }
-  if (/bank-imported transactions can[’']?t be deleted/i.test(message)) {
-    return new AppError(message, { code: 'IMPORTED_TRANSACTION', status: 409, expose: true, cause: error });
-  }
-  if (/splitwise snapshot/i.test(message)) {
-    return new AppError(message, { code: 'STALE_UPSTREAM_DATA', status: 503, expose: true, cause: error });
-  }
-  if (/too large|payload too large|exceeds the maximum (encoded|decoded)? receipt size/i.test(message)) {
-    return new AppError(message, { code: 'PAYLOAD_TOO_LARGE', status: 413, expose: true, cause: error });
-  }
-  if (
-    /\brequired\b|must be|must sum|invalid|unsupported|unsafe|at least|non-zero|greater than|bad debtor pattern|cannot|can't|can’t/i.test(message)
-  ) {
-    return new AppError(message, { code: 'INVALID_REQUEST', status: 400, expose: true, cause: error });
-  }
-  return new AppError('Internal finance service error', {
-    code: 'INTERNAL_ERROR',
+  return new AppError(GENERIC_INTERNAL_MESSAGE, {
+    code: GENERIC_INTERNAL_CODE,
     status: 500,
-    expose: true,
+    expose: false,
     cause: error,
   });
 }
@@ -216,13 +291,25 @@ module.exports = {
   AdmissionUnavailableError,
   AppError,
   ForecastMoneyValidationError,
+  GENERIC_INTERNAL_CODE,
+  GENERIC_INTERNAL_MESSAGE,
+  GoalLinkedAccountClosedError,
+  GoalLinkedAccountNotFoundError,
+  ImportedTransactionError,
   KnownPreApplyError,
+  ManualAssetNotFoundError,
   QueryAbortedError,
   isQueryAbortedError,
   QueryCursorSecretError,
   QueryRangeExceededError,
   QueryResultLimitExceededError,
+  ReceiptDuplicateError,
+  ReceiptPayloadTooLargeError,
+  ReceiptUnsupportedMediaTypeError,
+  ReceiptValidationError,
   RequestValidationError,
+  SplitLegDeleteError,
+  SplitParentNotFoundError,
   TransactionNotFoundError,
   classifyError,
 };

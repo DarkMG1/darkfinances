@@ -11,6 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { assertSplitwiseOk, cancelResponseBody } = require('./lib/splitwise-errors');
 
 const API = 'https://secure.splitwise.com/api/v3.0';
 const TOKEN_URL = 'https://secure.splitwise.com/oauth/token';
@@ -35,24 +36,28 @@ const SURNAME = Array.isArray(_cfg.surname) ? _cfg.surname : [];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function fetchWithRetry(url, options = {}, attempts = 3) {
-  let lastError;
+  let lastNetworkError = null;
   for (let attempt = 0; attempt < attempts; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
-      if (response.ok || (response.status < 500 && response.status !== 429)) return response;
-      lastError = new Error(`HTTP ${response.status}`);
+      if (response.ok) return response;
+      if (response.status < 500 && response.status !== 429) return response;
+      if (attempt >= attempts - 1) return response;
+      await cancelResponseBody(response);
       const retryAfter = Number(response.headers.get('retry-after'));
-      await sleep(Number.isFinite(retryAfter) ? retryAfter * 1000 : 250 * 2 ** attempt);
+      await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 250 * 2 ** attempt);
     } catch (error) {
-      lastError = error.name === 'AbortError' ? new Error(`request timed out after ${REQUEST_TIMEOUT_MS}ms`) : error;
+      lastNetworkError = error.name === 'AbortError'
+        ? new Error(`Splitwise request timed out after ${REQUEST_TIMEOUT_MS}ms`)
+        : error;
       if (attempt < attempts - 1) await sleep(250 * 2 ** attempt);
     } finally {
       clearTimeout(timer);
     }
   }
-  throw lastError || new Error('Splitwise request failed');
+  throw lastNetworkError || new Error('Splitwise request failed');
 }
 
 function resolveGroup(groups, groupNameOrId) {
@@ -97,7 +102,7 @@ async function getToken() {
   if (!key || !secret) throw new Error('Missing SPLITWISE_API_KEY or SPLITWISE_CONSUMER_KEY/SECRET');
   const body = new URLSearchParams({ grant_type: 'client_credentials', client_id: key, client_secret: secret });
   const r = await fetchWithRetry(TOKEN_URL, { method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-  if (!r.ok) throw new Error(`token failed: ${r.status} ${await r.text()}`);
+  await assertSplitwiseOk(r, { endpoint: 'oauth/token', method: 'POST' });
   const token = (await r.json()).access_token;
   if (!token) throw new Error('Splitwise token response did not include an access token');
   return token;
@@ -106,7 +111,7 @@ async function getToken() {
 async function swApi(token, endpoint, params = {}) {
   const qs = new URLSearchParams(params).toString();
   const r = await fetchWithRetry(`${API}/${endpoint}${qs ? '?' + qs : ''}`, { headers: { Authorization: `Bearer ${token}` } });
-  if (!r.ok) throw new Error(`${endpoint} failed: ${r.status} ${await r.text()}`);
+  await assertSplitwiseOk(r, { endpoint, method: 'GET' });
   return r.json();
 }
 

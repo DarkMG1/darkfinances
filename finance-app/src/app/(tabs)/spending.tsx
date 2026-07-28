@@ -100,7 +100,9 @@ export default function Spending() {
     [budgets, insights, reimb, spendingQuery, tags, trends],
   );
   const largestCharges = insights.data?.largestCharges ?? [];
-  const spendingComplete = cur?.completeness?.complete !== false;
+  const spendingComplete = (useCurrentToday
+    ? today.data?.spending?.completeness?.complete
+    : spending.data?.completeness?.complete) === true;
   const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
   const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
   const netIncome = totalSpend != null && totalIncome != null ? totalIncome - totalSpend : null;
@@ -114,7 +116,7 @@ export default function Spending() {
     const trimmed = ms.slice(i);
     const fallbackSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
     const fallbackIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
-    return trimmed.length ? trimmed : [{ month: curKey, spend: fallbackSpend, income: fallbackIncome, net: fallbackSpend != null && fallbackIncome != null ? fallbackIncome - fallbackSpend : null, netWorth: 0 }];
+    return trimmed.length ? trimmed : [{ month: curKey, spend: fallbackSpend, income: fallbackIncome, net: fallbackSpend != null && fallbackIncome != null ? fallbackIncome - fallbackSpend : null, netWorth: null }];
   }, [trends.data, curKey, cur, spendingComplete]);
   const chartMonths = useMemo(() => availMonths.slice(-6), [availMonths]);
   const chartHasIncomplete = chartMonths.some((m) => !trendPeriodComplete(m));

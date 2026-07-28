@@ -2,11 +2,14 @@
 // CONFIRM-gated auto-tagging of incoming event repayments.
 // All people, aliases, dates and Splitwise group names live in collection-rules.json.
 
-const fs = require('fs');
 const path = require('path');
 const api = require('@actual-app/api');
 const sw = require('./splitwise-lib');
 const { todayYMD } = require('./lib/date-only');
+const {
+  compileCollectionDebtors,
+  loadCollectionRule,
+} = require('./lib/operator-regex-config');
 
 const CONFIRM = process.env.CONFIRM === '1';
 const EVENT = process.env.COLLECTION_EVENT;
@@ -14,38 +17,16 @@ const CONFIG_PATH = process.env.COLLECTION_RULES_PATH || path.join(__dirname, 'c
 const DATA_DIR = process.env.FIX_DATA_DIR || process.env.ACTUAL_DATA_DIR;
 const money = (cents) => `$${(Number(cents) / 100).toFixed(2)}`;
 
-function readRule() {
-  if (!EVENT) throw new Error('COLLECTION_EVENT is required');
-  const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  const rule = config.events?.[EVENT];
-  if (!rule) throw new Error(`No collection rule configured for ${EVENT}`);
-  if (!rule.group || !rule.tag || !rule.start || !rule.debtors) throw new Error(`Collection rule ${EVENT} is incomplete`);
-  return rule;
-}
-
-function compileDebtors(rule, routed) {
-  const debtors = {};
-  for (const [slug, value] of Object.entries(rule.debtors)) {
-    const patterns = Array.isArray(value.patterns) ? value.patterns : [];
-    if (!patterns.length) throw new Error(`No payment pattern configured for ${slug}`);
-    const expected = routed.find((person) => person.slug === slug)?.amount || 0;
-    debtors[slug] = {
-      expectedCents: Math.round(expected * 100),
-      regex: new RegExp(patterns.map((pattern) => `(?:${pattern})`).join('|'), 'i'),
-    };
-  }
-  return debtors;
-}
-
 (async () => {
-  const rule = readRule();
+  if (!EVENT) throw new Error('COLLECTION_EVENT is required');
+  const rule = loadCollectionRule(CONFIG_PATH, EVENT);
   await api.init({ dataDir: DATA_DIR, serverURL: process.env.ACTUAL_SERVER_URL, password: process.env.ACTUAL_PASSWORD });
   await api.downloadBudget(process.env.ACTUAL_SYNC_ID);
 
   // simplified_debts is intentionally used here for payment routing, not for the
   // dashboard's "who owes me" totals (which remain direct pairwise only).
   const group = await sw.getGroupDebts(rule.group);
-  const debtors = compileDebtors(rule, group.owedToMe || []);
+  const debtors = compileCollectionDebtors(rule, group.owedToMe || []);
   const categoryGroups = await api.getCategoryGroups();
   let reimbursementId = null;
   for (const categoryGroup of categoryGroups) {

@@ -449,6 +449,7 @@ test('goals sidecar mutation discards in-flight goals fill', async (t) => {
         await waitSidecarRelease();
         return [{ id: 'g1', name: goalsCall === 1 ? 'StaleGoal' : 'FreshGoal', target: 100, current: 0 }];
       },
+      assertGoalSaveMutationAvailable: async () => {},
       saveGoal: async () => ({ ok: true, id: 'g1' }),
     };
     require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
@@ -883,4 +884,76 @@ test('dismiss repayment sidecar mutation uses projection write lane with full in
   assert.equal(freshWarm.body.data.pass, 2);
   const freshOther = await apiRequest(base, '/api/v1/repayments/suggestions?from=2026-08-01&to=2026-09-30');
   assert.equal(freshOther.body.data.pass, 2);
+});
+
+test('manual asset mutation invalidates warmed today and manual-assets under write lane', async (t) => {
+  const { base, child, logs, dir, childState, releaseFill } = await startCoordinatorServerWithSidecarGate(t, `
+    ${markLine()}
+    const path = require('path');
+    const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
+    let manualNet = 0;
+    let todayFillCount = 0;
+    const mock = {
+      initApi: async () => ({ ok: true }),
+      shutdownApi: async () => ({ ok: true }),
+      getHealth: () => ({ ready: true }),
+      syncNow: async () => ({ ok: true }),
+      getManualAssets: async () => {
+        mark('manualAssets:' + manualNet);
+        return { items: manualNet ? [{ id: 'm1', name: 'Boat', value: manualNet, kind: 'asset' }] : [], net: manualNet, assets: manualNet, liabilities: 0, complete: true };
+      },
+      getToday: async () => {
+        todayFillCount += 1;
+        mark('today:fill:' + todayFillCount);
+        if (todayFillCount === 1) {
+          await waitSidecarRelease();
+        }
+        mark('today:done:' + todayFillCount + ':' + manualNet);
+        return { revision: 'r' + todayFillCount, manualNet, pass: todayFillCount };
+      },
+      assertManualAssetMutationAvailable: () => {},
+      saveManualAsset: async ({ value }) => {
+        mark('saveManualAsset');
+        manualNet = value;
+        return { ok: true, id: 'm1' };
+      },
+      deleteManualAsset: async () => {
+        mark('deleteManualAsset');
+        manualNet = 0;
+        return { ok: true, removed: 1 };
+      },
+    };
+    require.cache[dataPath] = { id: dataPath, filename: dataPath, loaded: true, exports: mock, children: [], paths: [] };
+  `);
+
+  const warmManual = await apiRequest(base, '/api/v1/manual-assets');
+  assert.equal(warmManual.response.status, 200);
+
+  const readPromise = apiRequest(base, '/api/v1/today');
+  await waitForMarkerDir(dir, 'today:fill:1', childWatchContext({ child, logs, childState }));
+  const mutatePromise = apiRequest(base, '/api/v1/manual-assets', {
+    method: 'POST',
+    key: 'manual-asset-race',
+    body: { name: 'Boat', value: 250, kind: 'asset' },
+  });
+  releaseFill();
+  const [{ body: inFlightBody }, { response: mutateResponse }] = await Promise.all([readPromise, mutatePromise]);
+  assert.equal(mutateResponse.status, 200);
+  assert.equal(inFlightBody.data.manualNet, 0, 'in-flight Today fill must not publish post-mutation manual assets');
+
+  const freshManual = await apiRequest(base, '/api/v1/manual-assets');
+  assert.equal(freshManual.body.data.items.length, 1);
+  const freshToday = await apiRequest(base, '/api/v1/today');
+  assert.equal(freshToday.body.data.manualNet, 250);
+  assert.ok(freshToday.body.data.pass >= 2);
+
+  const deleteResponse = await apiRequest(base, '/api/v1/manual-assets/m1', {
+    method: 'DELETE',
+    key: 'manual-asset-delete',
+  });
+  assert.equal(deleteResponse.response.status, 200);
+  const afterDeleteManual = await apiRequest(base, '/api/v1/manual-assets');
+  assert.equal(afterDeleteManual.body.data.items.length, 0);
+  const afterDeleteToday = await apiRequest(base, '/api/v1/today');
+  assert.equal(afterDeleteToday.body.data.manualNet, 0);
 });

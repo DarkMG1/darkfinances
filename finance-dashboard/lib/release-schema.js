@@ -1,3 +1,6 @@
+const {
+  normalizePublisherToolchain,
+} = require('./publisher-toolchain');
 const crypto = require('crypto');
 const path = require('path');
 
@@ -211,6 +214,7 @@ function validateManifestContent(content) {
     'lockfile',
     'mode',
     'ota',
+    'publisherToolchain',
     'repository',
     'sourceEvidence',
   ]), 'manifest content');
@@ -349,18 +353,28 @@ function validateManifestContent(content) {
       throw new Error('OTA environment does not match release profile');
     }
   }
+  if (content.publisherToolchain !== undefined) {
+    const normalizedPublisher = normalizePublisherToolchain(content.publisherToolchain);
+    if (canonicalSerialize(normalizedPublisher) !== canonicalSerialize(content.publisherToolchain)) {
+      throw new Error('publisherToolchain must use normalized fields');
+    }
+  }
 
   const releaseEvidence = {
     dashboard: content.deployedFiles !== undefined,
     ipa: content.artifact !== undefined,
     ota: content.ota !== undefined,
     backup: content.backup !== undefined,
+    publisherToolchain: content.publisherToolchain !== undefined,
   };
   const incompatibleEvidence = Object.entries(releaseEvidence)
-    .filter(([evidenceMode, present]) => present && evidenceMode !== content.mode)
+    .filter(([evidenceMode, present]) => present && evidenceMode !== content.mode && evidenceMode !== 'publisherToolchain')
     .map(([evidenceMode]) => evidenceMode);
   if (incompatibleEvidence.length > 0) {
     throw new Error(`${content.mode} mode contains incompatible ${incompatibleEvidence.join(', ')} evidence`);
+  }
+  if (content.publisherToolchain !== undefined && content.mode !== 'ota') {
+    throw new Error('publisherToolchain evidence is only valid for ota mode');
   }
 
   if (content.mode === 'dashboard' && !content.deployedFiles) {
@@ -371,6 +385,9 @@ function validateManifestContent(content) {
   }
   if (content.mode === 'ota' && !content.ota) {
     throw new Error('ota mode requires update/group ID, runtime, channel, and branch evidence');
+  }
+  if (content.mode === 'ota' && !content.publisherToolchain) {
+    throw new Error('ota mode requires publisherToolchain evidence');
   }
   if (content.mode === 'backup' && !content.backup) {
     throw new Error('backup mode requires both backup manifest and archive evidence');
@@ -456,6 +473,7 @@ module.exports = {
   isPlainObject,
   normalizeLogicalPath,
   normalizeOtaEvidence,
+  normalizePublisherToolchain,
   requireNonEmptyString,
   validateActualAlignment,
   validateHash,

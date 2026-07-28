@@ -1,0 +1,83 @@
+name: Android compile smoke
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'finance-app/**'
+      - 'scripts/**'
+      - 'ops/toolchain/**'
+      - 'ops/publisher-toolchain/**'
+      - 'ops/vulnerability-exceptions.json'
+      - 'scripts/check-github-action-pins.js'
+      - 'scripts/check-vulnerability-gate.js'
+      - 'docs/vulnerability-policy.md'
+      - '.github/workflows/android-compile-smoke.yml'
+      - 'package.json'
+      - 'package-lock.json'
+  pull_request:
+    paths:
+      - 'finance-app/**'
+      - 'scripts/**'
+      - 'ops/toolchain/**'
+      - 'ops/publisher-toolchain/**'
+      - 'ops/vulnerability-exceptions.json'
+      - 'scripts/check-github-action-pins.js'
+      - 'scripts/check-vulnerability-gate.js'
+      - 'docs/vulnerability-policy.md'
+      - '.github/workflows/android-compile-smoke.yml'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-compile-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-assemble-debug:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: node scripts/ensure-declared-npm.js
+      - run: npm ci
+      - name: Supply-chain preflight (pinned actions + vulnerability gate)
+        run: |
+          npm run check:action-pins:upstream
+          npm run check:vulnerabilities
+      - name: Verify Android SDK
+        run: |
+          test -n "$ANDROID_HOME"
+          test -d "$ANDROID_HOME/platform-tools"
+          test -x "$ANDROID_HOME/platform-tools/adb"
+          "$ANDROID_HOME/platform-tools/adb" version
+          if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --version
+          fi
+      - name: Expo prebuild and assembleDebug
+        working-directory: finance-app
+        run: |
+          expo_bin="$(node scripts/resolve-expo-bin.js)"
+          "$expo_bin" prebuild -p android --clean
+          cd android
+          ./gradlew assembleDebug --no-daemon --stacktrace
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-debug-apk-${{ github.run_id }}
+          retention-days: 3
+          if-no-files-found: error
+          path: finance-app/android/app/build/outputs/apk/debug/app-debug.apk

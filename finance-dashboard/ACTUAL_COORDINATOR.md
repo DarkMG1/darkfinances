@@ -72,7 +72,12 @@ discarded at publish time.
 6. **HTTP mutation queue unchanged** — versioned mutations serialize on
    `SerialQueue('finance-mutations')`; coordinator serializes Actual access.
 7. **Bounded diagnostics** — `/api/v1/ping` exposes `actualCoordinator` health.
-8. **No raw `data.api` in production** — gated behind `ALLOW_RAW_ACTUAL_API=1` for tests.
+8. **No raw `data.api` in production** — `lib/finance-runtime-config.js` is the single contract.
+   Production is indicated by `FINANCE_RUNTIME_MODE=production` or `NODE_ENV=production` and
+   **dominates** any conflicting test runtime markers. Startup fails before imports when production
+   conflicts with test runtime, carries test-only bypass flags, or lacks explicit query cursor
+   signing. The `data.api` getter is allowed only in explicit test runtime with
+   `ALLOW_RAW_ACTUAL_API=1`.
 
 ## Reentrancy
 

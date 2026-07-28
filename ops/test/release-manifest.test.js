@@ -18,11 +18,18 @@ const {
   recalculateContentDigest,
   sha256Canonical,
   verifyManifest,
+  assertStdoutModeAllowed,
 } = require('../../scripts/release-manifest');
+const { validateManifestEnvelope, validateManifestContent } = require('../../finance-dashboard/lib/release-schema');
 const { readReleaseIdentity } = require('../../finance-dashboard/lib/release-identity');
+const { createEphemeralSigningMaterial } = require('./helpers/release-signing-fixtures');
+const { signaturePathFor } = require('../../finance-dashboard/lib/release-signing');
 
 const REPOSITORY_ROOT = path.resolve(__dirname, '..', '..');
 const SCRIPT = path.join(REPOSITORY_ROOT, 'scripts', 'release-manifest.js');
+const CAN_RUN_PUBLISHER_RUNTIME = process.platform === 'darwin'
+  && process.arch === 'arm64'
+  && fs.existsSync(path.join(REPOSITORY_ROOT, 'ops/publisher-toolchain/node_modules/eas-cli'));
 const temporaryDirectories = [];
 
 test.after(() => {
@@ -38,8 +45,42 @@ function write(root, relative, contents) {
   return target;
 }
 
-function git(root, args) {
-  return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+function git(root, args, env = process.env) {
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8', env }).trim();
+}
+
+function writeBrokenSigner(directory) {
+  fs.mkdirSync(directory, { recursive: true });
+  const signer = path.join(directory, 'broken-gpg-signer.sh');
+  fs.writeFileSync(
+    signer,
+    '#!/bin/sh\necho "broken signer invoked" >&2\nexit 1\n',
+  );
+  fs.chmodSync(signer, 0o755);
+  return signer;
+}
+
+function createSimulatedGlobalGitConfig(brokenSignerPath) {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-git-global-'));
+  temporaryDirectories.push(configDir);
+  const configPath = path.join(configDir, 'config');
+  fs.writeFileSync(configPath, [
+    '[commit]',
+    '  gpgsign = true',
+    '[gpg]',
+    `  program = ${brokenSignerPath}`,
+    '',
+  ].join('\n'));
+  return configPath;
+}
+
+function gitEnv(globalConfigPath) {
+  return { ...process.env, GIT_CONFIG_GLOBAL: globalConfigPath };
+}
+
+function isolateFixtureRepositorySigning(root, brokenSignerPath) {
+  git(root, ['config', 'commit.gpgsign', 'false']);
+  git(root, ['config', 'gpg.program', brokenSignerPath]);
 }
 
 function createFixtureRepository() {
@@ -53,7 +94,17 @@ function createFixtureRepository() {
     'finance-dashboard/release-manifest.json',
     '',
   ].join('\n'));
-  write(root, 'package-lock.json', '{"name":"fixture","lockfileVersion":3}\n');
+  write(root, 'package-lock.json', JSON.stringify({
+    name: 'fixture',
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'fixture', version: '1.0.0' },
+      'node_modules/eas-cli': {
+        version: '21.3.0',
+        integrity: 'sha512-6btEJ0LVhRw4Hx8XSlCHSaSXgGBRpPr+90/7+NYu2HZ+1CP4lRnWqerXUdui7kUWxyst4f6OolKO+oWQ58nqHQ==',
+      },
+    },
+  }, null, 2) + '\n');
   write(root, 'finance-dashboard/package.json', JSON.stringify({
     dependencies: { '@actual-app/api': '26.7.0' },
   }));
@@ -69,13 +120,46 @@ function createFixtureRepository() {
   write(root, 'finance-dashboard/lib/validation.js', 'module.exports = "validation";\n');
   write(root, 'finance-app/src/api/generated/endpoints.ts', 'export const endpoints = [];\n');
   write(root, 'finance-app/src/api/generated/types.ts', 'export type Ping = { ok: true };\n');
-  write(root, 'finance-app/package.json', '{"name":"fixture-app","version":"1.2.0"}\n');
+  write(root, 'finance-app/package.json', JSON.stringify({
+    name: 'fixture-app',
+    version: '1.2.0',
+  }, null, 2) + '\n');
+  write(root, 'ops/publisher-toolchain/package.json', JSON.stringify({
+    name: 'publisher-toolchain',
+    version: '1.0.0',
+    devDependencies: { 'eas-cli': '21.3.0' },
+  }, null, 2) + '\n');
   write(root, 'finance-app/eas.json', JSON.stringify({
+    cli: { version: '21.3.0', appVersionSource: 'local' },
     build: {
       production: { channel: 'production', environment: 'production' },
       preview: { channel: 'preview', environment: 'preview' },
     },
-  }));
+  }, null, 2) + '\n');
+  fs.mkdirSync(path.join(root, 'ops/toolchain'), { recursive: true });
+  fs.copyFileSync(
+    path.join(REPOSITORY_ROOT, 'ops/toolchain/eas-cli-runtime-closure.json'),
+    path.join(root, 'ops/toolchain/eas-cli-runtime-closure.json'),
+  );
+  fs.mkdirSync(path.join(root, 'ops/publisher-toolchain/node_modules'), { recursive: true });
+  fs.cpSync(
+    path.join(REPOSITORY_ROOT, 'ops/publisher-toolchain/node_modules/eas-cli'),
+    path.join(root, 'ops/publisher-toolchain/node_modules/eas-cli'),
+    { recursive: true },
+  );
+  const nestedEasModules = path.join(root, 'ops/publisher-toolchain/node_modules/eas-cli/node_modules');
+  if (fs.existsSync(nestedEasModules)) fs.rmSync(nestedEasModules, { recursive: true, force: true });
+  fs.copyFileSync(
+    path.join(REPOSITORY_ROOT, 'ops/publisher-toolchain/package-lock.json'),
+    path.join(root, 'ops/publisher-toolchain/package-lock.json'),
+  );
+  write(root, 'finance-app/package-lock.json', JSON.stringify({
+    name: 'fixture-app',
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'fixture-app', version: '1.2.0' },
+    },
+  }, null, 2) + '\n');
   write(root, 'finance-app/app.json', JSON.stringify({
     expo: {
       name: 'Fixture',
@@ -92,11 +176,15 @@ function createFixtureRepository() {
     if (!fs.existsSync(target)) write(root, `finance-dashboard/${relative}`, `fixture:${relative}\n`);
   }
   git(root, ['init', '--quiet']);
+  const brokenSignerPath = writeBrokenSigner(path.join(root, '.git', 'signing'));
+  const simulatedGlobalConfig = createSimulatedGlobalGitConfig(brokenSignerPath);
+  const signingEnv = gitEnv(simulatedGlobalConfig);
+  isolateFixtureRepositorySigning(root, brokenSignerPath);
   git(root, ['config', 'user.name', 'Release Test']);
   git(root, ['config', 'user.email', 'release-test@example.invalid']);
   git(root, ['config', 'core.fileMode', 'true']);
-  git(root, ['add', '.']);
-  git(root, ['commit', '--quiet', '-m', 'fixture']);
+  git(root, ['add', '.'], signingEnv);
+  git(root, ['commit', '--quiet', '-m', 'fixture'], signingEnv);
   return root;
 }
 
@@ -113,10 +201,31 @@ function deployDashboardFixture(root, deployedRoot) {
   return deployedRoot;
 }
 
+function explicitPublisherToolchainFixture() {
+  const contract = JSON.parse(fs.readFileSync(
+    path.join(REPOSITORY_ROOT, 'ops/toolchain/eas-cli-runtime-closure.json'),
+    'utf8',
+  ));
+  return {
+    package: 'eas-cli',
+    version: contract.version,
+    integrity: contract.integrity,
+    invocation: 'node finance-app/scripts/run-pinned-eas.js',
+    runtimeClosureDigest: contract.runtimeClosureDigest,
+    packageCount: contract.packageCount,
+    fileCount: contract.fileCount,
+    platform: contract.platform,
+    arch: contract.arch,
+    derivationVersion: contract.derivationVersion,
+    standaloneInstallCommand: contract.standaloneInstallCommand,
+  };
+}
+
 function dependencies(root, builtAt = '2026-07-01T00:00:00.000Z') {
   return {
     root,
     clock: () => new Date(builtAt),
+    resolvePublisherToolchain: () => explicitPublisherToolchainFixture(),
     resolveAppConfig: ({ variant }) => ({
       version: '1.2.0',
       runtimeVersion: variant === 'free-sideload'
@@ -136,19 +245,68 @@ function fixtureManifest(root, options = {}, builtAt) {
   return buildManifest({ root, ...options }, dependencies(root, builtAt));
 }
 
+function assertUnsignedOtaFixtureEvidence(ota) {
+  validateManifestEnvelope(ota);
+  validateManifestContent(ota.content);
+  assert.equal(ota.contentDigest.value, recalculateContentDigest(ota));
+}
+
 function digest(manifest) {
-  verifyManifest(manifest);
+  validateManifestEnvelope(manifest);
   return manifest.contentDigest.value;
 }
 
-function runCli(root, args, expectedStatus = 0) {
+function verifySignedFile(manifestPath, keyringPath) {
+  verifyManifest(JSON.parse(fs.readFileSync(manifestPath, 'utf8')), {
+    manifestPath,
+    keyringPath,
+    env: {},
+  });
+}
+
+function runCli(root, args, expectedStatus = 0, env = process.env) {
+  const signingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'release-cli-signing-'));
+  temporaryDirectories.push(signingRoot);
+  const signing = createEphemeralSigningMaterial(signingRoot);
   const result = spawnSync(process.execPath, [SCRIPT, `--root=${root}`, ...args], {
     cwd: root,
     encoding: 'utf8',
+    env: { ...env, ...signing.signingEnv },
   });
   assert.equal(result.status, expectedStatus, result.stderr);
-  return result;
+  return { ...result, signing };
 }
+
+test('fixture repositories isolate inherited commit signing configuration', () => {
+  const root = createFixtureRepository();
+  const brokenSignerPath = git(root, ['config', '--get', 'gpg.program']);
+  const simulatedGlobalConfig = createSimulatedGlobalGitConfig(brokenSignerPath);
+  const signingEnv = gitEnv(simulatedGlobalConfig);
+
+  assert.equal(git(root, ['config', '--get', 'commit.gpgsign']), 'false');
+  assert.match(brokenSignerPath, /[\\/]\.git[\\/]signing[\\/]broken-gpg-signer\.sh$/);
+  assert.throws(
+    () => execFileSync(brokenSignerPath, [], { encoding: 'utf8' }),
+    /broken signer invoked/,
+  );
+
+  write(root, 'signing-isolation.js', 'module.exports = "isolated";\n');
+  git(root, ['add', 'signing-isolation.js'], signingEnv);
+  assert.doesNotThrow(() => git(root, ['commit', '--quiet', '-m', 'signing isolation'], signingEnv));
+
+  const unisolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-release-signing-control-'));
+  temporaryDirectories.push(unisolatedRoot);
+  write(unisolatedRoot, '.gitignore', 'node_modules/\n');
+  write(unisolatedRoot, 'source.js', 'module.exports = "signing control";\n');
+  git(unisolatedRoot, ['init', '--quiet']);
+  git(unisolatedRoot, ['config', 'user.name', 'Release Test']);
+  git(unisolatedRoot, ['config', 'user.email', 'release-test@example.invalid']);
+  git(unisolatedRoot, ['add', '.'], signingEnv);
+  assert.throws(
+    () => git(unisolatedRoot, ['commit', '-m', 'simulated global signing should fail'], signingEnv),
+    /broken signer invoked|gpg|sign|failed/i,
+  );
+});
 
 test('release manifest includes versioned alignment and contract identity', () => {
   const root = createFixtureRepository();
@@ -432,7 +590,7 @@ test('dashboard generation accepts an exact repository/deployment runtime match'
     manifest.content.deployedFiles.map((entry) => entry.path),
     [...DASHBOARD_RUNTIME_FILES].sort(),
   );
-  verifyManifest(manifest);
+  validateManifestEnvelope(manifest);
 });
 
 test('dashboard generation rejects stale deployed source and executable state', {
@@ -482,7 +640,13 @@ test('a generated dashboard manifest becomes invalid when its deployed server ch
   const deployedRoot = deployDashboardFixture(root, path.join(root, 'build', 'live-dashboard'));
   const manifest = fixtureManifest(root, { mode: 'dashboard', deployedRoot });
   const manifestPath = write(root, 'build/dashboard-release.json', JSON.stringify(manifest));
-  assert.ok(readReleaseIdentity(manifestPath, deployedRoot));
+  const signing = createEphemeralSigningMaterial(root);
+  const { writeSignedManifest } = require('./helpers/release-signing-fixtures');
+  writeSignedManifest(manifestPath, manifest, signing.signingPath, signing.keyringPath);
+  assert.ok(readReleaseIdentity(manifestPath, deployedRoot, {
+    keyringPath: signing.keyringPath,
+    manifestPath,
+  }));
   write(deployedRoot, 'server.js', 'server-v2\n');
   assert.equal(readReleaseIdentity(manifestPath, deployedRoot), null);
 });
@@ -766,6 +930,26 @@ test('backup manifest and archive changes independently alter the digest', () =>
   assert.notEqual(digest(changedManifest), digest(changedArchive));
 });
 
+test('publisherToolchain runtime closure evidence changes signed OTA digest', () => {
+  const root = createFixtureRepository();
+  const ota = {
+    updateId: 'update-1',
+    groupId: '00000000-0000-0000-0000-000000000001',
+    runtimeVersion: '1.2.0',
+    channel: 'production',
+    branch: 'production',
+    profile: 'production',
+    environment: 'production',
+    updates: [{ id: '11111111-1111-1111-1111-111111111111', platform: 'ios' }],
+  };
+  const base = fixtureManifest(root, { mode: 'ota', ota });
+  const tampered = JSON.parse(JSON.stringify(base));
+  tampered.content.publisherToolchain.runtimeClosureDigest = 'b'.repeat(64);
+  tampered.contentDigest.value = recalculateContentDigest(tampered);
+  assert.notEqual(base.contentDigest.value, tampered.contentDigest.value);
+  assert.equal(base.content.publisherToolchain.packageCount, explicitPublisherToolchainFixture().packageCount);
+});
+
 test('additional coordinated-backup archives are content-addressed', () => {
   const root = createFixtureRepository();
   const backupManifest = write(root, 'build/runtime.tgz.manifest.json', '{}\n');
@@ -923,24 +1107,159 @@ test('CLI exercises source, dashboard, IPA, OTA, backup, and verification modes 
 
   const deployedRoot = path.join(root, 'build', 'deployed');
   deployDashboardFixture(root, deployedRoot);
-  const dashboard = JSON.parse(runCli(root, [
+  const dashboardPath = path.join(root, 'build', 'dashboard-manifest.json');
+  const dashboardRun = runCli(root, [
     '--mode=dashboard',
     `--deployed-root=${deployedRoot}`,
-    '--stdout',
-  ]).stdout);
+    dashboardPath,
+  ]);
+  const dashboard = JSON.parse(fs.readFileSync(dashboardPath, 'utf8'));
   assert.equal(dashboard.content.deployedFiles.length, DASHBOARD_RUNTIME_FILES.length);
-  verifyManifest(dashboard);
+  verifySignedFile(dashboardPath, dashboardRun.signing.keyringPath);
 
   const artifact = write(root, 'build/cli.ipa', 'ipa\n');
   const ipaDestination = path.join(root, 'build', 'ipa-manifest.json');
-  runCli(root, [`--artifact=${artifact}`, ipaDestination]);
+  const ipaRun = runCli(root, ['--mode=ipa', `--artifact=${artifact}`, ipaDestination]);
   const ipa = JSON.parse(fs.readFileSync(ipaDestination, 'utf8'));
   assert.equal(ipa.content.mode, 'ipa');
   assert.equal(ipa.content.artifact.file, 'cli.ipa');
-  verifyManifest(ipa);
+  verifySignedFile(ipaDestination, ipaRun.signing.keyringPath);
+  assert.equal(fs.existsSync(signaturePathFor(ipaDestination)), true);
 
   const otaDestination = path.join(root, 'build', 'ota-manifest.json');
-  runCli(root, [
+  if (CAN_RUN_PUBLISHER_RUNTIME) {
+    fs.cpSync(
+      path.join(REPOSITORY_ROOT, 'ops/publisher-toolchain/node_modules'),
+      path.join(root, 'ops/publisher-toolchain/node_modules'),
+      { recursive: true, force: true },
+    );
+    fs.copyFileSync(
+      path.join(REPOSITORY_ROOT, 'ops/publisher-toolchain/package-lock.json'),
+      path.join(root, 'ops/publisher-toolchain/package-lock.json'),
+    );
+    const otaRun = runCli(root, [
+      '--mode=ota',
+      '--ota-update-id=update-1',
+      '--ota-group-id=group-1',
+      '--ota-runtime=1.2.0',
+      '--ota-channel=production',
+      '--ota-branch=production',
+      otaDestination,
+    ]);
+    verifySignedFile(otaDestination, otaRun.signing.keyringPath);
+    assert.equal(fs.existsSync(signaturePathFor(otaDestination)), true);
+    const ota = JSON.parse(fs.readFileSync(otaDestination, 'utf8'));
+    assert.equal(
+      ota.content.publisherToolchain.runtimeClosureDigest,
+      explicitPublisherToolchainFixture().runtimeClosureDigest,
+    );
+  } else {
+    const ota = fixtureManifest(root, {
+      mode: 'ota',
+      ota: {
+        updateId: 'update-1',
+        groupId: 'group-1',
+        runtimeVersion: '1.2.0',
+        channel: 'production',
+        branch: 'production',
+      },
+    });
+    assert.deepEqual(ota.content.publisherToolchain, explicitPublisherToolchainFixture());
+    assertUnsignedOtaFixtureEvidence(ota);
+  }
+
+  const backupManifest = write(root, 'build/backup.manifest.json', '{}\n');
+  const backupArchive = write(root, 'build/backup.tgz', 'archive\n');
+  const backupDestination = path.join(root, 'build', 'backup-release.json');
+  const backupRun = runCli(root, [
+    '--mode=backup',
+    `--backup-manifest=${backupManifest}`,
+    `--backup-archive=${backupArchive}`,
+    backupDestination,
+  ]);
+  verifySignedFile(backupDestination, backupRun.signing.keyringPath);
+  assert.equal(fs.existsSync(signaturePathFor(backupDestination)), true);
+
+  const verified = spawnSync(process.execPath, [
+    SCRIPT,
+    `--verify=${backupDestination}`,
+    `--keyring-path=${backupRun.signing.keyringPath}`,
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  assert.equal(verified.status, 0, verified.stderr);
+  assert.match(verified.stdout, /^release-manifest: ok [a-f0-9]{64}\n$/);
+});
+
+test('simulated non-bound platform validates unsigned OTA fixture schema and digest without signature', () => {
+  const root = createFixtureRepository();
+  const ota = fixtureManifest(root, {
+    mode: 'ota',
+    ota: {
+      updateId: 'update-1',
+      groupId: 'group-1',
+      runtimeVersion: '1.2.0',
+      channel: 'production',
+      branch: 'production',
+    },
+  });
+  assert.deepEqual(ota.content.publisherToolchain, explicitPublisherToolchainFixture());
+  assertUnsignedOtaFixtureEvidence(ota);
+  assert.throws(
+    () => verifyManifest(ota),
+    /manifest path for signature lookup|requires RELEASE_KEYRING_PATH/,
+  );
+});
+
+test('buildManifest production OTA path requires verified standalone publisher install', () => {
+  const root = createFixtureRepository();
+  const ota = {
+    updateId: 'update-1',
+    groupId: 'group-1',
+    runtimeVersion: '1.2.0',
+    channel: 'production',
+    branch: 'production',
+  };
+  assert.throws(
+    () => buildManifest({ root, mode: 'ota', ota }),
+    /runtime closure|lock closure|standalone|installed|verifyInstalled|bound platform/i,
+  );
+});
+
+test('buildManifest production OTA path verifies installed publisher on bound platform', () => {
+  if (!CAN_RUN_PUBLISHER_RUNTIME) return;
+  const root = createFixtureRepository();
+  fs.cpSync(
+    path.join(REPOSITORY_ROOT, 'ops/publisher-toolchain/node_modules'),
+    path.join(root, 'ops/publisher-toolchain/node_modules'),
+    { recursive: true, force: true },
+  );
+  fs.copyFileSync(
+    path.join(REPOSITORY_ROOT, 'ops/publisher-toolchain/package-lock.json'),
+    path.join(root, 'ops/publisher-toolchain/package-lock.json'),
+  );
+  const manifest = buildManifest({
+    root,
+    mode: 'ota',
+    ota: {
+      updateId: 'update-1',
+      groupId: 'group-1',
+      runtimeVersion: '1.2.0',
+      channel: 'production',
+      branch: 'production',
+    },
+  });
+  assert.equal(
+    manifest.content.publisherToolchain.runtimeClosureDigest,
+    explicitPublisherToolchainFixture().runtimeClosureDigest,
+  );
+});
+
+test('CLI direct OTA generation fails without verified standalone install and writes no signed pair', () => {
+  const root = createFixtureRepository();
+  const otaDestination = path.join(root, 'build', 'ota-direct-fail.json');
+  const result = runCli(root, [
     '--mode=ota',
     '--ota-update-id=update-1',
     '--ota-group-id=group-1',
@@ -948,26 +1267,50 @@ test('CLI exercises source, dashboard, IPA, OTA, backup, and verification modes 
     '--ota-channel=production',
     '--ota-branch=production',
     otaDestination,
-  ]);
-  verifyManifest(JSON.parse(fs.readFileSync(otaDestination, 'utf8')));
+  ], 1);
+  assert.match(result.stderr, /runtime closure|lock closure|standalone|installed|verifyInstalled|bound platform/i);
+  assert.equal(fs.existsSync(otaDestination), false);
+  assert.equal(fs.existsSync(signaturePathFor(otaDestination)), false);
+});
 
-  const backupManifest = write(root, 'build/backup.manifest.json', '{}\n');
-  const backupArchive = write(root, 'build/backup.tgz', 'archive\n');
-  const backupDestination = path.join(root, 'build', 'backup-release.json');
-  runCli(root, [
-    '--mode=backup',
-    `--backup-manifest=${backupManifest}`,
-    `--backup-archive=${backupArchive}`,
-    backupDestination,
-  ]);
-  verifyManifest(JSON.parse(fs.readFileSync(backupDestination, 'utf8')));
-
-  const verified = spawnSync(process.execPath, [SCRIPT, `--verify=${backupDestination}`], {
-    cwd: root,
-    encoding: 'utf8',
-  });
-  assert.equal(verified.status, 0, verified.stderr);
-  assert.match(verified.stdout, /^release-manifest: ok [a-f0-9]{64}\n$/);
+test('CLI and library reject --stdout for production modes before generation', () => {
+  const root = createFixtureRepository();
+  const deployedRoot = deployDashboardFixture(root, path.join(root, 'build', 'stdout-dashboard'));
+  const artifact = write(root, 'build/stdout.ipa', 'ipa\n');
+  const backupManifest = write(root, 'build/stdout-backup.manifest.json', '{}\n');
+  const backupArchive = write(root, 'build/stdout-backup.tgz', 'archive\n');
+  const cases = [
+    ['dashboard', ['--mode=dashboard', `--deployed-root=${deployedRoot}`]],
+    ['ipa', ['--mode=ipa', `--artifact=${artifact}`]],
+    ['ota', [
+      '--mode=ota',
+      '--ota-update-id=update-1',
+      '--ota-group-id=group-1',
+      '--ota-runtime=1.2.0',
+      '--ota-channel=production',
+      '--ota-branch=production',
+    ]],
+    ['backup', [
+      '--mode=backup',
+      `--backup-manifest=${backupManifest}`,
+      `--backup-archive=${backupArchive}`,
+    ]],
+  ];
+  for (const [mode, args] of cases) {
+    assert.throws(
+      () => assertStdoutModeAllowed(mode),
+      /--stdout is only supported for source mode/,
+    );
+    const result = runCli(root, [...args, '--stdout'], 1);
+    assert.match(result.stderr, /--stdout is only supported for source mode/);
+    assert.equal(result.stdout.trim(), '');
+    const allowUnsigned = runCli(root, [...args, '--stdout', '--allow-unsigned'], 1);
+    assert.match(allowUnsigned.stderr, /--stdout is only supported for source mode/);
+    assert.equal(allowUnsigned.stdout.trim(), '');
+  }
+  const source = runCli(root, ['--mode=source', '--stdout']);
+  assert.match(source.stdout, /"mode": "source"/);
+  assert.doesNotThrow(() => assertStdoutModeAllowed('source'));
 });
 
 test('CLI refuses to write a final manifest when source changes after capture', () => {
@@ -1027,8 +1370,8 @@ test('CLI rejects ignored arguments and unsafe manifest destinations', () => {
   ], 1);
   assert.match(stdoutDestination.stderr, /--stdout cannot be combined/);
 
-  const manifestPath = path.join(root, 'build', 'valid.json');
-  runCli(root, ['--mode=source', manifestPath]);
+  const manifestPath = write(root, 'build/valid.json', '{}\n');
+  runCli(root, ['--mode=source', '--allow-unsigned', manifestPath]);
   const verifyConflict = spawnSync(process.execPath, [
     SCRIPT,
     `--verify=${manifestPath}`,
@@ -1078,7 +1421,7 @@ test('IPA and OTA callers capture source before operations and assert it afterwa
   const callers = [
     ['finance-app/scripts/ios-build.sh', 'npx expo prebuild'],
     ['finance-app/scripts/ios-sideload.sh', 'npx expo prebuild'],
-    ['finance-app/scripts/ota-publish.sh', 'npx eas-cli@latest update'],
+    ['finance-app/scripts/ota-publish.sh', 'node "$ROOT/scripts/run-pinned-eas.js" update'],
   ];
   for (const [relative, operation] of callers) {
     const source = fs.readFileSync(path.join(REPOSITORY_ROOT, relative), 'utf8');
@@ -1129,4 +1472,35 @@ test('dashboard runtime allowlist exactly covers production modules and browser 
   for (const relative of DASHBOARD_RUNTIME_FILES) {
     assert.equal(fs.statSync(path.join(dashboard, relative)).isFile(), true, relative);
   }
+});
+
+test('CLI verify rejects symlink and oversized release manifests', {
+  skip: process.platform === 'win32' ? 'POSIX symlink semantics' : false,
+}, () => {
+  const root = createFixtureRepository();
+  const signing = createEphemeralSigningMaterial(root);
+  const bundleManifestPath = write(root, 'bundle.manifest.json', '{"artifact":{"id":"abc"}}\n');
+  const bundleArchivePath = write(root, 'bundle.tgz', 'bundle\n');
+  const manifestPath = path.join(root, 'build', 'verify-target.json');
+  const { writeSignedReleaseEvidence } = require('./helpers/release-signing-fixtures');
+  writeSignedReleaseEvidence(manifestPath, bundleManifestPath, bundleArchivePath, signing);
+
+  const symlinkPath = path.join(root, 'build', 'linked-verify.json');
+  fs.symlinkSync(manifestPath, symlinkPath);
+  const symlinkVerify = spawnSync(process.execPath, [SCRIPT, `--verify=${symlinkPath}`], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, ...signing.signingEnv },
+  });
+  assert.equal(symlinkVerify.status, 1);
+  assert.match(symlinkVerify.stderr, /symbolic link/);
+
+  fs.writeFileSync(manifestPath, Buffer.alloc(4 * 1024 * 1024 + 1, 0x7b), { mode: 0o600 });
+  const oversizeVerify = spawnSync(process.execPath, [SCRIPT, `--verify=${manifestPath}`], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, ...signing.signingEnv },
+  });
+  assert.equal(oversizeVerify.status, 1);
+  assert.match(oversizeVerify.stderr, /size is out of bounds/);
 });

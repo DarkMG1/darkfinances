@@ -10,7 +10,8 @@ import { applyTextTone } from '../dom.js';
 export async function loadSpending() {
   const data = await (await fetch('/api/spending' + monthQS())).json();
   const { current, prev } = data;
-  const complete = current?.completeness?.complete !== false;
+  const complete = data.completeness?.complete === true;
+  const comparisonComplete = data.comparisonCompleteness?.complete === true;
   document.getElementById('statSpent').textContent = complete && current.totalSpend != null ? fmtPos(current.totalSpend) : 'Unavailable';
   document.getElementById('statIncome').textContent = complete && current.totalIncome != null ? fmtPos(current.totalIncome) : 'Unavailable';
   const net = complete && current.totalIncome != null && current.totalSpend != null ? current.totalIncome - current.totalSpend : null;
@@ -19,7 +20,7 @@ export async function loadSpending() {
   applyTextTone(netEl, net != null && net >= 0 ? 'green' : net != null ? 'red' : 'muted');
 
   const dEl = document.getElementById('statSpentDelta');
-  if (complete && prev.totalSpend > 0 && current.totalSpend != null) {
+  if (complete && comparisonComplete && prev.totalSpend > 0 && current.totalSpend != null) {
     const delta = current.totalSpend - prev.totalSpend;
     const pct = Math.abs((delta / prev.totalSpend) * 100).toFixed(0);
     dEl.textContent = (delta > 0 ? '▲' : '▼') + ' ' + pct + '% vs prev month';
@@ -85,6 +86,9 @@ export async function loadTrends() {
   const Chart = requireChart();
 
   destroyChart('netWorth');
+  const netWorthChartEl = document.getElementById('netWorthChart');
+  const netWorthChartBox = netWorthChartEl?.closest('.chart-box');
+  if (netWorthChartBox) netWorthChartBox.setAttribute('aria-label', 'Net worth trend chart, synced accounts only');
   if (nwComplete && nw.some((v) => v != null)) {
     setChart('netWorth', new Chart(document.getElementById('netWorthChart'), {
       type: 'line',

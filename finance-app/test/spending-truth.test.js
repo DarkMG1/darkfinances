@@ -202,7 +202,7 @@ test('spending screen preserves PR-19 finance-date hooks for period windows', ()
 });
 
 test('spending screen gates authoritative totals on projection completeness', () => {
-  assert.match(spendingSource, /spendingComplete = cur\?\.completeness\?\.complete !== false/);
+  assert.match(spendingSource, /spendingComplete = \(useCurrentToday[\s\S]*spending\.data\?\.completeness\?\.complete\) === true/);
   assert.match(spendingSource, /totalSpend = spendingComplete && cur\?\.totalSpend != null \? cur\.totalSpend : null/);
   assert.match(spendingSource, /'Unavailable'/);
   assert.doesNotMatch(spendingSource, /cur\?\.totalSpend \?\? 0/);

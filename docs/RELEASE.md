@@ -11,16 +11,56 @@ DarkFinances ships through three coordinated paths:
 Schema-v2 manifests separate display metadata such as `builtAt`, the short commit, and the local
 branch from the identity-bearing `content` object. `contentDigest.value` is the SHA-256 of canonical
 JSON for `content`; regenerating equivalent evidence at a different time therefore preserves the
-digest. Verify a stored manifest before using it:
+digest.
+
+Production release evidence is **Ed25519-signed**. Generation writes a sibling commit marker
+`<manifest>.sig.json` with a strict envelope (`kind`, `schemaVersion`, `algorithm=ed25519`, `keyId`,
+`signedAt`, `manifestDigest`, `signature`). The manifest itself never contains a signature field.
+Verification binds the signature payload to the full validated manifest digest, so transplanting a
+signature or tampering with manifest bytes fails closed.
+
+Verify a stored manifest and its signature before using it:
 
 ```bash
+export RELEASE_KEYRING_PATH=/path/to/release-keyring.json
 node scripts/release-manifest.js --verify=/path/to/release-manifest.json
 ```
 
-This is content integrity, not authenticity. There is no signing key or cryptographic signature:
-anyone able to replace both the content and its digest can create a different internally consistent
-manifest. Protect or attest the manifest through the release system if publisher authenticity is
-required.
+Production modes (`dashboard`, `ipa`, `ota`, `backup`) always require keyring + sibling signature
+for verification, generation, restore binding, coordinated backup health, and `/ping` identity.
+There is no opt-in downgrade when `RELEASE_KEYRING_PATH` is unset. `--allow-unsigned` remains
+source-mode only.
+
+```bash
+export RELEASE_SIGNING_KEY_PATH=/path/to/release-signing-key.json
+export RELEASE_KEYRING_PATH=/path/to/release-keyring.json
+```
+
+`--stdout`, `--source-digest`, and `--check-*` are source-only helpers. `--stdout` is rejected for
+production modes (`dashboard`, `ipa`, `ota`, `backup`) before generation because detached signatures
+cannot accompany stdout output; `--allow-unsigned` does not override this guard. Non-production
+writes to a destination require `--allow-unsigned` explicitly. `--allow-unsigned` is rejected for
+production modes regardless of `NODE_ENV`.
+
+Create operator-owned signing material once per environment (never commit production keys). Do this
+**before** the first production deploy:
+
+```bash
+node scripts/release-signing-keygen.js --output-dir=/secure/path/to/release-signing-v1
+# prints keyId only; creates release-signing-key.json (0600) and release-keyring.json (0600)
+export RELEASE_SIGNING_KEY_PATH=/secure/path/to/release-signing-v1/release-signing-key.json
+export RELEASE_KEYRING_PATH=/secure/path/to/release-signing-v1/release-keyring.json
+```
+
+Add `RELEASE_KEYRING_PATH` to the dashboard systemd `EnvironmentFile`. Keep the private signing key
+offline; deploy only the public keyring to the host.
+
+Atomic publication renames the manifest first and the sibling signature second. The signature rename
+is the commit marker: a crash between renames leaves verification failing and production startup
+unhealthy until the pair is repaired or regenerated.
+
+Until both files exist, env vars are configured, and manifests are signed, production manifest
+generation and verification will fail closed.
 
 Every manifest binds the Git commit, a SHA-256 aggregate of tracked working-tree content and
 non-ignored untracked source (including executable semantics), clean/tracked-dirty/untracked state,
@@ -79,6 +119,11 @@ branch/channel/environment, `preview` uses its preview branch/channel/environmen
 preview are validated against `finance-app/eas.json`. The publisher captures EAS `--json` output
 after publication and then writes and verifies
 `finance-app/dist/ota-release-manifest.json`; it does not create temporary branches or remap channels.
+Direct `--mode=ota` manifest generation (outside `ota-publish.sh`) requires a verified standalone
+`ops/publisher-toolchain/node_modules` install on the bound publisher platform; freshness-only contract checks
+are insufficient for production OTA evidence. OTA invocation copies the publisher install into a private
+temp snapshot and verifies the full physical package set and byte closure before spawning EAS; the publisher
+host must remain same-UID/trusted during publish.
 `npm run sideload:ios` continues to write a free-sideload manifest beside its unsigned IPA.
 
 Supplied artifact, backup, source-archive, and dirty-patch paths must be existing regular files.
@@ -132,6 +177,24 @@ node scripts/check-lockfile-repro.js
 Runs `npm ci --ignore-scripts` and fails if `package-lock.json` mutates. It uses only Node built-ins
 before that install, so CI can execute it directly from a dependency-empty checkout.
 
+## Supply-chain preflight in CI
+
+Merge CI (`.github/workflows/ci.yml`) and native/stress workflows
+(`ios-pr-smoke`, `android-compile-smoke`, `maestro-full-suite`, `shutdown-stress`)
+run a supply-chain preflight immediately after `npm ci` and before builds or
+stress execution:
+
+```bash
+npm run check:action-pins:upstream
+npm run check:vulnerabilities
+```
+
+Local `npm run check` keeps offline semantics: it runs source-only action pin
+alignment (`check:action-pins`) but not upstream verification or live npm audit.
+Use the explicit commands above when validating dependency or workflow pin
+changes before relying on CI. See [`docs/vulnerability-policy.md`](vulnerability-policy.md)
+for exception policy ownership.
+
 ## Coordinated backup provenance
 
 `ops/bin/backup-coordinated.sh` quiesces timers/services when available, builds a PR-16 relocatable
@@ -161,6 +224,30 @@ instead.
 
 Restore remains `CONFIRM=1` gated. The restore helper does not stop or start services; live swap
 requires writers to already be quiescent or a coordinated restore session that stops them first.
+
+### Restore admission transport migration
+
+Production **preview and live restore** now require quiescence admission via
+`RESTORE_QUIESCENCE_ADMISSION_PATH` only. Inline JSON/token transport
+(`RESTORE_QUIESCENCE_ADMISSION_TOKEN`) and direct token injection are rejected outside explicit
+test-only opt-in.
+
+Trusted admission file requirements:
+
+- mode `0600` regular file (not directory, symlink, or hard link)
+- owned by the invoking service account
+- single link count (no hard links)
+- path resolved under trusted coordinator roots (`controlRoot`, `workRoot`, `canonicalRoot`)
+
+Preview vs live mode is explicit boolean `dryRun` on the restore contract (not `NODE_ENV`):
+
+- **Standalone preview**: default/`--dry-run`; `--dry-run` wins over ambient `CONFIRM=1`
+- **Standalone live**: `--confirm` or `CONFIRM=1` without `--dry-run`
+- **Coordinated preview**: `restore-coordinated.sh --dry-run` or `RESTORE_DRY_RUN=1` (read-only;
+  does not consume admission)
+- **Coordinated live**: neither flag set; admission issued to a trusted path during the session
+
+Conflicting mode signals (`--dry-run` with `--confirm` or with `CONFIRM=1`) fail closed at the CLI.
 
 ## Dashboard trust-proxy migration
 

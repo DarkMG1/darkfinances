@@ -8,6 +8,7 @@ const { DASHBOARD_RUNTIME_FILES } = require('../../../finance-dashboard/lib/rele
 const { collectDeployedFiles, sha256Canonical } = require('../../../scripts/release-manifest');
 const { createMockRunners, defaultActiveUnits } = require('./coordinated-backup-fixtures');
 const { hashDashboardReleaseIdentity } = require('../../lib/coordinated-backup-health');
+const { createEphemeralSigningMaterial, writeSignedManifest } = require('../helpers/release-signing-fixtures');
 
 function envelopedPingBody(payload) {
   return { data: payload };
@@ -51,7 +52,7 @@ function writeSchemaV1ReleaseManifest(dashboardDir, identity = SCHEMA_V1_RELEASE
   return manifest;
 }
 
-function writeSchemaV2ReleaseManifest(dashboardDir, deployedPaths = DASHBOARD_RUNTIME_FILES) {
+function writeSchemaV2ReleaseManifest(dashboardDir, deployedPaths = DASHBOARD_RUNTIME_FILES, options = {}) {
   for (const relative of deployedPaths) {
     const target = path.join(dashboardDir, relative);
     fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -101,11 +102,13 @@ function writeSchemaV2ReleaseManifest(dashboardDir, deployedPaths = DASHBOARD_RU
     },
     display: { repository: { commitShort: 'unbound', branch: null } },
   };
-  fs.writeFileSync(
-    path.join(dashboardDir, 'release-manifest.json'),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-    { mode: 0o600 },
-  );
+  const manifestPath = path.join(dashboardDir, 'release-manifest.json');
+  if (options.sign === false) {
+    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  } else {
+    const signing = options.signing || createEphemeralSigningMaterial(dashboardDir);
+    writeSignedManifest(manifestPath, manifest, signing.signingPath, signing.keyringPath);
+  }
   return manifest;
 }
 

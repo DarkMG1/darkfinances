@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 2,
+  "version": "2.7.0",
+  "releaseTag": "cli-2.7.0",
+  "platform": "macos",
+  "artifactName": "maestro.zip",
+  "downloadUrl": "https://github.com/mobile-dev-inc/Maestro/releases/download/cli-2.7.0/maestro.zip",
+  "allowedHosts": [
+    "github.com",
+    "release-assets.githubusercontent.com"
+  ],
+  "sha256": "a4ccab6b604617e7aef6db4f885666056eabe5cfa32befaa3bc994041b8fcbb5",
+  "binaryPath": "maestro/bin/maestro",
+  "extractMode": "full-tree",
+  "maxArchiveBytes": 536870912,
+  "maxUncompressedBytes": 1073741824,
+  "maxMemberCount": 4096,
+  "maxMemberBytes": 268435456,
+  "maxCompressionRatio": 100,
+  "provenance": "https://github.com/mobile-dev-inc/Maestro/releases/tag/cli-2.7.0"
+}

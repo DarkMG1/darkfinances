@@ -35,7 +35,10 @@ const {
 const {
   listTarMemberNames,
   listTarVerboseEntries,
+  inspectTarArchive,
 } = require('./backup-bundle-tar-listing');
+const { backupTarEnv } = require('./backup-tar-env');
+const { assertArchivePublicationCommitted } = require('./backup-publication-contract');
 
 function sha256Buffer(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
@@ -46,6 +49,22 @@ function parseJson(label, text) {
     return JSON.parse(text);
   } catch (error) {
     throw new Error(`${label} is not valid JSON: ${error.message}`);
+  }
+}
+
+function normalizeTarMemberForCollision(member) {
+  return member.endsWith('/') && member.length > 1 ? member.slice(0, -1) : member;
+}
+
+function assertNoTarMemberNormalizationCollisions(rawMembers, label = 'archive member') {
+  const normalizedToRaw = new Map();
+  for (const raw of rawMembers) {
+    const normalized = normalizeTarMemberForCollision(raw);
+    const prior = normalizedToRaw.get(normalized);
+    if (prior !== undefined && prior !== raw) {
+      throw new Error(`archive member normalization collision for ${label}: ${prior} vs ${raw}`);
+    }
+    if (prior === undefined) normalizedToRaw.set(normalized, raw);
   }
 }
 
@@ -127,16 +146,10 @@ function inventoryFromBundle(bundleRoot) {
 }
 
 function assertArchiveChecksum(archivePath) {
-  const checksumPath = `${archivePath}.sha256`;
-  if (!fs.existsSync(checksumPath)) {
-    throw new Error(`missing archive checksum sidecar: ${checksumPath}`);
-  }
-  const expected = fs.readFileSync(checksumPath, 'utf8').trim().split(/\s+/)[0];
-  const actual = sha256File(archivePath);
-  if (expected !== actual) throw new Error('archive checksum mismatch');
+  assertArchivePublicationCommitted(archivePath, 'archive');
 }
 
-function readManifestFromArchive(archivePath) {
+function readManifestFromArchive(archivePath, listing = null) {
   const sidecarPath = `${archivePath}.manifest.json`;
   if (!fs.existsSync(sidecarPath)) {
     throw new Error(`missing sidecar manifest: ${sidecarPath}`);
@@ -147,12 +160,16 @@ function readManifestFromArchive(archivePath) {
 
   assertArchiveChecksum(archivePath);
 
-  const members = listTarMemberNames(archivePath);
+  const resolvedListing = listing || inspectTarArchive(archivePath);
+  const members = resolvedListing.memberNames;
   if (!members.includes(EMBEDDED_MANIFEST)) {
     throw new Error(`archive is missing embedded ${EMBEDDED_MANIFEST}`);
   }
 
-  const embedded = spawnSync('tar', ['-xOf', archivePath, EMBEDDED_MANIFEST], { encoding: 'utf8' });
+  const embedded = spawnSync('tar', ['-xOf', archivePath, EMBEDDED_MANIFEST], {
+    encoding: 'utf8',
+    env: backupTarEnv(),
+  });
   if (embedded.status !== 0) throw new Error('unable to read embedded manifest');
   const embeddedManifest = parseJson(EMBEDDED_MANIFEST, embedded.stdout);
   if (JSON.stringify(embeddedManifest) !== JSON.stringify(manifest)) {
@@ -242,9 +259,10 @@ function assertArchivePreflightBounds(manifest) {
   }
 }
 
-function assertTarEntryTypesSafe(archivePath) {
-  const memberNames = listTarMemberNames(archivePath);
-  const entries = listTarVerboseEntries(archivePath);
+function assertTarEntryTypesSafe(archivePath, listing = null) {
+  const resolved = listing || inspectTarArchive(archivePath);
+  const memberNames = resolved.memberNames;
+  const entries = resolved.verboseEntries;
 
   if (entries.length !== memberNames.length) {
     throw new Error(
@@ -300,7 +318,10 @@ function assertManifestMatchesArchive(manifestPaths, archiveMembers) {
 
 function extractArchiveTo(archivePath, destination) {
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
-  const extract = spawnSync('tar', ['-xzf', archivePath, '-C', destination], { encoding: 'utf8' });
+  const extract = spawnSync('tar', ['-xzf', archivePath, '-C', destination], {
+    encoding: 'utf8',
+    env: backupTarEnv(),
+  });
   if (extract.status !== 0) throw new Error(extract.stderr || 'tar extract failed');
 }
 
@@ -456,12 +477,14 @@ function verifyBackupBundleArchive({
     throw new Error(`archive not found: ${archivePath}`);
   }
 
-  const manifest = readManifestFromArchive(archivePath);
+  const listing = inspectTarArchive(archivePath);
+  const manifest = readManifestFromArchive(archivePath, listing);
   assertManifestStructure(manifest);
   assertArchivePreflightBounds(manifest);
 
-  const members = assertTarMembersSafe(listTarMembers(archivePath));
-  assertTarEntryTypesSafe(archivePath);
+  assertNoTarMemberNormalizationCollisions(listing.memberNames);
+  const members = assertTarMembersSafe(listing.memberNames);
+  assertTarEntryTypesSafe(archivePath, listing);
 
   const manifestPaths = new Set(manifest.files.map((entry) => assertSafeRelativePath(entry.path)));
   assertManifestMatchesArchive(manifestPaths, members);
@@ -519,6 +542,8 @@ function stageRuntimeFromBundle({
 module.exports = {
   assertSafeRelativePath,
   assertNoUnicodeNormalizationCollisions,
+  assertNoTarMemberNormalizationCollisions,
+  normalizeTarMemberForCollision,
   assertTarMembersSafe,
   listTarMembers,
   redactErrorMessage,

@@ -1,0 +1,34 @@
+{
+  "sdk": "expo-file-system/legacy@56",
+  "source": "Expo SDK 56 legacy FileSystem.getInfoAsync(fileUri) — InfoOptions supports md5 only; size is always present on existing files.",
+  "getInfoAsyncSignature": {
+    "arity": 2,
+    "supportedOptions": ["md5"],
+    "unsupportedOptions": ["size"]
+  },
+  "responses": {
+    "existingFile": {
+      "exists": true,
+      "isDirectory": false,
+      "uri": "file:///var/mobile/Containers/Data/Application/ABC/tmp/receipt.jpg",
+      "size": 24576,
+      "modificationTime": 1710000000
+    },
+    "missing": {
+      "exists": false,
+      "isDirectory": false
+    },
+    "directory": {
+      "exists": true,
+      "isDirectory": true,
+      "uri": "file:///var/mobile/Containers/Data/Application/ABC/tmp/",
+      "size": 4096,
+      "modificationTime": 1710000000
+    },
+    "unknownSize": {
+      "exists": true,
+      "isDirectory": false,
+      "uri": "file:///var/mobile/Containers/Data/Application/ABC/tmp/opaque.jpg"
+    }
+  }
+}

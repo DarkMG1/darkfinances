@@ -45,6 +45,7 @@ const OPS_TOOLING_FILES = Object.freeze([
 
 const SCRIPT_TOOLING_SEEDS = Object.freeze([
   'scripts/release-manifest.js',
+  'scripts/release-signing-keygen.js',
   'scripts/contract-fingerprint.js',
   'scripts/version-alignment.js',
   'scripts/release-profile.js',

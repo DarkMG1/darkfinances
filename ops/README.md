@@ -103,7 +103,12 @@ install -m 600 /path/to/finance-dashboard.env "$HOME/.openclaw/finance-dashboard
 ```
 
 Set `SESSION_DIR` and sidecar paths in the environment if they do not live under
-`$HOME/finance-dashboard`. Configure first-passkey enrollment only for the short provisioning window
+`$HOME/finance-dashboard`. The checked-in `finance-dashboard.service` unit pins
+`FINANCE_RUNTIME_MODE=production` and `NODE_ENV=production` (both pinned in the checked-in
+systemd unit); do not set `ALLOW_RAW_ACTUAL_API=1`, `NODE_ENV=test`, or other test-only
+Actual bypass flags in the deployment env file. Validate with
+`node finance-dashboard/scripts/check-dashboard-deployment-env.js --file=~/.openclaw/finance-dashboard.env`
+before restart. Configure first-passkey enrollment only for the short provisioning window
 described in [`../finance-dashboard/README.md`](../finance-dashboard/README.md).
 
 ### Trust-proxy migration checklist (pre-restart)
@@ -158,24 +163,34 @@ An HTTP `503` from ping means the process is reachable but Actual data is not re
 journal before restarting repeatedly.
 
 After each code deployment and before relying on `/ping` release identity, hash the files actually
-present in the deployment:
+present in the deployment. Production generation and verification require operator-provisioned signing
+files (see [Release and provenance](../docs/RELEASE.md)):
 
 ```bash
+export RELEASE_SIGNING_KEY_PATH=/secure/path/to/release-signing-key.json
+export RELEASE_KEYRING_PATH=/secure/path/to/release-keyring.json
 FINANCE_DASHBOARD_DIR="$HOME/finance-dashboard" \
   ops/bin/write-dashboard-release-manifest.sh
 node scripts/release-manifest.js \
   --verify="$HOME/finance-dashboard/release-manifest.json"
 ```
 
+Configure the dashboard systemd unit to load `RELEASE_KEYRING_PATH` from the deployment
+`EnvironmentFile` (`~/.openclaw/finance-dashboard.env`). Production runtime startup fails closed when
+the keyring is missing or the current dashboard manifest/signature pair does not verify. Until
+signing files are provisioned, production manifest generation, verification, coordinated backup
+release manifests, and signed `/ping` release identity will fail closed.
+
 The helper uses a fixed reviewed runtime-file allowlist and does not enumerate ignored sidecars,
 receipts, environment files, sessions, or dependencies. `DARKFINANCES_REPO_ROOT` must point to the
 repository containing the exact source copied into `FINANCE_DASHBOARD_DIR`; generation fails if any
 allowlisted source/deployment file differs. Set it explicitly when the helper is installed outside
 the repository, and set `RELEASE_MANIFEST_PATH` when the service uses a non-default manifest
-location. The standalone `--verify` command checks manifest structure and its canonical
-content digest. Dashboard `/ping` additionally rehashes every allowlisted file against the running
-dashboard directory; it reports `release: null` if deployed code or assets drift afterward. Schema-v1
-manifests remain readable for migration but do not claim this live deployed-file verification.
+location. The standalone `--verify` command checks manifest structure, its canonical content digest,
+and the detached Ed25519 signature against `RELEASE_KEYRING_PATH`. Dashboard `/ping` additionally
+rehashes every allowlisted file against the running dashboard directory; it reports `release: null`
+if deployed code or assets drift afterward, or if signature verification fails. Schema-v1 manifests
+remain readable for migration but do not claim this live deployed-file verification.
 
 ## 4. Install scheduled bank sync
 
@@ -621,6 +636,11 @@ The helper:
   invocations fail with `restore already in progress`.
 - Requires a PR-18 quiescence admission token with TTL and bindings to archive SHA-256 and destination path;
   generation evidence is re-read immediately before the first mutation.
+- Production restore admission must be supplied via `RESTORE_QUIESCENCE_ADMISSION_PATH` pointing at a
+  mode-`0600` regular file under trusted coordinator roots (owner, symlink, hard-link, and path checks).
+  Inline JSON/token transport (`RESTORE_QUIESCENCE_ADMISSION_TOKEN`) is rejected for production preview
+  and live swap; live restore (`CONFIRM=1` / `--confirm`, i.e. `dryRun !== true`) always requires the
+  trusted file path even in tests.
 - Fsyncs journals (write-temp-then-rename), staged files, and parent directories at mutation boundaries where
   the platform supports it.
 - Refuses restore without a PR-18 quiescence admission token (this script does not stop/start services).
@@ -670,6 +690,7 @@ export FINANCE_EVENT_SYNC_CONFIGURED=1
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `RESTORE_QUIESCENCE_ADMISSION_PATH` | unset | Path to signed PR-18 quiescence admission JSON (`0600`, trusted coordinator roots); required for production preview and live restore |
 | `RESTORE_PRE_QUIESCED` | unset | Coordinated restore only: skip stop commands when writers were stopped out-of-band; still verifies quiescence |
 | `RESTORE_DRY_RUN` | unset | Coordinated restore discovery/preview only (`restore-coordinated.sh`; not `restore-dashboard-runtime.sh`) |
 | `FINANCE_EVENT_SYNC_CONFIGURED` | unset | When `1`, coordinated restore quiesces event-sync writers and rejects active legacy `owes-snapshot.js` cron |
@@ -699,20 +720,46 @@ runs a reduced bounded profile nightly via the same script.
 
 ## Log rotation
 
-`logrotate-darkfinances.conf` rotates matching logs daily or at 5 MB, retains 14 compressed
-generations, and creates files with mode `0600`.
+Reviewed systemd units log to the **user journal** (`journalctl --user -u <unit>`). File-based
+logging is legacy-only: historical cron jobs redirected bank sync and actual-tools output into
+`/home/<user>/actual/bank-sync.log` and `~/actual-tools/*.log`. After migrating bank sync and
+who-owes snapshot collection to the reviewed timers/services, treat journald as authoritative and
+use logrotate only to compress or retire residual files still on disk.
 
-The checked-in file contains deployment-specific `/home/dark/...` paths and `su dark dark`. Edit both
-for your service account before installing:
+`ops/lib/logrotate-contract.json` documents each rotated path, how it was opened in legacy
+deployments, and the zero-loss contract:
+
+| Path | Reviewed replacement | Legacy open semantics |
+| --- | --- | --- |
+| `~/actual/bank-sync.log` | `actual-sync.service` → journald | Shell append once per cron/systemd oneshot invocation |
+| `~/actual-tools/*.log` | `finance-event-sync.service` → journald | Shell append from cron (for example `owes-snapshot.log`) |
+
+The checked-in `logrotate-darkfinances.conf` uses **rename/create** rotation (logrotate default) with
+`su <user> <group>` and `create 0600 <user> <group>`. The `create` ownership must exactly match `su`
+and the service account declared in `ops/lib/logrotate-contract.json` (`rotation.runAsUser` /
+`rotation.runAsGroup`). **Do not** use `copytruncate`. Rename/create is safe for short-lived appenders and
+for held descriptors (writes after rotation continue into the rotated inode). `copytruncate` can drop
+lines when a writer keeps an open descriptor or is mid-write during truncation.
+
+After full systemd migration you may archive residual `*.log` files and remove the logrotate stanza;
+until then, install it for legacy cleanup only:
 
 ```bash
+# Edit /home/dark/... paths and su dark dark for your service account first.
 sudo install -m 644 /path/to/reviewed-logrotate.conf \
   /etc/logrotate.d/darkfinances
-sudo logrotate -d /etc/logrotate.d/darkfinances
+sudo logrotate -d /etc/logrotate.d/darkfinances   # non-writing syntax/debug pass
+sudo logrotate -f /etc/logrotate.d/darkfinances     # optional one-shot cleanup
 ```
 
-Use `-d` for a non-writing debug pass. Finance logs can contain transaction metadata; restrict
-ownership and avoid forwarding them to untrusted log services.
+No service reload is required for journald-backed units when updating logrotate. Changing systemd
+units still requires `systemctl --user daemon-reload` and restarting affected services. Finance logs
+can contain transaction metadata; restrict ownership (`0600`) and avoid forwarding them to untrusted
+log services.
+
+Contract tests live in `ops/test/logrotate-contract.test.js` (configuration parity plus, when
+`logrotate` is installed locally, a concurrent append harness proving rename/create preserves unique
+lines).
 
 ## Deploying changes safely
 
@@ -729,6 +776,71 @@ Before replacing a live version:
 
 If a deployment fails, preserve logs and runtime state before rollback. Do not delete Actual caches or
 sidecars blindly; corruption recovery may depend on `.last-good` files.
+
+## Toolchain verification (local / CI)
+
+Default repository checks stay offline (`npm run check`). CI additionally verifies pinned GitHub Action
+tags against upstream release refs (`node scripts/check-github-action-pins.js --verify-upstream` in
+`.github/workflows/ci.yml`).
+
+Optional real-artifact verification (network required; not part of default `npm test`):
+
+```bash
+# Linux x86_64: pinned ShellCheck bootstrap + version contract
+DARKFINANCES_TOOLCHAIN_NETWORK_TEST=1 node --test ops/test/toolchain-network.test.js
+
+# macOS: pinned Maestro bootstrap + version contract
+DARKFINANCES_TOOLCHAIN_NETWORK_TEST=1 node --test ops/test/toolchain-network.test.js
+```
+
+Manual wrapper commands (expected exit `0`, stdout ends with absolute binary path, `--version` matches
+contract):
+
+```bash
+bash scripts/ensure-shellcheck.sh   # Linux x86_64 CI only; local macOS skips
+bash scripts/ensure-maestro.sh      # macOS CI only; local Linux skips
+```
+
+OTA publishing operator contract:
+
+- Supported publisher platform: **darwin/arm64** (bound in `ops/toolchain/eas-cli-runtime-closure.json`).
+- Required install layout: standalone `ops/publisher-toolchain/node_modules` only — no repo-root or finance-app hoist fallback.
+- Root npm workspaces are a closed list of literal paths; workspace glob/extglob/brace patterns are rejected so they cannot silently absorb `ops/publisher-toolchain`.
+- Prepare publisher host: `npm --prefix ops/publisher-toolchain ci --workspaces=false`
+- Preflight before OTA (same as merge gate byte verification, no publish):
+
+```bash
+npm --prefix ops/publisher-toolchain ci --workspaces=false
+npm run check:publisher-closure
+node finance-app/scripts/run-pinned-eas.js --version
+```
+
+- Invocation copies the installed publisher tree into a private temp snapshot, verifies the lock-derived physical package set and byte closure on that snapshot, sanitizes injection-related environment variables, then runs `process.execPath` with the snapshot's absolute `eas-cli/bin/run` while keeping child `cwd` at `finance-app`. This closes verification/use races under the trusted same-UID publisher-host model; it does not claim OS-level adversary resistance.
+- Regenerate closure contract after eas-cli/lock changes (darwin/arm64 only):
+  `node scripts/compute-eas-cli-runtime-closure.js`
+- Platform-agnostic CI (`ubuntu-latest`) validates closure contract freshness on every run
+  (lock SHA-256, eas-cli version/SRI, pin alignment, lock-derived package count) via
+  `verifyRuntimeClosureContractFreshness`.
+- **Merge gate:** `.github/workflows/ci.yml` job `publisher-closure` on **`macos-15` (arm64)**
+  runs standalone `npm --prefix ops/publisher-toolchain ci --workspaces=false`, then
+  `node scripts/check-publisher-closure.js` and `node finance-app/scripts/run-pinned-eas.js --version`
+  to validate installed-byte `runtimeClosureDigest`, `packageCount`, and `fileCount` on every PR/main
+  push. Use `macos-15-intel` only for x64; do not conflate labels.
+- Operator pre-publish on darwin/arm64 (same commands as the merge gate, no OTA publish):
+
+```bash
+npm --prefix ops/publisher-toolchain ci --workspaces=false
+npm run check:publisher-closure
+node finance-app/scripts/run-pinned-eas.js --version
+```
+
+Direct `node scripts/release-manifest.js --mode=ota …` (without injected test fixtures) calls
+`verifyPublisherToolchain` with `{ verifyInstalled: true }` and fails before writing when the host
+is off-platform or lacks a verified standalone install. Use `finance-app/scripts/ota-publish.sh` for
+the supported production OTA provenance path. OTA invocation uses a verified private snapshot of the
+publisher install (see above); the publisher host must be same-UID/trusted during publish.
+
+Current bound closure (regenerate after lock changes): **510 packages**, **15211 files**.
 
 ## Security checklist
 

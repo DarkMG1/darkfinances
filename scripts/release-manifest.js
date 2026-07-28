@@ -12,6 +12,7 @@ const { contractFingerprint } = require('./contract-fingerprint');
 const { readActualAlignment } = require('./version-alignment');
 const { resolveReleaseProfile } = require('./release-profile');
 const { DASHBOARD_RUNTIME_FILES } = require('../finance-dashboard/lib/release-files');
+const { verifyPublisherToolchain } = require('../finance-dashboard/lib/publisher-toolchain');
 const {
   CANONICALIZATION,
   CONTENT_DIGEST_ALGORITHM,
@@ -32,6 +33,25 @@ const {
   validateManifestEnvelope,
   validateManifestContent,
 } = require('../finance-dashboard/lib/release-schema');
+const {
+  assertAllowUnsigned,
+  isProductionMode,
+  manifestDigest,
+  publishSignedManifestPair,
+  requireKeyringPath,
+  requireSigningKeyPath,
+  resolveSigningPaths,
+  signaturePathFor,
+  verifyManifestEvidence,
+  verifySignedManifestFile,
+  writeManifestAndSignatureAtomic,
+} = require('../finance-dashboard/lib/release-signing');
+const {
+  readTrustedRegularFile,
+  MAX_JSON_EVIDENCE_BYTES,
+  MAX_OTA_RESULT_BYTES,
+  resolveTrustedOpenFlags,
+} = require('../finance-dashboard/lib/trusted-regular-file-read');
 
 const DEFAULT_ROOT = path.resolve(__dirname, '..');
 const SOURCE_DIGEST_VERSION = 1;
@@ -64,41 +84,16 @@ function sha256Canonical(value) {
   return sha256Buffer(Buffer.from(canonicalSerialize(value), 'utf8'));
 }
 
-function readRegularFile(file, label = 'file') {
-  const resolved = path.resolve(requireNonEmptyString(file, `${label} path`));
-  let before;
-  try {
-    before = fs.lstatSync(resolved);
-  } catch (error) {
-    if (error.code === 'ENOENT') throw new Error(`${label} not found: ${resolved}`);
-    throw error;
-  }
-  if (before.isSymbolicLink()) throw new Error(`${label} must not be a symbolic link: ${resolved}`);
-  if (!before.isFile()) throw new Error(`${label} must be a regular file: ${resolved}`);
-
-  const noFollow = fs.constants.O_NOFOLLOW || 0;
-  const nonBlock = fs.constants.O_NONBLOCK || 0;
-  let descriptor;
-  try {
-    descriptor = fs.openSync(resolved, fs.constants.O_RDONLY | noFollow | nonBlock);
-    const opened = fs.fstatSync(descriptor);
-    if (!opened.isFile()) throw new Error(`${label} must be a regular file: ${resolved}`);
-    if (opened.dev !== before.dev || opened.ino !== before.ino) {
-      throw new Error(`${label} changed before it could be read`);
-    }
-    const buffer = fs.readFileSync(descriptor);
-    const afterPath = fs.lstatSync(resolved);
-    if (
-      !afterPath.isFile()
-      || afterPath.dev !== opened.dev
-      || afterPath.ino !== opened.ino
-    ) {
-      throw new Error(`${label} path changed while it was being read`);
-    }
-    return { buffer, bytes: buffer.length, resolved };
-  } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor);
-  }
+function readRegularFile(file, label = 'file', options = {}) {
+  const maxBytes = options.maxBytes ?? MAX_JSON_EVIDENCE_BYTES;
+  const { buffer, resolved } = readTrustedRegularFile(file, {
+    label,
+    maxBytes,
+    allowedModes: options.allowedModes ?? [0o600, 0o644],
+    validateStat: options.validateStat || null,
+    preOpenValidate: options.preOpenValidate || null,
+  }, options.dependencies || {});
+  return { buffer, bytes: buffer.length, resolved };
 }
 
 function hashRegularFile(file, label = 'file', dependencies = {}) {
@@ -118,11 +113,10 @@ function hashRegularFile(file, label = 'file', dependencies = {}) {
   if (!Number.isSafeInteger(chunkBytes) || chunkBytes <= 0) {
     throw new Error('hash chunk size must be a positive safe integer');
   }
-  const noFollow = fs.constants.O_NOFOLLOW || 0;
-  const nonBlock = fs.constants.O_NONBLOCK || 0;
+  const openFlags = resolveTrustedOpenFlags();
   let descriptor;
   try {
-    descriptor = fs.openSync(resolved, fs.constants.O_RDONLY | noFollow | nonBlock);
+    descriptor = fs.openSync(resolved, openFlags);
     const before = fs.fstatSync(descriptor);
     if (!before.isFile()) throw new Error(`${label} must be a regular file: ${resolved}`);
     if (before.dev !== beforePath.dev || before.ino !== beforePath.ino) {
@@ -186,7 +180,10 @@ function fileEvidence(file, label, dependencies) {
 }
 
 function readJson(file, label = file) {
-  const { buffer } = readRegularFile(file, label);
+  const maxBytes = /EAS update result/i.test(String(label))
+    ? MAX_OTA_RESULT_BYTES
+    : MAX_JSON_EVIDENCE_BYTES;
+  const { buffer } = readRegularFile(file, label, { maxBytes });
   try {
     return JSON.parse(buffer.toString('utf8'));
   } catch (error) {
@@ -612,6 +609,13 @@ function otaEvidenceFromResult(file, { profile, expectedBranch = null } = {}) {
   });
 }
 
+function assertStdoutModeAllowed(mode) {
+  const resolved = requireNonEmptyString(mode || 'source', 'release mode');
+  if (resolved !== 'source') {
+    throw new Error(`--stdout is only supported for source mode manifests (requested ${resolved})`);
+  }
+}
+
 function inferMode(options) {
   if (options.mode !== undefined) {
     const mode = requireNonEmptyString(options.mode, 'release mode');
@@ -746,6 +750,13 @@ function buildManifest(options = {}, dependencies = {}) {
       `OTA runtime ${content.ota.runtimeVersion} does not match ${variant} app runtime ${app.runtimeVersion}`,
     );
   }
+  if (mode === 'ota' || content.ota) {
+    if (dependencies.resolvePublisherToolchain) {
+      content.publisherToolchain = dependencies.resolvePublisherToolchain(root, dependencies);
+    } else {
+      content.publisherToolchain = verifyPublisherToolchain(root, { verifyInstalled: true });
+    }
+  }
   const hasBackupManifest = options.backupManifestPath !== undefined;
   const hasBackupArchive = options.backupArchivePath !== undefined;
   if (hasBackupManifest !== hasBackupArchive) {
@@ -817,9 +828,8 @@ function recalculateContentDigest(manifest) {
   return calculateContentDigest(manifest.content);
 }
 
-function verifyManifest(manifest) {
-  validateManifestEnvelope(manifest);
-  return true;
+function verifyManifest(manifest, options = {}) {
+  return verifyManifestEvidence(manifest, options);
 }
 
 function optionValue(argv, index, inlineValue, flag) {
@@ -861,6 +871,9 @@ function parseCliArgs(argv) {
     'source-archive': 'sourceArchivePath',
     variant: 'variant',
     verify: 'verifyPath',
+    'signing-key-path': 'signingKeyPath',
+    'keyring-path': 'keyringPath',
+    'allow-unsigned': 'allowUnsigned',
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -872,9 +885,11 @@ function parseCliArgs(argv) {
     const separator = arg.indexOf('=');
     const flag = arg.slice(2, separator === -1 ? undefined : separator);
     const inlineValue = separator === -1 ? undefined : arg.slice(separator + 1);
-    if (flag === 'stdout' || flag === 'help' || flag === 'source-digest') {
+    if (flag === 'stdout' || flag === 'help' || flag === 'source-digest' || flag === 'allow-unsigned') {
       if (inlineValue !== undefined) throw new Error(`--${flag} does not accept a value`);
-      parsed[flag === 'source-digest' ? 'sourceDigest' : flag] = true;
+      if (flag === 'source-digest') parsed.sourceDigest = true;
+      else if (flag === 'allow-unsigned') parsed.allowUnsigned = true;
+      else parsed[flag] = true;
       continue;
     }
     if (
@@ -1049,12 +1064,19 @@ function assertSafeDestination(destination, options, root) {
   return effectiveDestination;
 }
 
-function writeManifestAtomic(destination, manifest) {
+function writeManifestAtomic(destination, manifest, signingOptions = null, dependencies = {}) {
+  if (signingOptions?.signingKeyPath) {
+    publishSignedManifestPair(destination, manifest, signingOptions.signingKeyPath, dependencies);
+    return;
+  }
   const temporary = path.join(
     path.dirname(destination),
     `.${path.basename(destination)}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`,
   );
-  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  const noFollow = fs.constants.O_NOFOLLOW;
+  if (!noFollow) {
+    throw new Error('atomic manifest writes require O_NOFOLLOW support on this platform');
+  }
   let descriptor;
   try {
     descriptor = fs.openSync(
@@ -1095,6 +1117,9 @@ function helpText() {
     '  --backup-manifest=<file> --backup-archive=<file>',
     '    [--backup-additional-archive=<file> ...]',
     '  --source-archive=<file> --dirty-patch=<file>',
+    '  --signing-key-path=<file>  (or RELEASE_SIGNING_KEY_PATH)',
+    '  --keyring-path=<file>      (or RELEASE_KEYRING_PATH)',
+    '  --allow-unsigned           (non-production source/check-only only)',
     '  --verify=<manifest>',
     '',
   ].join('\n');
@@ -1164,7 +1189,7 @@ function main(argv = process.argv.slice(2), io = process) {
     }
     if (parsed.verifyPath) {
       const incompatible = Object.entries(parsed).filter(([key, value]) => (
-        key !== 'verifyPath'
+        !['allowUnsigned', 'keyringPath', 'signingKeyPath', 'verifyPath'].includes(key)
         && value !== false
         && value !== null
         && value !== undefined
@@ -1173,9 +1198,27 @@ function main(argv = process.argv.slice(2), io = process) {
       if (incompatible.length > 0) {
         throw new Error('--verify cannot be combined with manifest generation options');
       }
-      const manifest = readJson(parsed.verifyPath, 'release manifest');
-      verifyManifest(manifest);
-      io.stdout.write(`release-manifest: ok ${manifest.contentDigest.value}\n`);
+      const signingPaths = resolveSigningPaths(parsed);
+      if (!parsed.allowUnsigned && !signingPaths.keyringPath) {
+        throw new Error('release manifest verification requires RELEASE_KEYRING_PATH or --keyring-path');
+      }
+      let manifest;
+      if (parsed.allowUnsigned) {
+        manifest = readJson(parsed.verifyPath, 'release manifest');
+        assertAllowUnsigned(manifest.content?.mode || 'source', true);
+        verifyManifest(manifest, {
+          manifestPath: parsed.verifyPath,
+          keyringPath: signingPaths.keyringPath,
+          allowUnsigned: true,
+        });
+      } else {
+        ({ manifest } = verifySignedManifestFile(parsed.verifyPath, signingPaths.keyringPath, {
+          label: 'release manifest',
+        }));
+        assertAllowUnsigned(manifest.content?.mode || 'source', false);
+      }
+      const digest = manifestDigest(manifest);
+      io.stdout.write(`release-manifest: ok ${digest}\n`);
       return 0;
     }
 
@@ -1183,7 +1226,17 @@ function main(argv = process.argv.slice(2), io = process) {
       throw new Error('--stdout cannot be combined with a manifest destination');
     }
     const options = cliBuildOptions(parsed);
+    const previewMode = options.mode || inferMode(options);
+    if (parsed.stdout) {
+      assertStdoutModeAllowed(previewMode);
+    }
+    if (parsed.allowUnsigned === true) {
+      assertAllowUnsigned(previewMode, true);
+    }
     const manifest = buildManifest(options);
+    const signingPaths = resolveSigningPaths(parsed);
+    const mode = manifest.content.mode;
+    assertAllowUnsigned(mode, parsed.allowUnsigned === true);
     if (parsed.stdout) {
       io.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
       return 0;
@@ -1196,8 +1249,25 @@ function main(argv = process.argv.slice(2), io = process) {
     assertSafeDestination(requestedDestination, options, root);
     fs.mkdirSync(path.dirname(requestedDestination), { recursive: true });
     const destination = assertSafeDestination(requestedDestination, options, root);
-    writeManifestAtomic(destination, manifest);
+
+    let signingKeyPath = signingPaths.signingKeyPath;
+    if (isProductionMode(mode)) {
+      signingKeyPath = requireSigningKeyPath(signingKeyPath, mode);
+    } else if (!signingKeyPath && !parsed.allowUnsigned) {
+      throw new Error(
+        'non-production manifest generation to a destination requires RELEASE_SIGNING_KEY_PATH or --allow-unsigned',
+      );
+    }
+
+    writeManifestAtomic(
+      destination,
+      manifest,
+      signingKeyPath ? { signingKeyPath } : null,
+    );
     io.stdout.write(`${destination}\n`);
+    if (signingKeyPath) {
+      io.stdout.write(`${signaturePathFor(destination)}\n`);
+    }
     return 0;
   } catch (error) {
     io.stderr.write(`release-manifest: ${error.message}\n`);
@@ -1212,6 +1282,7 @@ module.exports = {
   DASHBOARD_RUNTIME_FILES,
   HASH_CHUNK_BYTES,
   MANIFEST_SCHEMA_VERSION,
+  assertStdoutModeAllowed,
   buildManifest,
   buildSourceIdentity,
   canonicalSerialize,
@@ -1223,6 +1294,8 @@ module.exports = {
   fileEvidence,
   hashRegularFile,
   main,
+  readJson,
+  readRegularFile,
   normalizeLogicalPath,
   otaEvidenceFromResult,
   parseCliArgs,
@@ -1230,4 +1303,6 @@ module.exports = {
   sha256Canonical,
   sha256File,
   verifyManifest,
+  writeManifestAtomic,
+  writeManifestAndSignatureAtomic,
 };

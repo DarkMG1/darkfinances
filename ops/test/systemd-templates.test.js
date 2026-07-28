@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const { loadWriterInventory, enumerateWriters } = require('../lib/writer-inventory');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -42,6 +43,31 @@ test('finance-dashboard.service TimeoutStopSec matches graceful-shutdown hard ca
     /FINANCE_SHUTDOWN_TIMEOUT_MS defaults to 15s/,
     'unit file must document the app hard-cap alignment',
   );
+});
+
+test('finance-dashboard.service loads deployment secrets from EnvironmentFile', () => {
+  const unitText = readUnit('ops/systemd/finance-dashboard.service');
+  assert.equal(parseDirective(unitText, 'EnvironmentFile'), '%h/.openclaw/finance-dashboard.env');
+  assert.match(
+    unitText,
+    /EnvironmentFile=%h\/\.openclaw\/finance-dashboard\.env/,
+    'production dashboard must load RELEASE_KEYRING_PATH and other secrets from EnvironmentFile',
+  );
+});
+
+test('finance-dashboard.service pins production runtime mode without test-only bypass flags', () => {
+  const unitText = readUnit('ops/systemd/finance-dashboard.service');
+  const environmentDirectives = [...unitText.matchAll(/^Environment=(.+)$/mg)].map((match) => match[1].trim());
+  assert.deepEqual(environmentDirectives, [
+    'FINANCE_RUNTIME_MODE=production',
+    'NODE_ENV=production',
+  ]);
+  assert.doesNotMatch(unitText, /ALLOW_RAW_ACTUAL_API/);
+  assert.doesNotMatch(unitText, /SELFTEST/);
+  assert.doesNotMatch(unitText, /TEST_SERVER_INSTANCE_ID/);
+  assert.doesNotMatch(unitText, /FINANCE_QUERY_TEST_/);
+  assert.doesNotMatch(unitText, /NODE_ENV=test/);
+  assert.doesNotMatch(unitText, /FINANCE_RUNTIME_MODE=test/);
 });
 
 test('finance-dashboard.service path is exercised by check:systemd', () => {
@@ -118,4 +144,50 @@ test('enumerateWriters gates finance-event-sync on FINANCE_EVENT_SYNC_CONFIGURED
     withFlag.some((writer) => writer.id === 'finance-event-sync.service'),
     true,
   );
+});
+
+const PRIVATE_CONTEXT_SERVICE_UNITS = fs
+  .readdirSync(systemdDir)
+  .filter((name) => name.endsWith('.service'))
+  .sort();
+
+test('every checked-in service unit handling private context sets UMask=0077', () => {
+  assert.deepEqual(PRIVATE_CONTEXT_SERVICE_UNITS, [
+    'actual-sync.service',
+    'finance-dashboard.service',
+    'finance-event-sync.service',
+    'finance-sync-failure@.service',
+  ]);
+
+  for (const unitName of PRIVATE_CONTEXT_SERVICE_UNITS) {
+    const unitText = readUnit(path.join('ops/systemd', unitName));
+    assert.equal(
+      parseDirective(unitText, 'UMask'),
+      '0077',
+      `${unitName} must set UMask=0077 for private file creation`,
+    );
+  }
+});
+
+test('finance-sync-failure@.service uses private umask for alert bridge', () => {
+  const unitText = readUnit('ops/systemd/finance-sync-failure@.service');
+  assert.equal(parseDirective(unitText, 'Type'), 'oneshot');
+  assert.equal(parseDirective(unitText, 'UMask'), '0077');
+  assert.equal(parseDirective(unitText, 'Environment'), 'TZ=America/Los_Angeles');
+  assert.equal(parseDirective(unitText, 'ExecStart'), '%h/.local/bin/finance-sync-alert.sh %i');
+});
+
+test('checked-in systemd units pass systemd-analyze verify when available', (t) => {
+  if (spawnSync('command', ['-v', 'systemd-analyze'], { shell: true, encoding: 'utf8' }).status !== 0) {
+    t.skip('systemd-analyze not installed');
+    return;
+  }
+
+  for (const unitName of fs.readdirSync(systemdDir).sort()) {
+    const unitPath = path.join(systemdDir, unitName);
+    const result = spawnSync('systemd-analyze', ['--user', 'verify', unitPath], {
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, `${unitName}: ${result.stderr || result.stdout}`);
+  }
 });

@@ -42,6 +42,14 @@ const NOTIFICATION_ROUTES = {
   repayments: '/reimbursement',
 };
 
+function normalizeExactRoute(route) {
+  if (typeof route !== 'string') return null;
+  if (!route.startsWith('/')) return null;
+  if (route.includes('?') || route.includes('#') || route.includes('%')) return null;
+  if (route.includes('..') || route.includes('//')) return null;
+  return route;
+}
+
 function parseNotificationRoute(data) {
   if (!data || typeof data !== 'object') return null;
   const route = data.route;
@@ -50,8 +58,13 @@ function parseNotificationRoute(data) {
   if (typeof route !== 'string' || typeof category !== 'string' || typeof scope !== 'string') {
     return null;
   }
+  if (!scope.length) return null;
   if (!FINANCE_CATEGORIES.has(category)) return null;
-  return { route, category, scope };
+  const normalizedRoute = normalizeExactRoute(route);
+  if (!normalizedRoute) return null;
+  const allowedRoute = NOTIFICATION_ROUTES[category];
+  if (!allowedRoute || normalizedRoute !== allowedRoute) return null;
+  return { route: allowedRoute, category, scope };
 }
 
 function isFinanceScheduledNotification(notification) {

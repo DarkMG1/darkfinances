@@ -10,6 +10,8 @@ export ACTUAL_DATA_DIR="$HOME/actual/cache"
 node "$HOME/actual/bank-sync.js"
 
 if [ -n "${COLLECTION_EVENT:-}" ] && [ -f "$HOME/actual-tools/collection-rules.json" ]; then
-  CONFIRM=1 bash "$HOME/actual-tools/run.sh" event-collect.js ||
+  if ! CONFIRM=1 bash "$HOME/actual-tools/run.sh" event-collect.js; then
     echo "event collection automation failed" >&2
+    exit 1
+  fi
 fi

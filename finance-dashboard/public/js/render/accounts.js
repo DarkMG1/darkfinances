@@ -10,13 +10,13 @@ export function registerAccountFilterHandler(handler) {
 
 export function renderNetWorthChange() {
   const ch = document.getElementById('netWorthChange');
-  if (!ch || state.netWorth == null || state.trendFirstNW == null || state.trendMonths == null) return;
+  if (!ch || state.accountOnlyNetWorth == null || state.trendFirstNW == null || state.trendMonths == null) return;
   if (state.netWorthHasServerMetric && (state.netWorthIncompleteReasons || []).length) {
     ch.textContent = '';
     return;
   }
-  const diff = state.netWorth - state.trendFirstNW;
-  ch.textContent = `${diff >= 0 ? '▲' : '▼'} ${fmt(Math.abs(diff))} over ${state.trendMonths} mo`;
+  const diff = state.accountOnlyNetWorth - state.trendFirstNW;
+  ch.textContent = `${diff >= 0 ? '▲' : '▼'} ${fmt(Math.abs(diff))} over ${state.trendMonths} mo (synced accounts only)`;
   applyTextTone(ch, diff >= 0 ? 'green' : 'red');
 }
 
@@ -59,6 +59,7 @@ export async function loadAccounts() {
     ? state.netWorth
     : (state.netWorthHasServerMetric ? null : (totalAssets + totalLiabilities));
   state.netWorth = netWorth;
+  state.accountOnlyNetWorth = totalAssets + totalLiabilities;
   const nwEl = document.getElementById('netWorth');
   if (state.netWorthAuthoritative && netWorth != null) {
     nwEl.textContent = fmt(netWorth);

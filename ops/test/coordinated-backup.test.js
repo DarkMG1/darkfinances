@@ -6,7 +6,20 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { runCoordinatedBackup, buildCoordinatedManifest, LEGACY_IDENTITY_RECOVERY_MESSAGE } = require('../lib/coordinated-backup');
+const { runCoordinatedBackup, buildCoordinatedManifest, LEGACY_IDENTITY_RECOVERY_MESSAGE, publishAtomic, writeChecksumSidecar } = require('../lib/coordinated-backup');
+const {
+  publishFileDurable,
+  publishSidecarFromStaging,
+  writeChecksumSidecarDurable,
+  fsyncPath,
+  DIRECTORY_FSYNC_UNSUPPORTED_CODES,
+} = require('../lib/restore-durable-io');
+const {
+  assertArchivePublicationCommitted,
+  isArchivePublicationCommitted,
+  cleanupPartialRunPublication,
+  createRunPublicationTracker,
+} = require('../lib/backup-publication-contract');
 const {
   discoverWriters,
   stopWritersByPhase,
@@ -24,6 +37,11 @@ const { loadWriterInventory } = require('../lib/writer-inventory');
 const { parseAdmissionToken, assertAdmissionFresh, assertAdmissionBindings } = require('../lib/restore-quiescence-admission');
 const { buildTestAdmissionToken } = require('./fixtures/admission-token-fixtures');
 const { installTestCoordinatorKeys } = require('./fixtures/coordinated-test-helpers');
+const {
+  createEphemeralSigningMaterial,
+  createSignedBackupReleaseStub,
+  writeSignedReleaseEvidence,
+} = require('./helpers/release-signing-fixtures');
 const {
   defaultActiveUnits,
 } = require('./fixtures/coordinated-backup-fixtures');
@@ -49,7 +67,13 @@ const {
 const { verifyBackupBundleArchive } = require('../lib/backup-bundle-verify');
 const { buildBackupBundle } = require('../lib/build-backup-bundle');
 const { bundleToolingSourcePaths } = require('../lib/backup-bundle-tooling');
+const { sha256File } = require('../lib/backup-verify');
 const { writeProductionDashboard } = require('./fixtures/backup-bundle-dashboard-fixtures');
+const { createDefaultRunners } = require('../lib/ops-command-runners');
+const {
+  signaturePathFor,
+  verifySignedManifest,
+} = require('../../finance-dashboard/lib/release-signing');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const coordinatedShell = path.join(repoRoot, 'ops/bin/backup-coordinated.sh');
@@ -68,26 +92,40 @@ function writeBackupDashboard(dashboard, options = {}) {
   return dashboard;
 }
 
-function stubReleaseManifest() {
-  return ({ releaseManifestPath }) => {
-    fs.writeFileSync(releaseManifestPath, RELEASE_MANIFEST_BODY, { mode: 0o600 });
-  };
+function stubReleaseManifest(signing) {
+  return createSignedBackupReleaseStub(signing);
 }
 
 function backupOptions(base, runners, extra = {}) {
+  const signing = extra.signing
+    || (base.RELEASE_KEYRING_PATH && base.RELEASE_SIGNING_KEY_PATH
+      ? {
+        signingPath: base.RELEASE_SIGNING_KEY_PATH,
+        keyringPath: base.RELEASE_KEYRING_PATH,
+        signingEnv: {
+          RELEASE_SIGNING_KEY_PATH: base.RELEASE_SIGNING_KEY_PATH,
+          RELEASE_KEYRING_PATH: base.RELEASE_KEYRING_PATH,
+        },
+      }
+      : createEphemeralSigningMaterial(
+        extra.root || path.dirname(base.DARKFINANCES_BACKUP_DIR || base.HOME || os.tmpdir()),
+      ));
+  const mergedEnv = { ...base, ...signing.signingEnv };
   return {
     pollMs: 1,
     stopDeadlineMs: 2000,
     healthTimeoutMs: 200,
     healthPollMs: 10,
     registerSignalHandlers: false,
-    writeReleaseManifest: stubReleaseManifest(),
+    writeReleaseManifest: stubReleaseManifest(signing),
+    signing,
     ...extra,
-    env: base,
+    env: mergedEnv,
     runners,
   };
 }
 function envFor(root, dashboard, extra = {}) {
+  const signing = extra.signing || createEphemeralSigningMaterial(root);
   return {
     ...process.env,
     HOME: root,
@@ -97,6 +135,7 @@ function envFor(root, dashboard, extra = {}) {
     COORDINATED_TEST_SKIP_LOCK: '0',
     BACKUP_INCLUDE_ACTUAL_DATA: '0',
     FINANCE_API_TOKEN: 'test-token',
+    ...signing.signingEnv,
     ...extra,
   };
 }
@@ -580,7 +619,9 @@ test('relocated bundle tooling captures schema-v2 release identity from manifest
   const root = mkRoot(t, 'df-relocated-v2-capture-');
   const dashboard = path.join(root, 'dashboard');
   writeBackupDashboard(dashboard, { includeReleaseManifest: false });
-  writeSchemaV2ReleaseManifest(dashboard);
+  const signing = createEphemeralSigningMaterial(dashboard);
+  writeSchemaV2ReleaseManifest(dashboard, undefined, { signing });
+  const keyringPath = signing.keyringPath;
   const backups = path.join(root, 'backups');
   fs.mkdirSync(backups, { recursive: true, mode: 0o700 });
   const archive = path.join(backups, 'bundle.tgz');
@@ -597,7 +638,7 @@ test('relocated bundle tooling captures schema-v2 release identity from manifest
   const digest = await captureDashboardReleaseIdentity({
     dashboardDir: dashboard,
     preQuiesced: true,
-    env: { ...process.env, FINANCE_API_TOKEN: 'test-token' },
+    env: { ...process.env, FINANCE_API_TOKEN: 'test-token', RELEASE_KEYRING_PATH: keyringPath },
     runners: createBackupRunners({
       units: {
         'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
@@ -620,10 +661,13 @@ test('shell wrapper passes bash -n', () => {
 
 test('coordinated manifest binds generation fields accepted by PR-17', (t) => {
   const root = mkRoot(t, 'df-coordinated-manifest-');
+  const signing = createEphemeralSigningMaterial(root);
   const manifestPath = path.join(root, 'bundle.manifest.json');
   const releasePath = path.join(root, 'release.json');
   fs.writeFileSync(manifestPath, '{"artifact":{"id":"abc"}}\n');
-  fs.writeFileSync(releasePath, '{"contentDigest":{"value":"def"}}\n');
+  fs.writeFileSync(path.join(root, 'bundle.tgz'), 'bundle\n');
+  writeSignedReleaseEvidence(releasePath, manifestPath, path.join(root, 'bundle.tgz'), signing);
+  const releaseSignaturePath = `${releasePath}.sig.json`;
   const journal = {
     runId: 'run-1',
     journalId: 'j-1',
@@ -645,6 +689,7 @@ test('coordinated manifest binds generation fields accepted by PR-17', (t) => {
     bundleManifest,
     bundleManifestPath: manifestPath,
     releaseManifestPath: releasePath,
+    releaseSignaturePath,
     dashboardReleaseIdentityDigest: SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
   });
   assert.equal(manifest.kind, 'darkfinances-coordinated-backup-manifest');
@@ -1420,9 +1465,7 @@ test('quiescence_verified resume reuses journal dashboardReleaseIdentityDigest w
           'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
         },
         pingResponse: defaultEnvelopedPingResponse(mismatchedIdentity),
-      }), {
-        writeReleaseManifest: stubReleaseManifest(),
-      }),
+      })),
       dashboardDir: dashboard,
       destination: env.DARKFINANCES_BACKUP_DIR,
     }),
@@ -1590,7 +1633,6 @@ test('journal resume at backup_complete skips republish and finishes restart', a
   t.after(() => { require('../lib/build-backup-bundle').buildBackupBundle = originalBuild; });
   const result = await runCoordinatedBackup({
     ...backupOptions(env, runners, {
-      writeReleaseManifest: stubReleaseManifest(),
     }),
     dashboardDir: dashboard,
     destination: env.DARKFINANCES_BACKUP_DIR,
@@ -1656,9 +1698,7 @@ test('backup_complete resume migrates legacy coordinated manifest via manifest r
         'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
         'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
       },
-    }), {
-      writeReleaseManifest: stubReleaseManifest(),
-    }),
+    })),
     dashboardDir: dashboard,
     destination: env.DARKFINANCES_BACKUP_DIR,
   });
@@ -1721,9 +1761,7 @@ test('backup_complete resume fails closed when legacy identity cannot be recover
           'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
           'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
         },
-      }), {
-        writeReleaseManifest: stubReleaseManifest(),
-      }),
+      })),
       dashboardDir: dashboard,
       destination: env.DARKFINANCES_BACKUP_DIR,
     }),
@@ -1936,14 +1974,18 @@ test('coordinated manifest digest binds restore admission coordinatedManifestDig
   };
   const bundleManifest = { artifact: { id: 'a'.repeat(64) }, runtimeState: { inventoryDigest: 'b'.repeat(64) } };
   const releasePath = path.join(root, 'release.json');
-  fs.writeFileSync(releasePath, RELEASE_MANIFEST_BODY, { mode: 0o600 });
+  const signing = createEphemeralSigningMaterial(root);
   const bundleManifestPath = path.join(root, 'bundle.tgz.manifest.json');
   fs.writeFileSync(bundleManifestPath, `${JSON.stringify(bundleManifest, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(root, 'bundle.tgz'), 'bundle\n');
+  writeSignedReleaseEvidence(releasePath, bundleManifestPath, path.join(root, 'bundle.tgz'), signing);
+  const releaseSignaturePath = `${releasePath}.sig.json`;
   const coordinatedManifest = buildCoordinatedManifest({
     journal,
     bundleManifest,
     bundleManifestPath,
     releaseManifestPath: releasePath,
+    releaseSignaturePath,
     dashboardReleaseIdentityDigest: SCHEMA_V1_RELEASE_IDENTITY_DIGEST,
   });
   const coordinatedManifestPath = path.join(root, 'coordinated.json');
@@ -2306,4 +2348,420 @@ test('post-restart health rejects inactive timer state for originally active lin
   );
   assert.equal(result.ok, false);
   assert.match(result.error, /timer state=inactive/);
+});
+
+test('publishFileDurable fsyncs staging, renames, fsyncs final, and fsyncs destination directory in order', (t) => {
+  const root = mkRoot(t, 'df-coordinated-durable-order-');
+  const destination = path.join(root, 'backups');
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  const staging = path.join(root, 'staging.tgz');
+  const finalPath = path.join(destination, 'bundle.tgz');
+  fs.writeFileSync(staging, 'bundle-bytes\n', { mode: 0o600 });
+  const order = [];
+  publishFileDurable(finalPath, staging, 0o600, (point) => order.push(point));
+  assert.deepEqual(order, [
+    'before:publish-fsync-staging',
+    'after:publish-fsync-staging',
+    'before:publish-rename',
+    'after:publish-rename',
+    'before:publish-fsync-final',
+    'after:publish-fsync-final',
+    'before:publish-fsync-dir',
+    'after:publish-fsync-dir',
+  ]);
+  assert.equal(fs.readFileSync(finalPath, 'utf8'), 'bundle-bytes\n');
+  assert.equal(fs.existsSync(staging), false);
+});
+
+test('writeChecksumSidecarDurable uses atomic checksum publication boundaries', (t) => {
+  const root = mkRoot(t, 'df-coordinated-checksum-order-');
+  const archive = path.join(root, 'bundle.tgz');
+  fs.writeFileSync(archive, 'bundle-bytes\n', { mode: 0o600 });
+  const order = [];
+  writeChecksumSidecarDurable(archive, (point, target) => order.push(`${point}:${path.basename(String(target))}`));
+  assert.ok(order.some((entry) => entry.startsWith('before:checksum-sidecar:')));
+  assert.ok(order.some((entry) => entry.startsWith('before:atomic-fsync-temp:')));
+  assert.ok(order.some((entry) => entry.startsWith('before:atomic-rename:')));
+  assert.ok(order.some((entry) => entry.startsWith('before:atomic-fsync-dir:')));
+  assert.equal(fs.existsSync(`${archive}.sha256`), true);
+});
+
+test('coordinated backup publication faults at every fsync/rename boundary and errors dominate success', async (t) => {
+  const boundaries = [
+    'before:publish-fsync-staging',
+    'after:publish-fsync-staging',
+    'before:publish-rename',
+    'after:publish-rename',
+    'before:publish-fsync-final',
+    'after:publish-fsync-final',
+    'before:publish-fsync-dir',
+    'after:publish-fsync-dir',
+    'before:atomic-fsync-temp',
+    'after:atomic-fsync-temp',
+    'before:atomic-rename',
+    'after:atomic-rename',
+    'before:atomic-fsync-dir',
+    'after:atomic-fsync-dir',
+    'before:checksum-sidecar',
+    'after:checksum-sidecar',
+    'before:published-fsync-file',
+    'after:published-fsync-file',
+    'before:published-fsync-dir',
+    'after:published-fsync-dir',
+  ];
+
+  for (const faultPoint of boundaries) {
+    const root = mkRoot(t, `df-coordinated-fault-${faultPoint.replace(/[:/]/g, '-')}-`);
+    const dashboard = path.join(root, 'dashboard');
+    writeBackupDashboard(dashboard, {
+      overrides: {
+        bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+        transactionSagas: { schemaVersion: 1, sagas: {} },
+        transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+        repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+        operationJournal: { schemaVersion: 1, operations: {} },
+      },
+    });
+    const env = envFor(root, dashboard);
+    const runners = createBackupRunners({
+      units: {
+        'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+        'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+        'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+      },
+    });
+    await assert.rejects(
+      () => runCoordinatedBackup({
+        ...backupOptions(env, runners),
+        preQuiesced: true,
+        injectFault: (point) => {
+          if (point === faultPoint) throw new Error(`injected fault at ${faultPoint}`);
+        },
+        dashboardDir: dashboard,
+        destination: env.DARKFINANCES_BACKUP_DIR,
+      }),
+      new RegExp(`injected fault at ${faultPoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+    );
+    const journal = readRunJournal(path.join(env.DARKFINANCES_BACKUP_DIR, '.darkfinances-coordinated/run-journal.json'));
+    assert.notEqual(journal.phase, PHASE.COMPLETE);
+    assert.notEqual(journal.phase, PHASE.BACKUP_COMPLETE);
+    assert.ok(journal.errors.some((entry) => entry.message.includes(faultPoint)));
+  }
+});
+
+test('publishSidecarFromStaging publishes manifest via atomic durable write', (t) => {
+  const root = mkRoot(t, 'df-coordinated-sidecar-publish-');
+  const staging = path.join(root, 'bundle.tgz.manifest.json');
+  const finalPath = path.join(root, 'published', 'bundle.tgz.manifest.json');
+  fs.mkdirSync(path.dirname(staging), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(staging, '{"ok":true}\n', { mode: 0o600 });
+  const order = [];
+  publishSidecarFromStaging(finalPath, staging, 0o600, (point) => order.push(point));
+  assert.ok(order.includes('before:atomic-rename'));
+  assert.equal(fs.readFileSync(finalPath, 'utf8'), '{"ok":true}\n');
+});
+
+test('coordinated backup wrapper helpers delegate to durable publication primitives', (t) => {
+  const root = mkRoot(t, 'df-coordinated-wrapper-delegate-');
+  const staging = path.join(root, 'stage.tgz');
+  const finalPath = path.join(root, 'final.tgz');
+  fs.writeFileSync(staging, 'payload\n', { mode: 0o600 });
+  publishAtomic(finalPath, staging, 0o600);
+  writeChecksumSidecar(finalPath);
+  assert.equal(fs.existsSync(finalPath), true);
+  assert.equal(fs.existsSync(`${finalPath}.sha256`), true);
+});
+
+test('assertArchivePublicationCommitted refuses archive/manifest without checksum commit marker', (t) => {
+  const root = mkRoot(t, 'df-coordinated-commit-marker-');
+  const archive = path.join(root, 'bundle.tgz');
+  fs.writeFileSync(archive, 'bundle\n', { mode: 0o600 });
+  fs.writeFileSync(`${archive}.manifest.json`, '{"ok":true}\n', { mode: 0o600 });
+  assert.equal(isArchivePublicationCommitted(archive), false);
+  assert.throws(
+    () => assertArchivePublicationCommitted(archive),
+    /missing archive checksum commit marker/,
+  );
+});
+
+test('partial publication cleanup removes incomplete bundle artifacts but preserves prior committed backup', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-partial-cleanup-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard);
+  const priorArchive = path.join(env.DARKFINANCES_BACKUP_DIR, 'prior-complete.tgz');
+  fs.mkdirSync(env.DARKFINANCES_BACKUP_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(priorArchive, 'prior\n', { mode: 0o600 });
+  fs.writeFileSync(`${priorArchive}.manifest.json`, '{"prior":true}\n', { mode: 0o600 });
+  fs.writeFileSync(`${priorArchive}.sha256`, `${require('../lib/backup-verify').sha256File(priorArchive)}  prior-complete.tgz\n`, { mode: 0o600 });
+
+  const runners = createBackupRunners({
+    units: {
+      'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+      'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+      'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+    },
+  });
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, runners),
+      preQuiesced: true,
+      injectFault: (point) => {
+        if (point === 'before:checksum-sidecar') throw new Error('fault before checksum commit marker');
+      },
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /fault before checksum commit marker/,
+  );
+
+  const published = fs.readdirSync(env.DARKFINANCES_BACKUP_DIR).filter((name) => name.endsWith('.tgz'));
+  assert.deepEqual(published, ['prior-complete.tgz']);
+  assert.equal(isArchivePublicationCommitted(priorArchive), true);
+  const journal = readRunJournal(path.join(env.DARKFINANCES_BACKUP_DIR, '.darkfinances-coordinated/run-journal.json'));
+  assert.equal(journal.phase, PHASE.FAILED);
+});
+
+test('partial publication after manifest publish removes bundle when checksum never committed', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-fault-after-manifest-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard);
+  const priorArchive = path.join(env.DARKFINANCES_BACKUP_DIR, 'prior-complete.tgz');
+  fs.mkdirSync(env.DARKFINANCES_BACKUP_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(priorArchive, 'prior\n', { mode: 0o600 });
+  fs.writeFileSync(`${priorArchive}.manifest.json`, '{"prior":true}\n', { mode: 0o600 });
+  fs.writeFileSync(`${priorArchive}.sha256`, `${require('../lib/backup-verify').sha256File(priorArchive)}  prior-complete.tgz\n`, { mode: 0o600 });
+  const runners = createBackupRunners({
+    units: {
+      'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+      'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+      'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+    },
+  });
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, runners),
+      preQuiesced: true,
+      injectFault: (point, target) => {
+        if (point === 'after:atomic-fsync-dir' && String(target).endsWith('.manifest.json')) {
+          throw new Error('fault after manifest publication');
+        }
+      },
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /fault after manifest publication/,
+  );
+  const published = fs.readdirSync(env.DARKFINANCES_BACKUP_DIR).filter((name) => name.endsWith('.tgz'));
+  assert.deepEqual(published, ['prior-complete.tgz']);
+  assert.equal(isArchivePublicationCommitted(priorArchive), true);
+  const journal = readRunJournal(path.join(env.DARKFINANCES_BACKUP_DIR, '.darkfinances-coordinated/run-journal.json'));
+  assert.equal(journal.phase, PHASE.FAILED);
+});
+
+test('committed bundle survives later publication fault and remains consumable', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-committed-survives-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const env = envFor(root, dashboard);
+  const runners = createBackupRunners({
+    units: {
+      'actual-sync.timer': { active: 'inactive', enabled: 'enabled' },
+      'actual-sync.service': { active: 'inactive', enabled: 'enabled' },
+      'finance-dashboard.service': { active: 'inactive', enabled: 'enabled' },
+    },
+  });
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, runners),
+      preQuiesced: true,
+      injectFault: (point) => {
+        if (point === 'before:published-fsync-file') throw new Error('fault after bundle commit marker');
+      },
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /fault after bundle commit marker/,
+  );
+  const archives = fs.readdirSync(env.DARKFINANCES_BACKUP_DIR).filter((name) => name.endsWith('.tgz'));
+  assert.equal(archives.length, 1);
+  const archive = path.join(env.DARKFINANCES_BACKUP_DIR, archives[0]);
+  assert.equal(isArchivePublicationCommitted(archive), true);
+  assert.doesNotThrow(() => assertArchivePublicationCommitted(archive));
+});
+
+test('cleanupPartialRunPublication removes only incomplete tracked artifacts', (t) => {
+  const root = mkRoot(t, 'df-coordinated-tracker-cleanup-');
+  const archive = path.join(root, 'bundle.tgz');
+  fs.writeFileSync(archive, 'bundle\n', { mode: 0o600 });
+  fs.writeFileSync(`${archive}.manifest.json`, '{"ok":true}\n', { mode: 0o600 });
+  const tracker = createRunPublicationTracker();
+  tracker.bundleArchive = archive;
+  tracker.bundleManifest = `${archive}.manifest.json`;
+  tracker.releaseManifest = path.join(root, 'release.json');
+  fs.writeFileSync(tracker.releaseManifest, '{}\n', { mode: 0o600 });
+  cleanupPartialRunPublication(tracker);
+  assert.equal(fs.existsSync(archive), false);
+  assert.equal(fs.existsSync(`${archive}.manifest.json`), false);
+  assert.equal(fs.existsSync(tracker.releaseManifest), false);
+});
+
+test('directory fsync failure fails closed on Linux', (t) => {
+  if (process.platform !== 'linux') {
+    t.skip('linux-only directory fsync failure contract');
+    return;
+  }
+  const root = mkRoot(t, 'df-coordinated-fsync-linux-');
+  const target = path.join(root, 'publish');
+  fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+  const staging = path.join(root, 'stage.txt');
+  fs.writeFileSync(staging, 'payload\n', { mode: 0o600 });
+  const originalOpen = fs.openSync;
+  fs.openSync = (filePath, flags, mode) => {
+    const isDirectory = typeof flags === 'number'
+      && (flags & (fs.constants.O_DIRECTORY || 0)) !== 0;
+    if (isDirectory) {
+      const error = new Error('directory fsync failed');
+      error.code = 'EIO';
+      throw error;
+    }
+    return originalOpen.call(fs, filePath, flags, mode);
+  };
+  t.after(() => { fs.openSync = originalOpen; });
+  assert.throws(
+    () => publishFileDurable(path.join(target, 'final.txt'), staging, 0o600),
+    /directory fsync failed/,
+  );
+});
+
+test('directory fsync unsupported codes are observable on non-linux platforms', (t) => {
+  if (process.platform === 'linux') {
+    t.skip('non-linux unsupported directory fsync contract');
+    return;
+  }
+  const root = mkRoot(t, 'df-coordinated-fsync-nonlinux-');
+  const dir = path.join(root, 'dir');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const originalOpen = fs.openSync;
+  const signals = [];
+  fs.openSync = (filePath, flags, mode) => {
+    const isDirectory = typeof flags === 'number'
+      && (flags & (fs.constants.O_DIRECTORY || 0)) !== 0;
+    if (isDirectory) {
+      const error = new Error('operation not supported');
+      error.code = 'EOPNOTSUPP';
+      throw error;
+    }
+    return originalOpen.call(fs, filePath, flags, mode);
+  };
+  t.after(() => { fs.openSync = originalOpen; });
+  assert.doesNotThrow(() => fsyncPath(dir, true, {
+    onDirectoryFsyncUnsupported: (target, error) => signals.push({ target, code: error.code }),
+  }));
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].code, 'EOPNOTSUPP');
+  assert.ok(DIRECTORY_FSYNC_UNSUPPORTED_CODES.has('EOPNOTSUPP'));
+});
+
+test('coordinated backup rejects release evidence without signature before commit marker', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-unsigned-release-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const signing = createEphemeralSigningMaterial(root);
+  const runners = createBackupRunners();
+  const env = envFor(root, dashboard, signing);
+  await assert.rejects(
+    () => runCoordinatedBackup({
+      ...backupOptions(env, runners, { signing }),
+      writeReleaseManifest: ({ releaseManifestPath, bundleManifestFinal, bundleArchiveFinal }) => {
+        writeSignedReleaseEvidence(
+          releaseManifestPath,
+          bundleManifestFinal,
+          bundleArchiveFinal,
+          signing,
+        );
+        fs.rmSync(signaturePathFor(releaseManifestPath), { force: true });
+      },
+      dashboardDir: dashboard,
+      destination: env.DARKFINANCES_BACKUP_DIR,
+    }),
+    /release signature is missing|missing release signature/,
+  );
+  const backupDir = env.DARKFINANCES_BACKUP_DIR;
+  assert.equal(
+    fs.readdirSync(backupDir).some((name) => name.startsWith('coordinated-release-')),
+    false,
+  );
+  assert.equal(
+    fs.readdirSync(backupDir).some((name) => name.startsWith('coordinated-backup-')),
+    false,
+  );
+  const journal = readRunJournal(path.join(backupDir, '.darkfinances-coordinated/run-journal.json'));
+  assert.equal(journal.phase, PHASE.FAILED);
+});
+
+test('coordinated backup invokes real release-manifest CLI and verifies signed evidence', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-real-release-cli-');
+  const dashboard = path.join(root, 'dashboard');
+  writeBackupDashboard(dashboard, {
+    overrides: {
+      bulkOperationSagas: { schemaVersion: 1, sagas: {} },
+      transactionSagas: { schemaVersion: 1, sagas: {} },
+      transactionDeletionSagas: { schemaVersion: 1, sagas: {} },
+      repaymentConfirmationSagas: { schemaVersion: 1, sagas: {} },
+      operationJournal: { schemaVersion: 1, operations: {} },
+    },
+  });
+  const signing = createEphemeralSigningMaterial(root);
+  const env = envFor(root, dashboard, signing);
+  const mockRunners = createBackupRunners();
+  const realRunners = createDefaultRunners(env);
+  mockRunners.nodeScript = (...args) => realRunners.nodeScript(...args);
+  const result = await runCoordinatedBackup({
+    ...backupOptions(env, mockRunners, { signing, writeReleaseManifest: undefined }),
+    dashboardDir: dashboard,
+    destination: env.DARKFINANCES_BACKUP_DIR,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(fs.existsSync(result.releaseManifest), true);
+  assert.equal(fs.existsSync(signaturePathFor(result.releaseManifest)), true);
+  const releaseBody = JSON.parse(fs.readFileSync(result.releaseManifest, 'utf8'));
+  assert.equal(releaseBody.content.mode, 'backup');
+  verifySignedManifest(releaseBody, result.releaseManifest, signing.keyringPath);
+  const coordinated = JSON.parse(fs.readFileSync(result.coordinatedManifest, 'utf8'));
+  assert.equal(coordinated.generation.releaseManifestDigest, sha256File(result.releaseManifest));
+  assert.match(releaseBody.contentDigest.value, /^[a-f0-9]{64}$/);
 });
