@@ -30,6 +30,10 @@ function checkSystemdUnits(options = {}) {
   try {
     const fixtureHome = path.join(fixtureRoot, 'home');
     const fixtureUnits = path.join(fixtureRoot, 'units');
+    const fixtureNode = path.join(fixtureRoot, 'bin/node');
+    const fixtureBash = path.join(fixtureRoot, 'bin/bash');
+    writeFixtureFile(fixtureNode, '#!/bin/sh\nexit 0\n', 0o755);
+    writeFixtureFile(fixtureBash, '#!/bin/sh\nexit 0\n', 0o755);
     writeFixtureFile(path.join(fixtureHome, '.local/bin/actual-sync.sh'), '#!/bin/sh\nexit 0\n', 0o755);
     writeFixtureFile(
       path.join(fixtureHome, '.local/bin/finance-sync-alert.sh'),
@@ -46,7 +50,13 @@ function checkSystemdUnits(options = {}) {
       .map((name) => {
         const target = path.join(fixtureUnits, name);
         const source = fs.readFileSync(path.join(sourceDir, name), 'utf8');
-        writeFixtureFile(target, source.replaceAll('%h', fixtureHome));
+        writeFixtureFile(
+          target,
+          source
+            .replaceAll('%h', fixtureHome)
+            .replaceAll('/usr/bin/node', fixtureNode)
+            .replaceAll('/usr/bin/bash', fixtureBash),
+        );
         return target;
       });
 

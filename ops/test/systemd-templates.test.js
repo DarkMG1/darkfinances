@@ -177,6 +177,33 @@ test('finance-sync-failure@.service uses private umask for alert bridge', () => 
   assert.equal(parseDirective(unitText, 'ExecStart'), '%h/.local/bin/finance-sync-alert.sh %i');
 });
 
+test('systemd verifier replaces deployment executable paths with executable fixtures', () => {
+  let inspectedVerifyCall = false;
+  const result = checkSystemdUnits({
+    spawnSync(command, args) {
+      assert.equal(command, 'systemd-analyze');
+      if (args[0] === '--version') return { status: 0, stdout: '', stderr: '' };
+
+      assert.deepEqual(args.slice(0, 2), ['--user', 'verify']);
+      const units = new Map(args.slice(2).map((unitPath) => [
+        path.basename(unitPath),
+        fs.readFileSync(unitPath, 'utf8'),
+      ]));
+      const dashboardExec = parseDirective(units.get('finance-dashboard.service'), 'ExecStart');
+      const eventSyncExec = parseDirective(units.get('finance-event-sync.service'), 'ExecStart');
+      assert.doesNotMatch(dashboardExec, /^\/usr\/bin\/node\b/);
+      assert.doesNotMatch(eventSyncExec, /^\/usr\/bin\/bash\b/);
+      fs.accessSync(dashboardExec.split(' ', 1)[0], fs.constants.X_OK);
+      fs.accessSync(eventSyncExec.split(' ', 1)[0], fs.constants.X_OK);
+      inspectedVerifyCall = true;
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(result.skipped, false);
+  assert.equal(inspectedVerifyCall, true);
+});
+
 test('checked-in systemd units pass systemd-analyze verify when available', (t) => {
   const result = checkSystemdUnits();
   if (result.skipped) {
