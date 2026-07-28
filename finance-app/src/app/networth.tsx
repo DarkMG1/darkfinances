@@ -22,7 +22,7 @@ import { useMutationForm } from '@/hooks/useMutationForm';
 import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { AreaChart } from '@/components/charts';
 import { haptics } from '@/lib/haptics';
-import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
+import { accountsHaveInclusion, computeAccountOnlyNetWorth, resolveAccountOnlyNetWorthDelta, resolveMoneyMetric, resolveNetWorthAccountSnapshot, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
 import {
   collectFieldErrors,
   parseStrictMoneyDollars,
@@ -125,9 +125,13 @@ export default function NetWorthScreen() {
   const inputLocked = banner.isLocked;
 
   const accts = accounts.data ?? [];
-  const visible = accts.filter((a) => !a.hidden);
-  const hiddenAccts = accts.filter((a) => a.hidden);
-  const hasInclusion = accountsHaveInclusion(accts);
+  const accountSnapshot = resolveNetWorthAccountSnapshot(
+    today.data?.accounts,
+    accts,
+  );
+  const visible = accountSnapshot.filter((a) => !a.hidden);
+  const hiddenAccts = accountSnapshot.filter((a) => a.hidden);
+  const hasInclusion = accountsHaveInclusion(accountSnapshot);
   const nwIncluded = (a: Account) => (hasInclusion ? !!a.inclusion?.netWorth : true);
   const assetsList = visible.filter((a) => nwIncluded(a) && a.balance >= 0).sort((a, b) => b.balance - a.balance);
   const liabList = visible.filter((a) => nwIncluded(a) && a.balance < 0).sort((a, b) => a.balance - b.balance);
@@ -157,8 +161,15 @@ export default function NetWorthScreen() {
 
   const nwHist = (trends.data?.months ?? []).filter((m) => m.netWorth != null);
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
-  const acctNetWorth = acctAssets + acctLiab;
-  const nwDelta = breakdownUnavailable || prevNW == null ? null : acctNetWorth - prevNW;
+  const nwDelta = breakdownUnavailable
+    ? null
+    : resolveAccountOnlyNetWorthDelta(computeAccountOnlyNetWorth(accountSnapshot), prevNW);
+  const nwDeltaLabel = nwDelta != null
+    ? `${nwDelta >= 0 ? '▲' : '▼'} ${fmtPos(Math.abs(nwDelta))} this month · synced accounts only`
+    : null;
+  const nwDeltaA11y = nwDelta != null
+    ? `${nwDelta >= 0 ? 'up' : 'down'} ${fmtPos(Math.abs(nwDelta))} this month, synced accounts only`
+    : undefined;
   const nwPoints = nwHist.map((m) => ({ value: m.netWorth as number, label: m.month }));
   const totalAbs = breakdownUnavailable ? 0 : assets + Math.abs(liabilities);
   const assetPct = totalAbs > 0 ? (assets / totalAbs) * 100 : 100;
@@ -252,7 +263,7 @@ export default function NetWorthScreen() {
             accessibilityLabel={heroMetricAccessibilityLabel(
               'Net worth',
               netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth)),
-              nwDelta != null ? `${nwDelta >= 0 ? 'up' : 'down'} ${fmtPos(Math.abs(nwDelta))} this month` : undefined,
+              nwDeltaA11y,
             )}
           >
             <Text style={styles.heroLabel} accessibilityElementsHidden importantForAccessibility="no">NET WORTH</Text>
@@ -262,15 +273,19 @@ export default function NetWorthScreen() {
             {!netWorthAuthoritative && netWorthIncompleteReasons.length ? (
               <Text style={styles.delta}>Server projection incomplete — local sum not shown as authoritative</Text>
             ) : null}
-            {nwDelta != null ? (
-              <Text style={[styles.delta, { color: nwDelta >= 0 ? colors.green : colors.red }]}>
-                {nwDelta >= 0 ? '▲' : '▼'} {fmtPos(Math.abs(nwDelta))} this month
+            {nwDeltaLabel ? (
+              <Text style={[styles.delta, { color: nwDelta! >= 0 ? colors.green : colors.red }]}>
+                {nwDeltaLabel}
               </Text>
             ) : null}
           </View>
 
           {nwPoints.length > 1 ? (
-            <Card style={{ marginBottom: 16 }}>
+            <Card
+              style={{ marginBottom: 16 }}
+              accessible
+              accessibilityLabel="Net worth trend chart, synced accounts only"
+            >
               <AreaChart width={width - 64} points={nwPoints} />
               <View style={styles.rangeRow}>
                 {RANGES.map((r) => (

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "version": "0.11.0",
+  "platform": "linux.x86_64",
+  "artifactName": "shellcheck-v0.11.0.linux.x86_64.tar.xz",
+  "downloadUrl": "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz",
+  "allowedHosts": [
+    "github.com",
+    "release-assets.githubusercontent.com"
+  ],
+  "sha256": "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198",
+  "binaryPath": "shellcheck-v0.11.0/shellcheck",
+  "extractMode": "single-member",
+  "maxArchiveBytes": 16777216,
+  "maxUncompressedBytes": 67108864,
+  "maxMemberCount": 32,
+  "maxMemberBytes": 67108864,
+  "maxCompressionRatio": 100,
+  "provenance": "https://github.com/koalaman/shellcheck/releases/tag/v0.11.0"
+}

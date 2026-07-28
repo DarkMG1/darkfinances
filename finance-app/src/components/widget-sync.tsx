@@ -55,6 +55,7 @@ export function WidgetSync() {
       scope,
       widgetScope: widgetScopeRef.current,
       serverMetric: today.data?.metrics?.netWorth,
+      todayAccounts: today.data?.accounts?.filter((a) => !a.hidden) ?? null,
       accounts: accounts.data ?? null,
       accountsLoading: accounts.isLoading,
       accountsSettled: !accounts.isLoading && (accounts.isSuccess || accounts.isError),
@@ -77,7 +78,7 @@ export function WidgetSync() {
 
     const changeDiff = decision.changeDiff;
     const change = changeDiff != null
-      ? `${changeDiff >= 0 ? '+' : '-'}${fmtPos(Math.abs(changeDiff))} this mo`
+      ? `${changeDiff >= 0 ? '+' : '-'}${fmtPos(Math.abs(changeDiff))} this mo · synced accts`
       : '';
     const nextBill = (bills.data?.bills ?? []).find((b) => !b.paid);
     pushFinanceWidget({

@@ -53,6 +53,7 @@ function completeSnapshot() {
 }
 
 function freshDataModule(dir, { allowRawApi = true } = {}) {
+  process.env.NODE_ENV = 'test';
   process.env.ACTUAL_API_PATH = FIXTURE;
   process.env.ACTUAL_DATA_DIR = path.join(dir, 'actual-cache');
   if (allowRawApi) process.env.ALLOW_RAW_ACTUAL_API = '1';
@@ -226,6 +227,7 @@ test('direct data.api export is blocked without ALLOW_RAW_ACTUAL_API', async () 
   const data = freshDataModule(dir, { allowRawApi: false });
   assert.throws(() => data.api, /Direct data\.api access bypasses/);
   process.env.ALLOW_RAW_ACTUAL_API = '1';
+  assert.doesNotThrow(() => data.api);
 });
 
 test('runActualRead serializes concurrent Actual enumeration', async () => {

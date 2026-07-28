@@ -53,3 +53,5 @@ node "$REPO_ROOT/scripts/release-manifest.js" \
   --expected-source-digest="$expected_source_digest" \
   --artifact="$output/DarkFinances-${version}-${build_number}-unsigned.ipa" \
   "$output/DarkFinances-${version}-${build_number}-release-manifest.json"
+node "$REPO_ROOT/scripts/release-manifest.js" \
+  --verify="$output/DarkFinances-${version}-${build_number}-release-manifest.json"

@@ -1,3 +1,12 @@
+const {
+  assertProductionReleaseEvidence,
+  assertProductionRuntimeSafe,
+  isProductionRuntime,
+} = require('./lib/finance-runtime-config');
+const { resolveSigningPaths, verifySignedManifestFile, requireKeyringPath } = require('./lib/release-signing');
+
+assertProductionRuntimeSafe();
+
 const express = require('express');
 const NodeCache = require('node-cache');
 const path = require('path');
@@ -5,6 +14,7 @@ const session = require('express-session');
 const FileStore = require('session-file-store')(session);
 const fs = require('fs');
 const crypto = require('crypto');
+const { pipeline } = require('stream/promises');
 const {
   AccountNotFoundError,
   AppError,
@@ -44,7 +54,7 @@ const {
 const { parse, schemas } = require('./lib/validation');
 const { createReconnectFreshnessProbeService } = require('./lib/reconnect-freshness-probe');
 const { deriveRequestPrincipal } = require('./lib/request-principal');
-const { readReleaseIdentity } = require('./lib/release-identity');
+const { readReleaseIdentity, verifyDeployedFiles } = require('./lib/release-identity');
 const {
   exportExitCode,
   buildReimbursementExportV1Envelope,
@@ -70,6 +80,12 @@ const {
   DEFAULT_MAX_JSON_BYTES,
   RECEIPT_MAX_JSON_BYTES,
 } = require('./lib/receipt-limits');
+const {
+  closeReceiptFileHandle,
+  createReceiptFileReadStream,
+  verifyReceiptImageContent,
+} = require('./lib/receipt-file-access');
+const { tryConsumePasskeyChallenge } = require('./lib/passkey-challenge-guard');
 const {
   apiErrorMiddleware,
   sendApiError,
@@ -112,6 +128,34 @@ const mutationQueue = new SerialQueue('finance-mutations', {
 const operationJournal = new OperationJournal();
 const RELEASE_MANIFEST_PATH = process.env.RELEASE_MANIFEST_PATH || path.join(__dirname, 'release-manifest.json');
 
+function assertProductionReleaseManifestAtStartup() {
+  if (!isProductionRuntime(process.env)) return;
+  assertProductionReleaseEvidence(process.env);
+  let manifest;
+  try {
+    const { keyringPath } = resolveSigningPaths({}, process.env);
+    ({ manifest } = verifySignedManifestFile(RELEASE_MANIFEST_PATH, requireKeyringPath(
+      keyringPath,
+      'production dashboard startup',
+    ), { label: 'release manifest' }));
+  } catch {
+    throw new Error(`production runtime requires readable release manifest at ${RELEASE_MANIFEST_PATH}`);
+  }
+  if (manifest.schemaVersion !== 2 || manifest.content?.mode !== 'dashboard') {
+    throw new Error('production runtime requires signed schema-v2 dashboard release manifest');
+  }
+  verifyDeployedFiles(manifest.content, __dirname);
+}
+
+assertProductionReleaseManifestAtStartup();
+
+function releaseIdentity() {
+  return readReleaseIdentity(RELEASE_MANIFEST_PATH, __dirname, {
+    env: process.env,
+    manifestPath: RELEASE_MANIFEST_PATH,
+    allowLegacyIdentity: !isProductionRuntime(process.env),
+  });
+}
 function queryFingerprintBase() {
   const c = loadQueryScalingConfig();
   return {
@@ -128,10 +172,6 @@ const runtimeHealth = {
   startedAt: new Date().toISOString(),
   fatalErrorAt: null,
 };
-
-function releaseIdentity() {
-  return readReleaseIdentity(RELEASE_MANIFEST_PATH, __dirname);
-}
 
 const reconnectFreshnessProbe = createReconnectFreshnessProbeService({
   coordinator: actualCoordinator,
@@ -168,8 +208,11 @@ const PASSKEY_USER_NAME = process.env.PASSKEY_USER_NAME || 'owner';
 const PASSKEY_USER_DISPLAY_NAME = process.env.PASSKEY_USER_DISPLAY_NAME || PASSKEY_USER_NAME;
 const CREDS_FILE = process.env.PASSKEY_CREDENTIALS_FILE || path.join(__dirname, 'passkey-credentials.json');
 const {
+  applyAuthenticationCounterUpdate,
+  isPasskeyRuntimeStoreError,
   loadPasskeyCredentials,
-  savePasskeyCredentials,
+  mergeRegistrationCredential,
+  withPasskeyCredentialsTransaction,
 } = require('./lib/passkey-credentials-store');
 const SESSION_DIR = process.env.SESSION_DIR || path.join(__dirname, '.sessions');
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
@@ -196,8 +239,91 @@ if (SELFTEST && !localOrigin) {
 function loadCreds() {
   return loadPasskeyCredentials(CREDS_FILE);
 }
-function saveCreds(creds) {
-  savePasskeyCredentials(creds, CREDS_FILE);
+
+function passkeyChallengeField(kind) {
+  return kind === 'register' ? 'regChallenge' : 'authChallenge';
+}
+
+function passkeyFinishErrorResponse(res, error, { genericMessage, verificationMessage }) {
+  if (isPasskeyRuntimeStoreError(error)) {
+    return res.status(500).json({ error: genericMessage });
+  }
+  if (error instanceof AppError) {
+    return res.status(error.status).json({
+      error: error.expose ? error.message : genericMessage,
+    });
+  }
+  return res.status(400).json({ error: verificationMessage });
+}
+
+async function consumePasskeyChallengeForVerify(req, kind) {
+  const field = passkeyChallengeField(kind);
+  const challenge = req.session?.[field];
+  if (!challenge || !req.sessionID) {
+    throw new AppError('Challenge expired or already used', {
+      code: 'PASSKEY_CHALLENGE_EXPIRED',
+      status: 400,
+      expose: true,
+    });
+  }
+  if (!tryConsumePasskeyChallenge({ sessionId: req.sessionID, kind, challenge })) {
+    throw new AppError('Challenge expired or already used', {
+      code: 'PASSKEY_CHALLENGE_EXPIRED',
+      status: 400,
+      expose: true,
+    });
+  }
+  delete req.session[field];
+  await new Promise((resolve, reject) => {
+    req.session.save((err) => (err ? reject(err) : resolve()));
+  }).catch((cause) => {
+    throw new AppError('Could not persist session state', {
+      code: 'SESSION_PERSIST_FAILED',
+      status: 500,
+      expose: false,
+      cause,
+    });
+  });
+  return challenge;
+}
+
+function establishAuthenticatedSession(req, { failureMessage }) {
+  if (process.env.NODE_ENV === 'test' && process.env.TEST_INJECT_SESSION_REGENERATE_FAILURE === '1') {
+    return Promise.reject(new AppError(failureMessage, {
+      code: 'SESSION_REGENERATE_FAILED',
+      status: 500,
+      expose: false,
+      cause: new Error('injected session regenerate failure'),
+    }));
+  }
+  return new Promise((resolve, reject) => {
+    req.session.regenerate((err) => {
+      if (err) {
+        reject(new AppError(failureMessage, {
+          code: 'SESSION_REGENERATE_FAILED',
+          status: 500,
+          expose: false,
+          cause: err,
+        }));
+        return;
+      }
+      req.session.authenticated = true;
+      delete req.session.enrollmentAuthorized;
+      delete req.session.enrollmentExpiresAt;
+      req.session.save((saveErr) => {
+        if (saveErr) {
+          reject(new AppError(failureMessage, {
+            code: 'SESSION_PERSIST_FAILED',
+            status: 500,
+            expose: false,
+            cause: saveErr,
+          }));
+          return;
+        }
+        resolve();
+      });
+    });
+  });
 }
 function requestClaimsDemo(req) {
   return req.get('X-Demo-Mode') === '1' || req.query.demo === '1' || req.query.demo === 'true';
@@ -370,38 +496,68 @@ app.post('/auth/register/start', enrollmentLimiter, async (req, res) => {
 });
 
 app.post('/auth/register/finish', enrollmentLimiter, async (req, res) => {
+  let expectedChallenge;
   try {
-    const creds = loadCreds();
-    if (!enrollmentAuthorized(req, creds)) return res.status(403).json({ error: 'Registration closed' });
-    if (!req.session.regChallenge) return res.status(400).json({ error: 'Registration challenge expired' });
-    const verification = await verifyRegistrationResponse({
-      response: req.body,
-      expectedChallenge: req.session.regChallenge,
-      expectedOrigin: webAuthnExpectedOrigin(),
-      expectedRPID: RP_ID,
+    expectedChallenge = await consumePasskeyChallengeForVerify(req, 'register');
+  } catch (error) {
+    return passkeyFinishErrorResponse(res, error, {
+      genericMessage: 'Could not complete registration',
+      verificationMessage: 'Registration challenge expired',
     });
-    if (!verification.verified) return res.status(400).json({ error: 'Verification failed' });
-    const { credential } = verification.registrationInfo;
-    if (creds.some((c) => c.credentialID === credential.id)) {
-      return res.status(409).json({ error: 'Credential already registered' });
-    }
-    creds.push({
-      credentialID: credential.id,
-      credentialPublicKey: Buffer.from(credential.publicKey).toString('base64'),
-      counter: credential.counter,
-      transports: req.body.response?.transports || [],
-      createdAt: new Date().toISOString(),
-      lastUsedAt: null,
+  }
+  try {
+    await withPasskeyCredentialsTransaction(CREDS_FILE, async (creds) => {
+      if (!enrollmentAuthorized(req, creds)) {
+        throw new AppError('Registration closed', {
+          code: 'REGISTRATION_CLOSED',
+          status: 403,
+          expose: true,
+        });
+      }
+      const verification = await verifyRegistrationResponse({
+        response: req.body,
+        expectedChallenge,
+        expectedOrigin: webAuthnExpectedOrigin(),
+        expectedRPID: RP_ID,
+      });
+      if (!verification.verified) {
+        throw new AppError('Verification failed', {
+          code: 'PASSKEY_VERIFICATION_FAILED',
+          status: 400,
+          expose: true,
+        });
+      }
+      const { credential } = verification.registrationInfo;
+      try {
+        mergeRegistrationCredential(creds, {
+          credentialID: credential.id,
+          credentialPublicKey: Buffer.from(credential.publicKey).toString('base64'),
+          counter: credential.counter,
+          transports: req.body.response?.transports || [],
+          createdAt: new Date().toISOString(),
+          lastUsedAt: null,
+        });
+      } catch (error) {
+        if (error?.code === 'PASSKEY_CREDENTIAL_EXISTS') {
+          throw new AppError('Credential already registered', {
+            code: 'PASSKEY_CREDENTIAL_EXISTS',
+            status: 409,
+            expose: true,
+            cause: error,
+          });
+        }
+        throw error;
+      }
     });
-    saveCreds(creds);
-    req.session.authenticated = true;
-    delete req.session.regChallenge;
-    delete req.session.enrollmentAuthorized;
-    delete req.session.enrollmentExpiresAt;
+    await establishAuthenticatedSession(req, {
+      failureMessage: 'Could not complete registration',
+    });
     return res.json({ ok: true });
-  } catch (e) {
-    delete req.session.regChallenge;
-    return res.status(400).json({ error: 'Registration verification failed' });
+  } catch (error) {
+    return passkeyFinishErrorResponse(res, error, {
+      genericMessage: 'Could not complete registration',
+      verificationMessage: 'Registration verification failed',
+    });
   }
 });
 
@@ -423,34 +579,70 @@ app.post('/auth/login/start', loginLimiter, async (req, res) => {
 });
 
 app.post('/auth/login/finish', loginLimiter, async (req, res) => {
+  let expectedChallenge;
   try {
-    if (!req.session.authChallenge) return res.status(400).json({ error: 'Authentication challenge expired' });
-    const creds = loadCreds();
-    const credId = req.body.id;
-    const cred = creds.find(c => c.credentialID === credId);
-    if (!cred) return res.status(400).json({ error: 'Credential not found' });
-    const verification = await verifyAuthenticationResponse({
-      response: req.body,
-      expectedChallenge: req.session.authChallenge,
-      expectedOrigin: webAuthnExpectedOrigin(),
-      expectedRPID: RP_ID,
-      credential: {
-        id: cred.credentialID,
-        publicKey: Buffer.from(cred.credentialPublicKey, 'base64'),
-        counter: cred.counter,
-        transports: cred.transports,
-      },
+    expectedChallenge = await consumePasskeyChallengeForVerify(req, 'login');
+  } catch (error) {
+    return passkeyFinishErrorResponse(res, error, {
+      genericMessage: 'Could not complete authentication',
+      verificationMessage: 'Authentication challenge expired',
     });
-    if (!verification.verified) return res.status(400).json({ error: 'Verification failed' });
-    cred.counter = verification.authenticationInfo.newCounter;
-    cred.lastUsedAt = new Date().toISOString();
-    saveCreds(creds);
-    req.session.authenticated = true;
-    delete req.session.authChallenge;
+  }
+  const credId = req.body.id;
+  try {
+    await withPasskeyCredentialsTransaction(CREDS_FILE, async (creds) => {
+      const cred = creds.find((candidate) => candidate.credentialID === credId);
+      if (!cred) {
+        throw new AppError('Credential not found', {
+          code: 'PASSKEY_CREDENTIAL_NOT_FOUND',
+          status: 400,
+          expose: true,
+        });
+      }
+      const verification = await verifyAuthenticationResponse({
+        response: req.body,
+        expectedChallenge,
+        expectedOrigin: webAuthnExpectedOrigin(),
+        expectedRPID: RP_ID,
+        credential: {
+          id: cred.credentialID,
+          publicKey: Buffer.from(cred.credentialPublicKey, 'base64'),
+          counter: cred.counter,
+          transports: cred.transports,
+        },
+      });
+      if (!verification.verified) {
+        throw new AppError('Verification failed', {
+          code: 'PASSKEY_VERIFICATION_FAILED',
+          status: 400,
+          expose: true,
+        });
+      }
+      try {
+        applyAuthenticationCounterUpdate(creds, credId, verification.authenticationInfo.newCounter);
+      } catch (error) {
+        if (error?.code === 'PASSKEY_COUNTER_REPLAY'
+          || error?.code === 'PASSKEY_COUNTER_INVALID'
+          || error?.code === 'PASSKEY_CREDENTIAL_NOT_FOUND') {
+          throw new AppError(error.message, {
+            code: error.code,
+            status: 400,
+            expose: true,
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    });
+    await establishAuthenticatedSession(req, {
+      failureMessage: 'Could not complete authentication',
+    });
     return res.json({ ok: true });
-  } catch (e) {
-    delete req.session.authChallenge;
-    return res.status(400).json({ error: 'Authentication verification failed' });
+  } catch (error) {
+    return passkeyFinishErrorResponse(res, error, {
+      genericMessage: 'Could not complete authentication',
+      verificationMessage: 'Authentication verification failed',
+    });
   }
 });
 
@@ -637,7 +829,9 @@ function invalidateHttpCache() {
 
 // Generation-bound keys are filled via cachedActual and must never be evicted with
 // plain cache.del — always use invalidateActualProjection so generation advances.
-// Local keys (rules, manual-assets, investments) use cachedLocal / invalidateLocalCache.
+// Purely local keys (rules, investments) use cachedLocal / invalidateLocalCache.
+// Manual assets participate in Today projections, so their reads use cachedActual
+// and serialize with runActualProjectionMutation writes.
 function invalidateActualProjection(...keys) {
   const list = keys.flat().filter(Boolean);
   actualCoordinator.invalidateGeneration(list.length > 0 ? { keys: list } : {});
@@ -878,7 +1072,7 @@ const resolvers = {
     return cachedActual(key, () => data.getTags({ start: start || undefined, end: end || undefined }), 120);
   },
   rules: () => cachedLocal('rules', () => Promise.resolve({ ...data.getRules(), catalog: data.getCatalogDisplay() }), 120),
-  manualAssets: () => cachedLocal('manual-assets', () => Promise.resolve(data.getManualAssets()), 120),
+  manualAssets: () => cachedActual('manual-assets', () => Promise.resolve(data.getManualAssets()), 120),
   investments: () => cachedLocal('investments', () => Promise.resolve(data.getInvestments()), 120),
   reports: (req) => cachedActual(`reports-${monthOf(req) || 'current'}`, () => data.getReports({ month: monthOf(req) }), 300),
 };
@@ -1032,10 +1226,11 @@ async function addReceiptH(req, operation) {
     }
     throw error;
   }
-  return runActualProjectionMutation(
-    () => applyLocal(operation, () => data.addReceipt(receipt)),
-    'today', 'review-current',
-  );
+  data.validateReceiptUpload(receipt);
+  return runActualProjectionMutation(() => {
+    data.validateReceiptUpload(receipt);
+    return applyLocal(operation, () => data.addReceipt(receipt));
+  }, 'today', 'review-current');
 }
 const receiptsH = (req) => Promise.resolve(data.getReceipts({ txnId: req.query.txnId }));
 async function deleteReceiptH(req, operation) {
@@ -1047,34 +1242,33 @@ async function deleteReceiptH(req, operation) {
   );
 }
 // Raw image stream (auth already enforced by the router). expo-image sends the
-// token via headers, so this just serves the file bytes with the right type.
+// token via headers, so this streams verified descriptor bytes with the right type.
 async function receiptImageH(req, res) {
+  let handle;
   try {
     await withReadAdmission(req, res, actualCoordinator, async () => {
-      const f = await Promise.resolve(data.getReceiptFile({ id: req.params.id }));
-      if (!f) {
+      handle = await Promise.resolve(data.getReceiptFile({ id: req.params.id }));
+      if (!handle) {
         sendApiErrorCode(req, res, 'NOT_FOUND');
         return;
       }
-      const mime = String(f.mime || '').toLowerCase();
-      const allowed = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
-      if (!allowed.has(mime)) {
-        sendApiError(req, res, new AppError('unsupported receipt image type', {
-          code: 'UNSUPPORTED_MEDIA_TYPE',
-          status: 415,
-          expose: true,
-        }));
-        return;
-      }
-      res.type(mime);
+      verifyReceiptImageContent(handle, handle.mime);
+      res.type(handle.mime);
       res.setHeader('Content-Disposition', 'inline; filename="receipt-image"');
-      res.setHeader('Cache-Control', 'private, max-age=86400');
-      await new Promise((resolve, reject) => {
-        res.sendFile(f.path, (error) => (error ? reject(error) : resolve()));
-      });
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader('Content-Length', String(handle.size));
+      const stream = createReceiptFileReadStream(handle);
+      const abortStream = () => {
+        if (!stream.destroyed) stream.destroy();
+      };
+      req.on('aborted', abortStream);
+      res.on('close', abortStream);
+      await pipeline(stream, res);
     }, { admission: requestAdmission });
   } catch (e) {
     if (!res.headersSent) return sendApiError(req, res, e);
+  } finally {
+    closeReceiptFileHandle(handle);
   }
 }
 async function sweepReimbH(req, operation) {
@@ -1176,15 +1370,22 @@ async function setReviewDispositionH(req, operation) {
 }
 async function saveManualAssetH(req, operation) {
   const asset = parse(schemas.manualAsset, req.body, 'manual asset');
-  const result = await applyLocal(operation, () => data.saveManualAsset(asset));
-  invalidateLocalCache('manual-assets');
-  return result;
+  return runActualProjectionMutation(
+    () => {
+      data.assertManualAssetMutationAvailable(asset);
+      return applyLocal(operation, () => data.saveManualAsset(asset));
+    },
+    'today',
+    'manual-assets',
+  );
 }
 async function deleteManualAssetH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'manual asset id');
-  const result = await applyLocal(operation, () => data.deleteManualAsset({ id }));
-  invalidateLocalCache('manual-assets');
-  return result;
+  return runActualProjectionMutation(
+    () => applyLocal(operation, () => data.deleteManualAsset({ id })),
+    'today',
+    'manual-assets',
+  );
 }
 async function setNotes(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
@@ -1209,10 +1410,10 @@ async function setDateH(req, operation) {
 }
 async function saveGoal(req, operation) {
   const goal = parse(schemas.goal, req.body, 'goal');
-  return runActualProjectionMutation(
-    () => applyLocal(operation, () => data.saveGoal(goal)),
-    'goals', 'today',
-  );
+  return runActualProjectionMutation(async () => {
+    await data.assertGoalSaveMutationAvailable(goal);
+    return applyLocal(operation, () => data.saveGoal(goal));
+  }, 'goals', 'today');
 }
 async function deleteGoal(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'goal id');

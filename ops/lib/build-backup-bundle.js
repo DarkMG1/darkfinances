@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+const { backupTarEnv } = require('./backup-tar-env');
 const {
   BUNDLE_KIND,
   BUNDLE_SCHEMA_VERSION,
@@ -261,6 +262,7 @@ function buildBackupBundle({
     ];
     const tar = spawnSync('tar', ['-C', stagingRoot, '-czf', archivePath, ...tarMembers], {
       encoding: 'utf8',
+      env: backupTarEnv(),
     });
     if (tar.status !== 0) throw new Error(tar.stderr || 'tar create failed');
     fs.chmodSync(archivePath, 0o600);

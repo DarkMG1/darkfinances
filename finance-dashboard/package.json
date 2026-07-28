@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check dataModule.js && node --check demoData.js && node --check server.js && node --check scripts/actual-clone-smoke.js && node --check scripts/chart-js-vendor.js && node --check scripts/verify-chart-js-asset.js && node --check scripts/pin-chart-js-asset.js && node --check scripts/check-dashboard-install-contract.js && node --check scripts/sync-bounded-ledger-vendor.js && node --check scripts/verify-browser-manifest.js && node --check scripts/verify-no-inline-styles.js && node --check lib/browser-static.js && node --check lib/browser-style-policy.js && for file in lib/*.js lib/domain/*.js; do node --check \"$file\"; done",
+    "check": "node --check dataModule.js && node --check demoData.js && node --check server.js && node --check scripts/actual-clone-smoke.js && node --check scripts/chart-js-vendor.js && node --check scripts/verify-chart-js-asset.js && node --check scripts/pin-chart-js-asset.js && node --check scripts/check-dashboard-install-contract.js && node --check scripts/check-dashboard-deployment-env.js && node --check scripts/sync-bounded-ledger-vendor.js && node --check scripts/verify-browser-manifest.js && node --check scripts/verify-no-inline-styles.js && node --check lib/browser-static.js && node --check lib/browser-style-policy.js && for file in lib/*.js lib/domain/*.js; do node --check \"$file\"; done",
     "lint": "eslint .",
     "vendor:chart-js:verify": "node scripts/verify-chart-js-asset.js",
     "vendor:chart-js:pin": "node scripts/pin-chart-js-asset.js",
@@ -13,12 +13,15 @@
     "vendor:bounded-ledger:check": "node scripts/sync-bounded-ledger-vendor.js --check",
     "browser:manifest:verify": "node scripts/verify-browser-manifest.js",
     "browser:style:verify": "node scripts/verify-no-inline-styles.js",
-    "test": "npm run vendor:chart-js:verify && node scripts/check-dashboard-install-contract.js && npm run browser:manifest:verify && npm run browser:style:verify && npm run check && npm run vendor:bounded-ledger:check && ALLOW_RAW_ACTUAL_API=1 node --test test/*.test.js"
+    "test": "npm run vendor:chart-js:verify && node scripts/check-dashboard-install-contract.js && node scripts/check-dashboard-deployment-env.js && npm run browser:manifest:verify && npm run browser:style:verify && npm run check && npm run vendor:bounded-ledger:check && NODE_ENV=test ALLOW_RAW_ACTUAL_API=1 node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "type": "commonjs",
+  "overrides": {
+    "adm-zip": "0.6.0"
+  },
   "dependencies": {
     "@actual-app/api": "26.7.0",
     "@simplewebauthn/server": "^13.3.2",

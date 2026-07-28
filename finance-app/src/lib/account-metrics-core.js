@@ -82,6 +82,42 @@ function computeFallbackNetWorth(accounts, manual) {
 }
 
 /**
+ * @param {Array<{ hidden?: boolean; balance: number; inclusion?: { netWorth?: boolean } }>} accounts
+ * @returns {number | null}
+ */
+function computeAccountOnlyNetWorth(accounts) {
+  if (!accounts?.length) return null;
+  const visible = accounts.filter((account) => !account.hidden);
+  const hasInclusion = accountsHaveInclusion(visible);
+  const nwAccounts = hasInclusion ? visible.filter((account) => account.inclusion?.netWorth) : visible;
+  return nwAccounts.reduce((sum, account) => sum + account.balance, 0);
+}
+
+/**
+ * @param {number | null} accountOnlyNetWorth
+ * @param {number | null | undefined} prevTrendNetWorth
+ * @returns {number | null}
+ */
+function resolveAccountOnlyNetWorthDelta(accountOnlyNetWorth, prevTrendNetWorth) {
+  if (accountOnlyNetWorth == null || !Number.isFinite(accountOnlyNetWorth)) return null;
+  if (prevTrendNetWorth == null || !Number.isFinite(prevTrendNetWorth)) return null;
+  return accountOnlyNetWorth - prevTrendNetWorth;
+}
+
+/**
+ * Prefer Today account snapshot; fall back only when Today accounts are unavailable.
+ * @template T
+ * @param {T[] | null | undefined} todayAccounts
+ * @param {T[] | null | undefined} fallbackAccounts
+ * @returns {T[]}
+ */
+function resolveNetWorthAccountSnapshot(todayAccounts, fallbackAccounts) {
+  if (Array.isArray(todayAccounts) && todayAccounts.length > 0) return todayAccounts;
+  if (Array.isArray(fallbackAccounts)) return fallbackAccounts;
+  return [];
+}
+
+/**
  * @param {{
  *   resolved: ResolvedMoneyMetric;
  *   assets: number;
@@ -116,6 +152,7 @@ function resolveNetWorthAggregateDisplay({ resolved, assets, liabilities }) {
  *   scope: string;
  *   widgetScope: string | null;
  *   serverMetric?: MetricValue;
+ *   todayAccounts?: Array<{ hidden?: boolean; balance: number; inclusion?: { netWorth?: boolean } }> | null;
  *   accounts?: Array<{ hidden?: boolean; balance: number; inclusion?: { netWorth?: boolean } }> | null;
  *   accountsLoading?: boolean;
  *   accountsSettled?: boolean;
@@ -138,6 +175,7 @@ function resolveWidgetNetWorthDecision(input) {
     scope,
     widgetScope,
     serverMetric,
+    todayAccounts = null,
     accounts = null,
     accountsLoading = false,
     accountsSettled = false,
@@ -163,8 +201,10 @@ function resolveWidgetNetWorthDecision(input) {
   }
 
   const resolved = resolveMoneyMetric(serverMetric, null);
+  const accountSnapshot = resolveNetWorthAccountSnapshot(todayAccounts, accounts);
   if (resolved.authoritative && resolved.value != null) {
-    const changeDiff = prevTrendNetWorth != null ? resolved.value - prevTrendNetWorth : null;
+    const accountOnlyNetWorth = computeAccountOnlyNetWorth(accountSnapshot);
+    const changeDiff = resolveAccountOnlyNetWorthDelta(accountOnlyNetWorth, prevTrendNetWorth);
     return {
       action: 'push',
       netWorth: resolved.value,
@@ -197,7 +237,8 @@ function resolveWidgetNetWorthDecision(input) {
     return { action: 'clear', reason: 'fallback_unavailable' };
   }
 
-  const changeDiff = prevTrendNetWorth != null ? netWorth - prevTrendNetWorth : null;
+  const accountOnlyNetWorth = computeAccountOnlyNetWorth(accountSnapshot);
+  const changeDiff = resolveAccountOnlyNetWorthDelta(accountOnlyNetWorth, prevTrendNetWorth);
   return {
     action: 'push',
     netWorth,
@@ -208,9 +249,12 @@ function resolveWidgetNetWorthDecision(input) {
 
 module.exports = {
   accountsHaveInclusion,
+  computeAccountOnlyNetWorth,
   computeFallbackNetWorth,
   hasServerMetric,
+  resolveAccountOnlyNetWorthDelta,
   resolveMoneyMetric,
+  resolveNetWorthAccountSnapshot,
   resolveNetWorthAggregateDisplay,
   resolveWidgetNetWorthDecision,
 };

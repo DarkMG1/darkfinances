@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -13,6 +14,13 @@ const {
   collectDeployedFiles,
   sha256Canonical,
 } = require('../../scripts/release-manifest');
+const {
+  buildSignatureEnvelope,
+  generateSigningMaterial,
+  loadSigningKey,
+  writeKeyMaterialAtomic,
+  writeManifestAndSignatureAtomic,
+} = require('../lib/release-signing');
 
 const temporaryDirectories = [];
 
@@ -83,13 +91,78 @@ function resign(manifest) {
   return manifest;
 }
 
-function readFromDisk(manifest, runtimeDir, expectedFiles = ['server.js']) {
+function signManifestOnDisk(manifest, runtimeDir) {
+  const keysDir = path.join(runtimeDir, `.release-signing-keys-${crypto.randomUUID()}`);
+  const material = generateSigningMaterial({
+    notBefore: '2020-01-01T00:00:00.000Z',
+    notAfter: '2099-01-01T00:00:00.000Z',
+  });
+  const paths = writeKeyMaterialAtomic(keysDir, material);
   const manifestPath = path.join(runtimeDir, 'release-manifest.json');
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
-  return readReleaseIdentity(manifestPath, runtimeDir, { expectedFiles });
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  const signingKey = loadSigningKey(paths.signingPath);
+  const envelope = buildSignatureEnvelope(manifest, {
+    keyId: signingKey.keyId,
+    privateKey: signingKey.privateKey,
+    signedAt: manifest.builtAt,
+  });
+  writeManifestAndSignatureAtomic(manifestPath, manifest, envelope);
+  return { manifestPath, keyringPath: paths.keyringPath };
 }
 
-test('release identity preserves schema-v1 /ping compatibility', () => {
+function prepareSignedDashboardManifest(runtimeDir, expectedFiles = ['server.js']) {
+  const manifest = manifestFor(runtimeDir, expectedFiles);
+  const { manifestPath, keyringPath } = signManifestOnDisk(manifest, runtimeDir);
+  return { manifest, manifestPath, keyringPath, expectedFiles };
+}
+
+function readPreparedIdentity(prepared, runtimeDir, expectedFiles = prepared.expectedFiles) {
+  return readReleaseIdentity(prepared.manifestPath, runtimeDir, {
+    expectedFiles,
+    manifestPath: prepared.manifestPath,
+    env: { RELEASE_KEYRING_PATH: prepared.keyringPath },
+  });
+}
+
+function readSignedIdentity(runtimeDir, expectedFiles = ['server.js']) {
+  return readFromDisk(manifestFor(runtimeDir, expectedFiles), runtimeDir, expectedFiles);
+}
+
+function readFromDisk(manifest, runtimeDir, expectedFiles = ['server.js']) {
+  const { manifestPath, keyringPath } = signManifestOnDisk(manifest, runtimeDir);
+  return readReleaseIdentity(manifestPath, runtimeDir, {
+    expectedFiles,
+    manifestPath,
+    env: { RELEASE_KEYRING_PATH: keyringPath },
+  });
+}
+
+function tamperedSignedIdentity(runtimeDir, mutate, expectedFiles = ['server.js']) {
+  const prepared = prepareSignedDashboardManifest(runtimeDir, expectedFiles);
+  const manifest = structuredClone(prepared.manifest);
+  mutate(manifest);
+  fs.writeFileSync(prepared.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  return readReleaseIdentity(prepared.manifestPath, runtimeDir, {
+    expectedFiles,
+    manifestPath: prepared.manifestPath,
+    env: { RELEASE_KEYRING_PATH: prepared.keyringPath },
+  });
+}
+
+function unsignedManifestIdentity(runtimeDir, mutate, expectedFiles = ['server.js']) {
+  const prepared = prepareSignedDashboardManifest(runtimeDir, expectedFiles);
+  const manifest = structuredClone(prepared.manifest);
+  mutate(manifest);
+  fs.writeFileSync(prepared.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  return releaseIdentityFromManifest(JSON.parse(fs.readFileSync(prepared.manifestPath, 'utf8')), {
+    runtimeDir,
+    expectedFiles,
+    manifestPath: prepared.manifestPath,
+    env: { RELEASE_KEYRING_PATH: prepared.keyringPath },
+  });
+}
+
+test('non-production legacy identity preserves schema-v1 /ping compatibility', () => {
   assert.deepEqual(releaseIdentityFromManifest({
     schemaVersion: 1,
     builtAt: '2026-01-01T00:00:00.000Z',
@@ -97,6 +170,9 @@ test('release identity preserves schema-v1 /ping compatibility', () => {
     lockfile: { sha256: 'lock-v1' },
     contract: { fingerprint: 'contract-v1' },
     app: { version: '1.0.0' },
+  }, {
+    env: { NODE_ENV: 'development' },
+    allowLegacyIdentity: true,
   }), {
     commit: 'abcdef0',
     dirty: true,
@@ -107,12 +183,34 @@ test('release identity preserves schema-v1 /ping compatibility', () => {
   });
 });
 
-test('release identity maps schema-v2 content to the unchanged /ping shape', () => {
+test('production runtime rejects schema-v1 and unsigned schema-v2 dashboard manifests', () => {
+  const productionEnv = {
+    FINANCE_RUNTIME_MODE: 'production',
+    NODE_ENV: 'production',
+    RELEASE_KEYRING_PATH: '/tmp/unused-keyring.json',
+  };
+  assert.equal(releaseIdentityFromManifest({
+    schemaVersion: 1,
+    builtAt: '2026-01-01T00:00:00.000Z',
+    repository: { commitShort: 'abcdef0', dirty: false },
+    lockfile: { sha256: 'b'.repeat(64) },
+    contract: { fingerprint: 'contract-v1' },
+    app: { version: '1.0.0' },
+  }, { env: productionEnv, allowLegacyIdentity: false }), null);
+
   const runtimeDir = createRuntime();
-  assert.deepEqual(releaseIdentityFromManifest(manifestFor(runtimeDir), {
+  const manifest = manifestFor(runtimeDir);
+  assert.equal(releaseIdentityFromManifest(manifest, {
     runtimeDir,
     expectedFiles: ['server.js'],
-  }), {
+    env: productionEnv,
+    allowLegacyIdentity: false,
+  }), null);
+});
+
+test('release identity maps schema-v2 content to the unchanged /ping shape', () => {
+  const runtimeDir = createRuntime();
+  assert.deepEqual(readSignedIdentity(runtimeDir), {
     commit: '1234567',
     dirty: false,
     lockSha256: 'b'.repeat(64),
@@ -124,100 +222,82 @@ test('release identity maps schema-v2 content to the unchanged /ping shape', () 
 
 test('release identity rejects schema-v2 content tampering', () => {
   const runtimeDir = createRuntime();
-  const manifest = manifestFor(runtimeDir);
-  manifest.content.app.version = 'tampered';
-  assert.equal(releaseIdentityFromManifest(manifest, {
-    runtimeDir,
-    expectedFiles: ['server.js'],
+  assert.equal(tamperedSignedIdentity(runtimeDir, (manifest) => {
+    manifest.content.app.version = 'tampered';
   }), null);
 });
 
 test('release identity rejects rehashed but structurally invalid schema-v2 content', () => {
   const runtimeDir = createRuntime();
-  const unknown = manifestFor(runtimeDir);
-  unknown.content.repository.extra = true;
-  resign(unknown);
-  assert.equal(releaseIdentityFromManifest(unknown, {
-    runtimeDir,
-    expectedFiles: ['server.js'],
+  assert.equal(unsignedManifestIdentity(runtimeDir, (manifest) => {
+    manifest.content.repository.extra = true;
+    resign(manifest);
   }), null);
 
-  const misaligned = manifestFor(runtimeDir);
-  misaligned.content.actual.toolsApi = '26.7.1';
-  resign(misaligned);
-  assert.equal(releaseIdentityFromManifest(misaligned, {
-    runtimeDir,
-    expectedFiles: ['server.js'],
+  assert.equal(unsignedManifestIdentity(runtimeDir, (manifest) => {
+    manifest.content.actual.toolsApi = '26.7.1';
+    resign(manifest);
   }), null);
 
-  const unknownEnvelope = manifestFor(runtimeDir);
-  unknownEnvelope.extra = true;
-  assert.equal(releaseIdentityFromManifest(unknownEnvelope, {
-    runtimeDir,
-    expectedFiles: ['server.js'],
+  assert.equal(unsignedManifestIdentity(runtimeDir, (manifest) => {
+    manifest.extra = true;
   }), null);
 
-  const unknownDigest = manifestFor(runtimeDir);
-  unknownDigest.contentDigest.extra = true;
-  assert.equal(releaseIdentityFromManifest(unknownDigest, {
-    runtimeDir,
-    expectedFiles: ['server.js'],
+  assert.equal(unsignedManifestIdentity(runtimeDir, (manifest) => {
+    manifest.contentDigest.extra = true;
   }), null);
 });
 
 test('release identity rejects non-dashboard schema-v2 manifests', () => {
   const runtimeDir = createRuntime();
-  const manifest = manifestFor(runtimeDir);
-  manifest.content.mode = 'source';
-  resign(manifest);
-  assert.equal(releaseIdentityFromManifest(manifest, {
-    runtimeDir,
-    expectedFiles: ['server.js'],
+  assert.equal(unsignedManifestIdentity(runtimeDir, (manifest) => {
+    manifest.content.mode = 'source';
+    resign(manifest);
   }), null);
 });
 
 test('deployed runtime mutation invalidates schema-v2 /ping identity', () => {
   const runtimeDir = createRuntime();
-  const manifest = manifestFor(runtimeDir);
-  assert.ok(readFromDisk(manifest, runtimeDir));
+  const prepared = prepareSignedDashboardManifest(runtimeDir);
+  assert.ok(readPreparedIdentity(prepared, runtimeDir));
   fs.writeFileSync(path.join(runtimeDir, 'server.js'), 'server-v2\n');
-  assert.equal(readFromDisk(manifest, runtimeDir), null);
+  assert.equal(readPreparedIdentity(prepared, runtimeDir), null);
 });
 
 test('deployed runtime verification rejects missing files, directories, and symlinks', () => {
   const missingRuntime = createRuntime();
-  const missingManifest = manifestFor(missingRuntime);
+  const missingPrepared = prepareSignedDashboardManifest(missingRuntime);
   fs.unlinkSync(path.join(missingRuntime, 'server.js'));
-  assert.equal(readFromDisk(missingManifest, missingRuntime), null);
+  assert.equal(readPreparedIdentity(missingPrepared, missingRuntime), null);
 
   const directoryRuntime = createRuntime();
-  const directoryManifest = manifestFor(directoryRuntime);
+  const directoryPrepared = prepareSignedDashboardManifest(directoryRuntime);
   fs.unlinkSync(path.join(directoryRuntime, 'server.js'));
   fs.mkdirSync(path.join(directoryRuntime, 'server.js'));
-  assert.equal(readFromDisk(directoryManifest, directoryRuntime), null);
+  assert.equal(readPreparedIdentity(directoryPrepared, directoryRuntime), null);
 
   const symlinkRuntime = createRuntime();
-  const symlinkManifest = manifestFor(symlinkRuntime);
+  const symlinkPrepared = prepareSignedDashboardManifest(symlinkRuntime);
   fs.renameSync(path.join(symlinkRuntime, 'server.js'), path.join(symlinkRuntime, 'real-server.js'));
   fs.symlinkSync('real-server.js', path.join(symlinkRuntime, 'server.js'));
-  assert.equal(readFromDisk(symlinkManifest, symlinkRuntime), null);
+  assert.equal(readPreparedIdentity(symlinkPrepared, symlinkRuntime), null);
 
   const nestedRuntime = createRuntime({ 'lib/runtime.js': 'nested\n' });
-  const nestedManifest = manifestFor(nestedRuntime, ['lib/runtime.js']);
+  const nestedPrepared = prepareSignedDashboardManifest(nestedRuntime, ['lib/runtime.js']);
   const outside = createRuntime({ 'runtime.js': 'nested\n' });
   fs.rmSync(path.join(nestedRuntime, 'lib'), { recursive: true });
   fs.symlinkSync(outside, path.join(nestedRuntime, 'lib'));
-  assert.equal(readFromDisk(nestedManifest, nestedRuntime, ['lib/runtime.js']), null);
+  assert.equal(readPreparedIdentity(nestedPrepared, nestedRuntime, ['lib/runtime.js']), null);
 });
 
 test('deployed runtime verification rejects FIFOs before opening them', {
   skip: process.platform === 'win32',
 }, () => {
   const runtimeDir = createRuntime();
-  const manifest = manifestFor(runtimeDir);
+  const prepared = prepareSignedDashboardManifest(runtimeDir);
   fs.unlinkSync(path.join(runtimeDir, 'server.js'));
   execFileSync('mkfifo', [path.join(runtimeDir, 'server.js')]);
-  assert.equal(readFromDisk(manifest, runtimeDir), null);
+  assert.equal(readPreparedIdentity(prepared, runtimeDir), null);
 });
 
 test('deployed hashing rejects atomic path replacement', () => {
@@ -242,29 +322,32 @@ test('deployed runtime verification rejects traversal, malformed evidence, and p
     'b.js': 'b\n',
     'server.js': 'server\n',
   });
-  const traversal = manifestFor(runtimeDir);
-  traversal.content.deployedFiles[0].path = '../server.js';
-  resign(traversal);
-  assert.equal(readFromDisk(traversal, runtimeDir), null);
+  assert.equal(unsignedManifestIdentity(runtimeDir, (manifest) => {
+    manifest.content.deployedFiles[0].path = '../server.js';
+    resign(manifest);
+  }), null);
 
   for (const field of ['bytes', 'sha256', 'executable']) {
-    const invalid = manifestFor(runtimeDir);
-    if (field === 'bytes') invalid.content.deployedFiles[0].bytes += 1;
-    if (field === 'sha256') invalid.content.deployedFiles[0].sha256 = '0'.repeat(64);
-    if (field === 'executable') invalid.content.deployedFiles[0].executable = !invalid.content.deployedFiles[0].executable;
-    resign(invalid);
-    assert.equal(readFromDisk(invalid, runtimeDir), null, field);
+    assert.equal(unsignedManifestIdentity(runtimeDir, (manifest) => {
+      if (field === 'bytes') manifest.content.deployedFiles[0].bytes += 1;
+      if (field === 'sha256') manifest.content.deployedFiles[0].sha256 = '0'.repeat(64);
+      if (field === 'executable') {
+        manifest.content.deployedFiles[0].executable = !manifest.content.deployedFiles[0].executable;
+      }
+      resign(manifest);
+    }), null, field);
   }
 
-  const duplicate = manifestFor(runtimeDir);
-  duplicate.content.deployedFiles.push({ ...duplicate.content.deployedFiles[0] });
-  resign(duplicate);
-  assert.equal(readFromDisk(duplicate, runtimeDir), null);
+  assert.equal(unsignedManifestIdentity(runtimeDir, (manifest) => {
+    manifest.content.deployedFiles.push({ ...manifest.content.deployedFiles[0] });
+    resign(manifest);
+  }), null);
 
-  const unsorted = manifestFor(runtimeDir, ['a.js', 'b.js']);
-  unsorted.content.deployedFiles.reverse();
-  resign(unsorted);
-  assert.equal(readFromDisk(unsorted, runtimeDir, ['a.js', 'b.js']), null);
+  const unsortedRuntime = createRuntime({ 'a.js': 'a\n', 'b.js': 'b\n' });
+  assert.equal(unsignedManifestIdentity(unsortedRuntime, (manifest) => {
+    manifest.content.deployedFiles.reverse();
+    resign(manifest);
+  }, ['a.js', 'b.js']), null);
 });
 
 test('release identity returns null for missing or malformed manifests', () => {
@@ -274,4 +357,18 @@ test('release identity returns null for missing or malformed manifests', () => {
   assert.equal(readReleaseIdentity('/invalid', '/runtime', { readFile: () => '{not-json' }), null);
   assert.equal(releaseIdentityFromManifest({ schemaVersion: 2 }), null);
   assert.equal(releaseIdentityFromManifest({ schemaVersion: 99, repository: {} }), null);
+});
+
+test('readReleaseIdentity returns null for symlink and raced manifest files without injected readFile', {
+  skip: process.platform === 'win32' ? 'POSIX symlink semantics' : false,
+}, () => {
+  const runtimeDir = createRuntime();
+  const prepared = prepareSignedDashboardManifest(runtimeDir);
+  const realManifest = path.join(runtimeDir, 'real-release-manifest.json');
+  fs.renameSync(prepared.manifestPath, realManifest);
+  fs.symlinkSync(realManifest, prepared.manifestPath);
+  assert.equal(readReleaseIdentity(prepared.manifestPath, runtimeDir, {
+    manifestPath: prepared.manifestPath,
+    env: { RELEASE_KEYRING_PATH: prepared.keyringPath },
+  }), null);
 });

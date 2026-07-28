@@ -127,7 +127,11 @@ function readDashboardReleaseIdentityFromManifest(env, dashboardDir) {
   } catch (error) {
     throw new Error(`dashboard release identity tooling unavailable: ${error.message}`);
   }
-  return normalizeReleaseIdentity(readReleaseIdentity(manifestPath, dashboardDir));
+  return normalizeReleaseIdentity(readReleaseIdentity(manifestPath, dashboardDir, {
+    env,
+    manifestPath,
+    allowLegacyIdentity: false,
+  }));
 }
 
 async function captureDashboardReleaseIdentity({

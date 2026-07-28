@@ -50,6 +50,25 @@ export interface EventNotificationReconcileInput {
   repayments?: unknown[];
 }
 
+export const NOTIFICATION_ROUTES: {
+  readonly bills: '/bills';
+  readonly largeCharge: '/(tabs)/transactions';
+  readonly newSub: '/subscriptions';
+  readonly weekly: '/review';
+  readonly lowBalance: '/networth';
+  readonly repayments: '/reimbursement';
+};
+
+export type NotificationCategory = keyof typeof NOTIFICATION_ROUTES;
+
+export type NotificationRoute = typeof NOTIFICATION_ROUTES[NotificationCategory];
+
+export interface NotificationRoutePayload {
+  route: NotificationRoute;
+  category: NotificationCategory;
+  scope: string;
+}
+
 export interface NotificationReconciler {
   reconcileScheduledNotifications: (input: ScheduledNotificationReconcileInput) => Promise<void>;
   reconcileEventNotifications: (input: EventNotificationReconcileInput) => Promise<void>;
@@ -57,20 +76,20 @@ export interface NotificationReconciler {
   clearNotificationRoutingState: () => void;
   dismissDeliveredNotificationsForScope: (scope?: string) => Promise<void>;
   migrateLegacyScheduledNotifications: (token: NotificationReconciliationToken) => Promise<boolean>;
-  parseNotificationRoute: (data: unknown) => { route: string; category: string; scope: string } | null;
+  parseNotificationRoute: (data: unknown) => NotificationRoutePayload | null;
   readTrackedScheduledIds: (scope: string) => Record<string, unknown>;
-  readCategoryScheduleState: (scope: string, category: string) => CategoryScheduleState;
-  readCommittedScheduledIds: (scope: string, category: string) => string[];
-  convergeCategorySchedules: (scope: string, category: string) => Promise<CategoryScheduleState>;
+  readCategoryScheduleState: (scope: string, category: NotificationCategory) => CategoryScheduleState;
+  readCommittedScheduledIds: (scope: string, category: NotificationCategory) => string[];
+  convergeCategorySchedules: (scope: string, category: NotificationCategory) => Promise<CategoryScheduleState>;
   readNotificationStatus: (scope: string) => {
     permissionGranted: boolean | null;
     scheduledCount: number;
-    lastRefresh: Record<string, string>;
+    lastRefresh: Partial<Record<NotificationCategory, string>>;
   };
 }
 
 export function createNotificationReconciler(deps: NotificationReconcilerDeps): NotificationReconciler;
 
-export function parseNotificationRoute(data: unknown): { route: string; category: string; scope: string } | null;
+export function parseNotificationRoute(data: unknown): NotificationRoutePayload | null;
 
 export function isFinanceScheduledNotification(notification: unknown): boolean;

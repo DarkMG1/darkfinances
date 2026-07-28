@@ -119,7 +119,7 @@ test('production server startup fails closed without cursor signing secret', asy
     await pollBackoff();
   }
   assert.notEqual(child.exitCode, 0);
-  assert.match(logs.value, /Query cursor signing requires FINANCE_QUERY_CURSOR_SECRET/);
+  assert.match(logs.value, /Production runtime requires explicit query cursor signing/);
 });
 
 test('client disconnect aborts in-flight ledger reads with server-side abort markers', async (t) => {

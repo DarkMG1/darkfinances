@@ -43,7 +43,7 @@ test('check-shell fails when shellcheck is unavailable in CI=true', (t) => {
   const result = runCheckShell(envWithoutShellcheck(t, { CI: 'true' }));
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /shellcheck: required in CI but not installed/);
+  assert.match(result.stderr, /shellcheck: required in CI but pinned bootstrap is unavailable/);
   assert.doesNotMatch(result.stdout, /skipped/);
 });
 
@@ -51,7 +51,7 @@ test('check-shell fails when shellcheck is unavailable in GITHUB_ACTIONS=true', 
   const result = runCheckShell(envWithoutShellcheck(t, { GITHUB_ACTIONS: 'true' }));
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /shellcheck: required in CI but not installed/);
+  assert.match(result.stderr, /shellcheck: required in CI but pinned bootstrap is unavailable/);
   assert.doesNotMatch(result.stdout, /skipped/);
 });
 
@@ -79,4 +79,9 @@ test('check-shell passes with real shellcheck on repository scripts', () => {
 test('package.json check:shell delegates to scripts/check-shell.sh', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
   assert.equal(pkg.scripts['check:shell'], 'bash scripts/check-shell.sh');
+});
+
+test('check-shell includes ensure-cocoapods.sh in lint targets', () => {
+  const source = fs.readFileSync(checkShellScript, 'utf8');
+  assert.match(source, /scripts\/ensure-cocoapods\.sh/);
 });

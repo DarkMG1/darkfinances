@@ -1,8 +1,33 @@
 'use strict';
 
+const fs = require('fs');
 const { spawnSync } = require('child_process');
+const { backupTarEnv } = require('./backup-tar-env');
 
 const TAR_ENTRY_TYPES = new Set(['-', 'd', 'l', 'h', 'b', 'c', 'p', 's']);
+
+/**
+ * Tar archive preflight intentionally uses one verbose listing pass (-tvf).
+ * Name-only listing (-tzf) omits entry types and uncompressed sizes, so a
+ * second pass would decompress the archive again. archiveIdentity() captures
+ * dev/ino/size/mtime before and after listing to detect replacement.
+ */
+function archiveIdentity(archivePath) {
+  const stat = fs.statSync(archivePath);
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+  };
+}
+
+function archiveIdentitiesMatch(before, after) {
+  return before.dev === after.dev
+    && before.ino === after.ino
+    && before.size === after.size
+    && before.mtimeMs === after.mtimeMs;
+}
 
 function assertSingleLineListingLine(line, label = 'tar listing line') {
   if (line.includes('\0')) {
@@ -76,7 +101,7 @@ function parseTarVerboseLine(line) {
     }
   }
   if (/[\x00-\x1f\x7f]/.test(memberPath)) {
-    throw new Error(`unsafe tar listing path: control characters are forbidden`);
+    throw new Error('unsafe tar listing path: control characters are forbidden');
   }
 
   return {
@@ -96,23 +121,38 @@ function parseTarVerboseListingText(text) {
   return entries;
 }
 
-function listTarMemberNames(archivePath) {
-  const listing = spawnSync('tar', ['-tzf', archivePath], { encoding: 'utf8' });
-  if (listing.status !== 0) {
-    throw new Error(listing.stderr || 'tar listing failed');
-  }
-  return listing.stdout.trim().split('\n').filter(Boolean);
-}
-
-function listTarVerboseEntries(archivePath) {
-  const listing = spawnSync('tar', ['-tvf', archivePath], { encoding: 'utf8' });
+function inspectTarArchive(archivePath, options = {}) {
+  const env = backupTarEnv(options.env);
+  const identityBefore = archiveIdentity(archivePath);
+  const listing = spawnSync('tar', ['-tvf', archivePath], { encoding: 'utf8', env });
   if (listing.status !== 0) {
     throw new Error(listing.stderr || 'tar verbose listing failed');
   }
-  return parseTarVerboseListingText(listing.stdout);
+  const identityAfter = archiveIdentity(archivePath);
+  if (!archiveIdentitiesMatch(identityBefore, identityAfter)) {
+    throw new Error('archive identity changed during tar listing');
+  }
+  const verboseEntries = parseTarVerboseListingText(listing.stdout);
+  const memberNames = verboseEntries.map((entry) => entry.path);
+  return {
+    memberNames,
+    verboseEntries,
+    archiveIdentity: identityAfter,
+  };
+}
+
+function listTarMemberNames(archivePath, options = {}) {
+  return inspectTarArchive(archivePath, options).memberNames;
+}
+
+function listTarVerboseEntries(archivePath, options = {}) {
+  return inspectTarArchive(archivePath, options).verboseEntries;
 }
 
 module.exports = {
+  archiveIdentity,
+  archiveIdentitiesMatch,
+  inspectTarArchive,
   parseTarVerboseLine,
   parseTarVerboseListingText,
   listTarMemberNames,

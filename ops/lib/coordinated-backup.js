@@ -38,7 +38,20 @@ const {
   resolveActualServerDataDir,
 } = require('./coordinated-backup-health');
 const { loadWriterInventory, writerInventoryDigest } = require('./writer-inventory');
-const { writeFileAtomic } = require('./restore-durable-io');
+const { writeFileAtomic, publishFileDurable, publishSidecarFromStaging, writeChecksumSidecarDurable, fsyncPublishedFile } = require('./restore-durable-io');
+const {
+  createRunPublicationTracker,
+  cleanupPartialRunPublication,
+  assertArchivePublicationCommitted,
+  isArchivePublicationCommitted,
+} = require('./backup-publication-contract');
+const {
+  requireKeyringPath,
+  readTrustedManifestFile,
+  verifySignedManifestFile,
+  resolveSigningPaths,
+  signaturePathFor,
+} = require('../../finance-dashboard/lib/release-signing');
 
 const COORDINATED_MANIFEST_KIND = 'darkfinances-coordinated-backup-manifest';
 const COORDINATED_MANIFEST_SCHEMA_VERSION = 2;
@@ -63,6 +76,7 @@ function buildCoordinatedManifest({
   bundleManifest,
   bundleManifestPath,
   releaseManifestPath,
+  releaseSignaturePath = null,
   actualArchivePath = null,
   actualDataGeneration = null,
   dashboardReleaseIdentityDigest = null,
@@ -70,7 +84,11 @@ function buildCoordinatedManifest({
   const releaseDigest = releaseManifestPath && fs.existsSync(releaseManifestPath)
     ? sha256File(releaseManifestPath)
     : null;
+  const releaseSignatureDigest = releaseSignaturePath && fs.existsSync(releaseSignaturePath)
+    ? sha256File(releaseSignaturePath)
+    : null;
   if (!releaseDigest) throw new Error('coordinated manifest requires release manifest digest');
+  if (!releaseSignatureDigest) throw new Error('coordinated manifest requires release signature digest');
   if (!dashboardReleaseIdentityDigest) {
     throw new Error('coordinated manifest requires dashboard release identity digest');
   }
@@ -86,6 +104,7 @@ function buildCoordinatedManifest({
       bundleManifestDigest: sha256File(bundleManifestPath),
       runtimeInventoryDigest: bundleManifest.runtimeState.inventoryDigest,
       releaseManifestDigest: releaseDigest,
+      releaseSignatureDigest,
       dashboardReleaseIdentityDigest,
       actualDataGeneration,
       writerInventoryDigest: journal.inventory.writerInventoryDigest,
@@ -95,6 +114,9 @@ function buildCoordinatedManifest({
       bundleManifest: path.basename(journal.artifacts.bundleManifest),
       releaseManifest: journal.artifacts.releaseManifest
         ? path.basename(journal.artifacts.releaseManifest)
+        : null,
+      releaseSignature: releaseSignaturePath
+        ? path.basename(releaseSignaturePath)
         : null,
       actualArchive: actualArchivePath ? path.basename(actualArchivePath) : null,
     },
@@ -114,15 +136,12 @@ function assertNoActiveSagaGenerationMismatch(dashboardDir, actualDataGeneration
   }
 }
 
-function publishAtomic(finalPath, stagingPath, mode = 0o600) {
-  fs.renameSync(stagingPath, finalPath);
-  fs.chmodSync(finalPath, mode);
+function publishAtomic(finalPath, stagingPath, mode = 0o600, fault = null) {
+  publishFileDurable(finalPath, stagingPath, mode, fault);
 }
 
-function writeChecksumSidecar(archivePath) {
-  const checksum = crypto.createHash('sha256').update(fs.readFileSync(archivePath)).digest('hex');
-  fs.writeFileSync(`${archivePath}.sha256`, `${checksum}  ${path.basename(archivePath)}\n`, { mode: 0o600 });
-  return checksum;
+function writeChecksumSidecar(archivePath, fault = null) {
+  return writeChecksumSidecarDurable(archivePath, fault);
 }
 
 function buildContext(options, inventory, env, runners, dashboardDir, shouldInterrupt = () => false) {
@@ -168,7 +187,10 @@ function dashboardReleaseIdentityFromJournal(journal) {
 function readCoordinatedManifestGeneration(journal) {
   const manifestPath = journal?.artifacts?.coordinatedManifest;
   if (!manifestPath || !fs.existsSync(manifestPath)) return null;
-  const coordinated = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const { buffer } = readTrustedManifestFile(manifestPath, {
+    label: 'coordinated backup manifest',
+  });
+  const coordinated = JSON.parse(buffer.toString('utf8'));
   return coordinated.generation ?? null;
 }
 
@@ -357,6 +379,7 @@ async function runCoordinatedBackup(options = {}) {
   const dryRun = options.dryRun === true;
   const preQuiesced = options.preQuiesced === true || preQuiescedMode(env);
   const includeActual = options.includeActual === true || env.BACKUP_INCLUDE_ACTUAL_DATA === '1';
+  const injectFault = options.injectFault || null;
   const dashboardDir = path.resolve(options.dashboardDir || env.FINANCE_DASHBOARD_DIR || path.join(env.HOME || '', 'finance-dashboard'));
   const destination = path.resolve(options.destination || env.DARKFINANCES_BACKUP_DIR || path.join(env.HOME || '', 'darkfinances-backups'));
   const actualDataDir = resolveActualServerDataDir(env, options);
@@ -376,6 +399,7 @@ async function runCoordinatedBackup(options = {}) {
   let actualDataGeneration = null;
   let boundReleaseGeneration = null;
   let discoverySnapshots = [];
+  let runPublication = null;
 
   const onSignal = (signal) => {
     interrupted = true;
@@ -515,6 +539,7 @@ async function runCoordinatedBackup(options = {}) {
       const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, 'Z');
       const stagingDir = fs.mkdtempSync(path.join(layout.workRoot, 'backup-'));
       runOwnedArtifacts.push(stagingDir);
+      runPublication = createRunPublicationTracker();
 
       const bundleArchiveStaging = path.join(stagingDir, `dashboard-runtime-backup-bundle-${timestamp}.tgz`);
       const bundleManifest = (options.buildBackupBundle || buildBackupBundle)({
@@ -527,10 +552,13 @@ async function runCoordinatedBackup(options = {}) {
 
       const bundleArchiveFinal = path.join(destination, path.basename(bundleArchiveStaging));
       const bundleManifestFinal = `${bundleArchiveFinal}.manifest.json`;
-      publishAtomic(bundleArchiveFinal, bundleArchiveStaging);
-      fs.copyFileSync(`${bundleArchiveStaging}.manifest.json`, bundleManifestFinal);
-      fs.chmodSync(bundleManifestFinal, 0o600);
-      writeChecksumSidecar(bundleArchiveFinal);
+      publishAtomic(bundleArchiveFinal, bundleArchiveStaging, 0o600, injectFault);
+      runPublication.bundleArchive = bundleArchiveFinal;
+      publishSidecarFromStaging(bundleManifestFinal, `${bundleArchiveStaging}.manifest.json`, 0o600, injectFault);
+      runPublication.bundleManifest = bundleManifestFinal;
+      writeChecksumSidecar(bundleArchiveFinal, injectFault);
+      runPublication.bundleChecksumCommitted = true;
+      assertArchivePublicationCommitted(bundleArchiveFinal, 'coordinated bundle archive');
       journal.artifacts.bundleArchive = bundleArchiveFinal;
       journal.artifacts.bundleManifest = bundleManifestFinal;
 
@@ -550,8 +578,11 @@ async function runCoordinatedBackup(options = {}) {
         fs.chmodSync(actualStaging, 0o600);
         actualArchiveFinal = path.join(destination, path.basename(actualStaging));
         await verifySnapshotBoundary(context, snapshotsById, 'pre-publish-actual-archive');
-        publishAtomic(actualArchiveFinal, actualStaging);
-        writeChecksumSidecar(actualArchiveFinal);
+        publishAtomic(actualArchiveFinal, actualStaging, 0o600, injectFault);
+        writeChecksumSidecar(actualArchiveFinal, injectFault);
+        runPublication.actualArchive = actualArchiveFinal;
+        runPublication.actualChecksumCommitted = true;
+        assertArchivePublicationCommitted(actualArchiveFinal, 'coordinated actual archive');
         additionalBackupArgs.push(`--backup-additional-archive=${actualArchiveFinal}`);
         journal.artifacts.actualArchive = actualArchiveFinal;
         actualDataGeneration = beforeActualGeneration;
@@ -577,24 +608,46 @@ async function runCoordinatedBackup(options = {}) {
             ...additionalBackupArgs,
             releaseManifestFinal,
           ],
-          { cwd: releaseManifest.cwd },
+          { cwd: releaseManifest.cwd, env },
         );
         if (release.status !== 0) throw new Error(release.stderr || release.stdout || 'release manifest failed');
       }
+      runPublication.releaseManifest = releaseManifestFinal;
+      const keyringPath = requireKeyringPath(
+        resolveSigningPaths({}, env).keyringPath,
+        'coordinated backup release verification',
+      );
+      const { manifest: releaseManifestBody } = verifySignedManifestFile(
+        releaseManifestFinal,
+        keyringPath,
+        { label: 'coordinated backup release manifest' },
+      );
       fs.chmodSync(releaseManifestFinal, 0o600);
+      fsyncPublishedFile(releaseManifestFinal, injectFault);
+      const releaseSignatureFinal = signaturePathFor(releaseManifestFinal);
+      if (!fs.existsSync(releaseSignatureFinal)) {
+        throw new Error(`coordinated backup missing release signature: ${releaseSignatureFinal}`);
+      }
+      fs.chmodSync(releaseSignatureFinal, 0o600);
+      fsyncPublishedFile(releaseSignatureFinal, injectFault);
+      runPublication.releaseSignature = releaseSignatureFinal;
+      runPublication.releaseEvidenceCommitted = true;
       journal.artifacts.releaseManifest = releaseManifestFinal;
+      journal.artifacts.releaseSignature = releaseSignatureFinal;
 
       const coordinatedManifest = buildCoordinatedManifest({
         journal,
         bundleManifest,
         bundleManifestPath: bundleManifestFinal,
         releaseManifestPath: releaseManifestFinal,
+        releaseSignaturePath: releaseSignatureFinal,
         actualArchivePath: actualArchiveFinal,
         actualDataGeneration,
         dashboardReleaseIdentityDigest: boundReleaseGeneration,
       });
       const coordinatedManifestFinal = path.join(destination, `coordinated-backup-${runId}.json`);
-      writeFileAtomic(coordinatedManifestFinal, `${JSON.stringify(coordinatedManifest, null, 2)}\n`, 0o600);
+      writeFileAtomic(coordinatedManifestFinal, `${JSON.stringify(coordinatedManifest, null, 2)}\n`, 0o600, injectFault);
+      runPublication.coordinatedManifest = coordinatedManifestFinal;
       journal.artifacts.coordinatedManifest = coordinatedManifestFinal;
       journal.phase = PHASE.BACKUP_COMPLETE;
       writeRunJournal(layout.journalPath, journal);
@@ -613,6 +666,7 @@ async function runCoordinatedBackup(options = {}) {
   } catch (error) {
     primaryError = error;
     cleanupRunOwnedArtifacts(runOwnedArtifacts);
+    cleanupPartialRunPublication(runPublication);
     if (journal && !dryRun) {
       appendJournalError(journal, error.message);
       const recoveryRequired = interrupted
@@ -711,4 +765,10 @@ module.exports = {
   readCoordinatedManifestGeneration,
   LEGACY_IDENTITY_RECOVERY_MESSAGE,
   resultFromJournalArtifacts,
+  publishAtomic,
+  writeChecksumSidecar,
+  createRunPublicationTracker,
+  cleanupPartialRunPublication,
+  isArchivePublicationCommitted,
+  assertArchivePublicationCommitted,
 };

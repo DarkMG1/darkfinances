@@ -1,5 +1,9 @@
 'use strict';
 
+const { addDays, todayYMD } = require('../../lib/date-only');
+
+const RECENT_ACTIVITY_OFFSETS = [-5, -4, -3];
+
 const accounts = [
   { id: 'acc-check', name: 'Checking', closed: false, offbudget: false, balance: 100000, role: 'operating_cash' },
   { id: 'acc-save', name: 'Savings', closed: false, offbudget: false, balance: 50000, role: 'protected_savings' },
@@ -22,11 +26,44 @@ const categoryGroups = [
   },
 ];
 
-const transactions = [
-  { id: 't1', account: 'acc-check', date: '2026-07-10', amount: -5000, category: 'dining', payee: 'cafe', cleared: true, is_parent: false, subtransactions: [] },
-  { id: 't2', account: 'acc-hidden', date: '2026-07-11', amount: -8000, category: 'dining', payee: 'hidden', cleared: true, is_parent: false, subtransactions: [] },
-  { id: 't3', account: 'acc-splitwise', date: '2026-07-12', amount: -1500, category: 'dining', payee: 'sw', cleared: true, is_parent: false, subtransactions: [] },
-];
+function buildTransactions(financeDate) {
+  const anchor = financeDate || todayYMD();
+  return [
+    {
+      id: 't1',
+      account: 'acc-check',
+      date: addDays(anchor, RECENT_ACTIVITY_OFFSETS[0]),
+      amount: -5000,
+      category: 'dining',
+      payee: 'cafe',
+      cleared: true,
+      is_parent: false,
+      subtransactions: [],
+    },
+    {
+      id: 't2',
+      account: 'acc-hidden',
+      date: addDays(anchor, RECENT_ACTIVITY_OFFSETS[1]),
+      amount: -8000,
+      category: 'dining',
+      payee: 'hidden',
+      cleared: true,
+      is_parent: false,
+      subtransactions: [],
+    },
+    {
+      id: 't3',
+      account: 'acc-splitwise',
+      date: addDays(anchor, RECENT_ACTIVITY_OFFSETS[2]),
+      amount: -1500,
+      category: 'dining',
+      payee: 'sw',
+      cleared: true,
+      is_parent: false,
+      subtransactions: [],
+    },
+  ];
+}
 
 async function init() {}
 async function downloadBudget() {}
@@ -53,15 +90,16 @@ async function getPayees() {
   ];
 }
 async function getTransactions(accountId, start, end) {
-  return transactions
+  return buildTransactions(end)
     .filter((transaction) => transaction.account === accountId && transaction.date >= start && transaction.date <= end)
     .map(({ account, ...transaction }) => structuredClone(transaction));
 }
 
 module.exports = {
+  RECENT_ACTIVITY_OFFSETS,
   accounts,
+  buildTransactions,
   categoryGroups,
-  transactions,
   downloadBudget,
   getAccountBalance,
   getAccounts,

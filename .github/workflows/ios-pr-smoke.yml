@@ -1,0 +1,172 @@
+name: iOS PR smoke
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'finance-app/**'
+      - 'finance-dashboard/**'
+      - 'scripts/**'
+      - 'ops/toolchain/**'
+      - 'ops/publisher-toolchain/**'
+      - 'ops/vulnerability-exceptions.json'
+      - 'scripts/check-github-action-pins.js'
+      - 'scripts/check-vulnerability-gate.js'
+      - 'docs/vulnerability-policy.md'
+      - '.github/workflows/ios-pr-smoke.yml'
+      - 'package.json'
+      - 'package-lock.json'
+  pull_request:
+    paths:
+      - 'finance-app/**'
+      - 'finance-dashboard/**'
+      - 'scripts/**'
+      - 'ops/toolchain/**'
+      - 'ops/publisher-toolchain/**'
+      - 'ops/vulnerability-exceptions.json'
+      - 'scripts/check-github-action-pins.js'
+      - 'scripts/check-vulnerability-gate.js'
+      - 'docs/vulnerability-policy.md'
+      - '.github/workflows/ios-pr-smoke.yml'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-pr-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-simulator-maestro:
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+      - run: node scripts/ensure-declared-npm.js
+      - run: npm ci
+      - name: Supply-chain preflight (pinned actions + vulnerability gate)
+        run: |
+          npm run check:action-pins:upstream
+          npm run check:vulnerabilities
+      - name: Verify pinned CocoaPods CLI
+        run: bash scripts/ensure-cocoapods.sh
+      - name: Select and boot iOS simulator
+        id: simulator
+        run: node scripts/ci-ios-simulator.js
+      - name: Bootstrap pinned Maestro
+        id: maestro
+        run: |
+          maestro_bin="$(bash scripts/ensure-maestro.sh)"
+          maestro_dir="$(dirname "$maestro_bin")"
+          echo "bin=$maestro_bin" >> "$GITHUB_OUTPUT"
+          echo "dir=$maestro_dir" >> "$GITHUB_OUTPUT"
+          echo "$maestro_dir" >> "$GITHUB_PATH"
+          "$maestro_bin" --version
+      - name: Start synthetic DEMO_ONLY dashboard
+        run: |
+          mkdir -p finance-app/build
+          DEMO_ONLY=1 NODE_ENV=test ALLOW_RAW_ACTUAL_API=1 PORT=5007 node finance-dashboard/server.js > finance-app/build/ci-demo-dashboard.log 2>&1 &
+          echo $! > finance-app/build/ci-demo-dashboard.pid
+          for attempt in $(seq 1 60); do
+            if curl -fsS -H 'X-Demo-Mode: 1' 'http://127.0.0.1:5007/api/v1/ping' | grep -q '"ok":true'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "demo dashboard failed to become ready" >&2
+          exit 1
+      - name: Prebuild iOS project
+        working-directory: finance-app
+        env:
+          EXPO_PUBLIC_FINANCE_DEMO_URL: http://127.0.0.1:5007
+        run: |
+          mkdir -p build/maestro/screenshots
+          expo_bin="$(node scripts/resolve-expo-bin.js)"
+          "$expo_bin" prebuild -p ios --clean
+      - name: Build for iOS Simulator
+        working-directory: finance-app
+        env:
+          EXPO_PUBLIC_FINANCE_DEMO_URL: http://127.0.0.1:5007
+          DEVICE: ${{ steps.simulator.outputs.device }}
+        run: |
+          xcodebuild \
+            -workspace ios/Finances.xcworkspace \
+            -scheme Finances \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=$DEVICE" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            build
+      - name: Start Expo Metro for Debug build
+        working-directory: finance-app
+        env:
+          CI: '1'
+          EXPO_PUBLIC_FINANCE_DEMO_URL: http://127.0.0.1:5007
+        run: |
+          expo_bin="$(node scripts/resolve-expo-bin.js)"
+          "$expo_bin" start --dev-client --port 8081 > build/ci-metro.log 2>&1 &
+          echo $! > build/ci-metro.pid
+          for attempt in $(seq 1 90); do
+            if curl -fsS 'http://127.0.0.1:8081/status' | grep -q 'packager-status:running'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Expo Metro failed to become ready" >&2
+          exit 1
+      - name: Install app on booted simulator
+        working-directory: finance-app
+        env:
+          DEVICE: ${{ steps.simulator.outputs.device }}
+        run: |
+          app_path="$(
+            xcodebuild \
+              -workspace ios/Finances.xcworkspace \
+              -scheme Finances \
+              -configuration Debug \
+              -sdk iphonesimulator \
+              -destination "platform=iOS Simulator,id=$DEVICE" \
+              -showBuildSettings -json |
+            node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(0,'utf8'));const app=data.find((x)=>x.target==='Finances');const s=app.buildSettings;process.stdout.write(require('path').join(s.TARGET_BUILD_DIR,s.WRAPPER_NAME));"
+          )"
+          xcrun simctl bootstatus "$DEVICE" -b
+          xcrun simctl install "$DEVICE" "$app_path"
+      - name: Run core Maestro flows
+        working-directory: finance-app
+        env:
+          DEVICE: ${{ steps.simulator.outputs.device }}
+        run: |
+          bash scripts/run-maestro-ios.sh \
+            .maestro/onboarding-tabs.yaml \
+            .maestro/home-dashboard.yaml \
+            .maestro/activity-workflows.yaml \
+            .maestro/settings-workflows.yaml
+      - name: Upload sanitized failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-pr-smoke-failure-${{ github.run_id }}
+          retention-days: 3
+          if-no-files-found: ignore
+          path: |
+            finance-app/build/maestro/screenshots/**
+            finance-app/build/ci-demo-dashboard.log
+            finance-app/build/ci-metro.log
+      - name: Stop demo dashboard and Metro
+        if: always()
+        run: |
+          for pid_file in finance-app/build/ci-demo-dashboard.pid finance-app/build/ci-metro.pid; do
+            if [ -f "$pid_file" ]; then
+              kill "$(cat "$pid_file")" || true
+            fi
+          done

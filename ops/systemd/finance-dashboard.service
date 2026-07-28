@@ -11,6 +11,8 @@ RestartSec=5
 # FINANCE_SHUTDOWN_TIMEOUT_MS defaults to 15s; allow graceful drain plus SIGKILL margin.
 TimeoutStopSec=25
 UMask=0077
+Environment=FINANCE_RUNTIME_MODE=production
+Environment=NODE_ENV=production
 EnvironmentFile=%h/.openclaw/finance-dashboard.env
 
 [Install]

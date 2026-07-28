@@ -2,33 +2,28 @@
 // DRY-RUN by default. Set CONFIRM=1 to create rules.
 const api = require('@actual-app/api');
 const { q, runQuery } = require('@actual-app/api');
-const fs = require('fs');
 const path = require('path');
+const {
+  compilePatternList,
+  loadBuildRulesConfig,
+} = require('./lib/operator-regex-config');
 const CONFIRM = process.env.CONFIRM === '1';
 
 // Payees we never want to auto-categorize (money movement / ambiguous)
 const SKIP_GROUPS = new Set(['Money Movement', 'Income']);
 
-// Generic risky patterns: person-to-person money movement that should never be
-// auto-categorized unattended (Zelle/Venmo/Cash App/autosave transfers).
-const config = (() => {
-  try {
-    const file = process.env.BUILD_RULES_CONFIG_PATH || path.join(__dirname, 'build-rules-config.json');
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (_) {
-    return {};
-  }
-})();
-const SKIP_NAMES = new Set(Array.isArray(config.skipNames) ? config.skipNames : []);
-const SKIP_PATTERNS = [
-  /zelle/i,
-  /venmo/i,
-  /cash ?app/i,
-  /autosave/i,
-  ...(Array.isArray(config.skipPatterns) ? config.skipPatterns.map((source) => new RegExp(source, 'i')) : []),
-];
-
 (async () => {
+  const configPath = process.env.BUILD_RULES_CONFIG_PATH || path.join(__dirname, 'build-rules-config.json');
+  const config = loadBuildRulesConfig(configPath);
+  const SKIP_NAMES = config.skipNames;
+  const SKIP_PATTERNS = [
+    /zelle/i,
+    /venmo/i,
+    /cash ?app/i,
+    /autosave/i,
+    ...compilePatternList(config.skipPatterns, { setLabel: 'skipPatterns' }),
+  ];
+
   await api.init({ dataDir: process.env.FIX_DATA_DIR, serverURL: process.env.ACTUAL_SERVER_URL, password: process.env.ACTUAL_PASSWORD });
   await api.downloadBudget(process.env.ACTUAL_SYNC_ID);
 

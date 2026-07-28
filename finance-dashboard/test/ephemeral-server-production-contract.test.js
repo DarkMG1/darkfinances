@@ -44,7 +44,7 @@ async function spawnPingProbe({ nodeEnv, instanceId }) {
       dir,
       instanceId,
       nodeEnv,
-      demoOnly: true,
+      demoOnly: nodeEnv !== 'production',
       extraEnv: {},
       preloadPath,
     }),

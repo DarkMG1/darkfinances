@@ -4,4 +4,5 @@ Description=Notify owner that %i failed
 [Service]
 Type=oneshot
 Environment=TZ=America/Los_Angeles
+UMask=0077
 ExecStart=%h/.local/bin/finance-sync-alert.sh %i

@@ -6,6 +6,100 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const {
+  stripProductionUnsafeEnv,
+  isProductionCursorSigningConfigured,
+} = require('../../lib/finance-runtime-config');
+const { DASHBOARD_RUNTIME_FILES } = require('../../lib/release-files');
+
+function copyDashboardRuntimeFixture(sourceRoot, targetRoot) {
+  for (const relative of DASHBOARD_RUNTIME_FILES) {
+    const source = path.join(sourceRoot, relative);
+    const target = path.join(targetRoot, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(source, target);
+    fs.chmodSync(target, fs.statSync(source).mode);
+  }
+  const nodeModulesSource = fs.existsSync(path.join(sourceRoot, 'node_modules'))
+    ? path.join(sourceRoot, 'node_modules')
+    : path.join(sourceRoot, '..', 'node_modules');
+  const nodeModulesLink = path.join(targetRoot, 'node_modules');
+  if (!fs.existsSync(nodeModulesLink)) {
+    fs.symlinkSync(nodeModulesSource, nodeModulesLink);
+  }
+  return targetRoot;
+}
+
+function provisionProductionReleaseEvidence(dir, runtimeRoot = dashboardRoot()) {
+  const {
+    buildSignatureEnvelope,
+    generateSigningMaterial,
+    loadSigningKey,
+    writeKeyMaterialAtomic,
+    writeManifestAndSignatureAtomic,
+  } = require('../../lib/release-signing');
+  const { collectDeployedFiles, sha256Canonical } = require('../../../scripts/release-manifest');
+  const root = path.resolve(runtimeRoot);
+  const keyringPath = path.join(dir, 'release-keyring.json');
+  const manifestPath = path.join(dir, 'release-manifest.json');
+  const content = {
+    mode: 'dashboard',
+    repository: {
+      commit: '1234567890abcdef1234567890abcdef12345678',
+      dirty: false,
+      source: {
+        algorithm: 'sha256',
+        digest: 'a'.repeat(64),
+        state: 'clean',
+        trackedDirty: false,
+        untrackedSource: false,
+      },
+    },
+    lockfile: { path: 'package-lock.json', sha256: 'b'.repeat(64) },
+    actual: { serverImage: '26.7.0', dashboardApi: '26.7.0', toolsApi: '26.7.0' },
+    contract: { fingerprint: 'e92dd64e2bba333f' },
+    app: {
+      variant: 'full',
+      releaseProfile: 'production',
+      version: '2.0.0',
+      runtimeVersion: '2.0.0',
+      updateChannel: 'production',
+      iosBuildNumber: '5',
+    },
+    deployedFiles: collectDeployedFiles(root, [...DASHBOARD_RUNTIME_FILES]),
+  };
+  const manifest = {
+    kind: 'darkfinances-release',
+    schemaVersion: 2,
+    builtAt: '2026-02-02T00:00:00.000Z',
+    content,
+    contentDigest: {
+      algorithm: 'sha256',
+      canonicalization: 'darkfinances-canonical-json-v1',
+      value: sha256Canonical(content),
+    },
+    display: { repository: { commitShort: '1234567', branch: null } },
+  };
+  const material = generateSigningMaterial({
+    notBefore: '2020-01-01T00:00:00.000Z',
+    notAfter: '2099-01-01T00:00:00.000Z',
+  });
+  const paths = writeKeyMaterialAtomic(path.join(dir, 'release-signing-keys'), material);
+  fs.copyFileSync(paths.keyringPath, keyringPath);
+  fs.chmodSync(keyringPath, 0o644);
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  const signingKey = loadSigningKey(paths.signingPath);
+  writeManifestAndSignatureAtomic(
+    manifestPath,
+    manifest,
+    buildSignatureEnvelope(manifest, {
+      keyId: signingKey.keyId,
+      privateKey: signingKey.privateKey,
+      signedAt: manifest.builtAt,
+    }),
+  );
+  return { keyringPath, manifestPath, runtimeRoot: root };
+}
 
 const READY_RE = /^FINANCE_TEST_SERVER_READY (\d+) ([0-9a-f]+)$/;
 const FINANCE_API_TOKEN = 'test-api-token';
@@ -52,6 +146,10 @@ function validateExtraEnv(extraEnv, label = 'extraEnv') {
   }
 }
 
+function provisionTestReleaseEvidence(dir, runtimeRoot = dashboardRoot()) {
+  return provisionProductionReleaseEvidence(dir);
+}
+
 function buildDashboardServerEnv({
   dir,
   instanceId,
@@ -61,9 +159,10 @@ function buildDashboardServerEnv({
   demoOnly = true,
   nodeEnv = 'test',
   port = '0',
+  runtimeRoot = null,
 } = {}) {
   validateExtraEnv(extraEnv);
-  const root = dashboardRoot();
+  const root = runtimeRoot || dashboardRoot();
   const nodeOptions = preloadPath
     ? `${parentEnv.NODE_OPTIONS || ''} --require=${preloadPath}`.trim()
     : (parentEnv.NODE_OPTIONS || '').trim();
@@ -73,6 +172,8 @@ function buildDashboardServerEnv({
     OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
     BULK_OPERATION_SAGAS_PATH: path.join(dir, 'bulk-operation-sagas.json'),
     PASSKEY_CREDENTIALS_FILE: path.join(dir, 'credentials.json'),
+    RECEIPTS_PATH: path.join(dir, 'receipts.json'),
+    RECEIPTS_DIR: path.join(dir, 'receipt-images'),
     TEST_DASHBOARD_ROOT: root,
     TEST_EFFECT_MARKER: path.join(dir, 'effects.log'),
     TEST_MARKER: path.join(dir, 'marker.log'),
@@ -80,7 +181,7 @@ function buildDashboardServerEnv({
     WEBAUTHN_ORIGIN: 'http://127.0.0.1:0',
     WEBAUTHN_RP_ID: 'localhost',
   };
-  return finalizeTrustProxyHopsEnv({
+  const env = finalizeTrustProxyHopsEnv({
     ...parentEnvWithoutTrustSemantics(parentEnv),
     ...defaults,
     ...extraEnv,
@@ -91,6 +192,29 @@ function buildDashboardServerEnv({
     TEST_SERVER_INSTANCE_ID: instanceId,
     FINANCE_API_TOKEN,
   }, extraEnv);
+  if (nodeEnv === 'production') {
+    const pinned = {
+      ...stripProductionUnsafeEnv(env),
+      NODE_ENV: 'production',
+      FINANCE_RUNTIME_MODE: 'production',
+    };
+    const hasExplicitCursorEnv = Object.prototype.hasOwnProperty.call(env, 'FINANCE_QUERY_CURSOR_SECRET')
+      || Object.prototype.hasOwnProperty.call(env, 'ACTUAL_SYNC_ID');
+    if (!hasExplicitCursorEnv && !isProductionCursorSigningConfigured(pinned)) {
+      pinned.FINANCE_QUERY_CURSOR_SECRET = 'ephemeral-production-probe-cursor-secret';
+    }
+    const hasReleaseEvidence = env.RELEASE_KEYRING_PATH && env.RELEASE_MANIFEST_PATH;
+    if (hasReleaseEvidence) {
+      pinned.RELEASE_KEYRING_PATH = env.RELEASE_KEYRING_PATH;
+      pinned.RELEASE_MANIFEST_PATH = env.RELEASE_MANIFEST_PATH;
+    } else {
+      const releaseEvidence = provisionProductionReleaseEvidence(dir, root);
+      pinned.RELEASE_KEYRING_PATH = releaseEvidence.keyringPath;
+      pinned.RELEASE_MANIFEST_PATH = releaseEvidence.manifestPath;
+    }
+    return pinned;
+  }
+  return env;
 }
 
 function attachChildLogHandlers(child, logs, state = {}) {
@@ -281,6 +405,9 @@ module.exports = {
   parentEnvWithoutTrustSemantics,
   parseReadyLine,
   pingTestInstanceId,
+  copyDashboardRuntimeFixture,
+  provisionProductionReleaseEvidence,
+  provisionTestReleaseEvidence,
   registerEphemeralServerCleanup,
   spawnEphemeralDashboardServer,
   startEphemeralDashboardServer,

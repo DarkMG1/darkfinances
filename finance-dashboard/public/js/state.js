@@ -8,6 +8,7 @@ export const state = {
   netWorthAuthoritative: false,
   netWorthHasServerMetric: false,
   netWorthIncompleteReasons: [],
+  accountOnlyNetWorth: null,
   trendFirstNW: null,
   trendMonths: null,
 };

@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { readTrustedRegularFile } = require('../../finance-dashboard/lib/trusted-regular-file-read');
 const {
   resolveVerificationKey,
   resolveSigningKey,
@@ -16,12 +17,19 @@ const {
 } = require('./coordinated-admission-registry');
 const { coordinatedLayoutForRoot, assertNotSymlink } = require('./coordinated-operation-layout');
 const { assertAllWritersQuiescentForAdmission, writerStatesForAdmission } = require('./writer-quiescence');
+const {
+  resolveRestoreAdmissionTransportPolicy,
+  refuseInlineAdmissionTransport,
+  refuseTrustedAdmissionFileRequired,
+  isLiveRestoreAdmission,
+} = require('./restore-admission-transport');
 
 const ADMISSION_KIND = 'darkfinances-restore-quiescence-admission';
 const ADMISSION_SCHEMA_VERSION = 2;
 const MIN_ADMISSION_SCHEMA_VERSION = 2;
 
 const DEFAULT_ADMISSION_TTL_MS = 15 * 60 * 1000;
+const MAX_ADMISSION_TOKEN_BYTES = 64 * 1024;
 
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -40,6 +48,16 @@ function canonicalAdmissionPayload(payload) {
     writers: payload.writers,
     bindings: payload.bindings,
   });
+}
+
+function assertActualDataGenerationBinding(bindings, label) {
+  if (!Object.prototype.hasOwnProperty.call(bindings, 'actualDataGeneration')) {
+    throw new Error(`${label}.actualDataGeneration is required (use explicit null when unavailable)`);
+  }
+  const value = bindings.actualDataGeneration;
+  if (value !== null && (typeof value !== 'string' || !value)) {
+    throw new Error(`${label}.actualDataGeneration must be a non-empty string or null`);
+  }
 }
 
 function parseAdmissionToken(text, label = 'quiescence admission token', options = {}) {
@@ -87,6 +105,7 @@ function parseAdmissionToken(text, label = 'quiescence admission token', options
       throw new Error(`${label} bindings.${field} is required`);
     }
   }
+  assertActualDataGenerationBinding(parsed.bindings, `${label} bindings`);
   if (!/^[a-f0-9]{64}$/.test(parsed.bindings.archiveSha256)) {
     throw new Error(`${label} bindings.archiveSha256 must be sha256 hex`);
   }
@@ -114,20 +133,7 @@ function trustedCoordinatorRoots(options = {}) {
   return [...new Set(roots.map((entry) => path.resolve(entry)))];
 }
 
-function assertTrustedAdmissionTokenPath(tokenPath, options = {}, label = 'admission token path') {
-  const resolved = path.resolve(tokenPath);
-  const stat = fs.lstatSync(resolved);
-  assertNotSymlink(stat, label);
-  if (!stat.isFile()) throw new Error(`${label} must be a regular file`);
-  if (process.platform !== 'win32' && typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
-    throw new Error(`${label} ownership mismatch`);
-  }
-  if ((stat.mode & 0o777) !== 0o600) {
-    throw new Error(`${label} mode must be 0600`);
-  }
-  if (stat.nlink > 1) {
-    throw new Error(`${label} must not be hard-linked`);
-  }
+function assertTrustedAdmissionContainment(resolved, options, label) {
   const canonical = fs.realpathSync(resolved);
   const allowedRoots = trustedCoordinatorRoots(options);
   if (allowedRoots.length === 0) {
@@ -142,19 +148,76 @@ function assertTrustedAdmissionTokenPath(tokenPath, options = {}, label = 'admis
   return canonical;
 }
 
-function readAdmissionTokenFile(tokenPath, options = {}, label = 'quiescence admission token') {
-  const canonical = assertTrustedAdmissionTokenPath(tokenPath, options, label);
-  return parseAdmissionToken(fs.readFileSync(canonical, 'utf8'), label, { env: options.env, ...options });
+function validateAdmissionTokenStat(stat, resolved, label, maxBytes) {
+  assertNotSymlink(stat, label);
+  if (!stat.isFile()) throw new Error(`${label} must be a regular file`);
+  if (process.platform !== 'win32' && typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+    throw new Error(`${label} ownership mismatch`);
+  }
+  if ((stat.mode & 0o777) !== 0o600) {
+    throw new Error(`${label} mode must be 0600`);
+  }
+  if (stat.nlink > 1) {
+    throw new Error(`${label} must not be hard-linked`);
+  }
+  if (stat.size <= 0 || stat.size > maxBytes) {
+    throw new Error(`${label} size is out of bounds`);
+  }
 }
 
-function admissionTokenFromEnv(env = process.env, options = {}) {
+function assertTrustedAdmissionTokenPath(tokenPath, options = {}, label = 'admission token path') {
+  const resolved = path.resolve(tokenPath);
+  const stat = fs.lstatSync(resolved);
+  validateAdmissionTokenStat(stat, resolved, label, MAX_ADMISSION_TOKEN_BYTES);
+  return assertTrustedAdmissionContainment(resolved, options, label);
+}
+
+function readAdmissionTokenFile(tokenPath, options = {}, label = 'quiescence admission token') {
+  const resolved = path.resolve(tokenPath);
+  const { buffer } = readTrustedRegularFile(resolved, {
+    label,
+    maxBytes: MAX_ADMISSION_TOKEN_BYTES,
+    validateStat(stat, targetPath) {
+      validateAdmissionTokenStat(stat, targetPath, label, MAX_ADMISSION_TOKEN_BYTES);
+    },
+    preOpenValidate(targetPath) {
+      assertTrustedAdmissionContainment(targetPath, options, label);
+    },
+  });
+  return parseAdmissionToken(buffer.toString('utf8'), label, { env: options.env, ...options });
+}
+
+function resolveAdmissionToken(options = {}) {
+  const env = options.env || process.env;
+  const policy = resolveRestoreAdmissionTransportPolicy(options);
   const resolvedOptions = {
     env,
     ...options,
     coordinatorRoot: options.coordinatorRoot || env.DARKFINANCES_BACKUP_DIR || null,
   };
+
+  if (options.admissionToken) {
+    if (policy.liveRestore || !policy.allowDirectInjection) {
+      refuseTrustedAdmissionFileRequired();
+    }
+    if (typeof options.admissionToken === 'string') {
+      return parseAdmissionToken(options.admissionToken, 'quiescence admission token', resolvedOptions);
+    }
+    return options.admissionToken;
+  }
+
   const inline = env.RESTORE_QUIESCENCE_ADMISSION_TOKEN;
-  if (inline) return parseAdmissionToken(inline, 'RESTORE_QUIESCENCE_ADMISSION_TOKEN', resolvedOptions);
+  if (inline) {
+    if (policy.liveRestore || !policy.allowInlineEnv) {
+      if (policy.liveRestore) {
+        refuseInlineAdmissionTransport();
+      } else {
+        refuseTrustedAdmissionFileRequired();
+      }
+    }
+    return parseAdmissionToken(inline, 'quiescence admission token', resolvedOptions);
+  }
+
   const tokenPath = env.RESTORE_QUIESCENCE_ADMISSION_PATH;
   if (tokenPath) {
     if (!fs.existsSync(tokenPath)) {
@@ -162,7 +225,15 @@ function admissionTokenFromEnv(env = process.env, options = {}) {
     }
     return readAdmissionTokenFile(tokenPath, resolvedOptions);
   }
+
+  if (policy.requireTrustedFile && policy.liveRestore) {
+    refuseTrustedAdmissionFileRequired();
+  }
   return null;
+}
+
+function admissionTokenFromEnv(env = process.env, options = {}) {
+  return resolveAdmissionToken({ ...options, env });
 }
 
 function assertAdmissionFresh(token, now = Date.now()) {
@@ -200,7 +271,7 @@ function assertAdmissionBindings(token, context = {}) {
   if (context.writerInventoryDigest && token.bindings.writerInventoryDigest !== context.writerInventoryDigest) {
     throw new Error('quiescence admission token writer inventory binding mismatch');
   }
-  if (context.actualDataGeneration !== undefined && context.actualDataGeneration !== null
+  if (Object.prototype.hasOwnProperty.call(context, 'actualDataGeneration')
     && token.bindings.actualDataGeneration !== context.actualDataGeneration) {
     throw new Error('quiescence admission token actual generation binding mismatch');
   }
@@ -217,8 +288,7 @@ function requireQuiescenceAdmission(options = {}) {
   if (options.skipQuiescenceAdmission === true) {
     throw new Error('restore refused: quiescence admission cannot be skipped');
   }
-  const env = options.env || process.env;
-  const token = admissionTokenFromEnv(env, options);
+  const token = resolveAdmissionToken(options);
   if (!token) {
     throw new Error('restore refused: missing signed quiescence admission token (PR-18 owns writer quiescence)');
   }
@@ -249,6 +319,7 @@ function issueSignedAdmissionToken({
   privateKey = null,
 }) {
   assertAllWritersQuiescentForAdmission({ ...context, snapshotsById });
+  assertActualDataGenerationBinding(bindings, 'quiescence admission bindings');
   const writers = writerStatesForAdmission(snapshotsById);
   const issuedAt = new Date();
   const nonce = require('crypto').randomUUID();
@@ -292,9 +363,13 @@ module.exports = {
   ADMISSION_KIND,
   ADMISSION_SCHEMA_VERSION,
   MIN_ADMISSION_SCHEMA_VERSION,
+  MAX_ADMISSION_TOKEN_BYTES,
   DEFAULT_ADMISSION_TTL_MS,
   canonicalAdmissionPayload,
+  assertActualDataGenerationBinding,
   admissionTokenFromEnv,
+  resolveAdmissionToken,
+  isLiveRestoreAdmission,
   requireQuiescenceAdmission,
   parseAdmissionToken,
   issueSignedAdmissionToken,

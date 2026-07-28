@@ -3,6 +3,7 @@
 const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { backupTarEnv } = require('./backup-tar-env');
 
 const SAFE_UNIT_PATTERN = /^[A-Za-z0-9@._-]+$/;
 const SAFE_CONTAINER_PATTERN = /^[A-Za-z0-9_.-]+$/;
@@ -250,7 +251,10 @@ function createDefaultRunners(env = process.env, options = {}) {
     },
 
     tar(args, runOptions = {}) {
-      return spawnBounded('tar', args, { env: runOptions.env || env, timeoutMs: runOptions.timeoutMs || timeoutMs });
+      return spawnBounded('tar', args, {
+        env: backupTarEnv(runOptions.env || env),
+        timeoutMs: runOptions.timeoutMs || timeoutMs,
+      });
     },
 
     httpGet(url, headers = {}, requestTimeoutMs = 5000) {

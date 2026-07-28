@@ -8,6 +8,12 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-receipts-'));
 process.env.RECEIPTS_PATH = path.join(dir, 'receipts.json');
 process.env.RECEIPTS_DIR = path.join(dir, 'images');
 process.env.PERSONAL_CONFIG_PATH = path.join(dir, 'personal-config.json');
+const {
+  ReceiptDuplicateError,
+  ReceiptPayloadTooLargeError,
+  ReceiptUnsupportedMediaTypeError,
+  ReceiptValidationError,
+} = require('../lib/errors');
 const data = require('../dataModule');
 
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -42,14 +48,14 @@ test('receipt MIME must match the uploaded bytes', () => {
       imageBase64: pngBytes.toString('base64'),
       mime: 'image/jpeg',
     }),
-    /do not match/
+    ReceiptUnsupportedMediaTypeError,
   );
 });
 
 test('malformed base64 is rejected without creating an image', () => {
   assert.throws(
     () => data.addReceipt({ txnId: 'txn-3', imageBase64: 'not base64!', mime: 'image/jpeg' }),
-    /invalid base64/
+    ReceiptValidationError,
   );
 });
 
@@ -67,7 +73,26 @@ test('duplicate receipt images are rejected by content hash', () => {
       imageBase64: pngBytes.toString('base64'),
       mime: 'image/png',
     }),
-    /duplicate receipt image/
+    ReceiptDuplicateError,
   );
   data.deleteReceipt({ id: receipt.id });
+});
+
+test('unexpected filesystem failure remains a generic error', (t) => {
+  const originalOpen = fs.openSync;
+  fs.openSync = (...args) => {
+    if (String(args[0]).includes('.upload-')) throw new Error('injected filesystem outage');
+    return originalOpen(...args);
+  };
+  t.after(() => {
+    fs.openSync = originalOpen;
+  });
+  assert.throws(
+    () => data.addReceipt({
+      txnId: 'txn-fs-fail',
+      imageBase64: pngBytes.toString('base64'),
+      mime: 'image/png',
+    }),
+    (error) => error instanceof Error && !(error instanceof ReceiptValidationError),
+  );
 });

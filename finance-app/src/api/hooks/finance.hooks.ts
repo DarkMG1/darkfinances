@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useFinanceMutation, useFinanceQuery } from '@/api/client/requests';
 import { getServerAuthHeaders } from '@/api/client/server-auth';
@@ -6,6 +6,12 @@ import { getServerBaseUrl } from '@/api/client/server-url';
 import { useServerConfig } from '@/state/server';
 import { API_ENDPOINTS } from '@/api/generated/endpoints';
 import { scheduleQueryInvalidation } from '@/lib/query-invalidation';
+import { invalidateManualAssetDerivedQueries } from '@/lib/manual-asset-derived-keys';
+import { buildReceiptImageSource } from '@/lib/receipt-image-cache';
+import {
+  getProfileGeneration,
+  subscribeProfileGeneration,
+} from '@/lib/notification-reconciliation';
 import {
   Account,
   AccountCreditStatementOverride,
@@ -890,10 +896,21 @@ export function useDeleteReceipt() {
 }
 // Authed <Image> source for a server-stored receipt (expo-image forwards headers).
 export function useReceiptImageSource() {
-  const { serverUrl, token } = useServerConfig();
+  const { serverUrl, token, scope } = useServerConfig();
+  const profileGeneration = useSyncExternalStore(
+    subscribeProfileGeneration,
+    getProfileGeneration,
+    getProfileGeneration,
+  );
   const base = getServerBaseUrl(serverUrl);
   const headers = getServerAuthHeaders(token);
-  return (id: string) => ({ uri: `${base}/api/v1/receipts/${id}/image`, headers });
+  return useCallback((id: string) => buildReceiptImageSource({
+    uri: `${base}/api/v1/receipts/${encodeURIComponent(id)}/image`,
+    headers,
+    scope,
+    profileGeneration,
+    receiptId: id,
+  }), [base, headers, scope, profileGeneration]);
 }
 
 export function useCreateTransaction() {
@@ -968,7 +985,7 @@ export function useSaveManualAsset() {
     endpoint: API_ENDPOINTS.saveManualAsset.endpoint,
     method: 'POST',
     onSuccess: () => {
-      invalidateKeys(qc, [API_ENDPOINTS.manualAssets.key]);
+      invalidateManualAssetDerivedQueries(qc);
     },
   });
 }
@@ -979,7 +996,7 @@ export function useDeleteManualAsset() {
     endpoint: (v) => `/api/v1/manual-assets/${encodeURIComponent(v.id)}`,
     method: 'DELETE',
     onSuccess: () => {
-      invalidateKeys(qc, [API_ENDPOINTS.manualAssets.key]);
+      invalidateManualAssetDerivedQueries(qc);
     },
   });
 }

@@ -5,10 +5,22 @@ const { spawnSync } = require('child_process');
 const { validateBackupSidecar } = require('../../finance-dashboard/lib/runtime-state-store');
 
 const { sidecarFilenames } = require('./backup-bundle-inventory');
+const {
+  ARCHIVE_MAX_DECLARED_BYTES,
+  ARCHIVE_MAX_MEMBER_COUNT,
+} = require('./backup-bundle-schema');
+const { inspectTarArchive } = require('./backup-bundle-tar-listing');
+const { backupTarEnv } = require('./backup-tar-env');
+
+function backupArchiveGuards() {
+  return require('./backup-bundle-verify');
+}
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const STATE_SCHEMA_VERSION = 1;
 const SIDECAR_FILES = sidecarFilenames();
+const LEGACY_EMBEDDED_MANIFEST = '.backup-manifest.json';
+const LEGACY_SIDECAR_ONLY_FIELDS = Object.freeze([]);
 
 function sha256Buffer(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
@@ -140,6 +152,112 @@ function buildManifest({ dashboardDir, archivePath, files }) {
   };
 }
 
+function canonicalLegacyManifest(manifest) {
+  const copy = JSON.parse(JSON.stringify(manifest));
+  for (const field of LEGACY_SIDECAR_ONLY_FIELDS) {
+    delete copy[field];
+  }
+  return copy;
+}
+
+function normalizeLegacyTarMember(member) {
+  if (typeof member !== 'string' || !member) {
+    throw new Error('archive member must be a non-empty string');
+  }
+  return member.endsWith('/') && member.length > 1 ? member.slice(0, -1) : member;
+}
+
+function legacyExpectedMembers(manifest) {
+  const { assertSafeRelativePath } = backupArchiveGuards();
+  const expected = new Set([LEGACY_EMBEDDED_MANIFEST]);
+  for (const entry of manifest.files) {
+    const relativePath = assertSafeRelativePath(entry.path, 'manifest file path');
+    expected.add(relativePath);
+    if (entry.files) {
+      for (const child of entry.files) {
+        expected.add(assertSafeRelativePath(child.path, 'manifest file path'));
+      }
+    }
+  }
+  return expected;
+}
+
+function assertLegacyArchivePreflightBounds(manifest) {
+  let declaredBytes = 0;
+  for (const entry of manifest.files) {
+    if (Number.isInteger(entry.bytes) && entry.bytes >= 0) {
+      declaredBytes += entry.bytes;
+      if (declaredBytes > ARCHIVE_MAX_DECLARED_BYTES) {
+        throw new Error(`archive declared bytes exceed bound: ${declaredBytes}`);
+      }
+    }
+    if (entry.files) {
+      for (const child of entry.files) {
+        if (Number.isInteger(child.bytes) && child.bytes >= 0) {
+          declaredBytes += child.bytes;
+          if (declaredBytes > ARCHIVE_MAX_DECLARED_BYTES) {
+            throw new Error(`archive declared bytes exceed bound: ${declaredBytes}`);
+          }
+        }
+      }
+    }
+  }
+}
+
+function assertLegacyManifestMatchesArchive(manifest, rawArchiveMembers) {
+  const { assertNoTarMemberNormalizationCollisions } = backupArchiveGuards();
+  assertNoTarMemberNormalizationCollisions(rawArchiveMembers, 'legacy archive member');
+  const expected = legacyExpectedMembers(manifest);
+  const actual = new Set(rawArchiveMembers.map((member) => normalizeLegacyTarMember(member)));
+  const expectedNormalized = new Set([...expected].map((member) => normalizeLegacyTarMember(member)));
+  if (!actual.has(LEGACY_EMBEDDED_MANIFEST)) {
+    throw new Error(`archive is missing embedded ${LEGACY_EMBEDDED_MANIFEST}`);
+  }
+  for (const member of actual) {
+    if (!expectedNormalized.has(member)) {
+      throw new Error(`unexpected archive member: ${member}`);
+    }
+  }
+  for (const member of expectedNormalized) {
+    if (!actual.has(member)) {
+      throw new Error(`archive missing ${member}`);
+    }
+  }
+}
+
+function assertLegacyArchivePreflight(archivePath, manifest) {
+  const {
+    assertTarMembersSafe,
+    assertTarEntryTypesSafe,
+    assertNoTarMemberNormalizationCollisions,
+  } = backupArchiveGuards();
+  assertLegacyArchivePreflightBounds(manifest);
+  const listing = inspectTarArchive(archivePath);
+  assertNoTarMemberNormalizationCollisions(listing.memberNames, 'legacy archive member');
+  const members = assertTarMembersSafe(listing.memberNames);
+  assertTarEntryTypesSafe(archivePath, listing);
+  if (members.size > ARCHIVE_MAX_MEMBER_COUNT) {
+    throw new Error(`archive member count exceeds bound: ${members.size}`);
+  }
+  assertLegacyManifestMatchesArchive(manifest, listing.memberNames);
+  return listing;
+}
+
+function readLegacyEmbeddedManifest(archivePath, manifest) {
+  const embedded = spawnSync('tar', ['-xOf', archivePath, LEGACY_EMBEDDED_MANIFEST], {
+    encoding: 'utf8',
+    env: backupTarEnv(),
+  });
+  if (embedded.status !== 0) throw new Error('unable to read embedded manifest');
+  const embeddedManifest = parseJson(LEGACY_EMBEDDED_MANIFEST, embedded.stdout);
+  const canonicalSidecar = canonicalLegacyManifest(manifest);
+  const canonicalEmbedded = canonicalLegacyManifest(embeddedManifest);
+  if (JSON.stringify(canonicalEmbedded) !== JSON.stringify(canonicalSidecar)) {
+    throw new Error('embedded manifest does not match sidecar manifest');
+  }
+  return embeddedManifest;
+}
+
 function verifyArchive({ archivePath, dashboardDir = null, requireCommit = false }) {
   if (!archivePath || !fs.existsSync(archivePath)) {
     throw new Error(`archive not found: ${archivePath}`);
@@ -168,23 +286,15 @@ function verifyArchive({ archivePath, dashboardDir = null, requireCommit = false
     if (expected !== actual) throw new Error('archive checksum mismatch');
   }
 
-  const listing = spawnSync('tar', ['-tzf', archivePath], { encoding: 'utf8' });
-  if (listing.status !== 0) throw new Error(listing.stderr || 'tar listing failed');
-  const members = new Set(listing.stdout.trim().split('\n').filter(Boolean));
-  if (!members.has('.backup-manifest.json')) {
-    throw new Error('archive is missing embedded .backup-manifest.json');
-  }
+  assertLegacyArchivePreflight(archivePath, manifest);
+  readLegacyEmbeddedManifest(archivePath, manifest);
 
   const tempDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'darkfinances-verify-'));
   try {
-    const embedded = spawnSync('tar', ['-xOf', archivePath, '.backup-manifest.json'], { encoding: 'utf8' });
-    if (embedded.status !== 0) throw new Error('unable to read embedded manifest');
-    const embeddedManifest = parseJson('.backup-manifest.json', embedded.stdout);
-    if (embeddedManifest.archive !== manifest.archive) {
-      throw new Error('embedded manifest archive name mismatch');
-    }
-
-    const extract = spawnSync('tar', ['-xzf', archivePath, '-C', tempDir], { encoding: 'utf8' });
+    const extract = spawnSync('tar', ['-xzf', archivePath, '-C', tempDir], {
+      encoding: 'utf8',
+      env: backupTarEnv(),
+    });
     if (extract.status !== 0) throw new Error(extract.stderr || 'tar extract failed');
 
     for (const entry of manifest.files) {
@@ -232,9 +342,16 @@ function verifyArchive({ archivePath, dashboardDir = null, requireCommit = false
 module.exports = {
   SIDECAR_FILES,
   STATE_SCHEMA_VERSION,
+  LEGACY_EMBEDDED_MANIFEST,
+  LEGACY_SIDECAR_ONLY_FIELDS,
   buildManifest,
   validateSidecar,
   validateReceiptReferences,
   verifyArchive,
   sha256File,
+  assertLegacyArchivePreflight,
+  assertLegacyManifestMatchesArchive,
+  legacyExpectedMembers,
+  normalizeLegacyTarMember,
+  canonicalLegacyManifest,
 };

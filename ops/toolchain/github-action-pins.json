@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "actions": [
+    {
+      "id": "actions/checkout",
+      "releaseTag": "v4.4.0",
+      "sha": "11d5960a326750d5838078e36cf38b85af677262",
+      "provenance": "https://github.com/actions/checkout/releases/tag/v4.4.0"
+    },
+    {
+      "id": "actions/setup-java",
+      "releaseTag": "v4.8.0",
+      "sha": "c1e323688fd81a25caa38c78aa6df2d33d3e20d9",
+      "provenance": "https://github.com/actions/setup-java/releases/tag/v4.8.0"
+    },
+    {
+      "id": "actions/setup-node",
+      "releaseTag": "v4.4.0",
+      "sha": "49933ea5288caeca8642d1e84afbd3f7d6820020",
+      "provenance": "https://github.com/actions/setup-node/releases/tag/v4.4.0"
+    },
+    {
+      "id": "actions/upload-artifact",
+      "releaseTag": "v4.6.2",
+      "sha": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+      "provenance": "https://github.com/actions/upload-artifact/releases/tag/v4.6.2"
+    }
+  ]
+}

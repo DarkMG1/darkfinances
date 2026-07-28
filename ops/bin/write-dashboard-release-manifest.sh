@@ -15,3 +15,4 @@ node "$repo_root/scripts/release-manifest.js" \
   --mode=dashboard \
   --deployed-root="$dashboard" \
   "$destination"
+node "$repo_root/scripts/release-manifest.js" --verify="$destination"

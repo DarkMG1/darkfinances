@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { fromCents, sumCents, toCents } = require('./domain/money');
 
 const MANUAL_ASSETS_UNAVAILABLE = 'manual_assets_unavailable';
@@ -89,7 +90,59 @@ function validateManualAssetsStore(store) {
   };
 }
 
+function normalizeManualAssetName(name) {
+  return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function canonicalManualAssetTuple(item, index) {
+  if (!item || typeof item !== 'object') return null;
+  if (typeof item.value !== 'number' || !Number.isFinite(item.value)) return null;
+  const kind = item.kind === 'liability' ? 'liability' : 'asset';
+  try {
+    const valueCents = toCents(item.value);
+    const id = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : null;
+    const name = normalizeManualAssetName(item.name);
+    return { id, name, kind, valueCents, index };
+  } catch (_) {
+    return null;
+  }
+}
+
+function compareCanonicalTuples(a, b) {
+  const idA = a.id ?? `\0legacy:${a.index}`;
+  const idB = b.id ?? `\0legacy:${b.index}`;
+  return idA.localeCompare(idB)
+    || a.name.localeCompare(b.name)
+    || a.kind.localeCompare(b.kind)
+    || a.valueCents - b.valueCents
+    || a.index - b.index;
+}
+
+function canonicalManualAssetItems(validated) {
+  if (!validated?.complete || !Array.isArray(validated.items)) return [];
+  return validated.items
+    .map((item, index) => canonicalManualAssetTuple(item, index))
+    .filter(Boolean)
+    .sort(compareCanonicalTuples)
+    .map(({ id, name, kind, valueCents }) => ({ id, name, kind, valueCents }));
+}
+
+function manualAssetsRevision(validated) {
+  if (!validated || validated.complete !== true) {
+    return crypto.createHash('sha256').update('manual-assets:incomplete').digest('hex').slice(0, 16);
+  }
+  const payload = JSON.stringify({
+    complete: true,
+    items: canonicalManualAssetItems(validated),
+  });
+  return crypto.createHash('sha256').update(payload).digest('hex').slice(0, 16);
+}
+
 module.exports = {
   MANUAL_ASSETS_UNAVAILABLE,
+  canonicalManualAssetItems,
+  compareCanonicalTuples,
+  manualAssetsRevision,
+  normalizeManualAssetName,
   validateManualAssetsStore,
 };

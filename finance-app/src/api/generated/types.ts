@@ -249,6 +249,7 @@ export interface Spending {
   prev: SpendSummary;
   month: string;
   completeness?: ProjectionCompleteness;
+  comparisonCompleteness?: ProjectionCompleteness;
   scope?: {
     accountProjectionRevision?: string;
     spendingIncludedAccountIds?: string[];
@@ -1187,6 +1188,7 @@ export interface Today {
   };
   scope?: {
     accountProjectionRevision?: string;
+    manualAssetsRevision?: string;
     netWorthIncludedAccountIds?: string[];
     splitwiseMirrorAccountId?: string | null;
     splitwiseMirrorIdentity?: SplitwiseMirrorIdentity | null;

@@ -16,6 +16,7 @@ const { DASHBOARD_RUNTIME_FILES } = require('../lib/release-files');
 const { ActualCoordinator } = require('../lib/actual-coordinator');
 const NodeCache = require('node-cache');
 const { startEphemeralDashboardServer, waitForChildExit } = require('./helpers/ephemeral-dashboard-server');
+const { createEphemeralSigningMaterial, writeSignedManifest } = require('../../ops/test/helpers/release-signing-fixtures');
 const {
   childWatchContext,
   gateWaitPrelude,
@@ -152,9 +153,12 @@ async function startReconnectServer(t, preloadBody, {
     prepareDir,
     extraEnvForDir: (dir) => {
       const manifestPath = path.join(dir, 'release-manifest.json');
-      fs.writeFileSync(manifestPath, JSON.stringify(manifestFor(dashboardRoot)));
+      const manifest = manifestFor(dashboardRoot);
+      const signing = createEphemeralSigningMaterial(dir);
+      writeSignedManifest(manifestPath, manifest, signing.signingPath, signing.keyringPath);
       return {
         RELEASE_MANIFEST_PATH: manifestPath,
+        RELEASE_KEYRING_PATH: signing.keyringPath,
         ...extraEnv,
         ...(extraEnvForDirFn ? extraEnvForDirFn(dir) : {}),
       };

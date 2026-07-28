@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SymbolView, SymbolViewProps } from 'expo-symbols';
-import { useBankSync, useManualAssets, usePing, useRecurring, useToday, useTrends } from '@/api/hooks/finance.hooks';
+import { useAccounts, useBankSync, useManualAssets, usePing, useRecurring, useToday, useTrends } from '@/api/hooks/finance.hooks';
 import { Screen } from '@/components/screen';
 import { MutationFormBanner, MutationLiveRegion } from '@/components/mutation-form';
 import { useMutationAction } from '@/hooks/useMutationAction';
@@ -13,7 +13,7 @@ import { Account } from '@/api/generated/types';
 import { haptics } from '@/lib/haptics';
 import { useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { useFinanceToday } from '@/lib/date-only';
-import { accountsHaveInclusion, resolveMoneyMetric, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
+import { accountsHaveInclusion, computeAccountOnlyNetWorth, resolveAccountOnlyNetWorthDelta, resolveMoneyMetric, resolveNetWorthAccountSnapshot, resolveNetWorthAggregateDisplay } from '@/lib/account-metrics';
 import { heroMetricAccessibilityLabel } from '@/lib/metric-a11y.js';
 import { QueryRefetchBanners, refetchEnabledQueries } from '@/components/query-display';
 import { shouldShowFatalError, shouldShowInitialLoad } from '@/lib/query-display-state.js';
@@ -43,6 +43,7 @@ export default function Overview() {
   const { visible: widgets } = useDashboardWidgets();
 
   const today = useToday();
+  const accounts = useAccounts();
   const ping = usePing();
   const trends = useTrends(months);
   const recurring = useRecurring();
@@ -92,7 +93,11 @@ export default function Overview() {
   );
   const onRefresh = () => refetchEnabledQueries(homeRefetchQueries);
 
-  const accts = (today.data?.accounts ?? []).filter((a) => !a.hidden);
+  const accountSnapshot = resolveNetWorthAccountSnapshot(
+    today.data?.accounts?.filter((a) => !a.hidden),
+    (accounts.data ?? []).filter((a) => !a.hidden),
+  );
+  const accts = accountSnapshot;
   const hasInclusion = accountsHaveInclusion(accts);
   const manualComplete = manual.data?.complete !== false;
   const acctAssets = accts.filter((a) => (hasInclusion ? !!a.inclusion?.netWorth && a.balance > 0 : a.balance > 0)).reduce((s, a) => s + a.balance, 0);
@@ -116,11 +121,12 @@ export default function Overview() {
   const curMonth = financeToday.slice(0, 7);
   const cur = today.data?.spending?.current;
   const prev = today.data?.spending?.prev;
-  const spendingComplete = cur?.completeness?.complete !== false;
+  const spendingComplete = today.data?.spending?.completeness?.complete === true;
+  const comparisonComplete = today.data?.spending?.comparisonCompleteness?.complete === true;
   const totalSpend = spendingComplete && cur?.totalSpend != null ? cur.totalSpend : null;
   const totalIncome = spendingComplete && cur?.totalIncome != null ? cur.totalIncome : null;
   const net = totalSpend != null && totalIncome != null ? totalIncome - totalSpend : null;
-  const spendDelta = spendingComplete && cur && prev && prev.totalSpend != null && prev.totalSpend > 0 && cur.totalSpend != null
+  const spendDelta = spendingComplete && comparisonComplete && cur && prev && prev.totalSpend != null && prev.totalSpend > 0 && cur.totalSpend != null
     ? ((cur.totalSpend - prev.totalSpend) / prev.totalSpend) * 100
     : null;
 
@@ -129,8 +135,15 @@ export default function Overview() {
   // "This month" net-worth change ≈ now vs the previous monthly snapshot. Based on
   // synced accounts only, since manual assets have no monthly history.
   const prevNW = nwHist.length >= 2 ? nwHist[nwHist.length - 2].netWorth : null;
-  const acctNetWorth = acctAssets + acctLiab;
-  const nwDelta = resolvedNetWorth.unavailable || prevNW == null ? null : acctNetWorth - prevNW;
+  const nwDelta = resolvedNetWorth.unavailable
+    ? null
+    : resolveAccountOnlyNetWorthDelta(computeAccountOnlyNetWorth(accountSnapshot), prevNW);
+  const nwDeltaLabel = nwDelta != null
+    ? `${nwDelta >= 0 ? '▲' : '▼'} ${fmtPos(Math.abs(nwDelta))} this month · synced accounts only`
+    : null;
+  const nwDeltaA11y = nwDelta != null
+    ? `${nwDelta >= 0 ? 'up' : 'down'} ${fmtPos(Math.abs(nwDelta))} this month, synced accounts only`
+    : undefined;
 
   const cash = hasInclusion
     ? accts.filter((a) => a.inclusion?.liquidCash)
@@ -255,11 +268,13 @@ export default function Overview() {
               accessibilityLabel={heroMetricAccessibilityLabel(
                 'Net worth',
                 netWorthAuthoritative ? fmtMoney(netWorth) : (netWorthIncompleteReasons.length ? 'Unavailable' : fmtMoney(netWorth)),
-                !netWorthAuthoritative && netWorthIncompleteReasons.length
-                  ? 'Local estimate hidden, server projection incomplete'
-                  : aggregateDisplay.showAggregates
-                    ? `${fmtPos(aggregateDisplay.assets!)} assets, ${fmtPos(Math.abs(aggregateDisplay.liabilities!))} liabilities`
-                    : aggregateDisplay.unavailableLabel,
+                nwDeltaA11y ?? (
+                  !netWorthAuthoritative && netWorthIncompleteReasons.length
+                    ? 'Local estimate hidden, server projection incomplete'
+                    : aggregateDisplay.showAggregates
+                      ? `${fmtPos(aggregateDisplay.assets!)} assets, ${fmtPos(Math.abs(aggregateDisplay.liabilities!))} liabilities`
+                      : aggregateDisplay.unavailableLabel
+                ),
               )}
               onPress={() => { haptics.tap(); router.push('/networth' as never); }}
               style={({ pressed }) => [styles.hero, pressed && { opacity: 0.7 }]}
@@ -272,9 +287,9 @@ export default function Overview() {
                 <Text style={styles.heroSub} accessibilityElementsHidden importantForAccessibility="no">Local estimate hidden — server projection incomplete</Text>
               ) : null}
               <View style={styles.heroMetaRow}>
-                {nwDelta != null ? (
-                  <Text style={[styles.heroDelta, { color: nwDelta >= 0 ? colors.green : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">
-                    {nwDelta >= 0 ? '▲' : '▼'} {fmtPos(Math.abs(nwDelta))} this month
+                {nwDeltaLabel ? (
+                  <Text style={[styles.heroDelta, { color: nwDelta! >= 0 ? colors.green : colors.red }]} accessibilityElementsHidden importantForAccessibility="no">
+                    {nwDeltaLabel}
                   </Text>
                 ) : null}
                 {aggregateDisplay.showAggregates ? (
@@ -287,7 +302,11 @@ export default function Overview() {
           ) : null}
 
           {widgets.netWorth && nwPoints.length > 1 ? (
-            <Card style={{ marginBottom: 16 }}>
+            <Card
+              style={{ marginBottom: 16 }}
+              accessible
+              accessibilityLabel="Net worth trend chart, synced accounts only"
+            >
               <View style={styles.chartHead}>
                 <CardTitle>Net Worth</CardTitle>
                 <Text style={styles.chartHint}>Touch & drag</Text>

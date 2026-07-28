@@ -253,6 +253,8 @@ test('browser renderers emit semantic progress, palette classes, and hidden cont
         json: async () => ({
           current: { totalSpend: 120, totalIncome: 200, spending: { Food: 80, Travel: 40 } },
           prev: { totalSpend: 100 },
+          completeness: { complete: true },
+          comparisonCompleteness: { complete: true },
         }),
       };
     }

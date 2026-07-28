@@ -93,6 +93,10 @@ const {
 } = require('./lib/reimbursement-export-snapshot');
 const { readReleaseIdentity } = require('./lib/release-identity');
 const {
+  RAW_API_BLOCKED_ERROR,
+  isRawActualApiAllowed,
+} = require('./lib/finance-runtime-config');
+const {
   BulkOperationInProgressError,
   createBulkOperationSaga,
 } = require('./lib/bulk-operation-saga');
@@ -148,6 +152,7 @@ const {
   projectionCompletenessFromLeaves,
   spendSummaryFromClassifiedLeaves,
 } = require('./lib/domain/projection-completeness');
+const { buildSpendingCompletenessViews } = require('./lib/domain/spending-completeness-views');
 const {
   buildForecastProjectionContainment,
   buildForecastStsContainment,
@@ -179,7 +184,7 @@ const {
   sumIncludedBalanceCents,
 } = require('./lib/account-projection');
 const { resolveSplitwiseMirrorIdentity } = require('./lib/splitwise-mirror-account');
-const { validateManualAssetsStore } = require('./lib/manual-assets-projection');
+const { validateManualAssetsStore, manualAssetsRevision } = require('./lib/manual-assets-projection');
 const {
   mergeAccountOverrideEntry,
   validEntry,
@@ -203,12 +208,26 @@ const { assembleObligationGraphInputs, buildGraphTransactionInputs, collectBillC
 const { verifyCyclePartitionInvariants } = require('./lib/domain/liability-cycle-partition');
 const {
   AccountNotFoundError,
+  GoalLinkedAccountClosedError,
+  GoalLinkedAccountNotFoundError,
+  ImportedTransactionError,
+  ManualAssetNotFoundError,
+  ReceiptDuplicateError,
+  ReceiptPayloadTooLargeError,
+  ReceiptUnsupportedMediaTypeError,
+  ReceiptValidationError,
+  SplitLegDeleteError,
+  SplitParentNotFoundError,
   TransactionNotFoundError,
   QueryAbortedError,
   QueryResultLimitExceededError,
   QueryRangeExceededError,
   isQueryAbortedError,
 } = require('./lib/errors');
+const {
+  closeReceiptFileHandle,
+  openVerifiedReceiptFile,
+} = require('./lib/receipt-file-access');
 const { statePath } = require('./lib/state-registry');
 const { myShareExpenseCents, loadSplitwiseMirrorResolutions, owesSnapshotMaxAgeMs, preflightSplitwiseMirrorAdmission, SplitwiseMirrorSnapshotError } = require('./lib/splitwise-mirror');
 const { BulkOperationOutcomeUnknownError } = require('./lib/bulk-operation-saga');
@@ -1089,7 +1108,16 @@ function getManualAssets() {
   };
 }
 
+function assertManualAssetMutationAvailable({ id } = {}) {
+  if (!id) return;
+  const store = readJsonSafe(MANUAL_ASSETS_PATH, { items: [] });
+  if (!Array.isArray(store.items)) store.items = [];
+  const item = store.items.find((candidate) => candidate.id === id);
+  if (!item) throw new ManualAssetNotFoundError();
+}
+
 function saveManualAsset({ id, name, value, kind } = {}) {
+  assertManualAssetMutationAvailable({ id });
   const nm = (name || '').trim();
   const val = fromCents(Math.abs(toCents(value)));
   if (!nm) throw new Error('name required');
@@ -1100,7 +1128,6 @@ function saveManualAsset({ id, name, value, kind } = {}) {
   const now = todayYMD();
   if (id) {
     const item = store.items.find((i) => i.id === id);
-    if (!item) throw new Error('asset not found');
     Object.assign(item, { name: nm, value: val, kind: k, updated: now });
   } else {
     id = 'm' + Date.now().toString(36);
@@ -1440,18 +1467,17 @@ async function getSpending({ month, start, end } = {}) {
     });
     const current = summarize(currentLeaves);
     const previous = summarize(previousLeaves);
-    const spendingCompleteness = mergeProjectionCompleteness([current.completeness, previous.completeness]);
-    if (spendingProjection.incompleteReasons.length) {
-      spendingCompleteness.complete = false;
-      spendingCompleteness.incompleteReasons = [
-        ...new Set([...(spendingCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
-      ];
-    }
-    return {
+    const spendingViews = buildSpendingCompletenessViews({
       current,
+      previous,
+      spendingProjection,
+    });
+    return {
+      current: spendingViews.current,
       prev: previous,
       month: monthKey,
-      completeness: spendingCompleteness,
+      completeness: spendingViews.completeness,
+      comparisonCompleteness: spendingViews.comparisonCompleteness,
       scope: {
         accountProjectionRevision: spendingProjection.revision,
         spendingIncludedAccountIds: [...spendingProjection.includedIds],
@@ -2211,7 +2237,11 @@ async function buildReimbursementExport({
   const manifestPath = releaseManifestPath
     || process.env.RELEASE_MANIFEST_PATH
     || path.join(__dirname, 'release-manifest.json');
-  const release = readReleaseIdentity(manifestPath);
+  const release = readReleaseIdentity(manifestPath, __dirname, {
+    env: process.env,
+    manifestPath,
+    allowLegacyIdentity: process.env.NODE_ENV === 'test' || process.env.FINANCE_RUNTIME_MODE === 'test',
+  });
 
   for (let attempt = 1; attempt <= MAX_SNAPSHOT_ATTEMPTS; attempt += 1) {
     const captureGeneration = coordinator.generation;
@@ -4628,22 +4658,18 @@ async function getToday() {
     const previousLeaves = classifyWindow(prev.start, prev.end);
     const current = summarize(currentLeaves);
     const previous = summarize(previousLeaves);
-    let spendingCompleteness = mergeProjectionCompleteness([current.completeness, previous.completeness]);
-    if (spendingProjection.incompleteReasons.length) {
-      spendingCompleteness = {
-        ...spendingCompleteness,
-        complete: false,
-        incompleteReasons: [
-          ...new Set([...(spendingCompleteness.incompleteReasons || []), ...spendingProjection.incompleteReasons]),
-        ],
-      };
-    }
+    const spendingViews = buildSpendingCompletenessViews({
+      current,
+      previous,
+      spendingProjection,
+    });
     return {
       spending: {
-        current,
+        current: spendingViews.current,
         prev: previous,
         month,
-        completeness: spendingCompleteness,
+        completeness: spendingViews.completeness,
+        comparisonCompleteness: spendingViews.comparisonCompleteness,
       },
       classifiedLeaves: currentLeaves,
       txnContext: { rows, catInfo },
@@ -4671,6 +4697,7 @@ async function getToday() {
   const goalAdvisory = spendingBundle.goalsBundle.goalAdvisory;
   const bills = await getBills({ days: 45, recurring });
   const manualAssets = getManualAssets();
+  const manualAssetsRev = manualAssetsRevision(manualAssets);
   const { projections } = spendingBundle;
 
   const operatingAccounts = accounts.filter((account) => account.inclusion?.operatingCash);
@@ -4708,7 +4735,7 @@ async function getToday() {
     operatingAccounts,
     budgets,
     recurring,
-    spendingCompleteness: spending.current?.completeness,
+    spendingCompleteness: spending.completeness,
     obligationGraph: graph,
     liabilityPolicies,
   });
@@ -4756,7 +4783,7 @@ async function getToday() {
     metric: 'net_worth',
   });
   const revision = crypto.createHash('sha256')
-    .update(`${apiHealth.lastSyncAt || apiHealth.initializedAt || ''}\0${financeDate}\0${projections.netWorth.revision}`)
+    .update(`${apiHealth.lastSyncAt || apiHealth.initializedAt || ''}\0${financeDate}\0${projections.netWorth.revision}\0${manualAssetsRev}`)
     .digest('hex')
     .slice(0, 16);
 
@@ -4764,8 +4791,11 @@ async function getToday() {
     asOf,
     financeDate,
     revision,
-    complete: safeToSpend.complete && spending.current?.completeness?.complete !== false,
-    incompleteReasons: [...new Set([...safeToSpend.incompleteReasons, ...(spending.current?.completeness?.complete === false ? spending.current.completeness.incompleteReasons : [])])],
+    complete: safeToSpend.complete && spending.completeness?.complete === true,
+    incompleteReasons: [...new Set([
+      ...safeToSpend.incompleteReasons,
+      ...(spending.completeness?.complete === false ? spending.completeness.incompleteReasons : []),
+    ])],
     health: getHealth(),
     accounts,
     metrics: {
@@ -4775,6 +4805,7 @@ async function getToday() {
     },
     scope: {
       accountProjectionRevision: projections.netWorth.revision,
+      manualAssetsRevision: manualAssetsRev,
       netWorthIncludedAccountIds: [...projections.netWorth.includedIds],
       splitwiseMirrorAccountId: projections.netWorth.splitwiseMirrorAccountId,
       splitwiseMirrorIdentity: projections.netWorth.scope?.splitwiseMirrorIdentity || null,
@@ -5580,13 +5611,42 @@ function detectedImageMime(buffer) {
 }
 function decodeImageBase64(value) {
   const clean = stripBase64Envelope(value);
-  if (!clean || clean.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(clean)) throw new Error('invalid base64 image');
+  if (!clean || clean.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(clean)) {
+    throw new ReceiptValidationError('Receipt image encoding is invalid');
+  }
   const estimated = exactBase64DecodedBytes(clean);
-  if (estimated > RECEIPT_MAX_DECODED_BYTES) throw new Error('image too large (max 25MB)');
+  if (estimated > RECEIPT_MAX_DECODED_BYTES) throw new ReceiptPayloadTooLargeError();
   const buffer = Buffer.from(clean, 'base64');
-  if (!buffer.length) throw new Error('empty image');
-  if (buffer.length > RECEIPT_MAX_DECODED_BYTES) throw new Error('image too large (max 25MB)');
+  if (!buffer.length) throw new ReceiptValidationError('Receipt image is empty');
+  if (buffer.length > RECEIPT_MAX_DECODED_BYTES) throw new ReceiptPayloadTooLargeError();
   return buffer;
+}
+
+function validateReceiptUpload({
+  txnId,
+  imageBase64,
+  mime,
+} = {}) {
+  if (!txnId) throw new ReceiptValidationError('Transaction id is required');
+  if (!imageBase64) throw new ReceiptValidationError('Receipt image is required');
+  const buf = decodeImageBase64(imageBase64);
+  const declaredMime = (mime || 'image/jpeg').toLowerCase();
+  if (!EXT_FOR_MIME[declaredMime]) throw new ReceiptUnsupportedMediaTypeError();
+  const detected = detectedImageMime(buf);
+  const compatibleHeif = detected
+    && ['image/heic', 'image/heif'].includes(detected)
+    && ['image/heic', 'image/heif'].includes(declaredMime);
+  if (!detected || (detected !== declaredMime && !compatibleHeif)) {
+    throw new ReceiptUnsupportedMediaTypeError('Receipt image bytes do not match the declared type');
+  }
+  const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+  const store = readReceipts();
+  for (const receipts of Object.values(store.byTxn)) {
+    if (receipts.some((receipt) => receipt.sha256 === sha256)) {
+      throw new ReceiptDuplicateError();
+    }
+  }
+  return { buf, detected, sha256 };
 }
 
 // Persist a scanned receipt. `imageBase64` is the raw (optionally data-URI-prefixed)
@@ -5601,22 +5661,9 @@ function addReceipt({
   date,
   source,
 } = {}) {
-  if (!txnId) throw new Error('txnId required');
-  if (!imageBase64) throw new Error('imageBase64 required');
   assertTransactionMutationAvailable({ ids: [txnId] });
   const normalizedAmount = amount == null ? null : fromCents(toCents(amount));
-  const buf = decodeImageBase64(imageBase64);
-  const m = (mime || 'image/jpeg').toLowerCase();
-  if (!EXT_FOR_MIME[m]) throw new Error('unsupported receipt image type');
-  const detected = detectedImageMime(buf);
-  const compatibleHeif = detected && ['image/heic', 'image/heif'].includes(detected) && ['image/heic', 'image/heif'].includes(m);
-  if (!detected || (detected !== m && !compatibleHeif)) throw new Error('receipt image bytes do not match the declared type');
-  const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
-  const store = readReceipts();
-  for (const receipts of Object.values(store.byTxn)) {
-    const duplicate = receipts.find((receipt) => receipt.sha256 === sha256);
-    if (duplicate) throw new Error(`duplicate receipt image already stored as ${duplicate.id}`);
-  }
+  const { buf, detected, sha256 } = validateReceiptUpload({ txnId, imageBase64, mime });
   const ext = EXT_FOR_MIME[detected];
   const id = `rcpt_${Date.now().toString(36)}_${crypto.randomBytes(6).toString('hex')}`;
   ensureReceiptsDir();
@@ -5637,6 +5684,7 @@ function addReceipt({
     try { fs.unlinkSync(tempPath); } catch (_) {}
     throw error;
   }
+  const store = readReceipts();
   const rec = {
     id, txnId: String(txnId), file: `${id}.${ext}`, mime: detected, size: buf.length,
     ocrText: typeof ocrText === 'string' ? ocrText.slice(0, 8000) : '',
@@ -5679,15 +5727,21 @@ function assertReceiptMutationAvailable({ id } = {}) {
     return;
   }
 }
-// Resolve a receipt id to its on-disk file for streaming.
+// Resolve a receipt id to a verified open descriptor for streaming.
 function getReceiptFile({ id } = {}) {
   if (!id) return null;
   const store = readReceipts();
   for (const list of Object.values(store.byTxn)) {
     const r = list.find((x) => x.id === id);
-    if (r) {
-      const file = safeReceiptPath(r.file);
-      return fs.existsSync(file) ? { path: file, mime: r.mime } : null;
+    if (!r) continue;
+    try {
+      const handle = openVerifiedReceiptFile(RECEIPTS_DIR, r.file);
+      return { ...handle, mime: r.mime };
+    } catch (error) {
+      if (error?.code === 'NOT_FOUND' || (error?.name === 'ReceiptFileAccessError' && error.status === 404)) {
+        return null;
+      }
+      throw error;
     }
   }
   return null;
@@ -5934,17 +5988,17 @@ async function deleteTransaction({
   return withApi(async (api) => {
     const txns = await api.getTransactions(accountId, date, date);
     let transaction = txns.find((item) => String(item.id) === String(id));
-    if (!transaction) throw new Error('transaction not found');
+    if (!transaction) throw new TransactionNotFoundError();
     if (transaction.parent_id) {
-      if (!allowImported) throw new Error('split legs cannot be deleted independently');
+      if (!allowImported) throw new SplitLegDeleteError();
       const parent = txns.find(
         (item) => String(item.id) === String(transaction.parent_id),
       );
-      if (!parent) throw new Error('split parent not found');
+      if (!parent) throw new SplitParentNotFoundError();
       transaction = parent;
     }
     if (!allowImported && transaction.imported_id) {
-      throw new Error('Bank-imported transactions can’t be deleted — only ones you added manually.');
+      throw new ImportedTransactionError();
     }
     const ids = [
       String(transaction.id),
@@ -6494,6 +6548,22 @@ async function getGoals() {
   return goals;
 }
 
+async function validateGoalNewLinkAccount(api, normalized, existing) {
+  const isNewLink = normalized.accountId
+    && (!existing?.accountId || existing.accountId !== normalized.accountId);
+  if (!isNewLink) return;
+  const accounts = await api.getAccounts();
+  const account = accounts.find((candidate) => candidate.id === normalized.accountId);
+  if (!account) throw new GoalLinkedAccountNotFoundError();
+  if (account.closed) throw new GoalLinkedAccountClosedError();
+}
+
+async function assertGoalSaveMutationAvailable(goal = {}) {
+  const goals = readJsonSafe(GOALS_PATH, []);
+  const existing = goal.id ? goals.find((candidate) => candidate.id === goal.id) : null;
+  return withApi(async (api) => validateGoalNewLinkAccount(api, goal, existing));
+}
+
 async function saveGoal(goal = {}) {
   const target = fromCents(toCents(goal.target));
   const current = goal.current === undefined ? undefined : fromCents(toCents(goal.current));
@@ -6505,14 +6575,7 @@ async function saveGoal(goal = {}) {
     const goals = readJsonSafe(GOALS_PATH, []);
     const normalized = { ...input };
     const existing = normalized.id ? goals.find((candidate) => candidate.id === normalized.id) : null;
-    const isNewLink = normalized.accountId
-      && (!existing?.accountId || existing.accountId !== normalized.accountId);
-    if (isNewLink) {
-      const accounts = await api.getAccounts();
-      const account = accounts.find((candidate) => candidate.id === normalized.accountId);
-      if (!account) throw new Error('linked account not found');
-      if (account.closed) throw new Error('linked account is closed');
-    }
+    await validateGoalNewLinkAccount(api, normalized, existing);
     if (normalized.id) {
       if (existing) {
         if (normalized.current === undefined) normalized.current = existing.current ?? 0;
@@ -6774,6 +6837,7 @@ module.exports = {
   setAccountOverride,
   getManualAssets,
   getInvestments,
+  assertManualAssetMutationAvailable,
   saveManualAsset,
   deleteManualAsset,
   getTransactions,
@@ -6820,6 +6884,7 @@ module.exports = {
   assertRepaymentConfirmationJournalAdmission,
   getPhantomLog,
   addReceipt,
+  validateReceiptUpload,
   getReceipts,
   getReceiptFile,
   assertReceiptMutationAvailable,
@@ -6879,6 +6944,7 @@ module.exports = {
   setTransactionDate,
   getGoals,
   getGoalsWithAdvisory,
+  assertGoalSaveMutationAvailable,
   saveGoal,
   deleteGoal,
 };
@@ -6886,9 +6952,7 @@ module.exports = {
 Object.defineProperty(module.exports, 'api', {
   enumerable: true,
   get() {
-    if (process.env.ALLOW_RAW_ACTUAL_API === '1') return api;
-    throw new Error(
-      'Direct data.api access bypasses the Actual coordinator; use runActualRead/runActualWrite or set ALLOW_RAW_ACTUAL_API=1 for tests',
-    );
+    if (isRawActualApiAllowed()) return api;
+    throw new Error(RAW_API_BLOCKED_ERROR);
   },
 });

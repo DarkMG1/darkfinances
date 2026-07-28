@@ -69,7 +69,8 @@ test('app and web gate spending and trends on projection completeness', () => {
   const types = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
   assert.match(types, /completeness: ProjectionCompleteness/);
 
-  assert.match(browserSources, /current\?\.completeness\?\.complete !== false/);
+  assert.match(browserSources, /data\.completeness\?\.complete === true/);
+  assert.match(browserSources, /comparisonCompleteness\?\.complete === true/);
   assert.match(browserSources, /monthTrendComplete/);
   assert.doesNotMatch(browserSources, /m\.income \?\? 0/);
 
@@ -78,9 +79,9 @@ test('app and web gate spending and trends on projection completeness', () => {
   const cashflow = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'cashflow.tsx'), 'utf8');
   const review = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'review.tsx'), 'utf8');
 
-  assert.match(spending, /spendingComplete = cur\?\.completeness\?\.complete !== false/);
+  assert.match(spending, /spendingComplete = \(useCurrentToday[\s\S]*spending\.data\?\.completeness\?\.complete\) === true/);
   assert.match(spending, /'Unavailable'/);
-  assert.match(home, /spendingComplete = cur\?\.completeness\?\.complete !== false/);
+  assert.match(home, /spendingComplete = today\.data\?\.spending\?\.completeness\?\.complete === true/);
   assert.match(cashflow, /monthComplete\(m\)/);
   assert.match(review, /transfer_identity/);
 });
@@ -135,12 +136,20 @@ test('generated contract includes account projection metric and inclusion types'
   assert.match(generatedTypes, /netWorthIncludedAccountIds\?: string\[\]/);
 });
 
+test('generated contract includes manual asset revision and spending comparison completeness', () => {
+  assert.match(generatedTypes, /manualAssetsRevision\?: string/);
+  assert.match(generatedTypes, /comparisonCompleteness\?: ProjectionCompleteness/);
+});
+
 test('clients prefer authoritative server net worth and withhold local fallback when server metric is incomplete', () => {
   const home = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', '(tabs)', 'index.tsx'), 'utf8');
   const networth = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'app', 'networth.tsx'), 'utf8');
   const widget = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'components', 'widget-sync.tsx'), 'utf8');
   assert.match(home, /resolveNetWorthAggregateDisplay/);
   assert.match(networth, /resolveNetWorthAggregateDisplay/);
+  assert.match(home, /comparisonComplete = today\.data\?\.spending\?\.comparisonCompleteness\?\.complete === true/);
+  assert.match(home, /this month · synced accounts only/);
+  assert.match(networth, /this month · synced accounts only/);
   assert.match(widget, /resolveWidgetNetWorthDecision/);
   assert.match(widget, /clearFinanceWidget/);
   assert.match(browserSources, /aggregatesUnavailable/);

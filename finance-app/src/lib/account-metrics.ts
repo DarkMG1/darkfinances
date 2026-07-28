@@ -25,9 +25,12 @@ export type NetWorthAggregateDisplay = {
 
 export {
   accountsHaveInclusion,
+  computeAccountOnlyNetWorth,
   computeFallbackNetWorth,
   hasServerMetric,
+  resolveAccountOnlyNetWorthDelta,
   resolveMoneyMetric,
+  resolveNetWorthAccountSnapshot,
   resolveNetWorthAggregateDisplay,
   resolveWidgetNetWorthDecision,
 } from './account-metrics-core.js';

@@ -608,6 +608,7 @@ function runStagedRestore(options = {}) {
     requireQuiescenceAdmission({
       ...options,
       env,
+      dryRun: true,
       coordinatorRoot,
       requireBindings: true,
       bindingContext: {
@@ -714,6 +715,7 @@ function runStagedRestore(options = {}) {
         actualDataGenerationPath: options.actualDataGenerationPath,
         releaseManifestDigest: options.releaseManifestDigest,
         actualDataGeneration: options.actualDataGeneration,
+        env,
       });
       verifyCompleteDestination({
         destinationRoot: canonicalDestination,
@@ -758,6 +760,7 @@ function runStagedRestore(options = {}) {
       actualDataGenerationPath: options.actualDataGenerationPath,
       releaseManifestDigest: options.releaseManifestDigest,
       actualDataGeneration: options.actualDataGeneration,
+      env,
     });
     const bindingResult = validateGenerationBindingForRestore({
       manifest,
@@ -898,6 +901,7 @@ function runStagedRestore(options = {}) {
       admission = requireQuiescenceAdmission({
         ...options,
         env,
+        dryRun: false,
         requireBindings: true,
         layout: coordinatorLayout,
         bindingContext: {
@@ -944,6 +948,7 @@ function runStagedRestore(options = {}) {
       actualDataGenerationPath: options.actualDataGenerationPath,
       releaseManifestDigest: options.releaseManifestDigest,
       actualDataGeneration: options.actualDataGeneration,
+      env,
     });
     validateGenerationBindingForRestore({
       manifest,

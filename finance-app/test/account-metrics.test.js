@@ -3,8 +3,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  computeAccountOnlyNetWorth,
   computeFallbackNetWorth,
   hasServerMetric,
+  resolveNetWorthAccountSnapshot,
+  resolveAccountOnlyNetWorthDelta,
   resolveMoneyMetric,
   resolveNetWorthAggregateDisplay,
   resolveWidgetNetWorthDecision,
@@ -184,7 +187,7 @@ test('widget decision pushes inclusion-aware fallback for old server without met
   assert.equal(decision.authoritative, false);
 });
 
-test('widget decision pushes authoritative metric despite accounts error', () => {
+test('widget decision pushes authoritative headline without mixed-scope delta when accounts missing', () => {
   const decision = resolveWidgetNetWorthDecision({
     todayLoading: false,
     todaySettled: true,
@@ -204,8 +207,57 @@ test('widget decision pushes authoritative metric despite accounts error', () =>
   });
   assert.equal(decision.action, 'push');
   assert.equal(decision.netWorth, 900);
-  assert.equal(decision.changeDiff, 50);
+  assert.equal(decision.changeDiff, null);
   assert.equal(decision.authoritative, true);
+});
+
+test('widget delta uses account-only basis: accounts 800, manual 100, prior 750 => change 50', () => {
+  const accountsWithManual = [
+    { id: 'a1', hidden: false, balance: 1000, inclusion: { netWorth: true } },
+    { id: 'a2', hidden: false, balance: -200, inclusion: { netWorth: true } },
+  ];
+  const decision = resolveWidgetNetWorthDecision({
+    todayLoading: false,
+    todaySettled: true,
+    todayError: false,
+    profileGeneration: 1,
+    widgetProfileGeneration: 1,
+    scope: 'scope-a',
+    widgetScope: 'scope-a',
+    serverMetric: { complete: true, value: 900, valueCents: 90000 },
+    todayAccounts: [
+      { id: 'a1', hidden: false, balance: 1000, inclusion: { netWorth: true } },
+      { id: 'a2', hidden: false, balance: -200, inclusion: { netWorth: true } },
+    ],
+    accounts: [{ id: 'legacy', hidden: false, balance: 999, inclusion: { netWorth: true } }],
+    accountsLoading: false,
+    accountsSettled: true,
+    accountsError: false,
+    manual: { complete: true, assets: 100, liabilities: 0 },
+    manualLoading: false,
+    manualSettled: true,
+    manualError: false,
+    prevTrendNetWorth: 750,
+  });
+  assert.equal(decision.netWorth, 900);
+  assert.equal(decision.changeDiff, 50);
+});
+
+test('resolveAccountOnlyNetWorthDelta returns null when account-only basis unavailable', () => {
+  assert.equal(resolveAccountOnlyNetWorthDelta(null, 750), null);
+  assert.equal(resolveAccountOnlyNetWorthDelta(800, null), null);
+});
+
+test('resolveNetWorthAccountSnapshot prefers Today accounts over fallback list', () => {
+  const snapshot = resolveNetWorthAccountSnapshot(
+    [{ id: 'today', hidden: false, balance: 800, inclusion: { netWorth: true } }],
+    [{ id: 'fallback', hidden: false, balance: 999, inclusion: { netWorth: true } }],
+  );
+  assert.equal(computeAccountOnlyNetWorth(snapshot), 800);
+});
+
+test('computeAccountOnlyNetWorth respects inclusion.netWorth', () => {
+  assert.equal(computeAccountOnlyNetWorth(accounts), 800);
 });
 
 test('widget decision pushes authoritative metric without local delta when trend missing', () => {
