@@ -254,9 +254,9 @@ test('CI app-install-lifecycle job uses standalone finance-app lock install', ()
   assert.ok(appLifecycle, 'expected ci.yml app-install-lifecycle job');
   const steps = jobRunSteps(appLifecycle);
   assert.ok(steps.includes('npm --prefix finance-app ci --workspaces=false'));
-  assert.ok(steps.includes('node finance-app/scripts/check-app-install-lifecycle.js'));
+  assert.ok(steps.includes('npm run check:app-install-lifecycle'));
   const standaloneIndex = steps.indexOf('npm --prefix finance-app ci --workspaces=false');
-  const checkIndex = steps.indexOf('node finance-app/scripts/check-app-install-lifecycle.js');
+  const checkIndex = steps.indexOf('npm run check:app-install-lifecycle');
   assert.ok(checkIndex > standaloneIndex);
 });
 
@@ -311,6 +311,8 @@ test('root check script includes action pin and install lifecycle gates', () => 
   const pkg = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
   assert.match(pkg.scripts.check, /check:action-pins/);
   assert.match(pkg.scripts['check:install-lifecycle'], /check-install-lifecycle\.js/);
+  assert.doesNotMatch(pkg.scripts['check:install-lifecycle'], /check-app-install-lifecycle\.js/);
+  assert.match(pkg.scripts['check:app-install-lifecycle'], /check-app-install-lifecycle\.js/);
 });
 
 test('CI verify job runs check:vulnerabilities after npm ci', () => {

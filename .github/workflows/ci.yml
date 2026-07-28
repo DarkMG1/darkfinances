@@ -61,7 +61,7 @@ jobs:
           node-version-file: .nvmrc
       - run: node scripts/ensure-declared-npm.js
       - run: npm --prefix finance-app ci --workspaces=false
-      - run: node finance-app/scripts/check-app-install-lifecycle.js
+      - run: npm run check:app-install-lifecycle
 
   lockfile-repro:
     permissions:
