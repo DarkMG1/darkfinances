@@ -76,7 +76,7 @@ function collectWorkflowNpmPaths() {
     for (const job of jobs) {
       const steps = jobRunSteps(job);
       for (const [index, step] of steps.entries()) {
-        if (npmBootstrapCommands.has(step) || /^npm (ci|install)\b/.test(step) || /^npm --prefix finance-app ci --workspaces=false$/.test(step) || /^npm --prefix ops\/publisher-toolchain ci --workspaces=false$/.test(step)) {
+        if (npmBootstrapCommands.has(step) || /^npm (ci|install)\b/.test(step) || /^npm --prefix finance-app ci --workspaces=false$/.test(step) || /^npm --prefix ops\/publisher-toolchain ci --workspaces=false --ignore-scripts$/.test(step)) {
           paths.push({
             workflow: workflowName,
             job: job.name,
@@ -219,7 +219,7 @@ test('repository workflows using npm are fully enumerated for bootstrap enforcem
   assert.ok(actual.includes('android-compile-smoke.yml:android-assemble-debug:npm ci'));
   assert.ok(actual.includes('maestro-full-suite.yml:maestro-ios:npm ci'));
   assert.ok(actual.includes('ci.yml:app-install-lifecycle:npm --prefix finance-app ci --workspaces=false'));
-  assert.ok(actual.includes('ci.yml:publisher-closure:npm --prefix ops/publisher-toolchain ci --workspaces=false'));
+  assert.ok(actual.includes('ci.yml:publisher-closure:npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts'));
 });
 
 test('app-install-lifecycle job runs declared npm bootstrap before standalone finance-app ci', () => {
@@ -244,7 +244,7 @@ test('CI install-lifecycle job runs full npm ci then check:install-lifecycle', (
   const lifecycleIndex = steps.indexOf('npm run check:install-lifecycle');
   assert.ok(ensureIndex >= 0 && ensureIndex < ciIndex);
   assert.ok(lifecycleIndex > ciIndex);
-  assert.doesNotMatch(workflow.match(/install-lifecycle:[\s\S]*?npm ci[\s\S]*?--ignore-scripts/)?.[0] || '', /--ignore-scripts/);
+  assert.ok(!steps.some((step) => /^npm ci\b/.test(step) && step.includes('--ignore-scripts')));
 });
 
 test('CI app-install-lifecycle job uses standalone finance-app lock install', () => {
@@ -271,13 +271,13 @@ test('CI publisher-closure job verifies installed-byte runtime closure on macos-
   assert.match(publisherText, /contents:\s*read/);
   const steps = jobRunSteps(publisher);
   const ensureIndex = steps.indexOf('node scripts/ensure-declared-npm.js');
-  const standaloneIndex = steps.indexOf('npm --prefix ops/publisher-toolchain ci --workspaces=false');
+  const standaloneIndex = steps.indexOf('npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts');
   const verifyIndex = steps.indexOf('node scripts/check-publisher-closure.js');
   const versionIndex = steps.indexOf('node finance-app/scripts/run-pinned-eas.js --version');
   assert.ok(ensureIndex >= 0 && ensureIndex < standaloneIndex);
   const upstreamIndex = publisherText.indexOf('npm run check:action-pins:upstream');
   const vulnerabilityIndex = publisherText.indexOf('npm run check:vulnerabilities');
-  const standaloneTextIndex = publisherText.indexOf('npm --prefix ops/publisher-toolchain ci --workspaces=false');
+  const standaloneTextIndex = publisherText.indexOf('npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts');
   assert.ok(upstreamIndex >= 0 && upstreamIndex < vulnerabilityIndex);
   assert.ok(vulnerabilityIndex < standaloneTextIndex);
   assert.ok(verifyIndex > standaloneIndex);
@@ -310,9 +310,11 @@ test('CI verify job runs upstream action pin verification without npm cache', ()
 test('root check script includes action pin and install lifecycle gates', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
   assert.match(pkg.scripts.check, /check:action-pins/);
+  assert.match(pkg.scripts.check, /check:install-lifecycle/);
   assert.match(pkg.scripts['check:install-lifecycle'], /check-install-lifecycle\.js/);
   assert.doesNotMatch(pkg.scripts['check:install-lifecycle'], /check-app-install-lifecycle\.js/);
   assert.match(pkg.scripts['check:app-install-lifecycle'], /check-app-install-lifecycle\.js/);
+  assert.doesNotMatch(pkg.scripts['check:app'], /check-app-install-lifecycle\.js/);
 });
 
 test('CI verify job runs check:vulnerabilities after npm ci', () => {

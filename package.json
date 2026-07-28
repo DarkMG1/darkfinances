@@ -20,7 +20,7 @@
     }
   },
   "scripts": {
-    "check": "npm run check:toolchain && npm run check:action-pins && npm run check:alignment && npm run check:contract && npm run check:fixtures && npm run check:dashboard && npm run check:app && npm run check:tools && npm run check:ops && npm run check:parity && npm run check:release",
+    "check": "npm run check:toolchain && npm run check:action-pins && npm run check:install-lifecycle && npm run check:alignment && npm run check:contract && npm run check:fixtures && npm run check:dashboard && npm run check:app && npm run check:tools && npm run check:ops && npm run check:parity && npm run check:release",
     "check:action-pins": "node scripts/check-github-action-pins.js",
     "check:action-pins:upstream": "node scripts/check-github-action-pins.js --verify-upstream",
     "check:install-lifecycle": "node scripts/check-install-lifecycle.js",
@@ -32,7 +32,7 @@
     "update:contract-stamp": "node scripts/update-contract-fingerprint.js",
     "check:fixtures": "node scripts/check-finance-fixtures.js",
     "check:dashboard": "npm --prefix finance-dashboard test && npm --prefix finance-dashboard run lint",
-    "check:app": "npm --prefix finance-app test && npm --prefix finance-app run lint && node finance-app/scripts/check-app-install-contract.js && node finance-app/scripts/check-app-install-lifecycle.js && node finance-app/scripts/verify-release-variant.js",
+    "check:app": "npm --prefix finance-app test && npm --prefix finance-app run lint && node finance-app/scripts/check-app-install-contract.js && node finance-app/scripts/verify-release-variant.js",
     "check:tools": "node finance-dashboard/scripts/sync-bounded-ledger-vendor.js --check && npm --prefix actual-tools test",
     "check:ops": "for file in ops/bin/*.sh; do bash -n \"$file\"; done && node scripts/check-publisher-install-contract.js && node --test ops/test/*.test.js",
     "check:publisher-closure": "node scripts/check-publisher-closure.js",

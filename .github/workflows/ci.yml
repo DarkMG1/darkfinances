@@ -91,6 +91,6 @@ jobs:
         run: |
           npm run check:action-pins:upstream
           npm run check:vulnerabilities
-      - run: npm --prefix ops/publisher-toolchain ci --workspaces=false
+      - run: npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts
       - run: node scripts/check-publisher-closure.js
       - run: node finance-app/scripts/run-pinned-eas.js --version

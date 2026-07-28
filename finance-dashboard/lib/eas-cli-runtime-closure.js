@@ -7,7 +7,7 @@ const path = require('path');
 const PACKAGE_NAME = 'eas-cli';
 const CONTRACT_REL = 'ops/toolchain/eas-cli-runtime-closure.json';
 const PUBLISHER_ROOT_REL = 'ops/publisher-toolchain';
-const STANDALONE_INSTALL_COMMAND = `npm --prefix ${PUBLISHER_ROOT_REL} ci --workspaces=false`;
+const STANDALONE_INSTALL_COMMAND = `npm --prefix ${PUBLISHER_ROOT_REL} ci --workspaces=false --ignore-scripts`;
 const DERIVATION_VERSION = 2;
 const INTEGRITY_PATTERN = /^sha512-[A-Za-z0-9+/=]+$/;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;

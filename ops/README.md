@@ -806,15 +806,18 @@ OTA publishing operator contract:
 - Supported publisher platform: **darwin/arm64** (bound in `ops/toolchain/eas-cli-runtime-closure.json`).
 - Required install layout: standalone `ops/publisher-toolchain/node_modules` only — no repo-root or finance-app hoist fallback.
 - Root npm workspaces are a closed list of literal paths; workspace glob/extglob/brace patterns are rejected so they cannot silently absorb `ops/publisher-toolchain`.
-- Prepare publisher host: `npm --prefix ops/publisher-toolchain ci --workspaces=false`
+- Prepare publisher host: `npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts`
 - Preflight before OTA (same as merge gate byte verification, no publish):
 
 ```bash
-npm --prefix ops/publisher-toolchain ci --workspaces=false
+npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts
 npm run check:publisher-closure
 node finance-app/scripts/run-pinned-eas.js --version
 ```
 
+- The isolated publisher install disables dependency lifecycle scripts, avoiding unreviewed install-time
+  execution and nondeterministic native build artifacts. The merge gate proves the pinned EAS CLI runs
+  successfully from the resulting install.
 - Invocation copies the installed publisher tree into a private temp snapshot, verifies the lock-derived physical package set and byte closure on that snapshot, sanitizes injection-related environment variables, then runs `process.execPath` with the snapshot's absolute `eas-cli/bin/run` while keeping child `cwd` at `finance-app`. This closes verification/use races under the trusted same-UID publisher-host model; it does not claim OS-level adversary resistance.
 - Regenerate closure contract after eas-cli/lock changes (darwin/arm64 only):
   `node scripts/compute-eas-cli-runtime-closure.js`
@@ -822,14 +825,14 @@ node finance-app/scripts/run-pinned-eas.js --version
   (lock SHA-256, eas-cli version/SRI, pin alignment, lock-derived package count) via
   `verifyRuntimeClosureContractFreshness`.
 - **Merge gate:** `.github/workflows/ci.yml` job `publisher-closure` on **`macos-15` (arm64)**
-  runs standalone `npm --prefix ops/publisher-toolchain ci --workspaces=false`, then
+  runs standalone `npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts`, then
   `node scripts/check-publisher-closure.js` and `node finance-app/scripts/run-pinned-eas.js --version`
   to validate installed-byte `runtimeClosureDigest`, `packageCount`, and `fileCount` on every PR/main
   push. Use `macos-15-intel` only for x64; do not conflate labels.
 - Operator pre-publish on darwin/arm64 (same commands as the merge gate, no OTA publish):
 
 ```bash
-npm --prefix ops/publisher-toolchain ci --workspaces=false
+npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts
 npm run check:publisher-closure
 node finance-app/scripts/run-pinned-eas.js --version
 ```
@@ -840,7 +843,7 @@ is off-platform or lacks a verified standalone install. Use `finance-app/scripts
 the supported production OTA provenance path. OTA invocation uses a verified private snapshot of the
 publisher install (see above); the publisher host must be same-UID/trusted during publish.
 
-Current bound closure (regenerate after lock changes): **510 packages**, **15211 files**.
+Current bound closure (regenerate after lock changes): **510 packages**, **15190 files**.
 
 ## Security checklist
 
