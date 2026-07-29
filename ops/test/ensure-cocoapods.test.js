@@ -66,10 +66,9 @@ test('cocoapods contract pins macOS CLI version 1.17.0 with verify-only policy a
   assert.equal(contract.policy.mode, 'verify-only');
   assert.equal(contract.policy.autoInstall, false);
   assert.equal(contract.policy.ciPlatform, 'macos');
-  assert.equal(contract.policy.runnerImage.label, 'macos-15');
+  assert.equal(contract.policy.runnerImage.label, 'macos-26');
   assert.deepEqual(contract.policy.runnerImage.verifiedBaselines, [
-    'actions/runner-images macos-15/20260715.0340',
-    'actions/runner-images macos-15/20260720.0353',
+    'actions/runner-images macos-26/20260720.0390',
   ]);
   assert.match(contract.policy.runnerImage.driftBehavior, /fail closed/i);
 });

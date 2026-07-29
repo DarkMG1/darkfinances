@@ -5,6 +5,11 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { assertAllowedHost, downloadBounded } = require('../../scripts/toolchain-download');
+const {
+  PREFERRED_DEVICES,
+  collectIphoneDevices,
+  selectDevice,
+} = require('../../scripts/ci-ios-simulator');
 
 const repositoryRoot = path.resolve(__dirname, '..', '..');
 const workflowsDir = path.join(repositoryRoot, '.github/workflows');
@@ -109,6 +114,31 @@ test('toolchain download rejects insecure redirects', async () => {
 test('assertAllowedHost enforces exact host allowlist', () => {
   assert.doesNotThrow(() => assertAllowedHost('github.com', ['github.com']));
   assert.throws(() => assertAllowedHost('evil.example', ['github.com']), /outside allowlist/);
+});
+
+test('iOS simulator selection prefers current hardware on the newest available runtime', () => {
+  assert.deepEqual(PREFERRED_DEVICES.slice(0, 5), [
+    'iPhone 17 Pro',
+    'iPhone 17',
+    'iPhone 17 Pro Max',
+    'iPhone 17e',
+    'iPhone Air',
+  ]);
+  const devices = collectIphoneDevices({
+    devices: {
+      'com.apple.CoreSimulator.SimRuntime.iOS-26-2': [
+        { name: 'iPhone 17 Pro', udid: 'older-pro', isAvailable: true },
+      ],
+      'com.apple.CoreSimulator.SimRuntime.iOS-26-4': [
+        { name: 'iPhone 17', udid: 'current-standard', isAvailable: true },
+        { name: 'iPhone 17 Pro', udid: 'current-pro', isAvailable: true },
+      ],
+    },
+  });
+
+  const selected = selectDevice(devices);
+  assert.equal(selected.udid, 'current-pro');
+  assert.equal(selected.runtime, 'com.apple.CoreSimulator.SimRuntime.iOS-26-4');
 });
 
 test('native and stress workflows run supply-chain preflight after npm ci and before execution', () => {

@@ -222,6 +222,29 @@ test('repository workflows using npm are fully enumerated for bootstrap enforcem
   assert.ok(actual.includes('ci.yml:publisher-closure:npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts'));
 });
 
+test('iOS workflows pin an Expo SDK 56 compatible Xcode toolchain', () => {
+  for (const [workflowName, jobName] of [
+    ['ios-pr-smoke.yml', 'ios-simulator-maestro'],
+    ['maestro-full-suite.yml', 'maestro-ios'],
+  ]) {
+    const workflow = fs.readFileSync(path.join(workflowsDir, workflowName), 'utf8');
+    const job = parseWorkflowJobs(workflow).find((candidate) => candidate.name === jobName);
+    assert.ok(job, `expected ${workflowName} job ${jobName}`);
+    const jobText = job.lines.join('\n');
+    assert.match(jobText, /runs-on:\s*macos-26/);
+    assert.doesNotMatch(jobText, /runs-on:\s*macos-15/);
+    assert.match(
+      jobText,
+      /DEVELOPER_DIR:\s*\/Applications\/Xcode_26\.4\.1\.app\/Contents\/Developer/,
+    );
+    assert.ok(jobText.includes("expected=$'Xcode 26.4.1\\nBuild version 17E202'"));
+    assert.ok(jobText.includes('Apple Swift version 6.3'));
+    const verifyIndex = jobText.indexOf('- name: Verify pinned Xcode');
+    const npmIndex = jobText.indexOf('node scripts/ensure-declared-npm.js');
+    assert.ok(verifyIndex >= 0 && verifyIndex < npmIndex);
+  }
+});
+
 test('app-install-lifecycle job runs declared npm bootstrap before standalone finance-app ci', () => {
   const workflow = fs.readFileSync(path.join(workflowsDir, 'ci.yml'), 'utf8');
   const jobs = parseWorkflowJobs(workflow);

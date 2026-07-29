@@ -16,13 +16,28 @@ jobs:
   maestro-ios:
     permissions:
       contents: read
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
+      - name: Verify pinned Xcode
+        run: |
+          expected=$'Xcode 26.4.1\nBuild version 17E202'
+          actual="$(xcodebuild -version)"
+          if [[ "$actual" != "$expected" ]]; then
+            printf 'unexpected Xcode toolchain:\n%s\n' "$actual" >&2
+            exit 1
+          fi
+          swift_version="$(xcrun swift --version)"
+          if [[ "$swift_version" != "Apple Swift version 6.3"* ]]; then
+            printf 'unexpected Swift toolchain:\n%s\n' "$swift_version" >&2
+            exit 1
+          fi
       - run: node scripts/ensure-declared-npm.js
       - run: npm ci
       - name: Supply-chain preflight (pinned actions + vulnerability gate)

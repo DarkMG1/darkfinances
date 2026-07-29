@@ -4,6 +4,11 @@
 const { spawnSync } = require('child_process');
 
 const PREFERRED_DEVICES = [
+  'iPhone 17 Pro',
+  'iPhone 17',
+  'iPhone 17 Pro Max',
+  'iPhone 17e',
+  'iPhone Air',
   'iPhone 16 Pro',
   'iPhone 16',
   'iPhone 15 Pro',
@@ -31,18 +36,33 @@ function collectIphoneDevices(payload) {
     for (const entry of entries) {
       if (!entry.isAvailable || entry.isAvailable === false) continue;
       if (!entry.name?.startsWith('iPhone')) continue;
-      devices.push(entry);
+      devices.push({ ...entry, runtime });
     }
   }
   return devices;
 }
 
+function runtimeVersion(runtime) {
+  const match = String(runtime || '').match(/\.iOS-(\d+)(?:-(\d+))?(?:-(\d+))?$/);
+  return match ? match.slice(1).map((part) => Number(part || 0)) : [0, 0, 0];
+}
+
 function selectDevice(devices) {
+  const ordered = [...devices].sort((left, right) => {
+    const leftVersion = runtimeVersion(left.runtime);
+    const rightVersion = runtimeVersion(right.runtime);
+    for (let index = 0; index < 3; index += 1) {
+      if (leftVersion[index] !== rightVersion[index]) {
+        return rightVersion[index] - leftVersion[index];
+      }
+    }
+    return String(left.udid || '').localeCompare(String(right.udid || ''));
+  });
   for (const preferred of PREFERRED_DEVICES) {
-    const match = devices.find((device) => device.name === preferred);
+    const match = ordered.find((device) => device.name === preferred);
     if (match) return match;
   }
-  const fallback = devices.find((device) => device.name.startsWith('iPhone'));
+  const fallback = ordered.find((device) => device.name.startsWith('iPhone'));
   if (!fallback) fail('no available iPhone simulator found');
   return fallback;
 }
