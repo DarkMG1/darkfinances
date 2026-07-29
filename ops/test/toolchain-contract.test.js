@@ -215,33 +215,57 @@ test('repository workflows using npm are fully enumerated for bootstrap enforcem
   assert.ok(actual.includes('ci.yml:verify:npm ci'));
   assert.ok(actual.includes('ci.yml:lockfile-repro:node scripts/check-lockfile-repro.js'));
   assert.ok(actual.includes('shutdown-stress.yml:bounded-stress:npm ci'));
+  assert.ok(actual.includes('ios-pr-smoke.yml:ios-simulator-build:npm ci'));
   assert.ok(actual.includes('ios-pr-smoke.yml:ios-simulator-maestro:npm ci'));
   assert.ok(actual.includes('android-compile-smoke.yml:android-assemble-debug:npm ci'));
+  assert.ok(actual.includes('maestro-full-suite.yml:maestro-ios-build:npm ci'));
   assert.ok(actual.includes('maestro-full-suite.yml:maestro-ios:npm ci'));
   assert.ok(actual.includes('ci.yml:app-install-lifecycle:npm --prefix finance-app ci --workspaces=false'));
   assert.ok(actual.includes('ci.yml:publisher-closure:npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts'));
 });
 
-test('iOS workflows pin an Expo SDK 56 compatible Xcode toolchain', () => {
-  for (const [workflowName, jobName] of [
-    ['ios-pr-smoke.yml', 'ios-simulator-maestro'],
-    ['maestro-full-suite.yml', 'maestro-ios'],
+test('iOS workflows split the Expo build toolchain from the iOS 18 Maestro runtime', () => {
+  for (const [workflowName, buildJobName, testJobName, artifactName] of [
+    ['ios-pr-smoke.yml', 'ios-simulator-build', 'ios-simulator-maestro', 'ios-simulator-app'],
+    ['maestro-full-suite.yml', 'maestro-ios-build', 'maestro-ios', 'maestro-ios-app'],
   ]) {
     const workflow = fs.readFileSync(path.join(workflowsDir, workflowName), 'utf8');
-    const job = parseWorkflowJobs(workflow).find((candidate) => candidate.name === jobName);
-    assert.ok(job, `expected ${workflowName} job ${jobName}`);
-    const jobText = job.lines.join('\n');
-    assert.match(jobText, /runs-on:\s*macos-26/);
-    assert.doesNotMatch(jobText, /runs-on:\s*macos-15/);
+    const jobs = parseWorkflowJobs(workflow);
+    const buildJob = jobs.find((candidate) => candidate.name === buildJobName);
+    const testJob = jobs.find((candidate) => candidate.name === testJobName);
+    assert.ok(buildJob, `expected ${workflowName} job ${buildJobName}`);
+    assert.ok(testJob, `expected ${workflowName} job ${testJobName}`);
+    const buildText = buildJob.lines.join('\n');
+    const testText = testJob.lines.join('\n');
+
+    assert.match(buildText, /runs-on:\s*macos-26/);
     assert.match(
-      jobText,
+      buildText,
       /DEVELOPER_DIR:\s*\/Applications\/Xcode_26\.4\.1\.app\/Contents\/Developer/,
     );
-    assert.ok(jobText.includes("expected=$'Xcode 26.4.1\\nBuild version 17E202'"));
-    assert.ok(jobText.includes('Apple Swift version 6.3'));
-    const verifyIndex = jobText.indexOf('- name: Verify pinned Xcode');
-    const npmIndex = jobText.indexOf('node scripts/ensure-declared-npm.js');
-    assert.ok(verifyIndex >= 0 && verifyIndex < npmIndex);
+    assert.ok(buildText.includes("expected=$'Xcode 26.4.1\\nBuild version 17E202'"));
+    assert.ok(buildText.includes('Apple Swift version 6.3'));
+    assert.match(buildText, /destination 'generic\/platform=iOS Simulator'/);
+    assert.match(buildText, /ARCHS=arm64/);
+    assert.match(buildText, new RegExp(`name:\\s*${artifactName}-\\$\\{\\{ github\\.run_id \\}\\}`));
+
+    assert.match(testText, new RegExp(`needs:\\s*${buildJobName}`));
+    assert.match(testText, /runs-on:\s*macos-15/);
+    assert.match(
+      testText,
+      /DEVELOPER_DIR:\s*\/Applications\/Xcode_16\.4\.app\/Contents\/Developer/,
+    );
+    assert.ok(testText.includes("expected=$'Xcode 16.4\\nBuild version 16F6'"));
+    assert.match(testText, /IOS_SIMULATOR_RUNTIME:\s*'18\.5'/);
+    assert.match(testText, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/);
+    assert.match(testText, new RegExp(`name:\\s*${artifactName}-\\$\\{\\{ github\\.run_id \\}\\}`));
+    assert.doesNotMatch(testText, /ensure-cocoapods\.sh|prebuild -p ios/);
+
+    for (const jobText of [buildText, testText]) {
+      const verifyIndex = jobText.indexOf('Verify pinned ');
+      const npmIndex = jobText.indexOf('node scripts/ensure-declared-npm.js');
+      assert.ok(verifyIndex >= 0 && verifyIndex < npmIndex);
+    }
   }
 });
 

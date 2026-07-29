@@ -14,24 +14,40 @@ const {
 const repositoryRoot = path.resolve(__dirname, '..', '..');
 const workflowsDir = path.join(repositoryRoot, '.github/workflows');
 
-const NATIVE_STRESS_WORKFLOWS = [
+const NATIVE_STRESS_JOBS = [
   {
     name: 'ios-pr-smoke.yml',
+    job: 'ios-simulator-build',
+    firstExecutionMarker: 'ensure-cocoapods.sh',
+    pathFiltered: true,
+  },
+  {
+    name: 'ios-pr-smoke.yml',
+    job: 'ios-simulator-maestro',
     firstExecutionMarker: 'ci-ios-simulator.js',
     pathFiltered: true,
   },
   {
     name: 'maestro-full-suite.yml',
+    job: 'maestro-ios-build',
+    firstExecutionMarker: 'ensure-cocoapods.sh',
+    pathFiltered: false,
+  },
+  {
+    name: 'maestro-full-suite.yml',
+    job: 'maestro-ios',
     firstExecutionMarker: 'ci-ios-simulator.js',
     pathFiltered: false,
   },
   {
     name: 'android-compile-smoke.yml',
+    job: 'android-assemble-debug',
     firstExecutionMarker: 'prebuild -p android',
     pathFiltered: true,
   },
   {
     name: 'shutdown-stress.yml',
+    job: 'bounded-stress',
     firstExecutionMarker: 'check:shutdown-stress',
     pathFiltered: false,
   },
@@ -49,28 +65,38 @@ function readWorkflow(name) {
   return fs.readFileSync(path.join(workflowsDir, name), 'utf8');
 }
 
-function assertSupplyChainPreflightOrder(workflow, { name, firstExecutionMarker }) {
-  const npmCiIndex = workflow.indexOf('- run: npm ci');
-  const preflightIndex = workflow.indexOf('Supply-chain preflight (pinned actions + vulnerability gate)');
-  const upstreamIndex = workflow.indexOf('check:action-pins:upstream');
-  const vulnerabilityIndex = workflow.indexOf('check:vulnerabilities');
-  const executionIndex = workflow.indexOf(firstExecutionMarker);
+function readWorkflowJob(name, jobName) {
+  const lines = readWorkflow(name).split('\n');
+  const start = lines.findIndex((line) => line === `  ${jobName}:`);
+  assert.ok(start >= 0, `${name} must contain job ${jobName}`);
+  const relativeEnd = lines.slice(start + 1).findIndex((line) => /^  [a-z0-9_-]+:\s*$/.test(line));
+  const end = relativeEnd < 0 ? lines.length : start + 1 + relativeEnd;
+  return lines.slice(start, end).join('\n');
+}
 
-  assert.ok(npmCiIndex >= 0, `${name} must run npm ci`);
-  assert.ok(preflightIndex >= 0, `${name} must declare supply-chain preflight step`);
-  assert.ok(upstreamIndex >= 0, `${name} must run check:action-pins:upstream`);
-  assert.ok(vulnerabilityIndex >= 0, `${name} must run check:vulnerabilities`);
-  assert.ok(executionIndex >= 0, `${name} must run ${firstExecutionMarker}`);
-  assert.ok(npmCiIndex < preflightIndex, `${name} must run npm ci before supply-chain preflight`);
+function assertSupplyChainPreflightOrder(jobText, { name, job, firstExecutionMarker }) {
+  const label = `${name}:${job}`;
+  const npmCiIndex = jobText.indexOf('- run: npm ci');
+  const preflightIndex = jobText.indexOf('Supply-chain preflight (pinned actions + vulnerability gate)');
+  const upstreamIndex = jobText.indexOf('check:action-pins:upstream');
+  const vulnerabilityIndex = jobText.indexOf('check:vulnerabilities');
+  const executionIndex = jobText.indexOf(firstExecutionMarker);
+
+  assert.ok(npmCiIndex >= 0, `${label} must run npm ci`);
+  assert.ok(preflightIndex >= 0, `${label} must declare supply-chain preflight step`);
+  assert.ok(upstreamIndex >= 0, `${label} must run check:action-pins:upstream`);
+  assert.ok(vulnerabilityIndex >= 0, `${label} must run check:vulnerabilities`);
+  assert.ok(executionIndex >= 0, `${label} must run ${firstExecutionMarker}`);
+  assert.ok(npmCiIndex < preflightIndex, `${label} must run npm ci before supply-chain preflight`);
   assert.ok(
     preflightIndex < upstreamIndex && upstreamIndex < vulnerabilityIndex,
-    `${name} must run upstream pin check before vulnerability gate inside preflight`,
+    `${label} must run upstream pin check before vulnerability gate inside preflight`,
   );
   assert.ok(
     vulnerabilityIndex < executionIndex,
-    `${name} must finish supply-chain preflight before ${firstExecutionMarker}`,
+    `${label} must finish supply-chain preflight before ${firstExecutionMarker}`,
   );
-  assert.doesNotMatch(workflow, /actions\/cache@/);
+  assert.doesNotMatch(jobText, /actions\/cache@/);
 }
 
 test('toolchain download rejects off-host redirects', async () => {
@@ -126,6 +152,9 @@ test('iOS simulator selection prefers current hardware on the newest available r
   ]);
   const devices = collectIphoneDevices({
     devices: {
+      'com.apple.CoreSimulator.SimRuntime.iOS-18-5': [
+        { name: 'iPhone 16 Pro', udid: 'ios18-pro', isAvailable: true },
+      ],
       'com.apple.CoreSimulator.SimRuntime.iOS-26-2': [
         { name: 'iPhone 17 Pro', udid: 'older-pro', isAvailable: true },
       ],
@@ -139,17 +168,32 @@ test('iOS simulator selection prefers current hardware on the newest available r
   const selected = selectDevice(devices);
   assert.equal(selected.udid, 'current-pro');
   assert.equal(selected.runtime, 'com.apple.CoreSimulator.SimRuntime.iOS-26-4');
+  assert.equal(selectDevice(devices, { runtime: '18.5' }).udid, 'ios18-pro');
+  assert.throws(
+    () => selectDevice(devices, { runtime: '18.4' }),
+    /no available iPhone simulator found for iOS 18\.4/,
+  );
+  assert.throws(
+    () => selectDevice(devices, { runtime: 'latest' }),
+    /invalid IOS_SIMULATOR_RUNTIME/,
+  );
 });
 
 test('native and stress workflows run supply-chain preflight after npm ci and before execution', () => {
-  for (const workflowSpec of NATIVE_STRESS_WORKFLOWS) {
-    assertSupplyChainPreflightOrder(readWorkflow(workflowSpec.name), workflowSpec);
+  for (const workflowSpec of NATIVE_STRESS_JOBS) {
+    assertSupplyChainPreflightOrder(
+      readWorkflowJob(workflowSpec.name, workflowSpec.job),
+      workflowSpec,
+    );
   }
 });
 
 test('path-filtered native workflows trigger on supply-chain checker and policy files', () => {
-  for (const workflowSpec of NATIVE_STRESS_WORKFLOWS.filter((item) => item.pathFiltered)) {
-    const workflow = readWorkflow(workflowSpec.name);
+  const workflowNames = new Set(
+    NATIVE_STRESS_JOBS.filter((item) => item.pathFiltered).map((item) => item.name),
+  );
+  for (const workflowName of workflowNames) {
+    const workflow = readWorkflow(workflowName);
     for (const triggerPath of SUPPLY_CHAIN_PATH_TRIGGERS) {
       const escaped = triggerPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       assert.match(workflow, new RegExp(`- '${escaped}'`));
@@ -158,38 +202,80 @@ test('path-filtered native workflows trigger on supply-chain checker and policy 
 });
 
 test('iOS workflows use dynamic simulator, locked expo, metro, DEVICE on Maestro, and GITHUB_PATH wiring', () => {
-  for (const name of ['ios-pr-smoke.yml', 'maestro-full-suite.yml']) {
+  for (const [name, testJobName] of [
+    ['ios-pr-smoke.yml', 'ios-simulator-maestro'],
+    ['maestro-full-suite.yml', 'maestro-ios'],
+  ]) {
     const workflow = readWorkflow(name);
-    assert.match(workflow, /ci-ios-simulator\.js/);
-    assert.match(workflow, /steps\.simulator\.outputs\.device/);
-    assert.match(workflow, /resolve-expo-bin\.js/);
-    assert.match(workflow, /GITHUB_PATH/);
-    assert.match(workflow, /ci-metro\.pid/);
-    assert.match(workflow, /retention-days:\s*3/);
-    assert.match(workflow, /DEVICE:\s*\$\{\{\s*steps\.simulator\.outputs\.device\s*\}\}/);
+    const testJob = readWorkflowJob(name, testJobName);
+    assert.match(testJob, /ci-ios-simulator\.js/);
+    assert.match(testJob, /steps\.simulator\.outputs\.device/);
+    assert.match(testJob, /resolve-expo-bin\.js/);
+    assert.match(testJob, /GITHUB_PATH/);
+    assert.match(testJob, /ci-metro\.pid/);
+    assert.match(testJob, /retention-days:\s*3/);
+    assert.match(testJob, /IOS_SIMULATOR_RUNTIME:\s*'18\.5'/);
+    assert.match(testJob, /DEVICE:\s*\$\{\{\s*steps\.simulator\.outputs\.device\s*\}\}/);
     assert.doesNotMatch(workflow, /iPhone 16'/);
     assert.doesNotMatch(workflow, /actions:\s*write/);
   }
   assert.match(readWorkflow('ios-pr-smoke.yml'), /push:[\s\S]*branches:[\s\S]*- main/);
 });
 
-test('iOS workflows verify pinned CocoaPods immediately after supply-chain preflight and before simulator boot', () => {
-  for (const name of ['ios-pr-smoke.yml', 'maestro-full-suite.yml']) {
+test('iOS build jobs verify CocoaPods while Maestro jobs boot only after their own preflight', () => {
+  for (const [name, buildJobName, testJobName] of [
+    ['ios-pr-smoke.yml', 'ios-simulator-build', 'ios-simulator-maestro'],
+    ['maestro-full-suite.yml', 'maestro-ios-build', 'maestro-ios'],
+  ]) {
     const workflow = readWorkflow(name);
-    const preflightIndex = workflow.indexOf('Supply-chain preflight (pinned actions + vulnerability gate)');
-    const vulnerabilityIndex = workflow.indexOf('check:vulnerabilities');
-    const ensureIndex = workflow.indexOf('ensure-cocoapods.sh');
-    const simulatorIndex = workflow.indexOf('ci-ios-simulator.js');
-    const prebuildIndex = workflow.indexOf('prebuild -p ios');
-    assert.ok(preflightIndex >= 0, `${name} must declare supply-chain preflight`);
-    assert.ok(ensureIndex >= 0, `${name} must call ensure-cocoapods.sh`);
-    assert.ok(simulatorIndex >= 0, `${name} must boot simulator`);
-    assert.ok(prebuildIndex >= 0, `${name} must run expo prebuild for ios`);
-    assert.ok(vulnerabilityIndex < ensureIndex, `${name} must verify CocoaPods after vulnerability gate`);
-    assert.ok(ensureIndex < simulatorIndex, `${name} must verify CocoaPods before simulator boot`);
-    assert.ok(ensureIndex < prebuildIndex, `${name} must verify CocoaPods before prebuild`);
+    const buildJob = readWorkflowJob(name, buildJobName);
+    const testJob = readWorkflowJob(name, testJobName);
+    const buildVulnerabilityIndex = buildJob.indexOf('check:vulnerabilities');
+    const ensureIndex = buildJob.indexOf('ensure-cocoapods.sh');
+    const prebuildIndex = buildJob.indexOf('prebuild -p ios');
+    const testVulnerabilityIndex = testJob.indexOf('check:vulnerabilities');
+    const simulatorIndex = testJob.indexOf('ci-ios-simulator.js');
+    assert.ok(buildVulnerabilityIndex < ensureIndex, `${name} build must verify CocoaPods after vulnerability gate`);
+    assert.ok(ensureIndex < prebuildIndex, `${name} build must verify CocoaPods before prebuild`);
+    assert.ok(testVulnerabilityIndex < simulatorIndex, `${name} test must finish preflight before simulator boot`);
+    assert.doesNotMatch(buildJob, /ci-ios-simulator\.js/);
+    assert.doesNotMatch(testJob, /ensure-cocoapods\.sh|prebuild -p ios/);
     assert.doesNotMatch(workflow, /pod install/);
-    assert.match(workflow, /--dev-client/);
+    assert.match(testJob, /--dev-client/);
+  }
+});
+
+test('iOS workflows checksum-bind arm64 simulator apps across the split runner boundary', () => {
+  for (const [name, buildJobName, testJobName, artifactName] of [
+    ['ios-pr-smoke.yml', 'ios-simulator-build', 'ios-simulator-maestro', 'ios-simulator-app'],
+    ['maestro-full-suite.yml', 'maestro-ios-build', 'maestro-ios', 'maestro-ios-app'],
+  ]) {
+    const buildJob = readWorkflowJob(name, buildJobName);
+    const testJob = readWorkflowJob(name, testJobName);
+    assert.match(buildJob, /test "\$\(uname -m\)" = arm64/);
+    assert.match(buildJob, /destination 'generic\/platform=iOS Simulator'/);
+    assert.match(buildJob, /ARCHS=arm64/);
+    assert.match(buildJob, /COPYFILE_DISABLE=1 tar -czf/);
+    assert.match(buildJob, /shasum -a 256 ios-simulator-app\.tgz/);
+    assert.match(buildJob, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/);
+    assert.match(buildJob, new RegExp(`name:\\s*${artifactName}-\\$\\{\\{ github\\.run_id \\}\\}`));
+
+    assert.match(testJob, new RegExp(`needs:\\s*${buildJobName}`));
+    assert.match(testJob, /test "\$\(uname -m\)" = arm64/);
+    assert.match(testJob, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/);
+    assert.match(testJob, new RegExp(`name:\\s*${artifactName}-\\$\\{\\{ github\\.run_id \\}\\}`));
+    const checksumIndex = testJob.indexOf('shasum -a 256 -c');
+    const extractIndex = testJob.indexOf('tar -xzf');
+    const architectureIndex = testJob.indexOf('lipo -archs');
+    const runtimeIndex = testJob.indexOf('steps.simulator.outputs.runtime');
+    const installIndex = testJob.indexOf('xcrun simctl install');
+    assert.ok(checksumIndex >= 0 && checksumIndex < extractIndex);
+    assert.ok(extractIndex < architectureIndex);
+    assert.ok(architectureIndex < runtimeIndex);
+    assert.ok(runtimeIndex < installIndex);
+    assert.match(testJob, /Print :CFBundleIdentifier/);
+    assert.doesNotMatch(testJob, /simctl launch "\$DEVICE" dev\.darkmg1\.finances/);
+    assert.match(testJob, /grep -q 'iOS Bundled' build\/ci-metro\.log/);
   }
 });
 

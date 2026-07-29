@@ -24,6 +24,10 @@ test('run-maestro-ios resolves MAESTRO_APP_ID and ties matcher lifetime to maest
   assert.match(source, /start-match-loop/);
   assert.match(source, /trap cleanup_matcher EXIT INT TERM/);
   assert.match(source, /DEVICE="\$\{DEVICE:-booted\}"/);
+  assert.match(source, /MAESTRO_ARTIFACT_DIR=/);
+  assert.match(source, /--test-output-dir=/);
+  assert.match(source, /--debug-output=/);
+  assert.match(source, /--flatten-debug-output/);
   assert.doesNotMatch(source, /seq 1 360|120\)/);
 });
 
@@ -56,9 +60,10 @@ test('mutation validation banner flow filename matches client-validation intent'
   assert.match(readme, /mutation-validation-draft-preservation\.yaml/);
 });
 
-test('run-maestro-ios creates screenshot output directory under build/', () => {
+test('run-maestro-ios creates screenshot and failure-diagnostic directories under build/', () => {
   const source = fs.readFileSync(path.join(root, 'scripts/run-maestro-ios.sh'), 'utf8');
   assert.match(source, /mkdir -p "\$APP_ROOT\/build\/maestro\/screenshots"/);
+  assert.match(source, /\$APP_ROOT\/build\/maestro\/results/);
 });
 
 test('Maestro flows write screenshots under build/maestro/screenshots only', () => {

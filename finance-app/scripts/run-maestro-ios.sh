@@ -7,6 +7,15 @@ APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 export DEVICE
 
 mkdir -p "$APP_ROOT/build/maestro/screenshots"
+MAESTRO_ARTIFACT_DIR="${MAESTRO_ARTIFACT_DIR:-$APP_ROOT/build/maestro/results}"
+mkdir -p "$MAESTRO_ARTIFACT_DIR"
+maestro_command=(
+  test
+  "--test-output-dir=$MAESTRO_ARTIFACT_DIR"
+  "--debug-output=$MAESTRO_ARTIFACT_DIR"
+  --flatten-debug-output
+  "$@"
+)
 
 needs_biometric_matcher() {
   for arg in "$@"; do
@@ -31,11 +40,11 @@ bash "$SCRIPT_DIR/ios-sim-biometrics.sh" enroll
 
 if needs_biometric_matcher "$@"; then
   trap cleanup_matcher EXIT INT TERM
-  maestro test "$@" &
+  maestro "${maestro_command[@]}" &
   maestro_pid=$!
   bash "$SCRIPT_DIR/ios-sim-biometrics.sh" start-match-loop "$maestro_pid"
   wait "$maestro_pid"
   exit $?
 fi
 
-maestro test "$@"
+maestro "${maestro_command[@]}"

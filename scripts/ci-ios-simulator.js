@@ -47,8 +47,29 @@ function runtimeVersion(runtime) {
   return match ? match.slice(1).map((part) => Number(part || 0)) : [0, 0, 0];
 }
 
-function selectDevice(devices) {
-  const ordered = [...devices].sort((left, right) => {
+function requiredRuntimeVersion(value) {
+  if (!value) return null;
+  if (!/^\d+\.\d+(?:\.\d+)?$/.test(value)) {
+    fail(`invalid IOS_SIMULATOR_RUNTIME: ${value}`);
+  }
+  const parts = value.split('.').map(Number);
+  while (parts.length < 3) parts.push(0);
+  return parts;
+}
+
+function selectDevice(devices, { runtime = null } = {}) {
+  const requiredRuntime = requiredRuntimeVersion(runtime);
+  const eligible = requiredRuntime
+    ? devices.filter((device) => {
+        const version = runtimeVersion(device.runtime);
+        return version.every((part, index) => part === requiredRuntime[index]);
+      })
+    : devices;
+  if (requiredRuntime && eligible.length === 0) {
+    fail(`no available iPhone simulator found for iOS ${runtime}`);
+  }
+
+  const ordered = [...eligible].sort((left, right) => {
     const leftVersion = runtimeVersion(left.runtime);
     const rightVersion = runtimeVersion(right.runtime);
     for (let index = 0; index < 3; index += 1) {
@@ -81,16 +102,18 @@ function exportDevice(device) {
     const fs = require('fs');
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `device=${device.udid}\n`);
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `name=${device.name}\n`);
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `runtime=${device.runtime}\n`);
   }
   process.stdout.write(`device=${device.udid}\n`);
   process.stdout.write(`name=${device.name}\n`);
+  process.stdout.write(`runtime=${device.runtime}\n`);
 }
 
 function main() {
   try {
     const payload = listAvailableDevices();
     const devices = collectIphoneDevices(payload);
-    const device = selectDevice(devices);
+    const device = selectDevice(devices, { runtime: process.env.IOS_SIMULATOR_RUNTIME || null });
     bootDevice(device.udid);
     exportDevice(device);
   } catch (error) {
