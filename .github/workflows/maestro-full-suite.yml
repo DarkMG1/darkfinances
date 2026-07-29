@@ -67,14 +67,27 @@ jobs:
             -derivedDataPath "$derived_data" \
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=YES \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY='' \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM='' \
             build
           app_path="$derived_data/Build/Products/Debug-iphonesimulator/Finances.app"
           test -d "$app_path"
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist")"
           test -x "$app_path/$executable"
+          codesign --verify --deep --strict "$app_path"
+          signing_info="$(codesign -dvv "$app_path" 2>&1)"
+          if [[ "$signing_info" != *"Signature=adhoc"* ]]; then
+            printf 'simulator app was not ad-hoc signed:\n%s\n' "$signing_info" >&2
+            exit 1
+          fi
+          entitlements="$(codesign -d --entitlements :- "$app_path" 2>/dev/null)"
+          if [[ "$entitlements" != *"application-identifier"* ]]; then
+            printf 'simulator app lacks application-identifier entitlement\n' >&2
+            exit 1
+          fi
           COPYFILE_DISABLE=1 tar -czf build/ios-simulator-app.tgz \
             -C "$(dirname "$app_path")" "$(basename "$app_path")"
           (
@@ -140,6 +153,7 @@ jobs:
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist")"
           test -x "$app_path/$executable"
           test "$(lipo -archs "$app_path/$executable")" = arm64
+          codesign --verify --deep --strict "$app_path"
       - name: Select and boot iOS 18.5 simulator
         id: simulator
         env:
