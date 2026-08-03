@@ -278,26 +278,41 @@ test('iOS workflows checksum-bind arm64 simulator apps across the split runner b
     assert.match(buildJob, /Signature=adhoc/);
     assert.match(buildJob, /Finances\.app-Simulated\.xcent/);
     assert.match(buildJob, /ExpoWidgetsTarget\.appex-Simulated\.xcent/);
-    assert.match(buildJob, /test -f "\$app_entitlements"/);
-    assert.match(buildJob, /test -f "\$widget_entitlements"/);
-    assert.match(buildJob, /--entitlements "\$widget_entitlements"/);
-    assert.match(buildJob, /--entitlements "\$app_entitlements"/);
-    assert.match(buildJob, /--timestamp=none/);
-    assert.match(buildJob, /--generate-entitlement-der/);
+    assert.match(buildJob, /test -f "\$app_simulator_entitlements"/);
+    assert.match(buildJob, /test -f "\$widget_simulator_entitlements"/);
+    assert.doesNotMatch(buildJob, /codesign --force --sign/);
+    assert.doesNotMatch(buildJob, /codesign -d --entitlements :-/);
+    assert.match(buildJob, /codesign -d --entitlements - --xml/);
+    assert.match(buildJob, /simulator code signature unexpectedly contains entitlements/);
+    assert.match(buildJob, /\[\[ "\$\(plutil -convert json -o - "\$output"\)" != '\{\}' \]\]/);
+    assert.match(buildJob, /test "\$\(lipo -archs "\$widget_path\/\$widget_executable"\)" = arm64/);
+    assert.match(buildJob, /extract_simulator_entitlements/);
+    assert.match(buildJob, /otool -X -s __TEXT __entitlements/);
+    assert.match(buildJob, /xxd -r -p/);
+    assert.match(buildJob, /plutil -lint "\$output"/);
+    assert.match(buildJob, /plutil -convert json/);
     assert.match(buildJob, new RegExp(escapeRegExp(simulatorAppIdentifier)));
     assert.match(buildJob, new RegExp(escapeRegExp(simulatorWidgetIdentifier)));
     assert.match(buildJob, new RegExp(escapeRegExp(simulatorAppGroup)));
     assert.match(buildJob, /Print :aps-environment/);
     const xcodeBuildIndex = buildJob.indexOf('xcodebuild \\');
-    const widgetSignIndex = buildJob.indexOf('--entitlements "$widget_entitlements"');
-    const appSignIndex = buildJob.indexOf('--entitlements "$app_entitlements"');
     const signIndex = buildJob.indexOf('codesign --verify --deep --strict');
+    const buildSignatureBoundaryIndex = buildJob.indexOf(
+      'assert_empty_signature_entitlements "$app_path"',
+    );
+    const buildEmbeddedEntitlementsIndex = buildJob.indexOf(
+      'extract_simulator_entitlements "$app_path/$executable"',
+    );
+    const buildWidgetEntitlementsIndex = buildJob.indexOf(
+      'extract_simulator_entitlements "$widget_path/$widget_executable"',
+    );
     const entitlementValidationIndex = buildJob.indexOf('Print :application-identifier');
     const packageIndex = buildJob.indexOf('COPYFILE_DISABLE=1 tar -czf');
-    assert.ok(xcodeBuildIndex >= 0 && xcodeBuildIndex < widgetSignIndex);
-    assert.ok(widgetSignIndex < appSignIndex);
-    assert.ok(appSignIndex < signIndex);
-    assert.ok(signIndex < entitlementValidationIndex);
+    assert.ok(xcodeBuildIndex >= 0 && xcodeBuildIndex < signIndex);
+    assert.ok(signIndex < buildSignatureBoundaryIndex);
+    assert.ok(buildSignatureBoundaryIndex < buildEmbeddedEntitlementsIndex);
+    assert.ok(buildEmbeddedEntitlementsIndex < buildWidgetEntitlementsIndex);
+    assert.ok(buildWidgetEntitlementsIndex < entitlementValidationIndex);
     assert.ok(entitlementValidationIndex < packageIndex);
     assert.match(buildJob, /COPYFILE_DISABLE=1 tar -czf/);
     assert.match(buildJob, /shasum -a 256 ios-simulator-app\.tgz/);
@@ -312,18 +327,40 @@ test('iOS workflows checksum-bind arm64 simulator apps across the split runner b
     const extractIndex = testJob.indexOf('tar -xzf');
     const architectureIndex = testJob.indexOf('lipo -archs');
     const signatureIndex = testJob.indexOf('codesign --verify --deep --strict');
-    const entitlementsIndex = testJob.indexOf('codesign -d --entitlements :-');
+    const signatureEntitlementsIndex = testJob.indexOf('codesign -d --entitlements - --xml');
+    const testSignatureBoundaryIndex = testJob.indexOf(
+      'assert_empty_signature_entitlements "$app_path"',
+    );
+    const testEmbeddedEntitlementsIndex = testJob.indexOf(
+      'extract_simulator_entitlements "$app_path/$executable"',
+    );
+    const testWidgetEntitlementsIndex = testJob.indexOf(
+      'extract_simulator_entitlements "$widget_path/$widget_executable"',
+    );
     const runtimeIndex = testJob.indexOf('steps.simulator.outputs.runtime');
     const installIndex = testJob.indexOf('xcrun simctl install');
     assert.ok(checksumIndex >= 0 && checksumIndex < extractIndex);
     assert.ok(extractIndex < architectureIndex);
     assert.ok(architectureIndex < signatureIndex);
-    assert.ok(signatureIndex < entitlementsIndex);
-    assert.ok(entitlementsIndex < runtimeIndex);
+    assert.ok(signatureIndex < signatureEntitlementsIndex);
+    assert.ok(signatureEntitlementsIndex < testSignatureBoundaryIndex);
+    assert.ok(testSignatureBoundaryIndex < testEmbeddedEntitlementsIndex);
+    assert.ok(testEmbeddedEntitlementsIndex < testWidgetEntitlementsIndex);
+    assert.ok(testWidgetEntitlementsIndex < runtimeIndex);
     assert.ok(runtimeIndex < installIndex);
     assert.match(testJob, /Signature=adhoc/);
     assert.match(testJob, /widget_path="\$app_path\/PlugIns\/ExpoWidgetsTarget\.appex"/);
     assert.match(testJob, /test -d "\$widget_path"/);
+    assert.match(testJob, /widget_executable=/);
+    assert.doesNotMatch(testJob, /codesign --force --sign/);
+    assert.doesNotMatch(testJob, /codesign -d --entitlements :-/);
+    assert.match(testJob, /codesign -d --entitlements - --xml/);
+    assert.match(testJob, /simulator code signature unexpectedly contains entitlements/);
+    assert.match(testJob, /\[\[ "\$\(plutil -convert json -o - "\$output"\)" != '\{\}' \]\]/);
+    assert.match(testJob, /test "\$\(lipo -archs "\$widget_path\/\$widget_executable"\)" = arm64/);
+    assert.match(testJob, /otool -X -s __TEXT __entitlements/);
+    assert.match(testJob, /xxd -r -p/);
+    assert.match(testJob, /plutil -lint "\$output"/);
     assert.match(testJob, new RegExp(escapeRegExp(simulatorAppIdentifier)));
     assert.match(testJob, new RegExp(escapeRegExp(simulatorWidgetIdentifier)));
     assert.match(testJob, new RegExp(escapeRegExp(simulatorAppGroup)));
