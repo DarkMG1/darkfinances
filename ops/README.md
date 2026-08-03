@@ -843,7 +843,7 @@ is off-platform or lacks a verified standalone install. Use `finance-app/scripts
 the supported production OTA provenance path. OTA invocation uses a verified private snapshot of the
 publisher install (see above); the publisher host must be same-UID/trusted during publish.
 
-Current bound closure (regenerate after lock changes): **510 packages**, **15190 files**.
+Current bound closure (regenerate after lock changes): **510 packages**, **15165 files**.
 
 ## Security checklist
 
