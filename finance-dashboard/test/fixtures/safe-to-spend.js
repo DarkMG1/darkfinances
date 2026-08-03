@@ -1,5 +1,7 @@
 'use strict';
 
+const { addMonths } = require('../../lib/date-only');
+
 const REASON = Object.freeze({
   creditCardCoverageUnknown: 'credit_card_coverage_unknown',
   budgetTargetsMissing: 'budget_targets_missing',
@@ -65,11 +67,11 @@ function buildFixture({
     });
   }
   if (recurring) {
-    for (const [index, days] of [65, 35, 5].entries()) {
+    for (const [index, months] of [2, 1, 0].entries()) {
       transactions.push({
         id: `subscription-${index}`,
         account: 'acc-check',
-        date: addDays(today, -days),
+        date: addMonths(today, -months),
         amount: -1500,
         category: 'software',
         payee: 'software-payee',

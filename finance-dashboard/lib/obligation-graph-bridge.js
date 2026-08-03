@@ -25,9 +25,16 @@ const {
 } = require('./domain/obligation-identities');
 const {
   inferRecurrenceSchedule,
+  nextOccurrenceAfter,
   projectOccurrences,
 } = require('./recurrence');
 const { OBLIGATION_REASON } = require('./domain/obligation-graph');
+
+function firstUnobservedProjectionStart(schedule, today) {
+  const next = nextOccurrenceAfter(schedule.anchorDate, schedule);
+  if (!next) return null;
+  return next > today ? next : today;
+}
 
 function buildRecurringProjections(item, { windowStart, windowEnd, today }) {
   if (item.status !== 'active') return { projectedOccurrences: [], scheduleUncertain: false };
@@ -40,7 +47,9 @@ function buildRecurringProjections(item, { windowStart, windowEnd, today }) {
   if (schedule.uncertain || item.projectionUncertain) {
     return { projectedOccurrences: [], scheduleUncertain: true };
   }
-  const dates = projectOccurrences({ schedule, windowStart: today, windowEnd });
+  const projectionStart = firstUnobservedProjectionStart(schedule, today);
+  if (!projectionStart) return { projectedOccurrences: [], scheduleUncertain: true };
+  const dates = projectOccurrences({ schedule, windowStart: projectionStart, windowEnd });
   const amountCents = toCents(Math.abs(Number(item.amount) || 0));
   return {
     scheduleUncertain: false,
@@ -62,7 +71,9 @@ function buildIncomeProjections(stream, { windowStart, windowEnd, today }) {
     cadence: stream.cadence,
   });
   if (schedule.uncertain) return { projectedOccurrences: [], scheduleUncertain: true };
-  const dates = projectOccurrences({ schedule, windowStart: today, windowEnd });
+  const projectionStart = firstUnobservedProjectionStart(schedule, today);
+  if (!projectionStart) return { projectedOccurrences: [], scheduleUncertain: true };
+  const dates = projectOccurrences({ schedule, windowStart: projectionStart, windowEnd });
   const amountCents = toCents(Math.abs(Number(stream.amount) || 0));
   return {
     scheduleUncertain: false,

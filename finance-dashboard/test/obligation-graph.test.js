@@ -24,6 +24,8 @@ const {
   assembleObligationGraphInputs,
   billDurableIdentity,
   buildGraphTransactionInputs,
+  buildIncomeProjections,
+  buildRecurringProjections,
   recurringDurableIdentity,
 } = require('../lib/obligation-graph-bridge');
 const { sumCents } = require('../lib/domain/money');
@@ -32,6 +34,79 @@ const { addDays, monthEnd } = require('../lib/date-only');
 
 const TODAY = '2026-07-17';
 const WINDOW_END = '2026-10-17';
+
+test('bridge projections begin after the latest observed recurrence', () => {
+  const history = [
+    { date: '2026-05-17', amount: 15 },
+    { date: '2026-06-17', amount: 15 },
+    { date: TODAY, amount: 15 },
+  ];
+  const recurring = buildRecurringProjections({
+    status: 'active',
+    cadence: 'monthly',
+    amount: 15,
+    forced: true,
+    history,
+  }, {
+    windowStart: TODAY,
+    windowEnd: '2026-08-31',
+    today: TODAY,
+  });
+  const income = buildIncomeProjections({
+    active: true,
+    cadence: 'monthly',
+    amount: 15,
+    lastPaid: TODAY,
+    history: history.slice(0, -1),
+  }, {
+    windowStart: TODAY,
+    windowEnd: '2026-08-31',
+    today: TODAY,
+  });
+
+  assert.equal(recurring.scheduleUncertain, false);
+  assert.equal(income.scheduleUncertain, false);
+  assert.deepEqual(recurring.projectedOccurrences.map((item) => item.date), ['2026-08-17']);
+  assert.deepEqual(income.projectedOccurrences.map((item) => item.date), ['2026-08-17']);
+});
+
+test('bridge projection boundary handles weekly, semimonthly, and unobserved due-today schedules', () => {
+  const weekly = buildRecurringProjections({
+    status: 'active',
+    cadence: 'weekly',
+    amount: 15,
+    history: ['2026-07-03', '2026-07-10', TODAY].map((date) => ({ date, amount: 15 })),
+  }, {
+    windowStart: TODAY,
+    windowEnd: '2026-07-31',
+    today: TODAY,
+  });
+  const semimonthlyToday = '2026-07-15';
+  const semimonthly = buildRecurringProjections({
+    status: 'active',
+    cadence: 'semimonthly',
+    amount: 15,
+    history: ['2026-06-15', '2026-06-30', semimonthlyToday].map((date) => ({ date, amount: 15 })),
+  }, {
+    windowStart: semimonthlyToday,
+    windowEnd: '2026-07-31',
+    today: semimonthlyToday,
+  });
+  const dueToday = buildRecurringProjections({
+    status: 'active',
+    cadence: 'monthly',
+    amount: 15,
+    history: ['2026-05-17', '2026-06-17'].map((date) => ({ date, amount: 15 })),
+  }, {
+    windowStart: TODAY,
+    windowEnd: '2026-08-31',
+    today: TODAY,
+  });
+
+  assert.deepEqual(weekly.projectedOccurrences.map((item) => item.date), ['2026-07-24', '2026-07-31']);
+  assert.deepEqual(semimonthly.projectedOccurrences.map((item) => item.date), ['2026-07-31']);
+  assert.deepEqual(dueToday.projectedOccurrences.map((item) => item.date), [TODAY, '2026-08-17']);
+});
 
 function buildGraph(overrides = {}) {
   const input = assembleObligationGraphInputs({
