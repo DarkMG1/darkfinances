@@ -101,20 +101,44 @@ jobs:
             DEVELOPMENT_TEAM='' \
             build
           app_path="$derived_data/Build/Products/Debug-iphonesimulator/Finances.app"
+          app_entitlements="$derived_data/Build/Intermediates.noindex/Finances.build/Debug-iphonesimulator/Finances.build/Finances.app-Simulated.xcent"
+          widget_path="$app_path/PlugIns/ExpoWidgetsTarget.appex"
+          widget_entitlements="$derived_data/Build/Intermediates.noindex/Finances.build/Debug-iphonesimulator/ExpoWidgetsTarget.build/ExpoWidgetsTarget.appex-Simulated.xcent"
           test -d "$app_path"
+          test -f "$app_entitlements"
+          test -d "$widget_path"
+          test -f "$widget_entitlements"
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist")"
           test -x "$app_path/$executable"
+          codesign --force --sign - \
+            --entitlements "$widget_entitlements" \
+            --timestamp=none \
+            --generate-entitlement-der \
+            "$widget_path"
+          codesign --force --sign - \
+            --entitlements "$app_entitlements" \
+            --timestamp=none \
+            --generate-entitlement-der \
+            "$app_path"
           codesign --verify --deep --strict "$app_path"
           signing_info="$(codesign -dvv "$app_path" 2>&1)"
           if [[ "$signing_info" != *"Signature=adhoc"* ]]; then
             printf 'simulator app was not ad-hoc signed:\n%s\n' "$signing_info" >&2
             exit 1
           fi
-          entitlements="$(codesign -d --entitlements :- "$app_path" 2>/dev/null)"
-          if [[ "$entitlements" != *"application-identifier"* ]]; then
-            printf 'simulator app lacks application-identifier entitlement\n' >&2
-            exit 1
-          fi
+          signed_app_entitlements="$PWD/build/ios-simulator-app.entitlements.plist"
+          signed_widget_entitlements="$PWD/build/ios-simulator-widget.entitlements.plist"
+          codesign -d --entitlements :- "$app_path" > "$signed_app_entitlements"
+          codesign -d --entitlements :- "$widget_path" > "$signed_widget_entitlements"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$signed_app_entitlements")" = \
+            FAKETEAMID.dev.darkmg1.finances
+          test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$signed_app_entitlements")" = development
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$signed_app_entitlements")" = \
+            group.dev.darkmg1.finances
+          test "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$signed_widget_entitlements")" = \
+            FAKETEAMID.dev.darkmg1.finances.widget
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$signed_widget_entitlements")" = \
+            group.dev.darkmg1.finances
           COPYFILE_DISABLE=1 tar -czf build/ios-simulator-app.tgz \
             -C "$(dirname "$app_path")" "$(basename "$app_path")"
           (
@@ -181,6 +205,26 @@ jobs:
           test -x "$app_path/$executable"
           test "$(lipo -archs "$app_path/$executable")" = arm64
           codesign --verify --deep --strict "$app_path"
+          signing_info="$(codesign -dvv "$app_path" 2>&1)"
+          if [[ "$signing_info" != *"Signature=adhoc"* ]]; then
+            printf 'transferred simulator app was not ad-hoc signed:\n%s\n' "$signing_info" >&2
+            exit 1
+          fi
+          widget_path="$app_path/PlugIns/ExpoWidgetsTarget.appex"
+          test -d "$widget_path"
+          signed_app_entitlements="$PWD/build/ios-simulator-app.entitlements.plist"
+          signed_widget_entitlements="$PWD/build/ios-simulator-widget.entitlements.plist"
+          codesign -d --entitlements :- "$app_path" > "$signed_app_entitlements"
+          codesign -d --entitlements :- "$widget_path" > "$signed_widget_entitlements"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$signed_app_entitlements")" = \
+            FAKETEAMID.dev.darkmg1.finances
+          test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$signed_app_entitlements")" = development
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$signed_app_entitlements")" = \
+            group.dev.darkmg1.finances
+          test "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$signed_widget_entitlements")" = \
+            FAKETEAMID.dev.darkmg1.finances.widget
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$signed_widget_entitlements")" = \
+            group.dev.darkmg1.finances
       - name: Select and boot iOS 18.5 simulator
         id: simulator
         env:

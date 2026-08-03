@@ -13,6 +13,16 @@ const {
 
 const repositoryRoot = path.resolve(__dirname, '..', '..');
 const workflowsDir = path.join(repositoryRoot, '.github/workflows');
+const appConfig = JSON.parse(
+  fs.readFileSync(path.join(repositoryRoot, 'finance-app/app.json'), 'utf8'),
+).expo;
+const widgetPlugin = appConfig.plugins.find(
+  (plugin) => Array.isArray(plugin) && plugin[0] === 'expo-widgets',
+);
+assert.ok(widgetPlugin, 'finance-app config must include expo-widgets');
+const simulatorAppIdentifier = `FAKETEAMID.${appConfig.ios.bundleIdentifier}`;
+const simulatorWidgetIdentifier = `FAKETEAMID.${widgetPlugin[1].bundleIdentifier}`;
+const simulatorAppGroup = widgetPlugin[1].groupIdentifier;
 
 const NATIVE_STRESS_JOBS = [
   {
@@ -63,6 +73,10 @@ const SUPPLY_CHAIN_PATH_TRIGGERS = [
 
 function readWorkflow(name) {
   return fs.readFileSync(path.join(workflowsDir, name), 'utf8');
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function readWorkflowJob(name, jobName) {
@@ -262,10 +276,29 @@ test('iOS workflows checksum-bind arm64 simulator apps across the split runner b
     assert.match(buildJob, /DEVELOPMENT_TEAM=''/);
     assert.doesNotMatch(buildJob, /CODE_SIGNING_ALLOWED=NO|CODE_SIGNING_REQUIRED=NO/);
     assert.match(buildJob, /Signature=adhoc/);
-    assert.match(buildJob, /application-identifier/);
+    assert.match(buildJob, /Finances\.app-Simulated\.xcent/);
+    assert.match(buildJob, /ExpoWidgetsTarget\.appex-Simulated\.xcent/);
+    assert.match(buildJob, /test -f "\$app_entitlements"/);
+    assert.match(buildJob, /test -f "\$widget_entitlements"/);
+    assert.match(buildJob, /--entitlements "\$widget_entitlements"/);
+    assert.match(buildJob, /--entitlements "\$app_entitlements"/);
+    assert.match(buildJob, /--timestamp=none/);
+    assert.match(buildJob, /--generate-entitlement-der/);
+    assert.match(buildJob, new RegExp(escapeRegExp(simulatorAppIdentifier)));
+    assert.match(buildJob, new RegExp(escapeRegExp(simulatorWidgetIdentifier)));
+    assert.match(buildJob, new RegExp(escapeRegExp(simulatorAppGroup)));
+    assert.match(buildJob, /Print :aps-environment/);
+    const xcodeBuildIndex = buildJob.indexOf('xcodebuild \\');
+    const widgetSignIndex = buildJob.indexOf('--entitlements "$widget_entitlements"');
+    const appSignIndex = buildJob.indexOf('--entitlements "$app_entitlements"');
     const signIndex = buildJob.indexOf('codesign --verify --deep --strict');
+    const entitlementValidationIndex = buildJob.indexOf('Print :application-identifier');
     const packageIndex = buildJob.indexOf('COPYFILE_DISABLE=1 tar -czf');
-    assert.ok(signIndex >= 0 && signIndex < packageIndex);
+    assert.ok(xcodeBuildIndex >= 0 && xcodeBuildIndex < widgetSignIndex);
+    assert.ok(widgetSignIndex < appSignIndex);
+    assert.ok(appSignIndex < signIndex);
+    assert.ok(signIndex < entitlementValidationIndex);
+    assert.ok(entitlementValidationIndex < packageIndex);
     assert.match(buildJob, /COPYFILE_DISABLE=1 tar -czf/);
     assert.match(buildJob, /shasum -a 256 ios-simulator-app\.tgz/);
     assert.match(buildJob, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/);
@@ -279,13 +312,22 @@ test('iOS workflows checksum-bind arm64 simulator apps across the split runner b
     const extractIndex = testJob.indexOf('tar -xzf');
     const architectureIndex = testJob.indexOf('lipo -archs');
     const signatureIndex = testJob.indexOf('codesign --verify --deep --strict');
+    const entitlementsIndex = testJob.indexOf('codesign -d --entitlements :-');
     const runtimeIndex = testJob.indexOf('steps.simulator.outputs.runtime');
     const installIndex = testJob.indexOf('xcrun simctl install');
     assert.ok(checksumIndex >= 0 && checksumIndex < extractIndex);
     assert.ok(extractIndex < architectureIndex);
     assert.ok(architectureIndex < signatureIndex);
-    assert.ok(signatureIndex < runtimeIndex);
+    assert.ok(signatureIndex < entitlementsIndex);
+    assert.ok(entitlementsIndex < runtimeIndex);
     assert.ok(runtimeIndex < installIndex);
+    assert.match(testJob, /Signature=adhoc/);
+    assert.match(testJob, /widget_path="\$app_path\/PlugIns\/ExpoWidgetsTarget\.appex"/);
+    assert.match(testJob, /test -d "\$widget_path"/);
+    assert.match(testJob, new RegExp(escapeRegExp(simulatorAppIdentifier)));
+    assert.match(testJob, new RegExp(escapeRegExp(simulatorWidgetIdentifier)));
+    assert.match(testJob, new RegExp(escapeRegExp(simulatorAppGroup)));
+    assert.match(testJob, /Print :aps-environment/);
     assert.match(testJob, /Print :CFBundleIdentifier/);
     assert.doesNotMatch(testJob, /simctl launch "\$DEVICE" dev\.darkmg1\.finances/);
     assert.match(testJob, /grep -q 'iOS Bundled' build\/ci-metro\.log/);
