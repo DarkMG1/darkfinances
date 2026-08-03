@@ -80,7 +80,7 @@ function buildPrevMonthTransferMismatchFixture() {
     {
       id: 'xfer-b',
       account: 'acc-savings',
-      date: `${today.slice(0, 7)}-05`,
+      date: today,
       amount: 25000,
       transfer_id: 'xfer-a',
       cleared: true,
@@ -115,7 +115,7 @@ function buildPrevMonthOnlyMismatchFixture() {
     {
       id: 'mtd-spend',
       account: 'acc-check',
-      date: `${today.slice(0, 7)}-05`,
+      date: today,
       amount: -1000,
       category: 'groceries',
       payee: 'dining-payee',
@@ -133,7 +133,7 @@ function buildFutureNextMonthCounterpartMismatchFixture() {
     {
       id: 'mtd-a',
       account: 'acc-check',
-      date: `${today.slice(0, 7)}-10`,
+      date: today,
       amount: -50000,
       transfer_id: 'future-b',
       category: 'groceries',

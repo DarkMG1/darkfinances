@@ -13,16 +13,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  maestro-ios:
+  # Expo SDK 56 needs Swift 6.3, but RN 0.85 UI is absent from XCUITest on
+  # iOS 26 (react-native#57282). Build with Xcode 26.4, then test on iOS 18.5.
+  maestro-ios-build:
     permissions:
       contents: read
-    runs-on: macos-15
-    timeout-minutes: 120
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.4.1.app/Contents/Developer
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
+      - name: Verify pinned build toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          expected=$'Xcode 26.4.1\nBuild version 17E202'
+          actual="$(xcodebuild -version)"
+          if [[ "$actual" != "$expected" ]]; then
+            printf 'unexpected Xcode toolchain:\n%s\n' "$actual" >&2
+            exit 1
+          fi
+          swift_version="$(xcrun swift --version)"
+          if [[ "$swift_version" != "Apple Swift version 6.3"* ]]; then
+            printf 'unexpected Swift toolchain:\n%s\n' "$swift_version" >&2
+            exit 1
+          fi
       - run: node scripts/ensure-declared-npm.js
       - run: npm ci
       - name: Supply-chain preflight (pinned actions + vulnerability gate)
@@ -31,9 +49,235 @@ jobs:
           npm run check:vulnerabilities
       - name: Verify pinned CocoaPods CLI
         run: bash scripts/ensure-cocoapods.sh
-      - name: Select and boot iOS simulator
+      - name: Build and package iOS simulator app
+        working-directory: finance-app
+        env:
+          EXPO_PUBLIC_FINANCE_DEMO_URL: http://127.0.0.1:5007
+        run: |
+          mkdir -p build
+          expo_bin="$(node scripts/resolve-expo-bin.js)"
+          "$expo_bin" prebuild -p ios --clean
+          derived_data="$PWD/build/ios-simulator-derived-data"
+          xcodebuild \
+            -workspace ios/Finances.xcworkspace \
+            -scheme Finances \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$derived_data" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM='' \
+            build
+          app_path="$derived_data/Build/Products/Debug-iphonesimulator/Finances.app"
+          app_simulator_entitlements="$derived_data/Build/Intermediates.noindex/Finances.build/Debug-iphonesimulator/Finances.build/Finances.app-Simulated.xcent"
+          widget_path="$app_path/PlugIns/ExpoWidgetsTarget.appex"
+          widget_simulator_entitlements="$derived_data/Build/Intermediates.noindex/Finances.build/Debug-iphonesimulator/ExpoWidgetsTarget.build/ExpoWidgetsTarget.appex-Simulated.xcent"
+          test -d "$app_path"
+          test -f "$app_simulator_entitlements"
+          test -d "$widget_path"
+          test -f "$widget_simulator_entitlements"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist")"
+          widget_executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$widget_path/Info.plist")"
+          test -x "$app_path/$executable"
+          test -x "$widget_path/$widget_executable"
+          test "$(lipo -archs "$app_path/$executable")" = arm64
+          test "$(lipo -archs "$widget_path/$widget_executable")" = arm64
+          codesign --verify --deep --strict "$app_path"
+          signing_info="$(codesign -dvv "$app_path" 2>&1)"
+          if [[ "$signing_info" != *"Signature=adhoc"* ]]; then
+            printf 'simulator app was not ad-hoc signed:\n%s\n' "$signing_info" >&2
+            exit 1
+          fi
+          # Xcode links *-Simulated.xcent into each Mach-O. Copying those
+          # profile-bound keys into the outer ad-hoc signature makes AMFI deny launch.
+          app_signature_entitlements="$PWD/build/ios-simulator-app-signature.entitlements.plist"
+          widget_signature_entitlements="$PWD/build/ios-simulator-widget-signature.entitlements.plist"
+          assert_empty_signature_entitlements() {
+            local bundle="$1"
+            local output="$2"
+            codesign -d --entitlements - --xml "$bundle" > "$output"
+            if [[ -s "$output" ]]; then
+              plutil -lint "$output"
+              if [[ "$(plutil -convert json -o - "$output")" != '{}' ]]; then
+                printf 'simulator code signature unexpectedly contains entitlements: %s\n' \
+                  "$output" >&2
+                plutil -p "$output" >&2
+                exit 1
+              fi
+            fi
+          }
+          assert_empty_signature_entitlements "$app_path" "$app_signature_entitlements"
+          assert_empty_signature_entitlements "$widget_path" "$widget_signature_entitlements"
+          extract_simulator_entitlements() {
+            local binary="$1"
+            local output="$2"
+            otool -X -s __TEXT __entitlements "$binary" |
+              awk '{
+                for (i = 2; i <= NF; i++) {
+                  word = $i
+                  for (j = length(word) - 1; j >= 1; j -= 2) {
+                    printf "%s", substr(word, j, 2)
+                  }
+                }
+              } END { print "" }' |
+              xxd -r -p > "$output"
+            plutil -lint "$output"
+          }
+          embedded_app_entitlements="$PWD/build/ios-simulator-app-embedded.entitlements.plist"
+          embedded_widget_entitlements="$PWD/build/ios-simulator-widget-embedded.entitlements.plist"
+          extract_simulator_entitlements "$app_path/$executable" "$embedded_app_entitlements"
+          extract_simulator_entitlements "$widget_path/$widget_executable" "$embedded_widget_entitlements"
+          test "$(plutil -convert json -o - "$embedded_app_entitlements")" = \
+            "$(plutil -convert json -o - "$app_simulator_entitlements")"
+          test "$(plutil -convert json -o - "$embedded_widget_entitlements")" = \
+            "$(plutil -convert json -o - "$widget_simulator_entitlements")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$embedded_app_entitlements")" = \
+            FAKETEAMID.dev.darkmg1.finances
+          test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$embedded_app_entitlements")" = development
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$embedded_app_entitlements")" = \
+            group.dev.darkmg1.finances
+          test "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$embedded_widget_entitlements")" = \
+            FAKETEAMID.dev.darkmg1.finances.widget
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$embedded_widget_entitlements")" = \
+            group.dev.darkmg1.finances
+          COPYFILE_DISABLE=1 tar -czf build/ios-simulator-app.tgz \
+            -C "$(dirname "$app_path")" "$(basename "$app_path")"
+          (
+            cd build
+            shasum -a 256 ios-simulator-app.tgz > ios-simulator-app.tgz.sha256
+          )
+      - name: Upload iOS simulator app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maestro-ios-app-${{ github.run_id }}
+          retention-days: 3
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            finance-app/build/ios-simulator-app.tgz
+            finance-app/build/ios-simulator-app.tgz.sha256
+
+  maestro-ios:
+    needs: maestro-ios-build
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+      - name: Verify pinned simulator toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          expected=$'Xcode 16.4\nBuild version 16F6'
+          actual="$(xcodebuild -version)"
+          if [[ "$actual" != "$expected" ]]; then
+            printf 'unexpected Xcode toolchain:\n%s\n' "$actual" >&2
+            exit 1
+          fi
+      - run: node scripts/ensure-declared-npm.js
+      - run: npm ci
+      - name: Supply-chain preflight (pinned actions + vulnerability gate)
+        run: |
+          npm run check:action-pins:upstream
+          npm run check:vulnerabilities
+      - name: Download iOS simulator app
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: maestro-ios-app-${{ github.run_id }}
+          path: finance-app/build/ios-simulator-artifact
+      - name: Verify and extract iOS simulator app
+        working-directory: finance-app
+        run: |
+          artifact_dir="$PWD/build/ios-simulator-artifact"
+          (
+            cd "$artifact_dir"
+            shasum -a 256 -c ios-simulator-app.tgz.sha256
+          )
+          mkdir -p build/ios-simulator-app
+          tar -xzf "$artifact_dir/ios-simulator-app.tgz" -C build/ios-simulator-app
+          app_path="$PWD/build/ios-simulator-app/Finances.app"
+          test -d "$app_path"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist")"
+          test -x "$app_path/$executable"
+          test "$(lipo -archs "$app_path/$executable")" = arm64
+          codesign --verify --deep --strict "$app_path"
+          signing_info="$(codesign -dvv "$app_path" 2>&1)"
+          if [[ "$signing_info" != *"Signature=adhoc"* ]]; then
+            printf 'transferred simulator app was not ad-hoc signed:\n%s\n' "$signing_info" >&2
+            exit 1
+          fi
+          widget_path="$app_path/PlugIns/ExpoWidgetsTarget.appex"
+          test -d "$widget_path"
+          widget_executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$widget_path/Info.plist")"
+          test -x "$widget_path/$widget_executable"
+          test "$(lipo -archs "$widget_path/$widget_executable")" = arm64
+          # Preserve the Xcode signing boundary across artifact transfer: simulator
+          # capabilities belong in Mach-O sections, not the outer ad-hoc signatures.
+          app_signature_entitlements="$PWD/build/ios-simulator-app-signature.entitlements.plist"
+          widget_signature_entitlements="$PWD/build/ios-simulator-widget-signature.entitlements.plist"
+          assert_empty_signature_entitlements() {
+            local bundle="$1"
+            local output="$2"
+            codesign -d --entitlements - --xml "$bundle" > "$output"
+            if [[ -s "$output" ]]; then
+              plutil -lint "$output"
+              if [[ "$(plutil -convert json -o - "$output")" != '{}' ]]; then
+                printf 'simulator code signature unexpectedly contains entitlements: %s\n' \
+                  "$output" >&2
+                plutil -p "$output" >&2
+                exit 1
+              fi
+            fi
+          }
+          assert_empty_signature_entitlements "$app_path" "$app_signature_entitlements"
+          assert_empty_signature_entitlements "$widget_path" "$widget_signature_entitlements"
+          extract_simulator_entitlements() {
+            local binary="$1"
+            local output="$2"
+            otool -X -s __TEXT __entitlements "$binary" |
+              awk '{
+                for (i = 2; i <= NF; i++) {
+                  word = $i
+                  for (j = length(word) - 1; j >= 1; j -= 2) {
+                    printf "%s", substr(word, j, 2)
+                  }
+                }
+              } END { print "" }' |
+              xxd -r -p > "$output"
+            plutil -lint "$output"
+          }
+          embedded_app_entitlements="$PWD/build/ios-simulator-app-embedded.entitlements.plist"
+          embedded_widget_entitlements="$PWD/build/ios-simulator-widget-embedded.entitlements.plist"
+          extract_simulator_entitlements "$app_path/$executable" "$embedded_app_entitlements"
+          extract_simulator_entitlements "$widget_path/$widget_executable" "$embedded_widget_entitlements"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$embedded_app_entitlements")" = \
+            FAKETEAMID.dev.darkmg1.finances
+          test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$embedded_app_entitlements")" = development
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$embedded_app_entitlements")" = \
+            group.dev.darkmg1.finances
+          test "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$embedded_widget_entitlements")" = \
+            FAKETEAMID.dev.darkmg1.finances.widget
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$embedded_widget_entitlements")" = \
+            group.dev.darkmg1.finances
+      - name: Select and boot iOS 18.5 simulator
         id: simulator
+        env:
+          IOS_SIMULATOR_RUNTIME: '18.5'
         run: node scripts/ci-ios-simulator.js
+      - name: Verify selected iOS runtime
+        env:
+          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
+        run: test "$SIMULATOR_RUNTIME" = com.apple.CoreSimulator.SimRuntime.iOS-18-5
       - name: Bootstrap pinned Maestro
         id: maestro
         run: |
@@ -56,30 +300,6 @@ jobs:
           done
           echo "demo dashboard failed to become ready" >&2
           exit 1
-      - name: Prebuild iOS project
-        working-directory: finance-app
-        env:
-          EXPO_PUBLIC_FINANCE_DEMO_URL: http://127.0.0.1:5007
-        run: |
-          mkdir -p build/maestro/screenshots
-          expo_bin="$(node scripts/resolve-expo-bin.js)"
-          "$expo_bin" prebuild -p ios --clean
-      - name: Build for iOS Simulator
-        working-directory: finance-app
-        env:
-          EXPO_PUBLIC_FINANCE_DEMO_URL: http://127.0.0.1:5007
-          DEVICE: ${{ steps.simulator.outputs.device }}
-        run: |
-          xcodebuild \
-            -workspace ios/Finances.xcworkspace \
-            -scheme Finances \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination "platform=iOS Simulator,id=$DEVICE" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY='' \
-            build
       - name: Start Expo Metro for Debug build
         working-directory: finance-app
         env:
@@ -97,28 +317,39 @@ jobs:
           done
           echo "Expo Metro failed to become ready" >&2
           exit 1
-      - name: Install app on booted simulator
+      - name: Install and warm iOS simulator app
         working-directory: finance-app
         env:
           DEVICE: ${{ steps.simulator.outputs.device }}
         run: |
-          app_path="$(
-            xcodebuild \
-              -workspace ios/Finances.xcworkspace \
-              -scheme Finances \
-              -configuration Debug \
-              -sdk iphonesimulator \
-              -destination "platform=iOS Simulator,id=$DEVICE" \
-              -showBuildSettings -json |
-            node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(0,'utf8'));const app=data.find((x)=>x.target==='Finances');const s=app.buildSettings;process.stdout.write(require('path').join(s.TARGET_BUILD_DIR,s.WRAPPER_NAME));"
-          )"
+          app_path="$PWD/build/ios-simulator-app/Finances.app"
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Info.plist")"
           xcrun simctl bootstatus "$DEVICE" -b
           xcrun simctl install "$DEVICE" "$app_path"
+          xcrun simctl launch "$DEVICE" "$bundle_id"
+          for attempt in $(seq 1 90); do
+            if grep -q 'iOS Bundled' build/ci-metro.log; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "iOS app failed to request a Metro bundle" >&2
+          exit 1
       - name: Run full Maestro suite
         working-directory: finance-app
         env:
           DEVICE: ${{ steps.simulator.outputs.device }}
         run: bash scripts/run-maestro-ios.sh .maestro
+      - name: Capture simulator failure state
+        if: failure()
+        env:
+          DEVICE: ${{ steps.simulator.outputs.device }}
+        run: |
+          mkdir -p finance-app/build/maestro
+          if [ -n "$DEVICE" ]; then
+            xcrun simctl io "$DEVICE" screenshot \
+              finance-app/build/maestro/simulator-failure.png || true
+          fi
       - name: Upload sanitized failure artifacts
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -127,7 +358,7 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
           path: |
-            finance-app/build/maestro/screenshots/**
+            finance-app/build/maestro/**
             finance-app/build/ci-demo-dashboard.log
             finance-app/build/ci-metro.log
       - name: Stop demo dashboard and Metro

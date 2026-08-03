@@ -76,7 +76,7 @@ function collectWorkflowNpmPaths() {
     for (const job of jobs) {
       const steps = jobRunSteps(job);
       for (const [index, step] of steps.entries()) {
-        if (npmBootstrapCommands.has(step) || /^npm (ci|install)\b/.test(step) || /^npm --prefix finance-app ci --workspaces=false$/.test(step) || /^npm --prefix ops\/publisher-toolchain ci --workspaces=false$/.test(step)) {
+        if (npmBootstrapCommands.has(step) || /^npm (ci|install)\b/.test(step) || /^npm --prefix finance-app ci --workspaces=false$/.test(step) || /^npm --prefix ops\/publisher-toolchain ci --workspaces=false --ignore-scripts$/.test(step)) {
           paths.push({
             workflow: workflowName,
             job: job.name,
@@ -215,11 +215,58 @@ test('repository workflows using npm are fully enumerated for bootstrap enforcem
   assert.ok(actual.includes('ci.yml:verify:npm ci'));
   assert.ok(actual.includes('ci.yml:lockfile-repro:node scripts/check-lockfile-repro.js'));
   assert.ok(actual.includes('shutdown-stress.yml:bounded-stress:npm ci'));
+  assert.ok(actual.includes('ios-pr-smoke.yml:ios-simulator-build:npm ci'));
   assert.ok(actual.includes('ios-pr-smoke.yml:ios-simulator-maestro:npm ci'));
   assert.ok(actual.includes('android-compile-smoke.yml:android-assemble-debug:npm ci'));
+  assert.ok(actual.includes('maestro-full-suite.yml:maestro-ios-build:npm ci'));
   assert.ok(actual.includes('maestro-full-suite.yml:maestro-ios:npm ci'));
   assert.ok(actual.includes('ci.yml:app-install-lifecycle:npm --prefix finance-app ci --workspaces=false'));
-  assert.ok(actual.includes('ci.yml:publisher-closure:npm --prefix ops/publisher-toolchain ci --workspaces=false'));
+  assert.ok(actual.includes('ci.yml:publisher-closure:npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts'));
+});
+
+test('iOS workflows split the Expo build toolchain from the iOS 18 Maestro runtime', () => {
+  for (const [workflowName, buildJobName, testJobName, artifactName] of [
+    ['ios-pr-smoke.yml', 'ios-simulator-build', 'ios-simulator-maestro', 'ios-simulator-app'],
+    ['maestro-full-suite.yml', 'maestro-ios-build', 'maestro-ios', 'maestro-ios-app'],
+  ]) {
+    const workflow = fs.readFileSync(path.join(workflowsDir, workflowName), 'utf8');
+    const jobs = parseWorkflowJobs(workflow);
+    const buildJob = jobs.find((candidate) => candidate.name === buildJobName);
+    const testJob = jobs.find((candidate) => candidate.name === testJobName);
+    assert.ok(buildJob, `expected ${workflowName} job ${buildJobName}`);
+    assert.ok(testJob, `expected ${workflowName} job ${testJobName}`);
+    const buildText = buildJob.lines.join('\n');
+    const testText = testJob.lines.join('\n');
+
+    assert.match(buildText, /runs-on:\s*macos-26/);
+    assert.match(
+      buildText,
+      /DEVELOPER_DIR:\s*\/Applications\/Xcode_26\.4\.1\.app\/Contents\/Developer/,
+    );
+    assert.ok(buildText.includes("expected=$'Xcode 26.4.1\\nBuild version 17E202'"));
+    assert.ok(buildText.includes('Apple Swift version 6.3'));
+    assert.match(buildText, /destination 'generic\/platform=iOS Simulator'/);
+    assert.match(buildText, /ARCHS=arm64/);
+    assert.match(buildText, new RegExp(`name:\\s*${artifactName}-\\$\\{\\{ github\\.run_id \\}\\}`));
+
+    assert.match(testText, new RegExp(`needs:\\s*${buildJobName}`));
+    assert.match(testText, /runs-on:\s*macos-15/);
+    assert.match(
+      testText,
+      /DEVELOPER_DIR:\s*\/Applications\/Xcode_16\.4\.app\/Contents\/Developer/,
+    );
+    assert.ok(testText.includes("expected=$'Xcode 16.4\\nBuild version 16F6'"));
+    assert.match(testText, /IOS_SIMULATOR_RUNTIME:\s*'18\.5'/);
+    assert.match(testText, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/);
+    assert.match(testText, new RegExp(`name:\\s*${artifactName}-\\$\\{\\{ github\\.run_id \\}\\}`));
+    assert.doesNotMatch(testText, /ensure-cocoapods\.sh|prebuild -p ios/);
+
+    for (const jobText of [buildText, testText]) {
+      const verifyIndex = jobText.indexOf('Verify pinned ');
+      const npmIndex = jobText.indexOf('node scripts/ensure-declared-npm.js');
+      assert.ok(verifyIndex >= 0 && verifyIndex < npmIndex);
+    }
+  }
 });
 
 test('app-install-lifecycle job runs declared npm bootstrap before standalone finance-app ci', () => {
@@ -244,7 +291,7 @@ test('CI install-lifecycle job runs full npm ci then check:install-lifecycle', (
   const lifecycleIndex = steps.indexOf('npm run check:install-lifecycle');
   assert.ok(ensureIndex >= 0 && ensureIndex < ciIndex);
   assert.ok(lifecycleIndex > ciIndex);
-  assert.doesNotMatch(workflow.match(/install-lifecycle:[\s\S]*?npm ci[\s\S]*?--ignore-scripts/)?.[0] || '', /--ignore-scripts/);
+  assert.ok(!steps.some((step) => /^npm ci\b/.test(step) && step.includes('--ignore-scripts')));
 });
 
 test('CI app-install-lifecycle job uses standalone finance-app lock install', () => {
@@ -254,9 +301,9 @@ test('CI app-install-lifecycle job uses standalone finance-app lock install', ()
   assert.ok(appLifecycle, 'expected ci.yml app-install-lifecycle job');
   const steps = jobRunSteps(appLifecycle);
   assert.ok(steps.includes('npm --prefix finance-app ci --workspaces=false'));
-  assert.ok(steps.includes('node finance-app/scripts/check-app-install-lifecycle.js'));
+  assert.ok(steps.includes('npm run check:app-install-lifecycle'));
   const standaloneIndex = steps.indexOf('npm --prefix finance-app ci --workspaces=false');
-  const checkIndex = steps.indexOf('node finance-app/scripts/check-app-install-lifecycle.js');
+  const checkIndex = steps.indexOf('npm run check:app-install-lifecycle');
   assert.ok(checkIndex > standaloneIndex);
 });
 
@@ -271,13 +318,13 @@ test('CI publisher-closure job verifies installed-byte runtime closure on macos-
   assert.match(publisherText, /contents:\s*read/);
   const steps = jobRunSteps(publisher);
   const ensureIndex = steps.indexOf('node scripts/ensure-declared-npm.js');
-  const standaloneIndex = steps.indexOf('npm --prefix ops/publisher-toolchain ci --workspaces=false');
+  const standaloneIndex = steps.indexOf('npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts');
   const verifyIndex = steps.indexOf('node scripts/check-publisher-closure.js');
   const versionIndex = steps.indexOf('node finance-app/scripts/run-pinned-eas.js --version');
   assert.ok(ensureIndex >= 0 && ensureIndex < standaloneIndex);
   const upstreamIndex = publisherText.indexOf('npm run check:action-pins:upstream');
   const vulnerabilityIndex = publisherText.indexOf('npm run check:vulnerabilities');
-  const standaloneTextIndex = publisherText.indexOf('npm --prefix ops/publisher-toolchain ci --workspaces=false');
+  const standaloneTextIndex = publisherText.indexOf('npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts');
   assert.ok(upstreamIndex >= 0 && upstreamIndex < vulnerabilityIndex);
   assert.ok(vulnerabilityIndex < standaloneTextIndex);
   assert.ok(verifyIndex > standaloneIndex);
@@ -310,7 +357,11 @@ test('CI verify job runs upstream action pin verification without npm cache', ()
 test('root check script includes action pin and install lifecycle gates', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
   assert.match(pkg.scripts.check, /check:action-pins/);
+  assert.match(pkg.scripts.check, /check:install-lifecycle/);
   assert.match(pkg.scripts['check:install-lifecycle'], /check-install-lifecycle\.js/);
+  assert.doesNotMatch(pkg.scripts['check:install-lifecycle'], /check-app-install-lifecycle\.js/);
+  assert.match(pkg.scripts['check:app-install-lifecycle'], /check-app-install-lifecycle\.js/);
+  assert.doesNotMatch(pkg.scripts['check:app'], /check-app-install-lifecycle\.js/);
 });
 
 test('CI verify job runs check:vulnerabilities after npm ci', () => {

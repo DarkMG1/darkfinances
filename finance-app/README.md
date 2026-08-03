@@ -301,7 +301,7 @@ For OTA publishing, EAS resolves from the isolated publisher toolchain at `ops/p
 (exact `eas-cli@21.3.0`). Prepare the publisher host before `npm run ota:publish`:
 
 ```bash
-npm --prefix ops/publisher-toolchain ci --workspaces=false
+npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts
 npm run check:publisher-closure
 node scripts/run-pinned-eas.js --version
 ```
@@ -310,7 +310,9 @@ Do not use global `eas`, `npx eas-cli`, or `npm exec` for signed OTA publication
 `scripts/run-pinned-eas.js` and `scripts/ota-publish.sh` only. At invoke time the wrapper copies the
 installed publisher tree into a private temp snapshot, verifies the full lock-derived byte closure on
 that snapshot, strips code-injection environment variables, and runs the snapshot's absolute
-`eas-cli/bin/run` with `cwd` still at `finance-app`.
+`eas-cli/bin/run` with `cwd` still at `finance-app`. The isolated install intentionally disables
+dependency lifecycle scripts; EAS is verified by executing the pinned CLI from the byte-verified
+snapshot.
 
 The `npm exec -- eas-cli build …` examples below are for optional native EAS builds only, not the
 signed OTA provenance path.

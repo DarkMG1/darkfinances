@@ -477,6 +477,7 @@ function verifyBackupBundleArchive({
     throw new Error(`archive not found: ${archivePath}`);
   }
 
+  assertArchiveChecksum(archivePath);
   const listing = inspectTarArchive(archivePath);
   const manifest = readManifestFromArchive(archivePath, listing);
   assertManifestStructure(manifest);

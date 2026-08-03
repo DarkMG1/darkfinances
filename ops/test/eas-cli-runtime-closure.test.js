@@ -28,7 +28,10 @@ test('readRuntimeClosureContract loads checked-in runtime closure metadata', () 
   assert.equal(contract.version, '21.3.0');
   assert.match(contract.integrity, /^sha512-/);
   assert.match(contract.runtimeClosureDigest, /^[a-f0-9]{64}$/);
-  assert.equal(contract.standaloneInstallCommand, 'npm --prefix ops/publisher-toolchain ci --workspaces=false');
+  assert.equal(
+    contract.standaloneInstallCommand,
+    'npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts',
+  );
   assert.equal(contract.packageCount, 510);
   assert.ok(contract.fileCount > contract.packageCount);
 });
@@ -57,7 +60,10 @@ test('verifyRuntimeClosureContractFreshness validates lock/pins on every platfor
 test('verifyRuntimeClosure accepts standalone publisher-toolchain install on bound platform', { skip: !BOUND_PLATFORM }, () => {
   const publisherRoot = path.join(repositoryRoot, 'ops/publisher-toolchain');
   if (!fs.existsSync(path.join(publisherRoot, 'node_modules/eas-cli'))) {
-    assert.fail('standalone publisher-toolchain eas-cli install required; run npm --prefix ops/publisher-toolchain ci --workspaces=false');
+    assert.fail(
+      'standalone publisher-toolchain eas-cli install required; '
+      + 'run npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts',
+    );
   }
   assert.doesNotThrow(() => verifyRuntimeClosure(publisherRoot, repositoryRoot, contract));
 });

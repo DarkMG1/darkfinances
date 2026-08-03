@@ -15,7 +15,7 @@ test('linux-simulated freshness and contract evidence pass without installed-byt
   assert.doesNotThrow(() => verifyRuntimeClosureContractFreshness(repositoryRoot, linux));
   const evidence = verifyPublisherToolchain(repositoryRoot, linux);
   assert.equal(evidence.packageCount, 510);
-  assert.equal(evidence.fileCount, 15211);
+  assert.equal(evidence.fileCount, 15165);
   assert.match(evidence.runtimeClosureDigest, /^[a-f0-9]{64}$/);
 });
 
@@ -27,5 +27,5 @@ test('check-publisher-closure validates installed bytes on bound platform only',
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /publisher-closure: ok 510 packages 15211 files [a-f0-9]{64}/);
+  assert.match(result.stdout, /publisher-closure: ok 510 packages 15165 files [a-f0-9]{64}/);
 });

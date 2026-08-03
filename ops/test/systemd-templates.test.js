@@ -4,8 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
 const { loadWriterInventory, enumerateWriters } = require('../lib/writer-inventory');
+const { checkSystemdUnits } = require('../../scripts/check-systemd');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const systemdDir = path.join(repoRoot, 'ops/systemd');
@@ -177,17 +177,41 @@ test('finance-sync-failure@.service uses private umask for alert bridge', () => 
   assert.equal(parseDirective(unitText, 'ExecStart'), '%h/.local/bin/finance-sync-alert.sh %i');
 });
 
+test('systemd verifier replaces deployment executable paths with executable fixtures', () => {
+  let inspectedVerifyCall = false;
+  const result = checkSystemdUnits({
+    spawnSync(command, args) {
+      assert.equal(command, 'systemd-analyze');
+      if (args[0] === '--version') return { status: 0, stdout: '', stderr: '' };
+
+      assert.deepEqual(args.slice(0, 2), ['--user', 'verify']);
+      const units = new Map(args.slice(2).map((unitPath) => [
+        path.basename(unitPath),
+        fs.readFileSync(unitPath, 'utf8'),
+      ]));
+      const dashboardExec = parseDirective(units.get('finance-dashboard.service'), 'ExecStart');
+      const eventSyncExec = parseDirective(units.get('finance-event-sync.service'), 'ExecStart');
+      assert.doesNotMatch(dashboardExec, /^\/usr\/bin\/node\b/);
+      assert.doesNotMatch(eventSyncExec, /^\/usr\/bin\/bash\b/);
+      fs.accessSync(dashboardExec.split(' ', 1)[0], fs.constants.X_OK);
+      fs.accessSync(eventSyncExec.split(' ', 1)[0], fs.constants.X_OK);
+      inspectedVerifyCall = true;
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(result.skipped, false);
+  assert.equal(inspectedVerifyCall, true);
+});
+
 test('checked-in systemd units pass systemd-analyze verify when available', (t) => {
-  if (spawnSync('command', ['-v', 'systemd-analyze'], { shell: true, encoding: 'utf8' }).status !== 0) {
-    t.skip('systemd-analyze not installed');
+  const result = checkSystemdUnits();
+  if (result.skipped) {
+    t.skip(result.reason);
     return;
   }
-
-  for (const unitName of fs.readdirSync(systemdDir).sort()) {
-    const unitPath = path.join(systemdDir, unitName);
-    const result = spawnSync('systemd-analyze', ['--user', 'verify', unitPath], {
-      encoding: 'utf8',
-    });
-    assert.equal(result.status, 0, `${unitName}: ${result.stderr || result.stdout}`);
-  }
+  const expectedUnitCount = fs.readdirSync(systemdDir)
+    .filter((name) => name.endsWith('.service') || name.endsWith('.timer'))
+    .length;
+  assert.equal(result.unitCount, expectedUnitCount);
 });

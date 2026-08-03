@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 const { spawnSync } = require('child_process');
 const {
   loadLogrotateContract,
@@ -17,7 +18,17 @@ const repoRoot = path.resolve(__dirname, '..', '..');
 const systemdDir = path.join(repoRoot, 'ops/systemd');
 
 function logrotateAvailable() {
-  return spawnSync('command', ['-v', 'logrotate'], { shell: true, encoding: 'utf8' }).status === 0;
+  return spawnSync('logrotate', ['--version'], { encoding: 'utf8' }).status === 0;
+}
+
+function currentIdentity() {
+  const user = spawnSync('id', ['-un'], { encoding: 'utf8' });
+  const group = spawnSync('id', ['-gn'], { encoding: 'utf8' });
+  if (user.status !== 0 || group.status !== 0) return null;
+  return {
+    user: user.stdout.trim(),
+    group: group.stdout.trim(),
+  };
 }
 
 function uniqueLines(text) {
@@ -122,12 +133,27 @@ test('logrotate config passes debug syntax when logrotate is installed', (t) => 
   const configPath = path.join(repoRoot, 'ops/logrotate-darkfinances.conf');
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-logrotate-state-'));
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
+  const identity = currentIdentity();
+  if (!identity) {
+    t.skip('unable to resolve current user/group');
+    return;
+  }
+  const logPath = path.join(stateDir, 'syntax.log');
+  const fixtureConfig = path.join(stateDir, 'logrotate.conf');
+  fs.writeFileSync(logPath, '', { mode: 0o600 });
+  fs.writeFileSync(
+    fixtureConfig,
+    fs.readFileSync(configPath, 'utf8')
+      .replace('/home/dark/actual/bank-sync.log /home/dark/actual-tools/*.log', logPath)
+      .replace('su dark dark', `su ${identity.user} ${identity.group}`)
+      .replace('create 0600 dark dark', `create 0600 ${identity.user} ${identity.group}`),
+  );
 
   const result = spawnSync('logrotate', [
     '-d',
     '-s',
     path.join(stateDir, 'status'),
-    configPath,
+    fixtureConfig,
   ], {
     encoding: 'utf8',
   });
@@ -143,6 +169,11 @@ test('rename/create rotation preserves unique lines from concurrent short-lived 
 
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-logrotate-harness-'));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  const identity = currentIdentity();
+  if (!identity) {
+    t.skip('unable to resolve current user/group');
+    return;
+  }
 
   const logDir = path.join(tempRoot, 'logs');
   const logPath = path.join(logDir, 'bank-sync.log');
@@ -152,8 +183,8 @@ test('rename/create rotation preserves unique lines from concurrent short-lived 
 
   const config = readLogrotateConfig()
     .replace('/home/dark/actual/bank-sync.log /home/dark/actual-tools/*.log', logPath)
-    .replace('su dark dark', `su ${process.env.USER} ${process.env.USER}`)
-    .replace('create 0600 dark dark', `create 0600 ${process.env.USER} ${process.env.USER}`);
+    .replace('su dark dark', `su ${identity.user} ${identity.group}`)
+    .replace('create 0600 dark dark', `create 0600 ${identity.user} ${identity.group}`);
   fs.writeFileSync(configPath, config);
 
   const emitted = new Set();
@@ -179,9 +210,12 @@ test('rename/create rotation preserves unique lines from concurrent short-lived 
   }
 
   const collected = new Set();
-  for (const filePath of [logPath, `${logPath}.1`]) {
-    if (!fs.existsSync(filePath)) continue;
-    for (const line of uniqueLines(fs.readFileSync(filePath, 'utf8'))) {
+  for (const name of fs.readdirSync(logDir).filter((entry) => entry.startsWith('bank-sync.log'))) {
+    const filePath = path.join(logDir, name);
+    const contents = name.endsWith('.gz')
+      ? zlib.gunzipSync(fs.readFileSync(filePath)).toString('utf8')
+      : fs.readFileSync(filePath, 'utf8');
+    for (const line of uniqueLines(contents)) {
       collected.add(line);
     }
   }
@@ -200,6 +234,11 @@ test('rename/create rotation preserves lines written on a held descriptor after 
 
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-logrotate-held-fd-'));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  const identity = currentIdentity();
+  if (!identity) {
+    t.skip('unable to resolve current user/group');
+    return;
+  }
 
   const logPath = path.join(tempRoot, 'held.log');
   const configPath = path.join(tempRoot, 'logrotate.conf');
@@ -209,7 +248,7 @@ test('rename/create rotation preserves lines written on a held descriptor after 
   fs.writeFileSync(configPath, [
     `${logPath} {`,
     '    rotate 3',
-    `    create 0600 ${process.env.USER} ${process.env.USER}`,
+    `    create 0600 ${identity.user} ${identity.group}`,
     '}',
   ].join('\n'));
 

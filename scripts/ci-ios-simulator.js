@@ -4,6 +4,11 @@
 const { spawnSync } = require('child_process');
 
 const PREFERRED_DEVICES = [
+  'iPhone 17 Pro',
+  'iPhone 17',
+  'iPhone 17 Pro Max',
+  'iPhone 17e',
+  'iPhone Air',
   'iPhone 16 Pro',
   'iPhone 16',
   'iPhone 15 Pro',
@@ -31,18 +36,54 @@ function collectIphoneDevices(payload) {
     for (const entry of entries) {
       if (!entry.isAvailable || entry.isAvailable === false) continue;
       if (!entry.name?.startsWith('iPhone')) continue;
-      devices.push(entry);
+      devices.push({ ...entry, runtime });
     }
   }
   return devices;
 }
 
-function selectDevice(devices) {
+function runtimeVersion(runtime) {
+  const match = String(runtime || '').match(/\.iOS-(\d+)(?:-(\d+))?(?:-(\d+))?$/);
+  return match ? match.slice(1).map((part) => Number(part || 0)) : [0, 0, 0];
+}
+
+function requiredRuntimeVersion(value) {
+  if (!value) return null;
+  if (!/^\d+\.\d+(?:\.\d+)?$/.test(value)) {
+    fail(`invalid IOS_SIMULATOR_RUNTIME: ${value}`);
+  }
+  const parts = value.split('.').map(Number);
+  while (parts.length < 3) parts.push(0);
+  return parts;
+}
+
+function selectDevice(devices, { runtime = null } = {}) {
+  const requiredRuntime = requiredRuntimeVersion(runtime);
+  const eligible = requiredRuntime
+    ? devices.filter((device) => {
+        const version = runtimeVersion(device.runtime);
+        return version.every((part, index) => part === requiredRuntime[index]);
+      })
+    : devices;
+  if (requiredRuntime && eligible.length === 0) {
+    fail(`no available iPhone simulator found for iOS ${runtime}`);
+  }
+
+  const ordered = [...eligible].sort((left, right) => {
+    const leftVersion = runtimeVersion(left.runtime);
+    const rightVersion = runtimeVersion(right.runtime);
+    for (let index = 0; index < 3; index += 1) {
+      if (leftVersion[index] !== rightVersion[index]) {
+        return rightVersion[index] - leftVersion[index];
+      }
+    }
+    return String(left.udid || '').localeCompare(String(right.udid || ''));
+  });
   for (const preferred of PREFERRED_DEVICES) {
-    const match = devices.find((device) => device.name === preferred);
+    const match = ordered.find((device) => device.name === preferred);
     if (match) return match;
   }
-  const fallback = devices.find((device) => device.name.startsWith('iPhone'));
+  const fallback = ordered.find((device) => device.name.startsWith('iPhone'));
   if (!fallback) fail('no available iPhone simulator found');
   return fallback;
 }
@@ -61,16 +102,18 @@ function exportDevice(device) {
     const fs = require('fs');
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `device=${device.udid}\n`);
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `name=${device.name}\n`);
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `runtime=${device.runtime}\n`);
   }
   process.stdout.write(`device=${device.udid}\n`);
   process.stdout.write(`name=${device.name}\n`);
+  process.stdout.write(`runtime=${device.runtime}\n`);
 }
 
 function main() {
   try {
     const payload = listAvailableDevices();
     const devices = collectIphoneDevices(payload);
-    const device = selectDevice(devices);
+    const device = selectDevice(devices, { runtime: process.env.IOS_SIMULATOR_RUNTIME || null });
     bootDevice(device.udid);
     exportDevice(device);
   } catch (error) {

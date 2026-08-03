@@ -7,10 +7,10 @@
   "version": "21.3.0",
   "integrity": "sha512-6btEJ0LVhRw4Hx8XSlCHSaSXgGBRpPr+90/7+NYu2HZ+1CP4lRnWqerXUdui7kUWxyst4f6OolKO+oWQ58nqHQ==",
   "lockfilePath": "ops/publisher-toolchain/package-lock.json",
-  "lockfileSha256": "ab707701cb3a1c380aa4c4f8698eb9ab4f2410a15199f0870ca369d29beb51fa",
-  "runtimeClosureDigest": "18f301f4a7ef21fbb1eb2ab1adb4009020b960c520a877963bd843918f14f1a7",
+  "lockfileSha256": "cc92f85b6991c2a3af7c9939bf3085b254460ab245025a4239598cf878a07c2b",
+  "runtimeClosureDigest": "af2e989192906382bcdb546454c1ba11628f28ddfc9b728db79a6c2af2d1c390",
   "packageCount": 510,
-  "fileCount": 15211,
-  "standaloneInstallCommand": "npm --prefix ops/publisher-toolchain ci --workspaces=false",
-  "provenance": "Derived from standalone ops/publisher-toolchain install after npm --prefix ops/publisher-toolchain ci --workspaces=false on darwin/arm64; runtimeClosureDigest covers sorted lockPath/name/version/packagePayloadDigest records where each packagePayloadDigest hashes package files excluding nested node_modules after verifying the installed physical package set exactly matches the lock-derived closure."
+  "fileCount": 15165,
+  "standaloneInstallCommand": "npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts",
+  "provenance": "Derived from standalone ops/publisher-toolchain install after npm --prefix ops/publisher-toolchain ci --workspaces=false --ignore-scripts on darwin/arm64; runtimeClosureDigest covers sorted lockPath/name/version/packagePayloadDigest records where each packagePayloadDigest hashes package files excluding nested node_modules after verifying the installed physical package set exactly matches the lock-derived closure."
 }

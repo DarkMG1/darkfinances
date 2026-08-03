@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { addDays, todayYMD } = require('../lib/date-only');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-bulk-callers-'));
 const stateFiles = {
@@ -28,6 +29,7 @@ process.env.ACTUAL_API_PATH = path.join(__dirname, 'fixtures', 'deletion-actual'
 
 const fakeActual = require('./fixtures/deletion-actual');
 const data = require('../dataModule');
+const fixtureToday = todayYMD();
 
 function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
@@ -53,7 +55,7 @@ function reset(rows = []) {
 const uncategorized = Object.freeze({
   id: 'rule-target',
   account: 'account',
-  date: '2026-07-10',
+  date: addDays(fixtureToday, -10),
   amount: -1200,
   payee: 'payee',
   imported_payee: 'Merchant Cafe',
@@ -66,7 +68,7 @@ const uncategorized = Object.freeze({
 test('applyRules uses bulk checkpoints and reports status', async () => {
   reset([uncategorized]);
   writeJson(process.env.RULES_PATH, {
-    rules: [{ id: 'r1', match: 'Merchant', categoryId: 'category', categoryName: 'Dining', created: '2026-07-10' }],
+    rules: [{ id: 'r1', match: 'Merchant', categoryId: 'category', categoryName: 'Dining', created: uncategorized.date }],
   });
   const result = await data.applyRules({ sync: false, operationKey: 'rules-apply-test' });
   assert.equal(result.ok, false);
@@ -102,7 +104,7 @@ test('phantom dry-run remains effect-free', async () => {
   const phantom = {
     id: 'phantom-dry',
     account: 'account',
-    date: '2026-07-01',
+    date: addDays(fixtureToday, -30),
     amount: -1200,
     payee: 'payee',
     notes: 'temporary authorization hold expected to drop',
@@ -143,7 +145,7 @@ test('zero-item rules apply terminalizes without stranding at sync_pending', asy
 const phantomPending = Object.freeze({
   id: 'phantom-pending',
   account: 'account',
-  date: '2026-06-01',
+  date: addDays(fixtureToday, -30),
   amount: -1200,
   payee: 'payee',
   imported_payee: 'Merchant Cafe',
@@ -156,7 +158,7 @@ const phantomPending = Object.freeze({
 const phantomOther = Object.freeze({
   id: 'phantom-other',
   account: 'account',
-  date: '2026-06-01',
+  date: addDays(fixtureToday, -30),
   amount: -900,
   payee: 'payee',
   imported_payee: 'Merchant Other',
@@ -169,7 +171,7 @@ const phantomOther = Object.freeze({
 const phantomSuperseder = Object.freeze({
   id: 'phantom-cleared',
   account: 'account',
-  date: '2026-06-02',
+  date: addDays(fixtureToday, -29),
   amount: -1200,
   payee: 'payee',
   imported_payee: 'Merchant Cafe',
