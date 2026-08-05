@@ -5959,6 +5959,46 @@ async function removeSplit({ id, accountId, date, categoryId } = {}) {
   }, { mode: 'write' });
 }
 
+function resolveTransactionForDeletion(transactions, id, { allowImported = false } = {}) {
+  let transaction = transactions.find((item) => String(item.id) === String(id));
+  if (!transaction) throw new TransactionNotFoundError();
+  if (transaction.parent_id) {
+    const parent = transactions.find(
+      (item) => String(item.id) === String(transaction.parent_id),
+    );
+    if (!parent) throw new SplitParentNotFoundError();
+    if (!allowImported) throw new SplitLegDeleteError();
+    transaction = parent;
+  }
+  if (!allowImported && transaction.imported_id) {
+    throw new ImportedTransactionError();
+  }
+  return transaction;
+}
+
+async function preflightTransactionDeletion({ id, accountId, date } = {}) {
+  if (!id) throw new Error('id required');
+  if (!accountId || !date) throw new Error('accountId and date required');
+  assertTransactionDeletionAvailable({ accountId, ids: [id] });
+  return withApi(async (api) => {
+    const accounts = await api.getAccounts();
+    if (!accounts.some((account) => String(account.id) === String(accountId))) {
+      throw new AccountNotFoundError();
+    }
+    const transactions = await api.getTransactions(accountId, date, date);
+    const transaction = resolveTransactionForDeletion(transactions, id);
+    assertTransactionDeletionAvailable({
+      accountId,
+      ids: [
+        String(transaction.id),
+        ...(transaction.subtransactions || []).map((leg) => String(leg.id)),
+      ],
+      transaction,
+    });
+    return { ok: true };
+  });
+}
+
 // Permanently remove a transaction. Deleting a split parent removes its legs too.
 // Rocket-Money parity: user-facing deletes are refused for BANK-IMPORTED rows
 // (those carry an imported_id) — only manually-added ones can be deleted by hand.
@@ -5987,19 +6027,7 @@ async function deleteTransaction({
   assertTransactionDeletionAvailable({ accountId, ids: [id], bulkDelegation });
   return withApi(async (api) => {
     const txns = await api.getTransactions(accountId, date, date);
-    let transaction = txns.find((item) => String(item.id) === String(id));
-    if (!transaction) throw new TransactionNotFoundError();
-    if (transaction.parent_id) {
-      if (!allowImported) throw new SplitLegDeleteError();
-      const parent = txns.find(
-        (item) => String(item.id) === String(transaction.parent_id),
-      );
-      if (!parent) throw new SplitParentNotFoundError();
-      transaction = parent;
-    }
-    if (!allowImported && transaction.imported_id) {
-      throw new ImportedTransactionError();
-    }
+    const transaction = resolveTransactionForDeletion(txns, id, { allowImported });
     const ids = [
       String(transaction.id),
       ...(transaction.subtransactions || []).map((leg) => String(leg.id)),
@@ -6904,6 +6932,7 @@ module.exports = {
   assertTransactionDeletionAvailable,
   assertTransactionMutationAvailable,
   assertTransactionReplacementAvailable,
+  preflightTransactionDeletion,
   transactionReplacementMap,
   replaceActualTransaction,
   recoverTransactionDeletionSagas,

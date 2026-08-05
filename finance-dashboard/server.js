@@ -18,7 +18,10 @@ const { pipeline } = require('stream/promises');
 const {
   AccountNotFoundError,
   AppError,
+  ImportedTransactionError,
   KnownPreApplyError,
+  SplitLegDeleteError,
+  SplitParentNotFoundError,
   TransactionNotFoundError,
   classifyError,
 } = require('./lib/errors');
@@ -1278,10 +1281,44 @@ async function sweepReimbH(req, operation) {
   invalidateHttpCache();
   return result;
 }
+function knownDeletePreApplyError(error) {
+  if (error instanceof AccountNotFoundError) {
+    return new KnownPreApplyError('Account not found', {
+      code: 'ACCOUNT_NOT_FOUND',
+      status: 404,
+      cause: error,
+    });
+  }
+  if (error instanceof TransactionNotFoundError) {
+    return new KnownPreApplyError('Transaction not found', {
+      code: 'TRANSACTION_NOT_FOUND',
+      status: 404,
+      cause: error,
+    });
+  }
+  if (
+    error instanceof ImportedTransactionError
+    || error instanceof SplitLegDeleteError
+    || error instanceof SplitParentNotFoundError
+  ) {
+    return new KnownPreApplyError(error.message, {
+      code: error.code,
+      status: error.status,
+      cause: error,
+    });
+  }
+  return null;
+}
 async function deleteTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date } = parse(schemas.deleteTransactionQuery, req.query, 'transaction delete query');
   data.assertTransactionMutationAvailable({ ids: [id] });
+  try {
+    await data.preflightTransactionDeletion({ id, accountId, date });
+  } catch (error) {
+    const knownError = operation && knownDeletePreApplyError(error);
+    throw knownError || error;
+  }
   const result = await applyLocal(operation, () => data.deleteTransaction({ id, accountId, date }));
   await syncAfterLocal(operation); // persist the delete back to the Actual server
   invalidateHttpCache(); // removing a transaction shifts balances/spending/insights
