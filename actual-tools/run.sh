@@ -55,17 +55,45 @@ PY
 
 resolve_safe_data_dir() {
   python3 - "$1" <<'PY'
-import os, pathlib, sys
-p = pathlib.Path(sys.argv[1]).expanduser().resolve()
-allowed = [pathlib.Path('/tmp').resolve(), (pathlib.Path.home() / '.cache/actual-tools').resolve()]
-if str(p) in {'/', str(pathlib.Path.home().resolve())} or not any(root in p.parents for root in allowed):
-    raise SystemExit(f'refusing unsafe FIX_DATA_DIR: {p}')
+import os, pathlib, stat, sys
+
+p = pathlib.Path(os.path.abspath(pathlib.Path(sys.argv[1]).expanduser()))
+home = pathlib.Path(os.path.abspath(pathlib.Path.home()))
+allowed = [pathlib.Path('/tmp'), home / '.cache/actual-tools']
+
+for root in allowed:
+    if p != root and root not in p.parents:
+        continue
+    try:
+        root_st = root.lstat()
+    except FileNotFoundError:
+        continue
+    if stat.S_ISLNK(root_st.st_mode):
+        raise SystemExit(f'refusing symlink allowlist root for FIX_DATA_DIR: {root}')
+    if not stat.S_ISDIR(root_st.st_mode):
+        raise SystemExit(f'refusing non-directory allowlist root for FIX_DATA_DIR: {root}')
+
 try:
-    st = p.stat()
+    st = p.lstat()
 except FileNotFoundError:
     raise SystemExit(f'refusing missing FIX_DATA_DIR (create it with mode 0700 first): {p}')
-if not p.is_dir() or st.st_uid != os.getuid():
+if stat.S_ISLNK(st.st_mode):
+    raise SystemExit(f'refusing symlink FIX_DATA_DIR: {p}')
+if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
     raise SystemExit(f'refusing unowned or non-directory FIX_DATA_DIR: {p}')
+
+p = p.resolve(strict=True)
+real_allowed = []
+for root in allowed:
+    try:
+        root_st = root.lstat()
+    except FileNotFoundError:
+        continue
+    if stat.S_ISDIR(root_st.st_mode) and not stat.S_ISLNK(root_st.st_mode):
+        real_allowed.append(root)
+
+if str(p) in {'/', str(pathlib.Path.home().resolve())} or not any(root in p.parents for root in real_allowed):
+    raise SystemExit(f'refusing unsafe FIX_DATA_DIR: {p}')
 print(p)
 PY
 }
