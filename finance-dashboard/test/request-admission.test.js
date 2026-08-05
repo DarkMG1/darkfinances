@@ -172,6 +172,26 @@ test('principal derives from session or token rather than spoofable client metad
   );
 });
 
+test('demo-only API requests always derive the demo principal', () => {
+  const req = mockReq({
+    path: '/api/v1/accounts',
+    session: { authenticated: true },
+    sessionID: 'live-session',
+    get(name) {
+      if (name === 'X-Finance-Token') return 'live-token';
+      return null;
+    },
+  });
+  assert.equal(
+    deriveRequestPrincipal(req, {
+      apiToken: 'live-token',
+      demoOnly: true,
+      selftest: true,
+    }),
+    'demo',
+  );
+});
+
 test('read route policy classifies control, lightweight disk, cacheable, and direct reads', () => {
   assert.equal(classifyReadRoute(mockReq({ path: '/api/v1/ping' })).policy, 'control');
   assert.equal(classifyReadRoute(mockReq({ path: '/api/v1/operations/op-key-12345678' })).policy, 'control');

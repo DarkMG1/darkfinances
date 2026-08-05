@@ -896,7 +896,7 @@ export function useDeleteReceipt() {
 }
 // Authed <Image> source for a server-stored receipt (expo-image forwards headers).
 export function useReceiptImageSource() {
-  const { serverUrl, token, scope } = useServerConfig();
+  const { serverUrl, token, demo, scope } = useServerConfig();
   const profileGeneration = useSyncExternalStore(
     subscribeProfileGeneration,
     getProfileGeneration,
@@ -907,10 +907,11 @@ export function useReceiptImageSource() {
   return useCallback((id: string) => buildReceiptImageSource({
     uri: `${base}/api/v1/receipts/${encodeURIComponent(id)}/image`,
     headers,
+    demo,
     scope,
     profileGeneration,
     receiptId: id,
-  }), [base, headers, scope, profileGeneration]);
+  }), [base, headers, demo, scope, profileGeneration]);
 }
 
 export function useCreateTransaction() {

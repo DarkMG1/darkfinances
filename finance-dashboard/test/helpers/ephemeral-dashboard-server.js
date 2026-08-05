@@ -112,6 +112,7 @@ const RESERVED_ENV_KEYS = new Set([
   'TEST_DASHBOARD_ROOT',
   'NODE_OPTIONS',
   'DEMO_ONLY',
+  'TEST_SKIP_ACTUAL_STARTUP',
 ]);
 
 const TRUST_SEMANTICS_ENV_KEYS = Object.freeze([
@@ -157,6 +158,7 @@ function buildDashboardServerEnv({
   parentEnv = process.env,
   extraEnv = {},
   demoOnly = true,
+  skipActualStartup = false,
   nodeEnv = 'test',
   port = '0',
   runtimeRoot = null,
@@ -188,6 +190,7 @@ function buildDashboardServerEnv({
     ...(nodeOptions ? { NODE_OPTIONS: nodeOptions } : {}),
     NODE_ENV: nodeEnv,
     DEMO_ONLY: demoOnly ? '1' : '0',
+    TEST_SKIP_ACTUAL_STARTUP: skipActualStartup ? '1' : '0',
     PORT: String(port),
     TEST_SERVER_INSTANCE_ID: instanceId,
     FINANCE_API_TOKEN,
@@ -325,19 +328,22 @@ function registerEphemeralServerCleanup(t, { child, dir }) {
   });
 }
 
-function spawnEphemeralDashboardServer({
-  preloadBody = null,
-  preloadPath = null,
-  preloadFileName = 'mock-data-module.js',
-  extraEnv = {},
-  extraEnvForDir = null,
-  prepareDir = null,
-  instanceId = crypto.randomBytes(16).toString('hex'),
-  tempPrefix = 'darkfinances-ephemeral-server-',
-  demoOnly = true,
-  nodeEnv = 'test',
-  dir: existingDir = null,
-} = {}) {
+function spawnEphemeralDashboardServer(options = {}) {
+  const demoOnlyWasSpecified = Object.prototype.hasOwnProperty.call(options, 'demoOnly');
+  const {
+    preloadBody = null,
+    preloadPath = null,
+    preloadFileName = 'mock-data-module.js',
+    extraEnv = {},
+    extraEnvForDir = null,
+    prepareDir = null,
+    instanceId = crypto.randomBytes(16).toString('hex'),
+    tempPrefix = 'darkfinances-ephemeral-server-',
+    demoOnly = false,
+    skipActualStartup = !demoOnlyWasSpecified,
+    nodeEnv = 'test',
+    dir: existingDir = null,
+  } = options;
   const dir = existingDir || fs.mkdtempSync(path.join(os.tmpdir(), tempPrefix));
   if (prepareDir) prepareDir(dir);
   const dirExtra = extraEnvForDir ? extraEnvForDir(dir) : {};
@@ -354,6 +360,7 @@ function spawnEphemeralDashboardServer({
       preloadPath: preloadBody || preloadPath ? preload : null,
       extraEnv: { ...extraEnv, ...dirExtra },
       demoOnly,
+      skipActualStartup,
       nodeEnv,
     }),
     stdio: ['ignore', 'pipe', 'pipe'],

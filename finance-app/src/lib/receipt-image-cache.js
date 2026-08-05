@@ -11,13 +11,17 @@ function buildReceiptImageCacheKey(scope, profileGeneration, receiptId) {
 function buildReceiptImageSource({
   uri,
   headers,
+  demo = false,
   scope,
   profileGeneration,
   receiptId,
 }) {
   return {
     uri,
-    headers,
+    headers: {
+      ...headers,
+      ...(demo ? { 'X-Demo-Mode': '1' } : {}),
+    },
     cacheKey: buildReceiptImageCacheKey(scope, profileGeneration, receiptId),
   };
 }
