@@ -124,7 +124,7 @@ module.exports = {
     env.COLLECTION_RULES_PATH = configPath;
   } else {
     const configPath = path.join(dir, 'build-rules-config.json');
-    fs.writeFileSync(configPath, JSON.stringify({}));
+    fs.writeFileSync(configPath, JSON.stringify({ skipPatterns: ['fixture-never-matches'] }));
     env.BUILD_RULES_CONFIG_PATH = configPath;
   }
 
