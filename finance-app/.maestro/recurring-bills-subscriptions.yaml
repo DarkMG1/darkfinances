@@ -2,26 +2,35 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+    clearKeychain: true
 - assertVisible:
     id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
 - assertVisible:
     id: home-screen
-- openLink: darkfinances:///bills
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///bills
+- runFlow:
+    when:
+      visible: 'Open in "Finances"'
+    commands:
+      - tapOn:
+          text: Open
 - assertVisible:
     id: bills-screen
 - assertVisible: Upcoming Bills
 - assertVisible:
     id: bills-row-skyline-apartments
     optional: true
-- openLink: darkfinances:///subscriptions
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///subscriptions
+- runFlow:
+    when:
+      visible: 'Open in "Finances"'
+    commands:
+      - tapOn:
+          text: Open
 - assertVisible:
     id: subscriptions-screen
 - assertVisible:

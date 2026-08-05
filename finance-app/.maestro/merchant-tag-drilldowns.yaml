@@ -2,16 +2,21 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+    clearKeychain: true
 - assertVisible:
     id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
 - assertVisible:
     id: home-screen
-- openLink: darkfinances:///merchant/Amazon
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///merchant/Amazon
+- runFlow:
+    when:
+      visible: 'Open in "Finances"'
+    commands:
+      - tapOn:
+          text: Open
 - assertVisible:
     id: merchant-detail-screen
 - assertVisible:
@@ -21,10 +26,14 @@ appId: ${MAESTRO_APP_ID}
 - assertVisible:
     id: merchant-range-6m-selected
 - assertVisible: Amazon
-- openLink: darkfinances:///tag/alex
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///tag/alex
+- runFlow:
+    when:
+      visible: 'Open in "Finances"'
+    commands:
+      - tapOn:
+          text: Open
 - assertVisible:
     id: tag-detail-screen
 - assertVisible:

@@ -2,6 +2,7 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+    clearKeychain: true
 - assertVisible:
     id: onboarding-screen
 - assertVisible: Connect to your server
@@ -14,21 +15,15 @@ appId: ${MAESTRO_APP_ID}
     id: home-screen
 - assertVisible:
     id: home-networth-hero
-- openLink: darkfinances:///spending
 - tapOn:
-    text: Open
-    optional: true
+    id: spending-tab
 - assertVisible:
     id: spending-screen
-- openLink: darkfinances:///transactions
 - tapOn:
-    text: Open
-    optional: true
+    id: activity-tab
 - assertVisible:
     id: activity-screen
-- openLink: darkfinances:///settings
 - tapOn:
-    text: Open
-    optional: true
+    id: settings-tab
 - assertVisible:
     id: settings-screen

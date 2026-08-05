@@ -2,16 +2,15 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+    clearKeychain: true
 - assertVisible:
     id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
 - assertVisible:
     id: home-screen
-- openLink: darkfinances:///settings
 - tapOn:
-    text: Open
-    optional: true
+    id: settings-tab
 - assertVisible:
     id: settings-screen
 - assertVisible:

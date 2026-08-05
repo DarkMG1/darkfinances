@@ -210,19 +210,35 @@ export default function Events() {
       ) : list.length ? (
         <Card style={styles.list}>
           {list.map((e, i) => (
-            <Pressable
-              testID={`events-row-${e.slug}`}
-              key={e.slug}
-              style={({ pressed }) => [styles.row, i === list.length - 1 && { borderBottomWidth: 0 }, pressed && { opacity: 0.6 }]}
-              onLongPress={() => remove(e.slug, e.name)}
-              onPress={() => { haptics.tap(); router.push({ pathname: '/tag/[tag]', params: { tag: `ev-${e.slug}` } }); }}
-            >
-              <View style={{ flex: 1 }}>
-                <Text style={styles.rowName}>{e.name}</Text>
-                <Text style={styles.rowSub}>#{`ev-${e.slug}`}{e.start ? ` · starts ${e.start}` : ''}</Text>
-              </View>
-              <Text style={styles.chev}>›</Text>
-            </Pressable>
+            <View key={e.slug} style={[styles.row, i === list.length - 1 && { borderBottomWidth: 0 }]}>
+              <Pressable
+                testID={`events-row-${e.slug}`}
+                accessibilityRole="link"
+                accessibilityLabel={`${e.name}, #ev-${e.slug}${e.start ? `, starts ${e.start}` : ''}`}
+                accessibilityHint="Opens transactions tagged for this trip"
+                style={({ pressed }) => [styles.rowLink, pressed && { opacity: 0.6 }]}
+                onPress={() => { haptics.tap(); router.push({ pathname: '/tag/[tag]', params: { tag: `ev-${e.slug}` } }); }}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.rowName}>{e.name}</Text>
+                  <Text style={styles.rowSub}>#{`ev-${e.slug}`}{e.start ? ` · starts ${e.start}` : ''}</Text>
+                </View>
+                <Text style={styles.chev}>›</Text>
+              </Pressable>
+              <Pressable
+                testID={`events-delete-${e.slug}`}
+                accessibilityRole="button"
+                accessibilityLabel={`Delete ${e.name}`}
+                accessibilityHint="Shows a confirmation before deleting this trip"
+                accessibilityState={{ disabled: inputLocked }}
+                disabled={inputLocked}
+                hitSlop={8}
+                onPress={() => remove(e.slug, e.name)}
+                style={({ pressed }) => [styles.deleteButton, pressed && !inputLocked && { opacity: 0.5 }, inputLocked && { opacity: 0.4 }]}
+              >
+                <Text style={styles.deleteText}>Delete</Text>
+              </Pressable>
+            </View>
           ))}
         </Card>
       ) : (
@@ -241,9 +257,12 @@ const styles = StyleSheet.create({
   input: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 8, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, minHeight: 44 },
   inputError: { borderColor: '#ff6b6b' },
   list: { paddingVertical: 2 },
-  row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, minHeight: 44 },
+  row: { flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, minHeight: 44 },
+  rowLink: { flex: 1, flexDirection: 'row', alignItems: 'center', alignSelf: 'stretch', paddingVertical: 12, paddingRight: 12, minHeight: 44 },
   rowName: { color: colors.text, fontSize: 15, fontWeight: '600' },
   rowSub: { color: colors.muted, fontSize: 12, marginTop: 2 },
   chev: { color: colors.muted, fontSize: 20, fontWeight: '700' },
+  deleteButton: { alignSelf: 'stretch', justifyContent: 'center', minHeight: 44, paddingLeft: 12 },
+  deleteText: { color: colors.red, fontSize: 13, fontWeight: '600' },
   empty: { color: colors.muted, fontSize: 14 },
 });
