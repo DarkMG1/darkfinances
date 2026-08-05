@@ -79,8 +79,6 @@ except FileNotFoundError:
     raise SystemExit(f'refusing missing FIX_DATA_DIR (create it with mode 0700 first): {p}')
 if stat.S_ISLNK(st.st_mode):
     raise SystemExit(f'refusing symlink FIX_DATA_DIR: {p}')
-if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
-    raise SystemExit(f'refusing unowned or non-directory FIX_DATA_DIR: {p}')
 
 p = p.resolve(strict=True)
 real_allowed = []
@@ -94,6 +92,8 @@ for root in allowed:
 
 if str(p) in {'/', str(pathlib.Path.home().resolve())} or not any(root in p.parents for root in real_allowed):
     raise SystemExit(f'refusing unsafe FIX_DATA_DIR: {p}')
+if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+    raise SystemExit(f'refusing unowned or non-directory FIX_DATA_DIR: {p}')
 print(p)
 PY
 }
