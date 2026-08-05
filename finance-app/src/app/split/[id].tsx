@@ -14,6 +14,14 @@ import { useMutationBannerCoordinator } from '@/hooks/useMutationBannerCoordinat
 import { useMutationScreenAdmission } from '@/hooks/useMutationScreenAdmission';
 import { haptics } from '@/lib/haptics';
 import { isSplitEditorDirty, seedSplitEditorBaseline } from '@/lib/split-editor-dirty';
+import {
+  MAX_SPLIT_LEGS,
+  allocateSplitCents,
+  centsToDollars,
+  dollarsToIntegerCents,
+  formatSplitDollars,
+  formatSplitPercent,
+} from '@/lib/split-allocation';
 import { colors, fmtPos } from '@/theme/colors';
 
 type Mode = 'equal' | 'specific' | 'percent';
@@ -27,30 +35,6 @@ const MODE_LABEL: Record<Mode, string> = {
 
 let seq = 0;
 const nk = () => `leg-${Date.now()}-${seq++}`;
-const r2 = (n: number) => Math.round(n * 100) / 100;
-
-// Master (index 0) always absorbs the balance so the legs sum to the total exactly.
-function computeAmounts(legs: Leg[], mode: Mode, total: number): number[] {
-  const n = legs.length;
-  if (n === 0) return [];
-  if (mode === 'equal') {
-    const each = Math.floor((total * 100) / n) / 100;
-    const arr = legs.map(() => each);
-    arr[0] = r2(total - each * (n - 1));
-    return arr;
-  }
-  if (mode === 'percent') {
-    const arr = legs.map((l, i) => (i === 0 ? 0 : r2((total * (parseFloat(l.pct) || 0)) / 100)));
-    const used = arr.reduce((s, v, i) => (i === 0 ? s : s + v), 0);
-    arr[0] = r2(total - used);
-    return arr;
-  }
-  // specific
-  const arr = legs.map((l, i) => (i === 0 ? 0 : r2(parseFloat(l.amt) || 0)));
-  const used = arr.reduce((s, v, i) => (i === 0 ? s : s + v), 0);
-  arr[0] = r2(total - used);
-  return arr;
-}
 
 export default function SplitEditor() {
   const p = useLocalSearchParams<{ id: string; accountId: string; date: string }>();
@@ -99,8 +83,9 @@ export default function SplitEditor() {
   const legFieldError = (i: number) => splitAction.outcome?.fieldErrors?.[`leg-${i}`];
 
   const d = detail.data;
-  const total = d ? Math.abs(d.amount) : 0;
-  const sign = d && d.amount < 0 ? -1 : 1;
+  const parentCents = d ? dollarsToIntegerCents(d.amount) : null;
+  const totalCents = Math.abs(parentCents ?? 0);
+  const total = centsToDollars(totalCents);
 
   // Seed the editor once the transaction loads — baseline is set atomically with mode/legs.
   useEffect(() => {
@@ -108,24 +93,27 @@ export default function SplitEditor() {
     inited.current = true;
     const nextMode: Mode = d.isSplit && d.legs.length ? 'specific' : 'equal';
     const nextLegs: Leg[] = d.isSplit && d.legs.length
-      ? d.legs.map((l) => ({
-          key: nk(),
-          id: l.id,
-          catId: l.categoryId,
-          catName: l.category || '',
-          name: l.name || '',
-          notes: l.notes || '',
-          showNote: !!l.notes,
-          amt: Math.abs(l.amount).toFixed(2),
-          pct: total ? String(r2((Math.abs(l.amount) / total) * 100)) : '',
-        }))
+      ? d.legs.map((l) => {
+          const legCents = dollarsToIntegerCents(l.amount);
+          return {
+            key: nk(),
+            id: l.id,
+            catId: l.categoryId,
+            catName: l.category || '',
+            name: l.name || '',
+            notes: l.notes || '',
+            showNote: !!l.notes,
+            amt: legCents == null ? '' : formatSplitDollars(Math.abs(legCents)),
+            pct: totalCents && legCents != null ? formatSplitPercent(Math.abs(legCents), totalCents) : '',
+          };
+        })
       : [
-          { key: nk(), catId: d.categoryId, catName: d.category || '', name: '', notes: '', showNote: false, amt: total.toFixed(2), pct: '100' },
+          { key: nk(), catId: d.categoryId, catName: d.category || '', name: '', notes: '', showNote: false, amt: formatSplitDollars(totalCents), pct: '100' },
         ];
     setMode(nextMode);
     setLegs(nextLegs);
     setBaselineSnapshot(seedSplitEditorBaseline(nextMode, nextLegs));
-  }, [d, total]);
+  }, [d, totalCents]);
 
   useEffect(() => {
     const first = splitAction.outcome?.firstField;
@@ -215,15 +203,24 @@ export default function SplitEditor() {
     return unsub;
   }, [isDirty, mutationLocked, navigation]);
 
-  const amounts = useMemo(() => computeAmounts(legs, mode, total), [legs, mode, total]);
+  const allocation = useMemo(
+    () => allocateSplitCents(
+      parentCents,
+      mode,
+      legs.map((leg) => ({ amount: leg.amt, percent: leg.pct })),
+    ),
+    [legs, mode, parentCents],
+  );
   const auxiliaryRefetchQueries = useMemo(
     () => buildSplitEditorAuxiliaryRefetchQueries({ categories }),
     [categories],
   );
-  const master = amounts[0] ?? 0;
-  const balanced = Math.abs(amounts.reduce((s, v) => s + v, 0) - total) < 0.005;
-  const allPositive = amounts.every((v) => v > 0.0049);
-  const canSave = legs.length >= 2 && balanced && allPositive && master > 0.0049;
+  const amountsCents = allocation.displayCents;
+  const masterCents = amountsCents?.[0];
+  const inputsValid = allocation.inputValid;
+  const balanced = allocation.conservesCents;
+  const allPositive = allocation.allLegsPositive;
+  const canSave = allocation.canSave;
 
   const setLeg = (i: number, patch: Partial<Leg>) => {
     if (mutationLocked) return;
@@ -231,10 +228,14 @@ export default function SplitEditor() {
   };
 
   const addLeg = () => {
-    if (mutationLocked) return;
+    if (mutationLocked || legs.length >= MAX_SPLIT_LEGS) return;
     haptics.tap();
     const key = nk();
-    setLegs((ls) => [...ls, { key, catId: null, catName: '', name: '', notes: '', showNote: false, amt: '', pct: '' }]);
+    setLegs((ls) => (
+      ls.length >= MAX_SPLIT_LEGS
+        ? ls
+        : [...ls, { key, catId: null, catName: '', name: '', notes: '', showNote: false, amt: '', pct: '' }]
+    ));
     if (mode === 'specific' || mode === 'percent') setFocusKey(key);
   };
   const removeLeg = (i: number) => {
@@ -248,11 +249,16 @@ export default function SplitEditor() {
     if (mutationLocked) return;
     setModePick(false);
     setLegs((ls) => {
-      const amts = computeAmounts(ls, ls.length ? mode : m, total);
+      const current = allocateSplitCents(
+        parentCents,
+        ls.length ? mode : m,
+        ls.map((leg) => ({ amount: leg.amt, percent: leg.pct })),
+      );
+      if (!current.displayCents) return ls;
       return ls.map((l, i) => ({
         ...l,
-        amt: (amts[i] ?? 0).toFixed(2),
-        pct: total ? String(r2(((amts[i] ?? 0) / total) * 100)) : '',
+        amt: formatSplitDollars(current.displayCents[i] ?? 0),
+        pct: totalCents ? formatSplitPercent(current.displayCents[i] ?? 0, totalCents) : '',
       }));
     });
     setMode(m);
@@ -265,10 +271,11 @@ export default function SplitEditor() {
   };
 
   const doSave = () => {
-    if (!d || !canSave || mutationLocked) return;
+    const legCents = allocation.legCents;
+    if (!d || !canSave || !legCents || mutationLocked) return;
     const payload = legs.map((l, i) => ({
       id: l.id,
-      amount: sign * (amounts[i] ?? 0),
+      amount: centsToDollars(legCents[i]),
       categoryId: l.catId,
       name: l.name.trim() || undefined,
       notes: l.notes.trim() || undefined,
@@ -380,15 +387,19 @@ export default function SplitEditor() {
                         <TextInput
                           testID={`split-leg-${i}-percent-input`}
                           style={styles.amtInput}
-                          value={i === 0 ? String(r2(total ? (master / total) * 100 : 0)) : l.pct}
-                          onChangeText={(v) => setLeg(i, { pct: v.replace(/[^0-9.]/g, '') })}
+                          value={i === 0
+                            ? (masterCents == null ? '' : formatSplitPercent(masterCents, totalCents))
+                            : l.pct}
+                          onChangeText={(v) => setLeg(i, { pct: v })}
                           editable={!mutationLocked && i !== 0}
                           keyboardType="decimal-pad"
                           placeholder="0"
                           placeholderTextColor={colors.muted}
                           autoFocus={focusKey === l.key}
                         />
-                        <Text style={styles.amtSuffix}>%  ·  {fmtPos(amounts[i] ?? 0)}</Text>
+                        <Text style={styles.amtSuffix}>
+                          %  ·  {amountsCents ? fmtPos(centsToDollars(amountsCents[i] ?? 0)) : '—'}
+                        </Text>
                       </>
                     ) : (
                       <>
@@ -396,8 +407,10 @@ export default function SplitEditor() {
                         <TextInput
                           testID={`split-leg-${i}-amount-input`}
                           style={styles.amtInput}
-                          value={i === 0 || mode === 'equal' ? (amounts[i] ?? 0).toFixed(2) : l.amt}
-                          onChangeText={(v) => setLeg(i, { amt: v.replace(/[^0-9.]/g, '') })}
+                          value={i === 0 || mode === 'equal'
+                            ? (amountsCents ? formatSplitDollars(amountsCents[i] ?? 0) : '')
+                            : l.amt}
+                          onChangeText={(v) => setLeg(i, { amt: v })}
                           editable={!mutationLocked && i !== 0 && mode === 'specific'}
                           keyboardType="decimal-pad"
                           placeholder="0.00"
@@ -456,13 +469,17 @@ export default function SplitEditor() {
               </View>
             ))}
 
-            <Pressable testID="split-add-leg-button" onPress={addLeg} disabled={mutationLocked} style={({ pressed }) => [styles.addSplit, pressed && !mutationLocked && { opacity: 0.85 }, mutationLocked && { opacity: 0.4 }]}>
+            <Pressable testID="split-add-leg-button" onPress={addLeg} disabled={mutationLocked || legs.length >= MAX_SPLIT_LEGS} style={({ pressed }) => [styles.addSplit, pressed && !mutationLocked && legs.length < MAX_SPLIT_LEGS && { opacity: 0.85 }, (mutationLocked || legs.length >= MAX_SPLIT_LEGS) && { opacity: 0.4 }]}>
               <Text style={styles.addSplitText}>Add Split</Text>
             </Pressable>
 
-            {!balanced || !allPositive ? (
+            {!inputsValid || !balanced || !allPositive ? (
               <Text style={styles.warn}>
-                {!allPositive ? 'Each split must be greater than $0.' : `Splits must add up to ${fmtPos(total)}.`}
+                {!inputsValid
+                  ? `Enter a valid ${mode === 'percent' ? 'percentage' : 'amount'} for every split.`
+                  : !allPositive
+                    ? 'Each split must be greater than $0.'
+                    : `Splits must add up to ${fmtPos(total)}.`}
               </Text>
             ) : null}
 
