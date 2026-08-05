@@ -183,7 +183,12 @@ test('transaction deletion preflight classifies deterministic failures before mu
   );
 
   data.api.getAccounts = async () => [{ id: 'account-id', closed: false }];
-  data.api.getTransactions = async () => [{ id: 'manual', imported_id: null }];
+  data.api.getTransactions = async () => [{
+    id: 'manual',
+    date: '2026-07-13',
+    imported_id: null,
+    subtransactions: [],
+  }];
   await assert.doesNotReject(data.preflightTransactionDeletion({
     id: 'manual',
     accountId: 'account-id',
