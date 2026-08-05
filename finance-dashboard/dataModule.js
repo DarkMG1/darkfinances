@@ -537,13 +537,22 @@ async function loadBudgetResilient() {
   }
 }
 
-async function withApi(fn, { mode = 'read', skipRecover = false } = {}) {
+async function withApi(fn, {
+  mode = 'read',
+  skipRecover = false,
+  invalidateBefore,
+} = {}) {
   const coordinator = getActualCoordinator();
   const body = async () => {
     await ensureApiReady({ skipRecover });
     return fn(api);
   };
-  if (mode === 'write') return coordinator.runWrite(body, { label: 'withApi:write' });
+  if (mode === 'write') {
+    return coordinator.runWrite(body, {
+      label: 'withApi:write',
+      invalidateBefore,
+    });
+  }
   return coordinator.runRead(body, { label: 'withApi:read' });
 }
 
@@ -4913,6 +4922,7 @@ function getTransactionDeletionSagaManager() {
       referenceSteps: TRANSACTION_DELETION_REFERENCE_STEPS,
       receiptFileState: transactionDeletionReceiptFileState,
       unlinkReceiptFile: unlinkTransactionDeletionReceiptFile,
+      onMutationStart: () => getActualCoordinator().invalidateGeneration(),
       assertExternalAvailable: ({ accountId, original, bulkDelegation }) => {
         getTransactionSagaManager().assertAvailable({ accountId, original });
         getRepaymentConfirmationSagaManager().assertAvailable({
@@ -6040,7 +6050,7 @@ async function deleteTransaction({
       faultInjector,
       bulkDelegation,
     });
-  }, { mode: 'write' });
+  }, { mode: 'write', invalidateBefore: false });
 }
 
 // Rename a transaction's payee (RM "rename"). Resolves the free-text name to a payee
