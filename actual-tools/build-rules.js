@@ -92,9 +92,14 @@ const SKIP_GROUPS = new Set(['Money Movement', 'Income']);
       });
       created++;
     }
+    if (created) await api.sync();
     console.log(`\nAPPLIED — created ${created} rules.`);
   } else {
     console.log(`\nDRY-RUN — no rules created. Re-run with CONFIRM=1 to apply.`);
   }
   await api.shutdown();
-})().catch((e) => { console.error('ERR', (e && e.stack) || e); process.exit(1); });
+})().catch(async (e) => {
+  console.error('ERR', (e && e.stack) || e);
+  try { await api.shutdown(); } catch (_) {}
+  process.exit(1);
+});
