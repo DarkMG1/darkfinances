@@ -16,7 +16,7 @@ test('restore dry-run docs distinguish coordinated RESTORE_DRY_RUN from standalo
   assert.match(release, /Standalone preview/);
   assert.match(release, /Coordinated restore preview/);
   assert.match(release, /`RESTORE_DRY_RUN` applies only to coordinated restore, not the standalone helper/);
-  assert.match(release, /standalone: `CONFIRM=1`/);
+  assert.match(release, /Standalone `CONFIRM=1` is rejected/);
   assert.match(release, /### Restore admission transport migration/);
   assert.match(release, /RESTORE_QUIESCENCE_ADMISSION_PATH/);
   assert.match(release, /Inline JSON\/token transport/);
@@ -26,10 +26,10 @@ test('restore dry-run docs distinguish coordinated RESTORE_DRY_RUN from standalo
 
   assert.match(opsReadme, /`RESTORE_DRY_RUN=1` applies only to[\s\S]*`restore-coordinated\.sh`/);
   assert.match(opsReadme, /Default invocation is[\s\S]*dry-run \(`--dry-run`\)/);
-  assert.match(opsReadme, /live swap requires `CONFIRM=1`/);
+  assert.match(opsReadme, /`CONFIRM=1` is rejected by the standalone/);
   assert.match(opsReadme, /RESTORE_QUIESCENCE_ADMISSION_PATH/);
   assert.match(opsReadme, /Inline JSON\/token transport \(`RESTORE_QUIESCENCE_ADMISSION_TOKEN`\) is rejected/);
-  assert.match(opsReadme, /live restore \(`CONFIRM=1` \/ `--confirm`, i\.e\. `dryRun !== true`\)/);
+  assert.match(opsReadme, /Live restore is allowed only inside the coordinated session/);
 
   assert.match(restoreCli, /RESTORE_QUIESCENCE_ADMISSION_PATH/);
   assert.doesNotMatch(restoreCli, /RESTORE_QUIESCENCE_ADMISSION_TOKEN/);
@@ -50,9 +50,10 @@ test('production restore entrypoints pass explicit boolean dryRun to admission c
   assert.match(stagedRestoreCli, /dryRun:\s*parsed\.dryRun/);
   assert.match(coordinatedRestoreCli, /runCoordinatedRestore\(\{\s*dryRun,/);
   assert.match(coordinatedRestore, /runStagedRestore\)\(\{[\s\S]*?dryRun:\s*false/);
-  assert.equal((stagedRestore.match(/requireQuiescenceAdmission\(/g) || []).length, 2);
+  assert.equal((stagedRestore.match(/requireQuiescenceAdmission\(/g) || []).length, 1);
   assert.match(stagedRestore, /requireQuiescenceAdmission\(\{[\s\S]*?dryRun:\s*true/);
-  assert.match(stagedRestore, /requireQuiescenceAdmission\(\{[\s\S]*?dryRun:\s*false/);
+  assert.match(stagedRestore, /standalone live restore is refused/);
+  assert.match(stagedRestore, /assertCoordinatedLockHeld/);
   assert.match(restoreQuiescenceAdmission, /resolveRestoreAdmissionTransportPolicy\(options\)/);
   const transport = fs.readFileSync(path.join(repoRoot, 'ops/lib/restore-admission-transport.js'), 'utf8');
   assert.match(transport, /assertExplicitRestoreAdmissionMode/);

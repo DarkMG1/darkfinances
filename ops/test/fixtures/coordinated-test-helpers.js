@@ -178,22 +178,46 @@ function restoreDrillContext(root, destination, archivePath, extra = {}) {
   const units = unitOverrides || quiescedUnits();
   const fakeBin = installFakeSystemctl(root, units);
   const runners = injectedRunners || createMockRunners({ units });
+  const env = {
+    ...process.env,
+    ...safeExtra,
+    PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+    RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
+    COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+    COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+    DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+  };
+  const inventory = loadWriterInventory();
+  const writers = require('../../lib/writer-inventory').enumerateWriters(inventory, env);
+  const writerContext = {
+    inventory,
+    env,
+    runners,
+    writers,
+    dashboardDir: destination,
+    allowOwnRestoreLock: true,
+  };
+  const snapshotsById = new Map(writers.map((writer) => [
+    writer.id,
+    require('../../lib/writer-quiescence').captureWriterState(writer, writerContext),
+  ]));
   return {
-    env: {
-      ...process.env,
-      ...safeExtra,
-      PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
-      RESTORE_QUIESCENCE_ADMISSION_PATH: tokenPath,
-      COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
-      COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
-      DARKFINANCES_BACKUP_DIR: coordinatorRoot,
-    },
+    env,
     runners,
     coordinatorRoot,
     layout,
     keys,
     token,
     tokenPath,
+    coordinatedSession: {
+      layout,
+      runId: token.runId,
+      journalId: token.journalId,
+      snapshotsById,
+      context: writerContext,
+      privateKey: keys.pair.privateKey,
+      writerInventoryDigest: writerInventoryDigest(inventory),
+    },
   };
 }
 

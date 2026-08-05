@@ -168,7 +168,7 @@ test('dev inline admission requires explicit allowInlineAdmissionToken opt-in', 
   assert.equal(parsed.nonce, token.nonce);
 });
 
-test('production path accepted for live restore', (t) => {
+test('trusted admission path cannot authorize standalone live restore', (t) => {
   const root = mkRoot(t, 'df-admission-path-live-');
   const dashboard = path.join(root, 'dashboard');
   const destination = path.join(root, 'destination');
@@ -180,17 +180,51 @@ test('production path accepted for live restore', (t) => {
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
   const ctx = restoreDrillContext(root, destination, archive);
-  const result = runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    confirm: true,
-    dryRun: false,
-    env: ctx.env,
-    coordinatorRoot: ctx.coordinatorRoot,
-    layout: ctx.layout,
-    runners: ctx.runners,
+  assert.throws(
+    () => runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      confirm: true,
+      dryRun: false,
+      env: ctx.env,
+      coordinatorRoot: ctx.coordinatorRoot,
+      layout: ctx.layout,
+      runners: ctx.runners,
+    }),
+    /standalone live restore is refused/,
+  );
+  assert.equal(fs.readFileSync(path.join(destination, 'rules.json'), 'utf8'), '[]\n');
+  assert.equal(fs.existsSync(path.join(destination, '.darkfinances-restore')), false);
+});
+
+test('coordinated live restore requires the current process to hold the operation gate', (t) => {
+  const root = mkRoot(t, 'df-admission-no-held-gate-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeProductionDashboard(dashboard, {
+    overrides: { bulkOperationSagas: { schemaVersion: 1, sagas: {} } },
   });
-  assert.equal(result.dryRun, false);
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
+  const ctx = restoreDrillContext(root, destination, archive);
+  const env = { ...ctx.env };
+  delete env.COORDINATED_TEST_SKIP_LOCK;
+  assert.throws(
+    () => runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      confirm: true,
+      dryRun: false,
+      env,
+      runners: ctx.runners,
+      coordinatedSession: ctx.coordinatedSession,
+    }),
+    /held coordinated operation gate/,
+  );
+  assert.equal(fs.readFileSync(path.join(destination, 'rules.json'), 'utf8'), '[]\n');
+  assert.equal(fs.existsSync(path.join(destination, '.darkfinances-restore')), false);
 });
 
 test('admission token path rejects wrong mode', (t) => {

@@ -595,7 +595,7 @@ install -m 700 ops/bin/restore-dashboard-runtime.sh \
 
 Preview first (PR-16 archive trust chain, generation-binding validation, preflight space, and
 read-only writer discovery — **not** live all-writer quiescence proof). Default invocation is
-dry-run (`--dry-run`); live swap requires `CONFIRM=1`. `RESTORE_DRY_RUN=1` applies only to
+dry-run (`--dry-run`); this standalone entrypoint is preview-only. `RESTORE_DRY_RUN=1` applies only to
 `restore-coordinated.sh`, not this standalone helper.
 
 ```bash
@@ -605,17 +605,18 @@ RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
 ```
 
 Dry run exits `2` on success. Active writers may appear as warnings only; do not treat a successful
-preview as evidence that production is safe to mutate. Live swap requires PR-18 writer quiescence
-evidence plus `CONFIRM=1`:
+preview as evidence that production is safe to mutate. `CONFIRM=1` is rejected by the standalone
+helper because an admission token alone cannot keep writers stopped through the check-to-swap
+boundary. Run the coordinated helper for a live restore:
 
 ```bash
-RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
-  CONFIRM=1 "$HOME/.local/bin/restore-dashboard-runtime.sh" \
+"$HOME/.local/bin/restore-coordinated.sh" \
   /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
 ```
 
 This standalone helper does **not** honor `RESTORE_PRE_QUIESCED` and does not stop/start systemd
-writers itself. Use coordinated restore when you need PR-18 stop/restart orchestration.
+writers itself. Live restore is allowed only inside the coordinated session, which holds its
+exclusive operation gate and re-verifies every writer immediately before each destination mutation.
 
 The helper:
 
@@ -634,19 +635,21 @@ The helper:
   references) against the bound manifest before returning `complete`; destination drift fails closed.
 - Serializes live restores with an atomic `restore.lock` in the control root (`O_EXCL`); concurrent
   invocations fail with `restore already in progress`.
-- Requires a PR-18 quiescence admission token with TTL and bindings to archive SHA-256 and destination path;
-  generation evidence is re-read immediately before the first mutation.
+- Requires the live staged swap to run inside the PR-18 coordinator while its exclusive operation
+  gate is held; the coordinator issues a short-lived admission token bound to the archive and destination.
+  Generation evidence is re-read before snapshot capture, and writer quiescence plus gate ownership
+  are re-verified immediately before each destination mutation.
 - Production restore admission must be supplied via `RESTORE_QUIESCENCE_ADMISSION_PATH` pointing at a
-  mode-`0600` regular file under trusted coordinator roots (owner, symlink, hard-link, and path checks).
+  mode-`0600` regular file under trusted coordinator roots for standalone preview (owner, symlink,
+  hard-link, and path checks). Coordinated live restore writes this trusted token internally.
   Inline JSON/token transport (`RESTORE_QUIESCENCE_ADMISSION_TOKEN`) is rejected for production preview
-  and live swap; live restore (`CONFIRM=1` / `--confirm`, i.e. `dryRun !== true`) always requires the
-  trusted file path even in tests.
+  and live swap.
 - Fsyncs journals (write-temp-then-rename), staged files, and parent directories at mutation boundaries where
   the platform supports it.
-- Refuses restore without a PR-18 quiescence admission token (this script does not stop/start services).
+- Refuses preview without a PR-18 quiescence admission token and refuses standalone live mode.
 - Dry-run uses temporary staging only and must not create the destination tree or persistent control paths.
-- Dry-run writer preview is read-only discovery; live restore re-verifies all inventoried writers
-  immediately before the first destination mutation (`assertAllWritersQuiescentForAdmission`).
+- Dry-run writer preview is read-only discovery and does not prove quiescence. Coordinated live restore
+  re-verifies all inventoried writers at every mutation boundary (`assertAllWritersQuiescentForAdmission`).
 
 Afterward, verify `/api/v1/ping`, browser passkey login, the app, receipts, reimbursements, and
 reconciliation state.

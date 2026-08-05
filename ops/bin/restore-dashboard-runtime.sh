@@ -10,7 +10,7 @@ restore_cli="$ops_root/lib/staged-restore-cli.js"
 if [ -z "$archive" ] || [ ! -f "$archive" ]; then
   echo "Usage: RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/token.json $0 <dashboard-runtime-backup-bundle.tgz>" >&2
   echo "Dry run (default): archive/preflight checks only; does not prove live writer quiescence." >&2
-  echo "Live swap: CONFIRM=1 plus a PR-18 quiescence admission token." >&2
+  echo "Live swap: use restore-coordinated.sh so writer stops remain held through swap." >&2
   exit 2
 fi
 
@@ -19,10 +19,11 @@ if [ ! -f "$restore_cli" ]; then
   exit 2
 fi
 
-args=(--dry-run "$archive")
 if [ "${CONFIRM:-0}" = "1" ]; then
-  args=(--confirm "$archive")
+  echo "restore failed: standalone live restore is refused; use restore-coordinated.sh so writer stops remain held through swap" >&2
+  exit 1
 fi
+args=(--dry-run "$archive")
 
 export FINANCE_DASHBOARD_DIR="$dashboard"
 set +e

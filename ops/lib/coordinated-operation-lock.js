@@ -152,10 +152,32 @@ function acquireCoordinatedLock({
   };
 }
 
+function assertCoordinatedLockHeld({
+  layout,
+  operation,
+  env = process.env,
+}) {
+  if (env.COORDINATED_TEST_SKIP_LOCK === '1') {
+    return { skipped: true };
+  }
+  if (!layout?.lockPath || !fs.existsSync(layout.lockPath)) {
+    throw new Error('live restore requires a held coordinated operation gate');
+  }
+  const payload = validateCoordinatedLockOwnership(layout.lockPath, layout.canonicalRoot);
+  if (payload.operation !== operation) {
+    throw new Error(`coordinated operation gate is held for ${payload.operation}, not ${operation}`);
+  }
+  if (payload.pid !== process.pid || !isProcessAlive(payload.pid)) {
+    throw new Error('live restore requires the current coordinator to hold the operation gate');
+  }
+  return payload;
+}
+
 module.exports = {
   LOCK_KIND,
   LOCK_SCHEMA_VERSION,
   acquireCoordinatedLock,
+  assertCoordinatedLockHeld,
   createCoordinatedLockPayload,
   parseCoordinatedLockPayload,
   validateCoordinatedLockOwnership,
