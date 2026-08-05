@@ -21,6 +21,7 @@ function runFixture(t, mockSource, initial = '{"sentinel":true}\n', eventsConten
       ...process.env,
       OWES_TRUTH_PATH: output,
       EVENTS_PATH: eventsContent === null ? path.join(dir, 'missing-events.json') : eventsPath,
+      SPLITWISE_CURRENCY: 'USD',
     },
     encoding: 'utf8',
   });
@@ -40,14 +41,24 @@ module.exports = {
   assert.equal(fs.readFileSync(fixture.output, 'utf8'), '{"sentinel":true}\n');
 });
 
-const pair = (id, name, amount = 10) => ({
+const directPerson = (id, name, slug, amount) => ({ id, name, slug, amount, currency: 'USD' });
+const pairPeople = (id, name, owedToMe, iOweThem = []) => ({
   id,
   name,
-  owedToMe: [{ name: 'Person', slug: 'person', amount }],
+  currency: 'USD',
+  owedToMe,
+  iOweThem,
+});
+const pair = (id, name, amount = 10, person = { id: 101, name: 'Person Example', slug: 'person' }) => ({
+  id,
+  name,
+  currency: 'USD',
+  owedToMe: [directPerson(person.id, person.name, person.slug, amount)],
   iOweThem: [],
 });
 const itemized = (id) => ({
   id,
+  currency: 'USD',
   perPerson: {},
   mySpendItems: [{ id: `${id}01`, date: '2026-07-01', desc: 'Meal', category: 'Dining', myShare: 5, paidByMe: false }],
 });
@@ -79,7 +90,116 @@ module.exports = {
   assert.equal(fs.readFileSync(fixture.output, 'utf8'), '{"sentinel":true}\n');
 });
 
-test('complete snapshots include a prune-safe manifest and private atomic output', (t) => {
+test('same-group first-name slug collisions fail closed', (t) => {
+  const ambiguous = pairPeople(1, 'Group 1', [
+    directPerson(101, 'Alex Able', 'alex', 10),
+    directPerson(202, 'Alex Baker', 'alex', 20),
+  ]);
+  const fixture = runFixture(t, `
+module.exports = {
+  eventToGroup: { first: 'Group 1' },
+  getDirectOwed: async () => (${JSON.stringify(ambiguous)}),
+  getItemizedOwed: async () => (${JSON.stringify(itemized(1))}),
+};
+`);
+  assert.notEqual(fixture.result.status, 0);
+  assert.match(fixture.result.stderr, /identity ambiguity.*configured slug/i);
+  assert.equal(fs.readFileSync(fixture.output, 'utf8'), '{"sentinel":true}\n');
+});
+
+test('cross-group first-name slug collisions fail closed', (t) => {
+  const first = pair(1, 'Group 1', 10, { id: 101, name: 'Alex Able', slug: 'alex' });
+  const second = pair(2, 'Group 2', 20, { id: 202, name: 'Alex Baker', slug: 'alex' });
+  const fixture = runFixture(t, `
+module.exports = {
+  eventToGroup: { first: 'Group 1', second: 'Group 2' },
+  getDirectOwed: async (group) => group === 'Group 1'
+    ? (${JSON.stringify(first)})
+    : (${JSON.stringify(second)}),
+  getItemizedOwed: async (group) => group === 'Group 1'
+    ? (${JSON.stringify(itemized(1))})
+    : (${JSON.stringify(itemized(2))}),
+};
+`);
+  assert.notEqual(fixture.result.status, 0);
+  assert.match(fixture.result.stderr, /identity ambiguity.*configured slug/i);
+  assert.equal(fs.readFileSync(fixture.output, 'utf8'), '{"sentinel":true}\n');
+});
+
+test('configured alias collisions between distinct people fail closed', (t) => {
+  const first = pair(1, 'Group 1', 10, { id: 101, name: 'Jordan Hale', slug: 'housemate' });
+  const second = pair(2, 'Group 2', 20, { id: 202, name: 'Morgan Ives', slug: 'housemate' });
+  const fixture = runFixture(t, `
+module.exports = {
+  eventToGroup: { first: 'Group 1', second: 'Group 2' },
+  getDirectOwed: async (group) => group === 'Group 1'
+    ? (${JSON.stringify(first)})
+    : (${JSON.stringify(second)}),
+  getItemizedOwed: async (group) => group === 'Group 1'
+    ? (${JSON.stringify(itemized(1))})
+    : (${JSON.stringify(itemized(2))}),
+};
+`);
+  assert.notEqual(fixture.result.status, 0);
+  assert.match(fixture.result.stderr, /identity ambiguity.*configured slug/i);
+  assert.equal(fs.readFileSync(fixture.output, 'utf8'), '{"sentinel":true}\n');
+});
+
+test('one source user mapping to multiple configured slugs fails closed', (t) => {
+  const first = pair(1, 'Group 1', 10, { id: 101, name: 'Alex Able', slug: 'alex' });
+  const second = pair(2, 'Group 2', 20, { id: 101, name: 'Alex Able', slug: 'alex-able' });
+  const fixture = runFixture(t, `
+module.exports = {
+  eventToGroup: { first: 'Group 1', second: 'Group 2' },
+  getDirectOwed: async (group) => group === 'Group 1'
+    ? (${JSON.stringify(first)})
+    : (${JSON.stringify(second)}),
+  getItemizedOwed: async (group) => group === 'Group 1'
+    ? (${JSON.stringify(itemized(1))})
+    : (${JSON.stringify(itemized(2))}),
+};
+`);
+  assert.notEqual(fixture.result.status, 0);
+  assert.match(fixture.result.stderr, /identity ambiguity.*source user 101/i);
+  assert.equal(fs.readFileSync(fixture.output, 'utf8'), '{"sentinel":true}\n');
+});
+
+test('canonical-name collisions between distinct source users fail closed', (t) => {
+  const first = pair(1, 'Group 1', 10, { id: 101, name: 'Taylor Example', slug: 'taylor-one' });
+  const second = pair(2, 'Group 2', 20, { id: 202, name: '  taylor   example ', slug: 'taylor-two' });
+  const fixture = runFixture(t, `
+module.exports = {
+  eventToGroup: { first: 'Group 1', second: 'Group 2' },
+  getDirectOwed: async (group) => group === 'Group 1'
+    ? (${JSON.stringify(first)})
+    : (${JSON.stringify(second)}),
+  getItemizedOwed: async (group) => group === 'Group 1'
+    ? (${JSON.stringify(itemized(1))})
+    : (${JSON.stringify(itemized(2))}),
+};
+`);
+  assert.notEqual(fixture.result.status, 0);
+  assert.match(fixture.result.stderr, /identity ambiguity.*canonical name/i);
+  assert.equal(fs.readFileSync(fixture.output, 'utf8'), '{"sentinel":true}\n');
+});
+
+test('pairwise people without stable numeric ids fail closed', (t) => {
+  const missingId = pairPeople(1, 'Group 1', [
+    { name: 'Alex Able', slug: 'alex', amount: 10, currency: 'USD' },
+  ]);
+  const fixture = runFixture(t, `
+module.exports = {
+  eventToGroup: { first: 'Group 1' },
+  getDirectOwed: async () => (${JSON.stringify(missingId)}),
+  getItemizedOwed: async () => (${JSON.stringify(itemized(1))}),
+};
+`);
+  assert.notEqual(fixture.result.status, 0);
+  assert.match(fixture.result.stderr, /stable numeric user id/i);
+  assert.equal(fs.readFileSync(fixture.output, 'utf8'), '{"sentinel":true}\n');
+});
+
+test('one stable person aggregates across groups in a complete private snapshot', (t) => {
   const fixture = runFixture(t, `
 module.exports = {
   eventToGroup: { first: 'Group 1', second: 'Group 2' },
@@ -98,6 +218,12 @@ module.exports = {
   assert.equal(snapshot.manifest.expectedEvents, 2);
   assert.equal(snapshot.manifest.resolvedEvents, 2);
   assert.deepEqual(snapshot.manifest.uniqueGroupIds, ['1', '2']);
+  assert.deepEqual(snapshot.bySlug.person, [
+    { event: 'first', amount: 10 },
+    { event: 'second', amount: 20 },
+  ]);
+  assert.equal(snapshot.perPerson.person.net, 30);
+  assert.equal(snapshot.perPerson.person.owedToMe, 30);
   assert.equal(snapshot.total, 30);
   assert.equal(fs.statSync(fixture.output).mode & 0o777, 0o600);
 });

@@ -17,6 +17,51 @@ const OUT = process.env.OWES_TRUTH_PATH || dashboardPath('owes-truth.json');
 const EXPECTED_CURRENCY = process.env.SPLITWISE_CURRENCY || 'USD';
 const r2 = (n) => +Number(n).toFixed(2);
 
+function createPersonIdentityRegistry() {
+  const bySourceId = new Map();
+  const byCanonicalName = new Map();
+  const bySlug = new Map();
+
+  return {
+    register(person) {
+      const rawId = person && person.id;
+      const numericId = Number(rawId);
+      if (!/^\d+$/.test(String(rawId ?? '')) || !Number.isSafeInteger(numericId) || numericId <= 0) {
+        throw new Error('Splitwise identity ambiguity: pairwise result is missing a stable numeric user id');
+      }
+      const sourceId = String(numericId);
+      const name = String(person.name || '').normalize('NFKC').trim().replace(/\s+/g, ' ');
+      if (!name) {
+        throw new Error(`Splitwise identity ambiguity: source user ${sourceId} has no canonical name`);
+      }
+      const nameKey = name.toLowerCase();
+      const slug = String(person.slug || '').normalize('NFKC').trim().toLowerCase();
+      if (!slug) {
+        throw new Error(`Splitwise identity ambiguity: source user ${sourceId} has no configured slug`);
+      }
+
+      const identity = { sourceId, name, nameKey, slug };
+      const priorSource = bySourceId.get(sourceId);
+      if (priorSource && (priorSource.nameKey !== nameKey || priorSource.slug !== slug)) {
+        throw new Error(`Splitwise identity ambiguity: source user ${sourceId} maps to multiple canonical names or slugs`);
+      }
+      const priorName = byCanonicalName.get(nameKey);
+      if (priorName && (priorName.sourceId !== sourceId || priorName.slug !== slug)) {
+        throw new Error('Splitwise identity ambiguity: one canonical name maps to multiple source users or slugs');
+      }
+      const priorSlug = bySlug.get(slug);
+      if (priorSlug && (priorSlug.sourceId !== sourceId || priorSlug.nameKey !== nameKey)) {
+        throw new Error(`Splitwise identity ambiguity: configured slug "${slug}" maps to multiple source users or canonical names`);
+      }
+
+      bySourceId.set(sourceId, identity);
+      byCanonicalName.set(nameKey, identity);
+      bySlug.set(slug, identity);
+      return identity;
+    },
+  };
+}
+
 function writeSnapshotAtomic(file, value) {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -68,6 +113,7 @@ function loadEventMap() {
   const recon = {};         // slug -> { itemized, pairwise, diff } diagnostic log
   const failures = [];
   const groupOwner = new Map();
+  const personIdentities = createPersonIdentityRegistry();
   let total = 0, ok = 0;
 
   for (const ev of events) {
@@ -103,11 +149,25 @@ function loadEventMap() {
     }
     ok++;
 
-    const eventOwed = pair.owedToMe.map((p) => ({
-      name: p.name,
-      slug: (p.slug || p.name || '').toLowerCase(),
-      amount: r2(p.amount),
-    })).filter((p) => p.slug && p.amount > 0.005);
+    const eventSourceIds = new Set();
+    const registerEventPerson = (person) => {
+      const identity = personIdentities.register(person);
+      if (eventSourceIds.has(identity.sourceId)) {
+        throw new Error(`Splitwise identity ambiguity: source user ${identity.sourceId} appears more than once in group ${pair.id}`);
+      }
+      eventSourceIds.add(identity.sourceId);
+      return identity;
+    };
+    const eventOwed = [];
+    for (const p of pair.owedToMe || []) {
+      const amount = r2(p.amount);
+      if (!Number.isFinite(amount) || amount < 0) {
+        throw new Error(`invalid pairwise amount for Splitwise group ${pair.id}`);
+      }
+      if (amount <= 0.005) continue;
+      const identity = registerEventPerson(p);
+      eventOwed.push({ name: identity.name, slug: identity.slug, amount });
+    }
     for (const p of eventOwed) {
       (bySlug[p.slug] = bySlug[p.slug] || []).push({ event: ev, amount: p.amount });
       const pp = (perPerson[p.slug] = perPerson[p.slug] || { net: 0, owedToMe: 0, iOwe: 0, byEvent: [] });
@@ -117,9 +177,13 @@ function loadEventMap() {
       total += p.amount;
     }
     for (const p of pair.iOweThem || []) {
-      const slug = (p.slug || p.name || '').toLowerCase();
-      if (!slug) continue;
       const amt = r2(p.amount);
+      if (!Number.isFinite(amt) || amt < 0) {
+        throw new Error(`invalid pairwise amount for Splitwise group ${pair.id}`);
+      }
+      if (amt <= 0.005) continue;
+      const identity = registerEventPerson(p);
+      const slug = identity.slug;
       const pp = (perPerson[slug] = perPerson[slug] || { net: 0, owedToMe: 0, iOwe: 0, byEvent: [] });
       pp.net = r2(pp.net - amt);
       pp.iOwe = r2(pp.iOwe + amt);
