@@ -33,8 +33,8 @@ reverse-proxy settings, and alert delivery before installation.
 - Services run as an unprivileged dedicated user.
 - Actual and Finance Dashboard listen on loopback and are exposed only through a trusted HTTPS reverse
   proxy/private access layer. Set `FINANCE_TRUST_PROXY_HOPS=1` in the dashboard environment so
-  rate limits and forwarded client addresses honor the proxy hop. The trusted proxy must be the sole
-  ingress to Node and must overwrite or append `X-Forwarded-For` with the real client address.
+  rate limits and forwarded client addresses honor the proxy hop, but only after the trusted proxy is
+  the sole ingress to Node and overwrites inbound `X-Forwarded-For` with the validated client address.
 - The repository is deployed as `~/finance-dashboard` and supporting tools as `~/actual-tools`.
 - Service secrets live in `~/.openclaw/finance-dashboard.env` with mode `0600`.
 - User systemd is available and, if needed after logout, lingering is enabled for the service account.
@@ -44,7 +44,8 @@ Adjust the unit files if your layout differs. Do not add secrets directly to uni
 
 ## 1. Deploy Actual Server
 
-The Compose file pins Actual Server to `26.7.0`, matching `finance-dashboard`'s `@actual-app/api`.
+The Compose file pins Actual Server to the `26.7.0` tag and its reviewed multi-platform image digest,
+matching `finance-dashboard`'s `@actual-app/api`.
 
 ```bash
 mkdir -p "$HOME/actual/data"
@@ -56,6 +57,18 @@ docker compose -f "$HOME/actual/compose.yml" ps
 
 The container publishes only `127.0.0.1:5006`. Preserve `$HOME/actual/data` across upgrades and include
 it in your independent Actual backup strategy.
+
+When upgrading, resolve the intended tag directly from the registry and copy the top-level manifest
+digest into the `tag@sha256:...` Compose reference:
+
+```bash
+docker buildx imagetools inspect actualbudget/actual-server:26.7.0
+npm run check:alignment
+npm run check:compose
+```
+
+Review the registry source and digest before committing. The alignment gate requires an exact tag and
+lowercase SHA-256 digest; the Compose gate validates the resulting reference.
 
 Version alignment matters across:
 
@@ -80,6 +93,7 @@ ACTUAL_DATA_DIR=/home/<user>/.cache/actual-dashboard
 FINANCE_API_TOKEN=...
 SESSION_SECRET=...
 PUBLIC_ORIGIN=https://finances.example.com
+# Set only after completing the trust-proxy migration checklist below.
 FINANCE_TRUST_PROXY_HOPS=1
 FINANCE_TIME_ZONE=America/Los_Angeles
 TZ=America/Los_Angeles
@@ -117,13 +131,14 @@ When upgrading to dashboard code with fail-safe trust-proxy defaults (absent
 `FINANCE_TRUST_PROXY_HOPS` defaults to `0`), edit
 `~/.openclaw/finance-dashboard.env` **before** restarting `finance-dashboard.service`:
 
-1. If the dashboard sits behind the normal trusted HTTPS reverse proxy on loopback, add
-   `FINANCE_TRUST_PROXY_HOPS=1`.
-2. Confirm the reverse proxy is the **sole ingress** to `127.0.0.1:5007` and overwrites or appends
-   `X-Forwarded-For` with the real client address. Do not expose Node directly to the internet.
-3. Leave `FINANCE_TRUST_PROXY_HOPS` unset or set it to `0` only when Node is reached without a
+1. Confirm the reverse proxy is the **sole ingress** to `127.0.0.1:5007`. Configure its upstream
+   request to discard any inbound `X-Forwarded-For` value and overwrite it with the validated client
+   address. Do not expose Node directly to the internet.
+2. Confirm there is exactly one trusted proxy hop between the client and Node. Only after step 1 is
+   deployed and verified, add `FINANCE_TRUST_PROXY_HOPS=1`.
+3. Leave `FINANCE_TRUST_PROXY_HOPS` unset or set it to `0` when Node is reached without a
    trusted proxy (direct exposure). This is fail-safe: spoofed `X-Forwarded-For` values are ignored,
-   but all proxied clients may share one rate-limit bucket until step 1 is applied.
+   but all proxied clients may share one rate-limit bucket until steps 1–2 are applied.
 4. Restart the dashboard service after saving the environment file:
 
 ```bash
@@ -133,6 +148,11 @@ journalctl --user -u finance-dashboard.service --since "5 min ago" | rg trust-pr
 
 Look for `[trust-proxy]` in the journal when hops remain at `0` on a non-loopback deployment; that
 warning means per-client rate limits still key on the proxy connection address.
+
+Fail the rollout and restore hops to `0` if Node has a proxy-bypass path, the proxy preserves or
+appends client-supplied forwarding chains, the hop count differs from the topology, a forged
+`X-Forwarded-For` controls Node's observed client address, or separate test clients still collapse to
+the proxy address. Fix and re-verify the proxy before enabling trust.
 
 ## 3. Install the dashboard service
 

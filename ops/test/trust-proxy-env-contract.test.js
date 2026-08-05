@@ -23,10 +23,16 @@ test('ops runbook and env example document FINANCE_TRUST_PROXY_HOPS for reverse-
 
   assert.match(envExample, /FINANCE_TRUST_PROXY_HOPS=1/);
   assert.match(opsReadme, /FINANCE_TRUST_PROXY_HOPS=1/);
-  assert.match(opsReadme, /sole ingress/s);
-  assert.match(opsReadme, /overwrite or append[\s\S]*X-Forwarded-For/i);
+  assert.match(
+    opsReadme,
+    /Trust-proxy migration checklist[\s\S]*sole ingress[\s\S]*discard any inbound `X-Forwarded-For`[\s\S]*overwrite[\s\S]*Only after[\s\S]*FINANCE_TRUST_PROXY_HOPS=1/i,
+  );
+  assert.match(opsReadme, /Fail the rollout[\s\S]*proxy-bypass[\s\S]*forged/i);
   assert.match(releaseDoc, /FINANCE_TRUST_PROXY_HOPS=1/);
   assert.match(releaseDoc, /pre-restart|Before restarting/i);
-  assert.match(releaseDoc, /sole ingress/s);
-  assert.match(releaseDoc, /overwrite or append[\s\S]*X-Forwarded-For/i);
+  assert.match(
+    releaseDoc,
+    /Dashboard trust-proxy migration[\s\S]*sole ingress[\s\S]*discard any inbound `X-Forwarded-For`[\s\S]*overwrite[\s\S]*Only after[\s\S]*FINANCE_TRUST_PROXY_HOPS=1/i,
+  );
+  assert.match(releaseDoc, /Fail the rollout[\s\S]*bypasses[\s\S]*forged/i);
 });

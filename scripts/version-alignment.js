@@ -5,6 +5,8 @@ const {
   validateActualAlignment,
 } = require('../finance-dashboard/lib/release-schema');
 
+const ACTUAL_IMAGE_PIN_PATTERN = /^([^@]+)@(sha256:[a-f0-9]{64})$/;
+
 function readJson(file, label) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -54,7 +56,14 @@ function readActualServiceImage(compose) {
   if (images.length !== 1) {
     throw new Error('ops/actual-compose.yml must contain one direct services.actual.image');
   }
-  return images[0];
+  const pin = ACTUAL_IMAGE_PIN_PATTERN.exec(images[0]);
+  if (!pin) {
+    throw new Error(
+      'Actual server image must use an exact tag@sha256 digest pin '
+      + '(actualbudget/actual-server:x.y.z@sha256:<64 lowercase hex>)',
+    );
+  }
+  return pin[1];
 }
 
 function readActualAlignment(root) {
@@ -71,6 +80,7 @@ function readActualAlignment(root) {
 }
 
 module.exports = {
+  ACTUAL_IMAGE_PIN_PATTERN,
   ACTUAL_VERSION_PATTERN,
   readActualServiceImage,
   readActualAlignment,

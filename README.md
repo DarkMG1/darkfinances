@@ -185,9 +185,9 @@ There are three supported delivery paths:
 2. **Signed native build** for dependency, entitlement, widget, notification, or privacy-shield changes.
 3. **Unsigned IPA for Sideloadly** when local Apple signing is unavailable.
 
-The free-sideload build intentionally removes widgets, App Groups, and push-notification entitlements.
+The free-sideload build intentionally removes widgets, App Groups, and notification support.
 It uses the separate `free-sideload` OTA channel and `<app-version>-free-sideload` runtime so a
-full-entitlement bundle cannot reach it. Local notifications continue to work. See
+full-entitlement bundle cannot reach it. Use a full release build for local alerts. See
 [`finance-app/README.md`](./finance-app/README.md).
 
 ## Security and privacy
