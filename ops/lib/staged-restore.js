@@ -55,6 +55,7 @@ const {
 } = require('./restore-snapshot');
 const { writeFileAtomic, fsyncPath } = require('./restore-durable-io');
 const { acquireRestoreLock } = require('./restore-instance-lock');
+const { assertCoordinatedLockHeld } = require('./coordinated-operation-lock');
 
 const JOURNAL_KIND = 'darkfinances-staged-restore-journal';
 const JOURNAL_SCHEMA_VERSION = 2;
@@ -382,6 +383,7 @@ function swapRuntimeTree({
   dryRun,
   injectFault,
   persist,
+  assertMutationGate,
 }) {
   if (dryRun) return { completedSwaps: [], completedDeletes: [], introducedPaths: [] };
 
@@ -396,6 +398,7 @@ function swapRuntimeTree({
   for (const relative of manifestPaths) {
     if (journal.completedSwaps.includes(relative)) continue;
     injectFault?.('before:swap-file', relative);
+    assertMutationGate();
     const source = path.join(stagingRoot, relative);
     const destination = path.join(destinationRoot, relative);
     fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
@@ -415,6 +418,7 @@ function swapRuntimeTree({
   for (const relative of staleDestinationPaths) {
     if (journal.completedDeletes.includes(relative)) continue;
     injectFault?.('before:delete-stale', relative);
+    assertMutationGate();
     removePathIfExists(path.join(destinationRoot, relative));
     journal.completedDeletes.push(relative);
     updateJournal(journal, { phase: PHASE.SWAPPED, completedDeletes: [...journal.completedDeletes] });
@@ -593,6 +597,17 @@ function runStagedRestore(options = {}) {
   const env = options.env || process.env;
   const injectFault = options.injectFault || parseFaultSchedule(env.RESTORE_FAULT_SCHEDULE);
   const persist = !dryRun;
+
+  if (!dryRun) {
+    if (!options.coordinatedSession) {
+      throw new Error('standalone live restore is refused; use restore-coordinated.sh so writer stops remain held through swap');
+    }
+    assertCoordinatedLockHeld({
+      layout: options.coordinatedSession.layout,
+      operation: 'restore',
+      env,
+    });
+  }
 
   if (!dryRun && !destinationExists(requestedDestination)) {
     fs.mkdirSync(requestedDestination, { recursive: true, mode: 0o700 });
@@ -840,8 +855,7 @@ function runStagedRestore(options = {}) {
 
     admission = null;
     admissionConsumed = false;
-    coordinatorLayout = options.layout
-      || (options.coordinatorRoot ? coordinatedLayoutForRoot(options.coordinatorRoot) : null);
+    coordinatorLayout = options.coordinatedSession.layout;
     const writerInventory = loadWriterInventory();
     const writers = enumerateWriters(writerInventory, env);
     const runnersForLive = options.runners || createDefaultRunners(env);
@@ -855,84 +869,50 @@ function runStagedRestore(options = {}) {
         allowOwnRestoreLock: true,
       }));
     }
-    if (options.coordinatedSession) {
-      const session = options.coordinatedSession;
-      for (const [id, prior] of (session.snapshotsById || new Map()).entries()) {
-        const current = liveSnapshots.get(id);
-        if (current && prior) {
-          current.originallyActive = prior.originallyActive;
-          current.originallyEnabled = prior.originallyEnabled;
-          current.originallyRunning = prior.originallyRunning;
-          current.restartPolicy = prior.restartPolicy ?? current.restartPolicy ?? null;
-        }
+    const session = options.coordinatedSession;
+    for (const [id, prior] of (session.snapshotsById || new Map()).entries()) {
+      const current = liveSnapshots.get(id);
+      if (current && prior) {
+        current.originallyActive = prior.originallyActive;
+        current.originallyEnabled = prior.originallyEnabled;
+        current.originallyRunning = prior.originallyRunning;
+        current.restartPolicy = prior.restartPolicy ?? current.restartPolicy ?? null;
       }
-      assertAllWritersQuiescentForAdmission({
-        ...session.context,
-        inventory: writerInventory,
-        writers,
-        snapshotsById: liveSnapshots,
-        dashboardDir: canonicalDestination,
-        allowOwnRestoreLock: true,
-      });
-      admission = issueSignedAdmissionToken({
-        layout: session.layout,
-        runId: session.runId,
-        journalId: session.journalId,
-        snapshotsById: liveSnapshots,
-        context: { ...session.context, inventory: writerInventory, writers, dashboardDir: canonicalDestination },
-        env,
-        privateKey: session.privateKey,
-        bindings: {
-          archiveSha256,
-          destinationRoot: canonicalDestination,
-          manifestArtifactId: manifest.artifact.id,
-          releaseManifestDigest: bindingResult.expectedBinding.releaseManifestDigest,
-          coordinatedManifestDigest: options.coordinatedManifestDigest
-            || bindingResult.expectedBinding.dashboardStateId,
-          writerInventoryDigest: session.writerInventoryDigest,
-          actualDataGeneration: bindingResult.expectedBinding.actualDataGeneration,
-        },
-      });
-      session.onAdmissionIssued?.(admission);
-      const tokenPath = path.join(session.layout.workRoot, `restore-admission-${session.runId}.json`);
-      writeFileAtomic(tokenPath, `${JSON.stringify(admission, null, 2)}\n`, 0o600);
-      env.RESTORE_QUIESCENCE_ADMISSION_PATH = tokenPath;
-    } else {
-      admission = requireQuiescenceAdmission({
-        ...options,
-        env,
-        dryRun: false,
-        requireBindings: true,
-        layout: coordinatorLayout,
-        bindingContext: {
-          archiveSha256,
-          destinationRoot: canonicalDestination,
-          manifestArtifactId: manifest.artifact.id,
-          releaseManifestDigest: bindingResult.expectedBinding.releaseManifestDigest,
-          actualDataGeneration: bindingResult.expectedBinding.actualDataGeneration,
-          coordinatedManifestDigest: options.coordinatedManifestDigest,
-          writerInventoryDigest: options.writerInventoryDigest,
-        },
-        writerContext: {
-          inventory: writerInventory,
-          env,
-          runners: runnersForLive,
-          dashboardDir: canonicalDestination,
-          writers,
-          snapshotsById: liveSnapshots,
-          allowOwnRestoreLock: true,
-        },
-      });
-      assertAllWritersQuiescentForAdmission({
-        inventory: writerInventory,
-        env,
-        runners: runnersForLive,
-        dashboardDir: canonicalDestination,
-        writers,
-        snapshotsById: liveSnapshots,
-        allowOwnRestoreLock: true,
-      }, admission.writers);
     }
+    const writerContext = {
+      ...session.context,
+      inventory: writerInventory,
+      env,
+      runners: runnersForLive,
+      writers,
+      snapshotsById: liveSnapshots,
+      dashboardDir: canonicalDestination,
+      allowOwnRestoreLock: true,
+    };
+    assertAllWritersQuiescentForAdmission(writerContext);
+    admission = issueSignedAdmissionToken({
+      layout: session.layout,
+      runId: session.runId,
+      journalId: session.journalId,
+      snapshotsById: liveSnapshots,
+      context: writerContext,
+      env,
+      privateKey: session.privateKey,
+      bindings: {
+        archiveSha256,
+        destinationRoot: canonicalDestination,
+        manifestArtifactId: manifest.artifact.id,
+        releaseManifestDigest: bindingResult.expectedBinding.releaseManifestDigest,
+        coordinatedManifestDigest: options.coordinatedManifestDigest
+          || bindingResult.expectedBinding.dashboardStateId,
+        writerInventoryDigest: session.writerInventoryDigest,
+        actualDataGeneration: bindingResult.expectedBinding.actualDataGeneration,
+      },
+    });
+    session.onAdmissionIssued?.(admission);
+    const tokenPath = path.join(session.layout.workRoot, `restore-admission-${session.runId}.json`);
+    writeFileAtomic(tokenPath, `${JSON.stringify(admission, null, 2)}\n`, 0o600);
+    env.RESTORE_QUIESCENCE_ADMISSION_PATH = tokenPath;
     assertAdmissionBindings(admission, {
       archiveSha256,
       destinationRoot: canonicalDestination,
@@ -970,6 +950,14 @@ function runStagedRestore(options = {}) {
     writeJournal(layout.journalPath, journal, true);
     injectFault?.('after:snapshot-capture');
 
+    const assertMutationGate = () => {
+      assertCoordinatedLockHeld({
+        layout: session.layout,
+        operation: 'restore',
+        env,
+      });
+      assertAllWritersQuiescentForAdmission(writerContext, admission.writers);
+    };
     swapRuntimeTree({
       destinationRoot: canonicalDestination,
       stagingRoot,
@@ -981,6 +969,7 @@ function runStagedRestore(options = {}) {
       dryRun: false,
       injectFault,
       persist: true,
+      assertMutationGate,
     });
     updateJournal(journal, { phase: PHASE.SWAPPED });
     writeJournal(layout.journalPath, journal, true);

@@ -12,7 +12,7 @@ import { useReconcilePending, useSetReconcileEnabled } from '@/api/hooks/finance
 import { resolveReconcileEnabledSetting } from '@/lib/settings-query-display.js';
 import { useServerConfig } from '@/state/server';
 import { verifyConnectionConfig } from '@/api/client/requests';
-import { authenticate, isBiometricAvailable } from '@/lib/biometric';
+import { authenticate, getBiometricLabel, isBiometricAvailable } from '@/lib/biometric';
 import { checkForUpdatesManual, useOtaUpdateStatus } from '@/lib/auto-update';
 import { DASHBOARD_WIDGETS, useDashboardWidgets } from '@/lib/dashboard-widgets';
 import { buildRedactedDiagnostics } from '@/lib/diagnostics';
@@ -41,6 +41,7 @@ export default function Settings() {
   const { serverUrl, token, faceId, demo, setConfig, clear } = useServerConfig();
   const router = useRouter();
   const [bioAvailable, setBioAvailable] = useState(false);
+  const [biometricLabel, setBiometricLabel] = useState('Biometrics');
   const [editUrl, setEditUrl] = useState(serverUrl ?? '');
   const [newToken, setNewToken] = useState('');
   const [status, setStatus] = useState<string | null>(null);
@@ -78,10 +79,20 @@ export default function Settings() {
   });
 
   useEffect(() => {
-    isBiometricAvailable().then(setBioAvailable);
+    let mounted = true;
+    void isBiometricAvailable().then((available) => {
+      if (mounted) setBioAvailable(available);
+    });
+    void getBiometricLabel().then((label) => {
+      if (mounted) setBiometricLabel(label);
+    });
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const reconEnabledValue = reconcileSetting.enabled;
+  const biometricLockLabel = `${biometricLabel} lock`;
 
   const toggleNotif = async (key: NotifKey, value: boolean) => {
     if (!notificationsAvailable) return;
@@ -130,17 +141,17 @@ export default function Settings() {
     setConnectionAnnounce(message);
   };
 
-  const toggleFaceId = async (value: boolean) => {
-    await runConnectionSave(CONNECTION_SAVE_ACTIONS.FACE_ID, value ? 'Confirm Face ID…' : 'Updating security…', async () => {
+  const toggleBiometricLock = async (value: boolean) => {
+    await runConnectionSave(CONNECTION_SAVE_ACTIONS.FACE_ID, value ? `Confirm ${biometricLabel}…` : 'Updating security…', async () => {
       if (value) {
-        const ok = await authenticate('Enable Face ID lock');
+        const ok = await authenticate(`Enable ${biometricLockLabel}`);
         if (!ok) {
-          announceConnectionStatus('Face ID lock not enabled');
+          announceConnectionStatus(`${biometricLockLabel} not enabled`);
           return;
         }
       }
       await setConfig({ faceId: value });
-      announceConnectionStatus(value ? 'Face ID lock enabled' : 'Face ID lock disabled');
+      announceConnectionStatus(`${biometricLockLabel} ${value ? 'enabled' : 'disabled'}`);
     });
   };
 
@@ -157,7 +168,7 @@ export default function Settings() {
       },
     );
     if (outcome.skipped) {
-      announceConnectionStatus(settingsConnectionSaveSkippedMessage(action));
+      announceConnectionStatus(settingsConnectionSaveSkippedMessage(action, biometricLabel));
     }
     return outcome;
   };
@@ -306,15 +317,18 @@ export default function Settings() {
       <Card style={{ marginBottom: 16 }}>
         <View style={styles.switchRow}>
           <View>
-            <Text style={styles.switchLabel}>Face ID Lock</Text>
-            <Text style={styles.switchSub}>{bioAvailable ? 'Require Face ID on open' : 'Not available on this device'}</Text>
+            <Text style={styles.switchLabel}>{biometricLabel} Lock</Text>
+            <Text style={styles.switchSub}>{bioAvailable ? `Require ${biometricLabel} on open` : 'Not available on this device'}</Text>
           </View>
           <Switch
             testID="settings-face-id-switch"
             value={faceId}
-            onValueChange={toggleFaceId}
+            onValueChange={toggleBiometricLock}
             disabled={!bioAvailable || connectionBusy}
-            accessibilityLabel={connectionSwitchAccessibilityLabel(CONNECTION_SAVE_ACTIONS.FACE_ID, busyOwner)}
+            accessibilityLabel={connectionSwitchAccessibilityLabel(CONNECTION_SAVE_ACTIONS.FACE_ID, busyOwner, {
+              idleLabel: biometricLockLabel,
+              inProgressLabel: `Updating ${biometricLockLabel}`,
+            })}
             accessibilityState={{ disabled: !bioAvailable || connectionBusy, busy: busyOwner?.action === CONNECTION_SAVE_ACTIONS.FACE_ID }}
             trackColor={{ true: colors.accent }}
           />

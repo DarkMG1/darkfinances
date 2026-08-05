@@ -44,13 +44,22 @@ enter the checkpointed rollback path without dropping or merging evidence.
 
 Legacy records are migrated deterministically. A legacy record with an exact saved replacement or
 restoration ID is revalidated and replayed by that ID. A record without sufficient durable identity
-becomes `legacy_unresolved`; recovery performs no date/amount guess and no Actual or sidecar mutation.
+becomes `legacy_unresolved`; recovery performs no date/amount guess. If the exact original ID is still
+present with the saved full financial shape and no second live owner of its imported identity,
+recovery safely terminalizes the saga as `rolled_back` without an Actual or reference-sidecar
+mutation. Otherwise the saga remains nonterminal, checkpoints a bounded `lastError`, and appears by
+saga ID in recovery `.errors` and the dashboard's operational-saga health inventory. This keeps
+readiness false and preserves transaction ownership until an operator restores a verified backup or
+otherwise supplies durable evidence through a reviewed repair. Re-running recovery after repair is
+idempotent.
 
 ## Deployment and rollback
 
 Before deployment or rollback, drain mutation traffic, take a verified backup containing Actual state,
 the operation journal, both transaction saga files, all reference sidecars, and receipt files, then
-inventory every v2 replacement `phase` and every deletion `phase`.
+inventory every v2 replacement `phase`, every deletion `phase`, and the operational-saga health
+errors. Treat every `legacy_unresolved` record as active even if its compatibility `status` is
+`"aborted"`.
 
 The previous server may serve mutations only when every saga is terminal (`completed` or `rolled_back`
 under v2 semantics). Although it safely skips active v2 records, its all-record 100-entry pruning and

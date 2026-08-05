@@ -55,6 +55,17 @@ test('generated contract includes content-bound review task fields', () => {
   assert.match(types, /contentVersion: number;/);
 });
 
+test('generated contract describes bounded list metadata and optional receipt OCR', () => {
+  assert.match(generatedTypes, /export interface OffsetPagination/);
+  assert.match(generatedTypes, /nextOffset: number \| null;/);
+  assert.match(generatedTypes, /export interface Receipts[\s\S]*pagination: OffsetPagination;/);
+  assert.match(generatedTypes, /export interface Receipts[\s\S]*ocrIncluded: boolean;/);
+  assert.match(generatedTypes, /ocrText\?: string;/);
+  assert.match(generatedTypes, /ocrLines\?: string\[\];/);
+  assert.match(generatedTypes, /export interface Rules[\s\S]*pagination: OffsetPagination;/);
+  assert.match(generatedTypes, /export interface EventsResponse[\s\S]*pagination: OffsetPagination;/);
+});
+
 test('generated contract includes transfer identity completeness types', () => {
   const types = fs.readFileSync(path.resolve(__dirname, '..', '..', 'finance-app', 'src', 'api', 'generated', 'types.ts'), 'utf8');
   assert.match(types, /export interface ProjectionCompleteness/);

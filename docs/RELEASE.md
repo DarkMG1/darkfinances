@@ -3,7 +3,7 @@
 DarkFinances ships through three coordinated paths:
 
 1. **Full native build** — widgets, App Groups, push-notification entitlement, EAS Update on the `production` channel.
-2. **Free sideload IPA** — `FREE_IOS_SIDELOAD=1` removes widget/push entitlements; local notifications remain.
+2. **Free sideload IPA** — `FREE_IOS_SIDELOAD=1` removes widgets, App Groups, and notification support.
 3. **OTA updates** — JavaScript/assets only when the installed `runtimeVersion` matches.
 
 ## Content-addressed release manifest
@@ -54,6 +54,71 @@ export RELEASE_KEYRING_PATH=/secure/path/to/release-signing-v1/release-keyring.j
 
 Add `RELEASE_KEYRING_PATH` to the dashboard systemd `EnvironmentFile`. Keep the private signing key
 offline; deploy only the public keyring to the host.
+
+### Rotate, retire, or revoke a release-signing key
+
+Keyring entries support `notBefore`, `notAfter`, and optional `revokedAt` canonical ISO timestamps.
+Verification checks the signature's `signedAt` and the current time, so an expired or revoked entry
+also stops historical signatures from verifying. Plan routine rotation around the retention period of
+signed manifests and backups, not only the next deployment.
+
+Use this order for a planned rotation:
+
+1. **Generate a distinct replacement key** in a new private directory. Do not overwrite the active
+   material:
+
+   ```bash
+   node scripts/release-signing-keygen.js \
+     --output-dir=/secure/path/to/release-signing-v2
+   ```
+
+2. **Stage one combined public keyring**. Copy the complete old `keys` array and append the new
+   public entry from `release-signing-v2/release-keyring.json`. Preserve unique `keyId` values. Set
+   the new entry's `notBefore` no later than its planned activation, and leave the old entry's
+   `notAfter` beyond the overlap, rollback, and retained-artifact verification windows. The overlap
+   must cover keyring deployment to every dashboard, publisher, backup verifier, and restore host.
+   Keep the staged keyring private (`0600`) until it is deployed.
+3. **Deploy the combined keyring before changing any signer.** Atomically replace the public
+   `RELEASE_KEYRING_PATH` on every verifier, preserving mode `0600` or `0644`, then verify an existing
+   old-key manifest on every host:
+
+   ```bash
+   RELEASE_KEYRING_PATH=/deployed/release-keyring.json \
+     node scripts/release-manifest.js --verify=/path/to/current/release-manifest.json
+   ```
+
+   Stop if any host does not recognize the old key; signing with the replacement would strand that
+   verifier.
+4. **Prove the replacement key and combined keyring together** on the trusted signing host:
+
+   ```bash
+   export RELEASE_SIGNING_KEY_PATH=/secure/path/to/release-signing-v2/release-signing-key.json
+   export RELEASE_KEYRING_PATH=/secure/path/to/combined-release-keyring.json
+   ROTATION_SMOKE_DIR="$(mktemp -d)"
+   node scripts/release-manifest.js "$ROTATION_SMOKE_DIR/release-manifest.json"
+   node scripts/release-manifest.js \
+     --verify="$ROTATION_SMOKE_DIR/release-manifest.json"
+   rm -rf -- "$ROTATION_SMOKE_DIR"
+   ```
+
+5. **Activate the new signer and redeploy signed evidence.** Point the operator/publisher signing
+   environment at the v2 private key, generate each production manifest and sibling signature, deploy
+   the pair, and verify it through the normal dashboard, OTA, IPA, backup, and restore checks. Keep
+   the combined keyring deployed throughout the overlap window.
+6. **Retire the old signer only after the overlap succeeds.** Remove access to its private key first,
+   but retain its non-revoked public entry until every old-signed release, rollback artifact, and
+   retained backup no longer needs verification. After that retention boundary, let `notAfter` pass
+   and remove the entry in a later atomic keyring deployment. Do not use `revokedAt` for routine
+   retirement.
+
+For a confirmed private-key compromise, first deploy a combined keyring containing a trusted
+replacement, re-sign and redeploy all active evidence with that replacement, and verify those new
+signatures. Then add `revokedAt` to the compromised entry and atomically redeploy the keyring
+everywhere. Once current time reaches `revokedAt`, this implementation rejects the compromised key
+even for signatures created before revocation; old releases and backups signed only by that key are
+therefore intentionally unusable and require incident-specific recovery evidence. Record the key IDs,
+timestamps, affected artifacts, and host verification results in the incident log. Never copy a
+replacement private key to verifier hosts.
 
 Atomic publication renames the manifest first and the sibling signature second. The signature rename
 is the commit marker: a crash between renames leaves verification failing and production startup
@@ -144,9 +209,11 @@ differences and use separate OTA channels and runtime identities.
 node scripts/check-version-alignment.js
 ```
 
-Requires exact `x.y.z` versions in `ops/actual-compose.yml`, `finance-dashboard/package.json`, and
-`actual-tools/package.json`, with both API dependencies exactly equal to the pinned server image.
-Manifest construction and verification reuse this same alignment rule.
+Requires an exact `x.y.z` tag plus `sha256` digest in `ops/actual-compose.yml` and exact `x.y.z`
+versions in `finance-dashboard/package.json` and `actual-tools/package.json`, with both API
+dependencies exactly equal to the pinned server tag. Manifest construction and verification reuse
+this same alignment rule. Resolve and review the registry digest for the intended tag before changing
+the Compose reference; never substitute a digest obtained from an untrusted mirror.
 
 ## Contract freshness
 
@@ -217,13 +284,14 @@ instead.
 - **Coordinated restore preview** (`restore-coordinated.sh --dry-run` or `RESTORE_DRY_RUN=1`): same
   read-only writer boundary checks inside the coordinated session; does not stop services or mutate
   destination bytes. `RESTORE_DRY_RUN` applies only to coordinated restore, not the standalone helper.
-- **Live restore** — standalone: `CONFIRM=1` with a PR-18 quiescence admission token; coordinated:
-  live session without `--dry-run`/`RESTORE_DRY_RUN`. Both paths re-verify **all** inventoried writers
-  with live state checks (`assertAllWritersQuiescentForAdmission`) immediately before the first
-  destination mutation. Stale tokens or post-token writer activity fail closed.
+- **Live restore** — only the coordinated live session (without `--dry-run`/`RESTORE_DRY_RUN`) may
+  swap runtime state. Standalone `CONFIRM=1` is rejected because a token alone cannot hold writer
+  stops across the check-to-swap boundary. The coordinator holds its exclusive operation gate and
+  re-verifies **all** inventoried writers (`assertAllWritersQuiescentForAdmission`) immediately
+  before every destination mutation; post-token writer activity fails closed.
 
-Restore remains `CONFIRM=1` gated. The restore helper does not stop or start services; live swap
-requires writers to already be quiescent or a coordinated restore session that stops them first.
+The standalone restore helper does not stop or start services and remains preview-only. Use
+`restore-coordinated.sh` for live restore, including `RESTORE_PRE_QUIESCED=1` maintenance windows.
 
 ### Restore admission transport migration
 
@@ -242,7 +310,7 @@ Trusted admission file requirements:
 Preview vs live mode is explicit boolean `dryRun` on the restore contract (not `NODE_ENV`):
 
 - **Standalone preview**: default/`--dry-run`; `--dry-run` wins over ambient `CONFIRM=1`
-- **Standalone live**: `--confirm` or `CONFIRM=1` without `--dry-run`
+- **Standalone live**: unsupported; `--confirm` or `CONFIRM=1` fails closed
 - **Coordinated preview**: `restore-coordinated.sh --dry-run` or `RESTORE_DRY_RUN=1` (read-only;
   does not consume admission)
 - **Coordinated live**: neither flag set; admission issued to a trusted path during the session
@@ -258,13 +326,24 @@ non-loopback deployments.
 
 Before restarting production after such an upgrade:
 
-1. Add `FINANCE_TRUST_PROXY_HOPS=1` to the private dashboard environment when the process sits behind
-   the usual trusted HTTPS reverse proxy on loopback.
-2. Keep that reverse proxy as the sole ingress to Node and configure it to overwrite or append
-   `X-Forwarded-For` with the real client address.
-3. Restart `finance-dashboard.service` and confirm the `[trust-proxy]` warning disappears once hops
-   are set to `1`.
+1. Keep the trusted HTTPS reverse proxy as the sole ingress to Node. Configure its upstream request
+   to **discard any inbound `X-Forwarded-For` value and overwrite it** with the validated client
+   address.
+2. Verify there is exactly one trusted proxy hop between the client and Node. Only after step 1 is
+   deployed and verified, add `FINANCE_TRUST_PROXY_HOPS=1` to the private dashboard environment.
+3. Restart `finance-dashboard.service`; confirm the `[trust-proxy]` warning disappears and rate-limit
+   logs identify the proxy-supplied client address.
+
+Fail the rollout and leave `FINANCE_TRUST_PROXY_HOPS` unset (or `0`) if any of these checks fail:
+
+- Node is reachable through any path that bypasses the trusted proxy.
+- The proxy preserves, trusts, or appends a client-supplied `X-Forwarded-For` chain instead of
+  overwriting it.
+- The configured hop count does not exactly match the deployment topology.
+- A request with a forged inbound `X-Forwarded-For` can select the address observed by Node, or
+  separate test clients collapse to the proxy address after restart.
 
 Leaving the variable unset preserves security during the rollout but shares one rate-limit bucket
-across all proxied clients until step 1 is applied. See [`ops/README.md`](../ops/README.md) for the
+across all proxied clients until the proxy prerequisite and hop setting are applied. See
+[`ops/README.md`](../ops/README.md) for the
 full pre-restart checklist.

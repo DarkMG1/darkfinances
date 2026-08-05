@@ -3,7 +3,7 @@
 const { validState, isCompleted, isKnownFailed } = require('./operation-journal');
 const { loadSplitwiseMirrorResolutions } = require('./splitwise-mirror');
 
-const TERMINAL_REPLACEMENT = new Set(['completed', 'rolled_back', 'legacy_unresolved', 'aborted']);
+const TERMINAL_REPLACEMENT = new Set(['completed', 'rolled_back', 'aborted']);
 const TERMINAL_DELETION = new Set(['completed']);
 const TERMINAL_REPAYMENT = new Set(['completed']);
 const TERMINAL_REIMBURSEMENT_LINK = new Set(['completed']);

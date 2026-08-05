@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { mock } = require('node:test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -10,6 +11,7 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-recurring-overri
 const fixturePath = path.join(__dirname, 'fixtures', 'safe-to-spend.js');
 process.env.ACTUAL_API_PATH = fixturePath;
 process.env.ACTUAL_DATA_DIR = path.join(dir, 'actual-cache');
+process.env.FINANCE_TIME_ZONE = 'America/Los_Angeles';
 for (const [env, filename] of Object.entries({
   ACCOUNT_OVERRIDES_PATH: 'account-overrides.json',
   BILLS_PAID_PATH: 'bills-paid.json',
@@ -35,7 +37,14 @@ const { getRecurring, resetApi, setRecurringOverride } = require('../dataModule'
 const { parse, schemas } = require('../lib/validation');
 const { RequestValidationError } = require('../lib/errors');
 
-test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+test.before(() => {
+  mock.timers.enable({ apis: ['Date'], now: new Date('2026-07-15T17:01:00-07:00') });
+});
+
+test.after(() => {
+  mock.timers.reset();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);

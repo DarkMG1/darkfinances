@@ -26,7 +26,6 @@ const TERMINAL_SAGA_PHASES = new Set([
   'completed',
   'rolled_back',
   'aborted',
-  'legacy_unresolved',
 ]);
 
 function isPlainObject(value) {

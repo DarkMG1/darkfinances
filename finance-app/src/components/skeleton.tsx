@@ -1,6 +1,10 @@
 import React, { useEffect } from 'react';
 import { StyleSheet, View, ViewStyle, DimensionValue } from 'react-native';
 import Animated, { useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
+import {
+  AccessibilityAnnouncementEffect,
+  visibleStatusLiveRegionProps,
+} from '@/components/accessibility-live-region';
 import { colors } from '@/theme/colors';
 
 // A single shimmering placeholder block. Pulses opacity (cheap + reliable) so
@@ -34,9 +38,16 @@ export function SkeletonRow() {
 }
 
 // A card full of skeleton rows — drop-in replacement for <Loading/> on list screens.
-export function SkeletonList({ rows = 6, hero = false }: { rows?: number; hero?: boolean }) {
+export function SkeletonList({ rows = 6, hero = false, accessibilityLabel = 'Loading content' }: { rows?: number; hero?: boolean; accessibilityLabel?: string }) {
   return (
-    <View>
+    <View
+      accessible
+      accessibilityRole="progressbar"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ busy: true }}
+      {...visibleStatusLiveRegionProps()}
+    >
+      <AccessibilityAnnouncementEffect message={accessibilityLabel} />
       {hero ? (
         <View style={{ marginTop: 8, marginBottom: 20, gap: 10 }}>
           <Skeleton width={110} height={11} />

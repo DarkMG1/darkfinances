@@ -46,6 +46,12 @@ const {
   stripBase64Envelope,
 } = require('./lib/receipt-limits');
 const {
+  MAX_LIST_LIMIT,
+  MAX_OCR_LIST_LIMIT,
+  boundedString,
+  paginateBoundedList,
+} = require('./lib/bounded-list');
+const {
   REFERENCE_STEPS: TRANSACTION_DELETION_REFERENCE_STEPS,
   rewriteTransactionDeletionReferences,
 } = require('./lib/transaction-deletion-references');
@@ -361,7 +367,7 @@ const apiHealth = {
 };
 
 let sagaRecoverCompleted = false;
-const TERMINAL_TRANSACTION_REPLACEMENT = new Set(['completed', 'rolled_back', 'legacy_unresolved', 'aborted']);
+const TERMINAL_TRANSACTION_REPLACEMENT = new Set(['completed', 'rolled_back', 'aborted']);
 const TERMINAL_TRANSACTION_DELETION = new Set(['completed']);
 const TERMINAL_REPAYMENT_CONFIRMATION = new Set(['completed']);
 const TERMINAL_REIMBURSEMENT_LINK = new Set(['completed']);
@@ -537,13 +543,22 @@ async function loadBudgetResilient() {
   }
 }
 
-async function withApi(fn, { mode = 'read', skipRecover = false } = {}) {
+async function withApi(fn, {
+  mode = 'read',
+  skipRecover = false,
+  invalidateBefore,
+} = {}) {
   const coordinator = getActualCoordinator();
   const body = async () => {
     await ensureApiReady({ skipRecover });
     return fn(api);
   };
-  if (mode === 'write') return coordinator.runWrite(body, { label: 'withApi:write' });
+  if (mode === 'write') {
+    return coordinator.runWrite(body, {
+      label: 'withApi:write',
+      invalidateBefore,
+    });
+  }
   return coordinator.runRead(body, { label: 'withApi:read' });
 }
 
@@ -656,7 +671,7 @@ function getHealth() {
     initializedAt: apiHealth.initializedAt,
     lastSyncAt: apiHealth.lastSyncAt,
     lastErrorAt: apiHealth.lastErrorAt,
-    lastError: apiHealth.lastError,
+    lastError: apiHealth.lastError ? 'Finance data is unavailable' : null,
     operationalSagas: { ...operationalSagaHealth },
   };
 }
@@ -1960,9 +1975,28 @@ function readEvents() {
   const s = readJsonSafe(EVENTS_PATH, { events: [] });
   return { events: s && Array.isArray(s.events) ? s.events : [] };
 }
-async function getEvents() {
+function publicEvent(event) {
+  return {
+    slug: boundedString(event?.slug, 80),
+    name: boundedString(event?.name, 300),
+    start: boundedString(event?.start, 10),
+    members: (Array.isArray(event?.members) ? event.members : [])
+      .slice(0, 100)
+      .map((member) => boundedString(member, 100)),
+    group: boundedString(event?.group, 300),
+    created: boundedString(event?.created, 64),
+  };
+}
+async function getEvents({ limit, offset } = {}) {
   const config = loadQueryScalingConfig();
   const { events } = readEvents();
+  const page = paginateBoundedList(
+    events
+      .slice()
+      .sort((a, b) => String(b?.start || '').localeCompare(String(a?.start || ''))
+        || String(b?.created || '').localeCompare(String(a?.created || ''))),
+    { limit, offset },
+  );
   // Enrich each event with its tagged-charge count + total from the ledger window.
   let tagCounts = {};
   try {
@@ -2001,10 +2035,12 @@ async function getEvents() {
     /* best-effort enrichment */
   }
   return {
-    events: events
-      .slice()
-      .sort((a, b) => (b.start || '').localeCompare(a.start || '') || (b.created || '').localeCompare(a.created || ''))
-      .map((e) => ({ ...e, taggedCount: (tagCounts[e.slug] || {}).count || 0 })),
+    events: page.items.map((event) => {
+      const bounded = publicEvent(event);
+      return { ...bounded, taggedCount: (tagCounts[bounded.slug] || {}).count || 0 };
+    }),
+    truncated: page.truncated,
+    pagination: page.pagination,
   };
 }
 function saveEvent({ slug, name, start, members, group } = {}) {
@@ -2346,58 +2382,70 @@ function writeReimbSuggest(s) { writeJsonSafe(REIMB_SUGGEST_PATH, s); }
 // { allocations:[{expense,amount}], matched, kind, score, reason } — allocations may
 // be [] when there are no clean ledger charges to point at (person-level repayment).
 function allocateInflow(inflow, expenses) {
-  const pool = expenses.filter((e) => e.remaining > 0.005).sort((a, b) => (a.date < b.date ? -1 : 1));
-  const A = round2(inflow.amount);
-  const tol = Math.max(1, A * 0.02);
+  const amountCents = toCents(inflow.amount);
+  const pool = expenses
+    .map((expense) => ({ expense, remainingCents: toCents(expense.remaining) }))
+    .filter((entry) => entry.remainingCents > 0)
+    .sort((a, b) => String(a.expense.date || '').localeCompare(String(b.expense.date || ''))
+      || String(a.expense.id || '').localeCompare(String(b.expense.id || '')));
+  const toleranceCents = Math.max(100, Math.floor(amountCents / 50));
   const refOf = (e) => ({ id: e.id, date: e.date, payee: e.payee, amount: e.amount });
-  const outstanding = round2(pool.reduce((s, e) => s + e.remaining, 0));
+  const outstandingCents = sumCents(pool.map((entry) => entry.remainingCents));
 
   // 1. Exact single expense.
-  const exact = pool.find((e) => Math.abs(e.remaining - A) <= tol);
+  const exact = pool.find((entry) => Math.abs(entry.remainingCents - amountCents) <= toleranceCents);
   if (exact) {
-    const amt = round2(Math.min(exact.remaining, A));
-    return { allocations: [{ expense: refOf(exact), amount: amt }], matched: amt, kind: 'exact', score: 0.98,
-      reason: `Matches ${exact.payee || 'a charge'} (${exact.date})` };
+    const allocatedCents = Math.min(exact.remainingCents, amountCents);
+    const amount = fromCents(allocatedCents);
+    return { allocations: [{ expense: refOf(exact.expense), amount }], matched: amount, kind: 'exact', score: 0.98,
+      reason: `Matches ${exact.expense.payee || 'a charge'} (${exact.expense.date})` };
   }
-  // 2. Subset of 2–3 expenses summing ~ A (each capped so the total never exceeds A).
+  // 2. Subset of 2–3 expenses summing ~ the inflow (capped to conserve cents).
   for (let k = 2; k <= 3 && k <= pool.length; k++) {
-    const combo = findSubset(pool, k, A, tol);
+    const combo = findSubsetCents(pool, k, amountCents, toleranceCents);
     if (combo) {
-      let left = A;
+      let leftCents = amountCents;
       const allocations = [];
-      for (const e of combo) { const take = round2(Math.min(e.remaining, left)); if (take > 0.005) { allocations.push({ expense: refOf(e), amount: take }); left = round2(left - take); } }
-      const matched = round2(allocations.reduce((s, x) => s + x.amount, 0));
-      return { allocations, matched, kind: 'subset', score: 0.9,
-        reason: `Covers ${allocations.length} charges (${combo.map((e) => e.payee || '?').join(', ')})` };
+      for (const entry of combo) {
+        const takeCents = Math.min(entry.remainingCents, leftCents);
+        if (takeCents > 0) {
+          allocations.push({ expense: refOf(entry.expense), amount: fromCents(takeCents) });
+          leftCents -= takeCents;
+        }
+      }
+      const matchedCents = amountCents - leftCents;
+      return { allocations, matched: fromCents(matchedCents), kind: 'subset', score: 0.9,
+        reason: `Covers ${allocations.length} charges (${combo.map((entry) => entry.expense.payee || '?').join(', ')})` };
     }
   }
   // 3. Greedy — oldest first until the inflow is spent (or charges run out).
-  let left = A;
+  let leftCents = amountCents;
   const allocations = [];
-  for (const e of pool) {
-    if (left <= 0.005) break;
-    const take = round2(Math.min(e.remaining, left));
-    if (take <= 0.005) continue;
-    allocations.push({ expense: refOf(e), amount: take });
-    left = round2(left - take);
+  for (const entry of pool) {
+    if (leftCents === 0) break;
+    const takeCents = Math.min(entry.remainingCents, leftCents);
+    if (takeCents <= 0) continue;
+    allocations.push({ expense: refOf(entry.expense), amount: fromCents(takeCents) });
+    leftCents -= takeCents;
   }
-  const matched = round2(allocations.reduce((s, x) => s + x.amount, 0));
-  const over = A > outstanding + tol;
+  const matchedCents = amountCents - leftCents;
+  const matched = fromCents(matchedCents);
+  const over = amountCents > outstandingCents + toleranceCents;
   const kind = over ? 'over' : allocations.length > 1 ? 'multi' : allocations.length === 1 ? 'partial' : 'person';
   const reason = allocations.length === 0
     ? 'Looks like a repayment — apply toward what they owe'
     : over
-      ? `Covers all ${allocations.length} tracked charge${allocations.length === 1 ? '' : 's'}; ${fmtUSD(round2(A - matched))} extra`
+      ? `Covers all ${allocations.length} tracked charge${allocations.length === 1 ? '' : 's'}; ${fmtUSD(fromCents(leftCents))} extra`
       : `Applies to ${allocations.length} charge${allocations.length === 1 ? '' : 's'} (oldest first)`;
   return { allocations, matched, kind, score: allocations.length ? 0.7 : 0.5, reason };
 }
-function findSubset(pool, k, target, tol, start = 0, chosen = []) {
+function findSubsetCents(pool, k, targetCents, toleranceCents, start = 0, chosen = []) {
   if (chosen.length === k) {
-    const sum = chosen.reduce((s, e) => s + e.remaining, 0);
-    return Math.abs(sum - target) <= tol ? chosen.slice() : null;
+    const totalCents = sumCents(chosen.map((entry) => entry.remainingCents));
+    return Math.abs(totalCents - targetCents) <= toleranceCents ? chosen.slice() : null;
   }
   for (let i = start; i < pool.length; i++) {
-    const r = findSubset(pool, k, target, tol, i + 1, [...chosen, pool[i]]);
+    const r = findSubsetCents(pool, k, targetCents, toleranceCents, i + 1, [...chosen, pool[i]]);
     if (r) return r;
   }
   return null;
@@ -2482,19 +2530,27 @@ async function suggestRepayments({ from, to } = {}) {
 
     // Net each expense's remaining against amounts already linked to it.
     const { links } = readReimbLinks();
-    const allocByExp = {};
+    const allocatedCentsByExpense = {};
     const linkedInflow = new Set();
     for (const l of links) {
       if (l.inflow) linkedInflow.add(l.inflow.id);
       if (l.expense) {
         const trusted = trustedLinkedCents(l);
         if (trusted > 0) {
-          allocByExp[l.expense.id] = round2((allocByExp[l.expense.id] || 0) + fromCents(trusted));
+          allocatedCentsByExpense[l.expense.id] = sumCents([
+            allocatedCentsByExpense[l.expense.id] || 0,
+            trusted,
+          ]);
         }
       }
     }
     for (const slug of Object.keys(expByPerson))
-      for (const e of expByPerson[slug]) e.remaining = round2(Math.max(0, -e.amount - (allocByExp[e.id] || 0)));
+      for (const e of expByPerson[slug]) {
+        e.remaining = fromCents(Math.max(
+          0,
+          -toCents(e.amount) - (allocatedCentsByExpense[e.id] || 0),
+        ));
+      }
 
     const { dismissed } = readReimbSuggest();
     const dismissedSet = new Set(dismissed);
@@ -2511,8 +2567,9 @@ async function suggestRepayments({ from, to } = {}) {
       const expIndex = new Map((expByPerson[inf.person] || []).map((entry) => [entry.id, entry]));
       for (const a of alloc.allocations) {
         const e = expIndex.get(a.expense.id);
-        if (e) e.remaining = round2(Math.max(0, e.remaining - a.amount));
+        if (e) e.remaining = fromCents(Math.max(0, toCents(e.remaining) - toCents(a.amount)));
       }
+      const remainder = fromCents(toCents(inf.amount) - toCents(alloc.matched));
       suggestions.push({
         id: `sg_${inf.id}`,
         inflow: { id: inf.id, date: inf.date, payee: inf.payee, amount: inf.amount },
@@ -2520,7 +2577,7 @@ async function suggestRepayments({ from, to } = {}) {
         owed: round2(owed),
         allocations: alloc.allocations,
         matched: alloc.matched,
-        remainder: round2(inf.amount - alloc.matched),
+        remainder,
         kind: alloc.kind,
         score: alloc.score,
         reason: alloc.reason,
@@ -3679,13 +3736,13 @@ async function collectReviewTasks({ month, classifiedLeaves: preclassifiedLeaves
         accountFilter: spendingProjection.accountFilter,
       });
     });
-  const [txnsRaw, insights, recurring, repayments, recon, receipts, classifiedLeaves] = await Promise.all([
+  const [txnsRaw, insights, recurring, repayments, recon, receiptTxnIds, classifiedLeaves] = await Promise.all([
     getTransactions({ start, end, collapse: true }),
     getInsights({ month: m }),
     getRecurring({}),
     suggestRepayments({}),
     getReconcilePending(),
-    Promise.resolve(getReceipts()),
+    Promise.resolve(getAllReceiptTransactionIds()),
     classifiedLeavesPromise,
   ]);
   const txns = txnsRaw.filter((txn) => !reviewExcludedAccountIds.has(txn.accountId));
@@ -3756,7 +3813,6 @@ async function collectReviewTasks({ month, classifiedLeaves: preclassifiedLeaves
     tasks.push(draft);
   }
 
-  const receiptTxnIds = new Set((receipts.receipts || []).map((r) => String(r.txnId)));
   for (const t of txns) {
     const catName = String(t.category || '');
     const isSplitParent = t.isSplit || t.splitCount || /^split$/i.test(catName);
@@ -4913,6 +4969,7 @@ function getTransactionDeletionSagaManager() {
       referenceSteps: TRANSACTION_DELETION_REFERENCE_STEPS,
       receiptFileState: transactionDeletionReceiptFileState,
       unlinkReceiptFile: unlinkTransactionDeletionReceiptFile,
+      onMutationStart: () => getActualCoordinator().invalidateGeneration(),
       assertExternalAvailable: ({ accountId, original, bulkDelegation }) => {
         getTransactionSagaManager().assertAvailable({ accountId, original });
         getRepaymentConfirmationSagaManager().assertAvailable({
@@ -5707,15 +5764,57 @@ function addReceipt({
   return publicReceipt(rec);
 }
 // Strip server-only fields for API responses (the file name stays internal).
-function publicReceipt(r) {
-  return { id: r.id, txnId: r.txnId, mime: r.mime, size: r.size, ocrText: r.ocrText, ocrLines: r.ocrLines, amount: r.amount, date: r.date, source: r.source, evidenceStatus: r.evidenceStatus || 'unreadable', uploadedAt: r.uploadedAt };
+function publicReceipt(r, { includeOcr = true } = {}) {
+  const evidenceStatus = new Set(['needs-review', 'matched', 'mismatch', 'unreadable'])
+    .has(r?.evidenceStatus) ? r.evidenceStatus : 'unreadable';
+  const receipt = {
+    id: boundedString(r?.id, 200),
+    txnId: boundedString(r?.txnId, 200),
+    mime: boundedString(r?.mime, 100),
+    size: Number.isSafeInteger(r?.size) && r.size >= 0 ? r.size : 0,
+    amount: typeof r?.amount === 'number' && Number.isFinite(r.amount) ? r.amount : null,
+    date: r?.date == null ? null : boundedString(r.date, 10),
+    source: boundedString(r?.source, 40),
+    evidenceStatus,
+    uploadedAt: boundedString(r?.uploadedAt, 64),
+  };
+  if (includeOcr) {
+    receipt.ocrText = boundedString(r?.ocrText, 8000);
+    receipt.ocrLines = (Array.isArray(r?.ocrLines) ? r.ocrLines : [])
+      .slice(0, 200)
+      .map((line) => boundedString(line, 1000));
+  }
+  return receipt;
 }
-function getReceipts({ txnId } = {}) {
+function getReceipts({ txnId, limit, offset, includeOcr = false } = {}) {
   const store = readReceipts();
-  if (txnId) return { receipts: (store.byTxn[String(txnId)] || []).map(publicReceipt) };
-  const all = [];
-  for (const list of Object.values(store.byTxn)) for (const r of list) all.push(publicReceipt(r));
-  return { receipts: all };
+  const all = txnId
+    ? [...(store.byTxn[String(txnId)] || [])]
+    : Object.values(store.byTxn).flatMap((list) => list);
+  all.sort((a, b) => String(b?.uploadedAt || '').localeCompare(String(a?.uploadedAt || ''))
+    || String(b?.id || '').localeCompare(String(a?.id || '')));
+  const page = paginateBoundedList(
+    all,
+    { limit, offset },
+    { maxLimit: includeOcr ? MAX_OCR_LIST_LIMIT : MAX_LIST_LIMIT },
+  );
+  return {
+    receipts: page.items.map((receipt) => publicReceipt(receipt, { includeOcr })),
+    truncated: page.truncated,
+    pagination: page.pagination,
+    ocrIncluded: includeOcr,
+  };
+}
+function getAllReceiptTransactionIds() {
+  const ids = new Set();
+  const store = readReceipts();
+  for (const [bucketTxnId, receipts] of Object.entries(store.byTxn)) {
+    ids.add(String(bucketTxnId));
+    for (const receipt of receipts) {
+      if (receipt?.txnId != null) ids.add(String(receipt.txnId));
+    }
+  }
+  return ids;
 }
 function assertReceiptMutationAvailable({ id } = {}) {
   if (!id) throw new Error('id required');
@@ -5959,6 +6058,46 @@ async function removeSplit({ id, accountId, date, categoryId } = {}) {
   }, { mode: 'write' });
 }
 
+function resolveTransactionForDeletion(transactions, id, { allowImported = false } = {}) {
+  let transaction = transactions.find((item) => String(item.id) === String(id));
+  if (!transaction) throw new TransactionNotFoundError();
+  if (transaction.parent_id) {
+    const parent = transactions.find(
+      (item) => String(item.id) === String(transaction.parent_id),
+    );
+    if (!parent) throw new SplitParentNotFoundError();
+    if (!allowImported) throw new SplitLegDeleteError();
+    transaction = parent;
+  }
+  if (!allowImported && transaction.imported_id) {
+    throw new ImportedTransactionError();
+  }
+  return transaction;
+}
+
+async function preflightTransactionDeletion({ id, accountId, date } = {}) {
+  if (!id) throw new Error('id required');
+  if (!accountId || !date) throw new Error('accountId and date required');
+  assertTransactionDeletionAvailable({ accountId, ids: [id] });
+  return withApi(async (api) => {
+    const accounts = await api.getAccounts();
+    if (!accounts.some((account) => String(account.id) === String(accountId))) {
+      throw new AccountNotFoundError();
+    }
+    const transactions = await api.getTransactions(accountId, date, date);
+    const transaction = resolveTransactionForDeletion(transactions, id);
+    assertTransactionDeletionAvailable({
+      accountId,
+      ids: [
+        String(transaction.id),
+        ...(transaction.subtransactions || []).map((leg) => String(leg.id)),
+      ],
+      transaction,
+    });
+    return { ok: true };
+  });
+}
+
 // Permanently remove a transaction. Deleting a split parent removes its legs too.
 // Rocket-Money parity: user-facing deletes are refused for BANK-IMPORTED rows
 // (those carry an imported_id) — only manually-added ones can be deleted by hand.
@@ -5987,19 +6126,7 @@ async function deleteTransaction({
   assertTransactionDeletionAvailable({ accountId, ids: [id], bulkDelegation });
   return withApi(async (api) => {
     const txns = await api.getTransactions(accountId, date, date);
-    let transaction = txns.find((item) => String(item.id) === String(id));
-    if (!transaction) throw new TransactionNotFoundError();
-    if (transaction.parent_id) {
-      if (!allowImported) throw new SplitLegDeleteError();
-      const parent = txns.find(
-        (item) => String(item.id) === String(transaction.parent_id),
-      );
-      if (!parent) throw new SplitParentNotFoundError();
-      transaction = parent;
-    }
-    if (!allowImported && transaction.imported_id) {
-      throw new ImportedTransactionError();
-    }
+    const transaction = resolveTransactionForDeletion(txns, id, { allowImported });
     const ids = [
       String(transaction.id),
       ...(transaction.subtransactions || []).map((leg) => String(leg.id)),
@@ -6012,7 +6139,7 @@ async function deleteTransaction({
       faultInjector,
       bulkDelegation,
     });
-  }, { mode: 'write' });
+  }, { mode: 'write', invalidateBefore: false });
 }
 
 // Rename a transaction's payee (RM "rename"). Resolves the free-text name to a payee
@@ -6062,9 +6189,27 @@ async function setPayee({ id, payee, isLeg, parentId, accountId, date } = {}) {
 // ---------------------------------------------------------------------------
 // Categorization rules — auto-apply a category to matching (uncategorized) txns
 // ---------------------------------------------------------------------------
-function getRules() {
+function readRules() {
   const store = readJsonSafe(RULES_PATH, { rules: [] });
-  return { rules: Array.isArray(store.rules) ? store.rules : [] };
+  return { ...store, rules: Array.isArray(store.rules) ? store.rules : [] };
+}
+function publicRule(rule) {
+  return {
+    id: boundedString(rule?.id, 200),
+    match: boundedString(rule?.match, 300),
+    categoryId: boundedString(rule?.categoryId, 200),
+    categoryName: boundedString(rule?.categoryName, 300),
+    created: boundedString(rule?.created, 10),
+  };
+}
+function getRules({ limit, offset } = {}) {
+  const store = readRules();
+  const page = paginateBoundedList(store.rules, { limit, offset });
+  return {
+    rules: page.items.map(publicRule),
+    truncated: page.truncated,
+    pagination: page.pagination,
+  };
 }
 
 // Apply a single rule to uncategorized, non-split txns in a window. Only ever
@@ -6102,7 +6247,7 @@ async function saveRule({ match, categoryId, categoryName } = {}, {
 } = {}) {
   const m = (match || '').trim();
   if (!m || !categoryId) throw new Error('match and categoryId required');
-  const store = getRules();
+  const store = readRules();
   if (!store || !Array.isArray(store.rules)) throw new Error('invalid rules store');
   const id = 'r' + Date.now().toString(36);
   const rule = { id, match: m, categoryId, categoryName: categoryName || '', created: todayYMD() };
@@ -6125,7 +6270,7 @@ async function saveRule({ match, categoryId, categoryName } = {}, {
 
 function deleteRule({ id } = {}) {
   if (!id) throw new Error('id required');
-  const store = getRules();
+  const store = readRules();
   const before = store.rules.length;
   store.rules = store.rules.filter((r) => r.id !== id);
   writeJsonSafe(RULES_PATH, store);
@@ -6863,6 +7008,7 @@ module.exports = {
   commitReviewDisposition,
   setReviewDisposition,
   suggestRepayments,
+  allocateInflow,
   confirmRepayment,
   validateRepaymentConfirmationAdmission,
   prepareRepaymentConfirmationAdmission,
@@ -6904,6 +7050,7 @@ module.exports = {
   assertTransactionDeletionAvailable,
   assertTransactionMutationAvailable,
   assertTransactionReplacementAvailable,
+  preflightTransactionDeletion,
   transactionReplacementMap,
   replaceActualTransaction,
   recoverTransactionDeletionSagas,

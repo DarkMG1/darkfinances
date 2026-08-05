@@ -12,6 +12,7 @@ export declare function buildReceiptImageCacheKey(
 export declare function buildReceiptImageSource(input: {
   uri: string;
   headers: Record<string, string>;
+  demo?: boolean;
   scope: string;
   profileGeneration: number;
   receiptId: string;

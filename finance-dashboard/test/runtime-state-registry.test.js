@@ -850,6 +850,24 @@ const OWNERSHIP_ADVERSARIAL = [
     buildOriginal: (stamp) => ({
       schemaVersion: 1,
       sagas: {
+        legacy: {
+          id: 'legacy',
+          recordVersion: 2,
+          phase: 'legacy_unresolved',
+          status: 'aborted',
+          updatedAt: stamp,
+          original: { id: 'legacy-original' },
+        },
+      },
+    }),
+    buildAttack: () => ({ schemaVersion: 1, sagas: {} }),
+    pattern: /cannot drop a nonterminal/,
+  },
+  {
+    name: 'transactionSagas',
+    buildOriginal: (stamp) => ({
+      schemaVersion: 1,
+      sagas: {
         active: {
           id: 'active',
           recordVersion: 2,

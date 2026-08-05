@@ -36,9 +36,9 @@ const CONNECTION_CONTROL_SPECS = Object.freeze({
     progressPhrase: 'changing demo mode',
   },
   [CONNECTION_SAVE_ACTIONS.FACE_ID]: {
-    idleLabel: 'Face ID lock',
-    inProgressLabel: 'Updating Face ID lock',
-    progressPhrase: 'updating Face ID lock',
+    idleLabel: 'Biometric lock',
+    inProgressLabel: 'Updating biometric lock',
+    progressPhrase: 'updating biometric lock',
   },
   [CONNECTION_SAVE_ACTIONS.DISCONNECT]: {
     idleLabel: 'Disconnect',
@@ -72,8 +72,8 @@ function connectionButtonControlState(controlAction, busyOwner) {
   };
 }
 
-function connectionSwitchAccessibilityLabel(controlAction, busyOwner) {
-  return connectionControlAccessibilityLabel(controlAction, busyOwner);
+function connectionSwitchAccessibilityLabel(controlAction, busyOwner, overrides = {}) {
+  return connectionControlAccessibilityLabel(controlAction, busyOwner, overrides);
 }
 
 function disconnectButtonAccessibilityLabel(busyOwner) {
@@ -84,12 +84,12 @@ function disconnectButtonVisibleLabel(busyOwner) {
   return busyOwner?.action === CONNECTION_SAVE_ACTIONS.DISCONNECT ? 'Disconnecting…' : 'Disconnect';
 }
 
-function settingsConnectionSaveSkippedMessage(action) {
+function settingsConnectionSaveSkippedMessage(action, biometricLabel = 'Biometric') {
   switch (action) {
     case CONNECTION_SAVE_ACTIONS.DISCONNECT:
       return 'Could not disconnect — another connection change is in progress. Try again shortly.';
     case CONNECTION_SAVE_ACTIONS.FACE_ID:
-      return 'Could not update Face ID lock — another connection change is in progress. Try again shortly.';
+      return `Could not update ${biometricLabel} lock — another connection change is in progress. Try again shortly.`;
     case CONNECTION_SAVE_ACTIONS.SAVE_URL:
       return 'Could not save server URL — another connection change is in progress. Try again shortly.';
     case CONNECTION_SAVE_ACTIONS.SAVE_TOKEN:

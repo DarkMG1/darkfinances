@@ -43,7 +43,7 @@ function quiescedUnits() {
   };
 }
 
-test('standalone staged restore rejects active writers even with signed token', async (t) => {
+test('standalone staged restore rejects live mode even with signed token', async (t) => {
   const root = mkRoot(t, 'df-restore-active-writer-');
   const dashboard = path.join(root, 'dashboard');
   writeProductionDashboard(dashboard, {
@@ -89,8 +89,9 @@ test('standalone staged restore rejects active writers even with signed token', 
       layout,
       runners,
     }),
-    /live-quiescent/,
+    /standalone live restore is refused/,
   );
+  assert.equal(fs.existsSync(path.join(dashboard, '.darkfinances-restore')), false);
 });
 
 test('coordinated restore dry-run performs zero destination mutation', async (t) => {

@@ -34,10 +34,13 @@ which makes a crash after unlink and before its checkpoint replay-safe.
 
 Nonterminal deletion and replacement records own every checkpointed parent and leg ID. Shared
 admission blocks any transaction field change, replacement, deletion, or sidecar reference mutation for
-an owned ID. Direct HTTP routes check globally unique known IDs before the operation effect boundary
-without trusting client-supplied account scoping; internal and bulk callers recheck each discovered ID in
-the data layer. Account-scoped checks are used only when the account was resolved from Actual. Terminal
-records release ownership.
+an owned ID. Direct HTTP deletes resolve the account and target before the operation effect boundary, so
+confirmed missing accounts or transactions and imported, split-leg, or orphaned-split targets are
+terminal pre-apply failures. The mutation path rechecks the target after crossing the boundary; any
+failure there remains outcome-unknown. Direct HTTP routes check globally unique known IDs before the
+boundary without trusting client-supplied account scoping; internal and bulk callers recheck each
+discovered ID in the data layer. Account-scoped checks are used only when the account was resolved from
+Actual. Terminal records release ownership.
 Nonterminal records are never pruned; only the newest 100 completed records are retained. Stored errors
 are bounded and credential-redacted, and every completed record contains a durable `auditOutcome`.
 

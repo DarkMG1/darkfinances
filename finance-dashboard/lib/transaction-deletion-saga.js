@@ -186,6 +186,7 @@ function createTransactionDeletionSaga({
   referenceSteps,
   receiptFileState,
   unlinkReceiptFile,
+  onMutationStart,
   assertExternalAvailable,
   terminalLimit = TERMINAL_LIMIT,
 }) {
@@ -655,6 +656,7 @@ function createTransactionDeletionSaga({
     };
     await invokeFault(faultInjector, 'before:initial-saga-write', saga);
     writeSaga(saga);
+    if (onMutationStart) onMutationStart();
     await invokeFault(faultInjector, 'after:initial-saga-write', saga);
 
     try {

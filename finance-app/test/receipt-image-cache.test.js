@@ -63,6 +63,21 @@ test('receipt image cache key binds scope, profile generation, and receipt id wi
   assert.equal(source.cacheKey, keyA);
   assert.equal(source.uri.includes(token), false);
   assert.equal(source.cacheKey.includes(token), false);
+  assert.equal(source.headers['X-Demo-Mode'], undefined);
+});
+
+test('demo receipt image sources include the demo request header', () => {
+  const token = 'optional-demo-token';
+  const source = buildReceiptImageSource({
+    uri: 'https://finance.example/api/v1/receipts/receipt-demo-1/image',
+    headers: { 'X-Finance-Token': token },
+    demo: true,
+    scope: 'demo',
+    profileGeneration: 0,
+    receiptId: 'receipt-demo-1',
+  });
+  assert.equal(source.headers['X-Demo-Mode'], '1');
+  assert.equal(source.headers['X-Finance-Token'], token);
 });
 
 test('profile generation bump isolates same-uri cache keys across profile switches', () => {
@@ -145,6 +160,7 @@ test('transaction receipt render paths use memory-only cache without preload', (
   assert.doesNotMatch(transactionSource, /Image\.loadAsync/);
   assert.match(hooksSource, /buildReceiptImageSource\(/);
   assert.match(hooksSource, /profileGeneration/);
+  assert.match(hooksSource, /\bdemo,\s*\n\s*scope,/);
   assert.match(hooksSource, /receiptId:\s*id/);
   assert.match(purgeSource, /await purgeReceiptImageCaches\(\)/);
 });

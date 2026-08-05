@@ -551,7 +551,10 @@ class RequestAdmissionController {
 
     const laneState = this.lanes.mutation;
     const limits = laneLimits(this.config, 'mutation');
-    if (!this._canAdmitClass(laneState, limits, TRAFFIC.ORDINARY, ticket.weight)) {
+    if (
+      !this._canAddRunning(laneState, limits, TRAFFIC.ORDINARY, ticket.weight)
+      || !this._canAdmitClass(laneState, limits, TRAFFIC.ORDINARY, ticket.weight)
+    ) {
       ticket.release();
       throw this._overloadError(1, {
         lane: 'mutation',

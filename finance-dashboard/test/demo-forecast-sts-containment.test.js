@@ -3,7 +3,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+process.env.DEMO_FINANCE_NOW = '2026-07-15T17:01:00-07:00';
+
 const demo = require('../demoData');
+
+test.after(() => {
+  delete process.env.DEMO_FINANCE_NOW;
+});
 
 test('demo forecast exposes STS containment and labels projection incomplete when Today STS is incomplete', () => {
   const today = demo.today();
