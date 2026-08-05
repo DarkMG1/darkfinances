@@ -1,5 +1,6 @@
 import { fmtPos, html, cadenceLabel, cap } from '../format.js';
 import { dueLabel, daysUntil } from '../finance-date.js';
+import { mutateFinance } from '../api.js';
 
 export async function loadRecurring() {
   const data = await (await fetch('/api/recurring')).json();
@@ -46,8 +47,8 @@ export async function loadRecurring() {
 }
 
 async function subOverride(key, body) {
-  await fetch(`/api/recurring/${encodeURIComponent(key)}/override`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  await mutateFinance(`/recurring/${encodeURIComponent(key)}/override`, {
+    body,
   });
   await Promise.all([loadRecurring(), loadBills()]);
 }
