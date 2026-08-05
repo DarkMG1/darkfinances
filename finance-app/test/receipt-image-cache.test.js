@@ -120,6 +120,15 @@ test('purgeReceiptImageCaches throws when clearDiskCache returns false', async (
   );
 });
 
+test('purgeReceiptImageCaches permits unsupported web cache APIs', async () => {
+  const calls = [];
+  await purgeReceiptImageCaches({
+    clearMemoryCache: async () => { calls.push('memory'); return false; },
+    clearDiskCache: async () => { calls.push('disk'); throw new Error('unsupported'); },
+  }, { allowUnsupported: true });
+  assert.deepEqual(calls, ['memory', 'disk']);
+});
+
 test('purgeReceiptImageCaches surfaces a stable non-secret error message', async () => {
   await assert.rejects(
     purgeReceiptImageCaches({
@@ -136,12 +145,13 @@ test('purgeReceiptImageCaches surfaces a stable non-secret error message', async
 });
 
 test('profile purge awaits receipt image cache purge before generation bump', () => {
-  const purgeIndex = purgeSource.indexOf('await purgeReceiptImageCaches()');
+  const purgeIndex = purgeSource.indexOf('await purgeReceiptImageCaches(');
   const generationIndex = purgeSource.indexOf('purgeProfileGeneration(scope)');
   assert.ok(purgeIndex >= 0);
   assert.ok(generationIndex >= 0);
   assert.ok(purgeIndex < generationIndex);
-  assert.doesNotMatch(purgeSource, /purgeReceiptImageCaches\(\)\.catch/);
+  assert.match(purgeSource, /allowUnsupported:\s*Platform\.OS === 'web'/);
+  assert.doesNotMatch(purgeSource, /purgeReceiptImageCaches\([^;]*\)\.catch/);
 });
 
 test('server identity switch awaits profile purge before committing new identity', () => {
@@ -162,5 +172,5 @@ test('transaction receipt render paths use memory-only cache without preload', (
   assert.match(hooksSource, /profileGeneration/);
   assert.match(hooksSource, /\bdemo,\s*\n\s*scope,/);
   assert.match(hooksSource, /receiptId:\s*id/);
-  assert.match(purgeSource, /await purgeReceiptImageCaches\(\)/);
+  assert.match(purgeSource, /await purgeReceiptImageCaches\(/);
 });
