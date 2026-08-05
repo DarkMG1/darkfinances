@@ -540,6 +540,40 @@ test('recovery journal peek uses bounded recovery class and converts to ordinary
   assertCountersZero(admission);
 });
 
+test('empty recovery peek cannot convert beyond ordinary mutation running cap', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    mutationGlobalPending: 3,
+    mutationGlobalRunning: 1,
+    recoveryReserve: 1,
+    controlReserve: 0,
+    maxPendingDepth: 3,
+  }));
+  const ordinary = await admission.acquire({
+    lane: 'mutation',
+    principal: 'session:ordinary',
+    endpoint: 'post /budgets',
+    weight: 1,
+    trafficClass: TRAFFIC.ORDINARY,
+  });
+
+  await assert.rejects(
+    admission.acquireMutationWithJournalPeek({
+      principal: 'session:fresh-key',
+      endpoint: 'post /budgets',
+      weight: 1,
+      peekJournal: () => null,
+    }),
+    AdmissionOverloadedError,
+  );
+
+  const mutation = admission.getHealth().lanes.mutation;
+  assert.equal(mutation.classRunning.ordinary, 1);
+  assert.equal(mutation.classRunning.recovery, 0);
+  assert.equal(mutation.globalRunning, 1);
+  ordinary.release();
+  assertCountersZero(admission);
+});
+
 test('random-key recovery flood cannot exceed recovery reserve peeks', async () => {
   const admission = new RequestAdmissionController(tinyConfig({
     mutationGlobalPending: 2,
