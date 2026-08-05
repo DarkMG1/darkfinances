@@ -361,7 +361,7 @@ const apiHealth = {
 };
 
 let sagaRecoverCompleted = false;
-const TERMINAL_TRANSACTION_REPLACEMENT = new Set(['completed', 'rolled_back', 'legacy_unresolved', 'aborted']);
+const TERMINAL_TRANSACTION_REPLACEMENT = new Set(['completed', 'rolled_back', 'aborted']);
 const TERMINAL_TRANSACTION_DELETION = new Set(['completed']);
 const TERMINAL_REPAYMENT_CONFIRMATION = new Set(['completed']);
 const TERMINAL_REIMBURSEMENT_LINK = new Set(['completed']);

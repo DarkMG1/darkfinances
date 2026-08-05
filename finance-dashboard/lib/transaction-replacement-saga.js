@@ -2006,6 +2006,51 @@ function createTransactionReplacementSaga({
     return driveRollback(api, saga, { faultInjector });
   }
 
+  async function reconcileLegacyUnresolved(api, saga, faultInjector) {
+    if (saga.accountId == null || saga.original?.id == null) {
+      return unresolved(
+        saga,
+        'legacy replacement inventory is incomplete; operator repair is required',
+        faultInjector,
+      );
+    }
+
+    const rows = await transactionsFor(api, saga);
+    const original = rowById(rows, saga.original.id);
+    if (!original) {
+      return unresolved(
+        saga,
+        'legacy replacement lacks durable identity and the exact original transaction is absent; operator repair is required',
+        faultInjector,
+      );
+    }
+    if (!shapeMatches(original, saga.original)) {
+      return unresolved(
+        saga,
+        'legacy replacement exact original transaction changed; operator repair is required',
+        faultInjector,
+      );
+    }
+    if (importedIdentityConflict(rows, saga.original.imported_id, [original.id])) {
+      return unresolved(
+        saga,
+        'legacy replacement original imported identity has another live owner; operator repair is required',
+        faultInjector,
+      );
+    }
+
+    await checkpoint(saga, {
+      phase: 'rolled_back',
+      legacyResolution: {
+        outcome: 'original_intact',
+        evidence: 'exact_original_id_and_shape',
+        originalId: String(original.id),
+      },
+      lastError: null,
+    }, 'legacy-terminal-write', faultInjector);
+    return { rolledBack: true };
+  }
+
   async function recover(api, { faultInjector, deferSync = false } = {}) {
     const loaded = loadState();
     if (loaded.changed) writeState(loaded.state);
@@ -2015,10 +2060,11 @@ function createTransactionReplacementSaga({
     let firstThrownError = null;
     for (const saga of active) {
       let result;
-      if (saga.phase === 'legacy_unresolved') continue;
       if (recoveryOwnershipGuard?.(saga)) continue;
       try {
-        if (saga.phase === 'legacy_reconcile_forward') {
+        if (saga.phase === 'legacy_unresolved') {
+          result = await reconcileLegacyUnresolved(api, saga, faultInjector);
+        } else if (saga.phase === 'legacy_reconcile_forward') {
           result = await reconcileLegacyForward(api, saga, faultInjector);
         } else if (saga.phase === 'legacy_reconcile_rollback') {
           result = await reconcileLegacyRollback(api, saga, faultInjector);

@@ -197,6 +197,58 @@ test('startup recovery completes healthy link saga and reports broken saga in he
   assert.equal(links[0].allocationCents, 2000);
 });
 
+test('startup health inventories a legacy replacement that cannot be safely terminalized', async () => {
+  resetSidecars();
+  writeJson(process.env.REIMBURSEMENT_LINK_SAGAS_PATH, { schemaVersion: 1, sagas: {} });
+  writeJson(process.env.TRANSACTION_SAGAS_PATH, {
+    schemaVersion: 1,
+    sagas: {
+      'legacy-replacement': {
+        id: 'legacy-replacement',
+        status: 'original-deleted',
+        accountId: 'account',
+        original: {
+          id: 'missing-original',
+          date: '2026-07-10',
+          amount: -2500,
+          payee: 'payee',
+          notes: '',
+          cleared: true,
+          category: 'dining',
+          is_parent: false,
+          subtransactions: [],
+        },
+        replacement: {
+          date: '2026-07-10',
+          amount: -2500,
+          payee: 'payee',
+          notes: '',
+          cleared: true,
+          category: 'dining',
+        },
+        startedAt: '2026-07-10T00:00:00.000Z',
+        updatedAt: '2026-07-10T00:00:01.000Z',
+      },
+    },
+  });
+
+  const data = loadDataModule();
+  await data.initApi();
+  const health = data.getHealth();
+
+  assert.equal(health.ready, false);
+  assert.equal(health.operationalSagas.nonterminal.byStore.transactionReplacement, 1);
+  assert.ok(health.operationalSagas.errors.some((entry) => (
+    entry.store === 'transactionReplacement'
+      && entry.sagaId === 'legacy-replacement'
+      && entry.code === 'TRANSACTION_REPLACEMENT_OUTCOME_UNKNOWN'
+      && /operator repair is required/.test(entry.message)
+  )));
+  const saga = readJson(process.env.TRANSACTION_SAGAS_PATH).sagas['legacy-replacement'];
+  assert.equal(saga.phase, 'legacy_unresolved');
+  assert.match(saga.lastError.message, /operator repair is required/);
+});
+
 test('startup with only terminal link sagas marks operational recovery ready', async () => {
   resetSidecars();
   writeJson(process.env.REIMBURSEMENT_LINK_SAGAS_PATH, { schemaVersion: 1, sagas: {} });
