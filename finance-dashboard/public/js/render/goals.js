@@ -48,6 +48,15 @@ export function closeGoalForm() {
   document.getElementById('goalModal').classList.remove('open');
 }
 
+async function mutateGoal(path, options) {
+  try {
+    return await mutateFinance(path, options);
+  } catch (error) {
+    alert('Goal update failed: ' + (error?.message || 'Request failed'));
+    throw error;
+  }
+}
+
 export async function submitGoal() {
   const id = document.getElementById('goalId').value || undefined;
   const name = document.getElementById('goalName').value.trim();
@@ -59,7 +68,7 @@ export async function submitGoal() {
     alert('Enter a name, target > 0, and non-negative allocation.');
     return;
   }
-  await mutateFinance('/goals', {
+  await mutateGoal('/goals', {
     body: { id, name, target, current, accountId, deadline: deadline || null },
   });
   closeGoalForm();
@@ -69,7 +78,7 @@ export async function submitGoal() {
 export async function deleteGoal() {
   const id = document.getElementById('goalId').value;
   if (!id || !confirm('Delete this goal?')) return;
-  await mutateFinance('/goals/' + encodeURIComponent(id), { method: 'DELETE' });
+  await mutateGoal('/goals/' + encodeURIComponent(id), { method: 'DELETE' });
   closeGoalForm();
   await loadGoals();
 }

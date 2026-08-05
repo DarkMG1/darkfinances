@@ -1,5 +1,5 @@
 {
-  "version": "2d0327d58f9170e9",
+  "version": "f9dc1b9ab98d5b8f",
   "entrypoints": [
     "js/app.js",
     "js/login.js"
@@ -47,7 +47,7 @@
     "css/dashboard.css": "7c6cd149a47e7ae79ea5b9fecc23a57a92adb68f9eecd1a9ed5b60624fe65a9b",
     "css/login.css": "52bab62d8af74df4b2d36f9b6c5aabce14075c3e0c37ef53c356798ceb7c2d60",
     "index.html": "8453a39258f648404d0143de971b33b986b2180fa94c1314d5f8f37ffbe2f6da",
-    "js/api.js": "94b9f987b3d067f1c1d1a6f5429aa0c744051d7bb299757ae44fb69ed082d1de",
+    "js/api.js": "5b874d3e6cb7e57d3516892dc913280c91e926a6f5160c48d0ea4050b21de2bb",
     "js/app.js": "ddf916cf606202e4bcec50031be38c0c27775e3b32b5ad0a553e0090aa45bc0f",
     "js/chart-runtime.js": "87b7b4ffb0315c84efddbe6ad51e69ad9dfd5b14750658984b853e08445c1891",
     "js/constants.js": "0cd3873f5b09f214d8e2ea3fcdb7c82f4e5048429eb8ca60134da09b6d396594",
@@ -61,8 +61,8 @@
     "js/render/accounts.js": "697074ff903458b86c449356daac586ef933a0b6fde687b688a4012770ca2615",
     "js/render/budgets.js": "0560c1ac62182e17812ad3ec48a81cefa3c82c68804121f8c2293a2209ead0f3",
     "js/render/charts-pages.js": "f50c071f974552a5cbb0dc3f7eb9c7863b8321cab4a5157fdcde503f4100a8f9",
-    "js/render/goals.js": "1095fdd44b44bc8c727fd11ed5d666e6aeab860897780aaf77e6c56ed50b6b92",
-    "js/render/recurring.js": "ae51422c45869545396ff1cd413bc570ce86a197203233697a7e6345aa2dd9a9",
+    "js/render/goals.js": "9ac19edc32591453bb1764ff43c826c4598ae16f71864714a6b43bfa1e08ee5a",
+    "js/render/recurring.js": "5e7c0e72b7bbd22b9d55b2816ff487b2c095f575ec8ec919d3c0ae7377c0b0cf",
     "js/render/reimbursement.js": "4641e69d4097850d1267ac54f4910342c1c1c20deda5ab709412e5a898e618b0",
     "js/render/safe-to-spend.js": "327c330355c0d053399136d0008b6f4610cb108c94d4b8d1225325bfc71962a0",
     "js/render/transactions.js": "5b985c5174c1b431f305d484b275ff87e8c02877aa1ded2c4e8d127d5d1761bc",

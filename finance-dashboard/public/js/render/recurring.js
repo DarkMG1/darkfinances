@@ -41,7 +41,9 @@ export async function loadRecurring() {
       const body = button.dataset.subHidden === 'true'
         ? { hidden: true }
         : { status: button.dataset.subStatus };
-      subOverride(button.dataset.subKey, body);
+      void subOverride(button.dataset.subKey, body).catch((error) => {
+        alert('Recurring update failed: ' + (error?.message || 'Request failed'));
+      });
     });
   });
 }
