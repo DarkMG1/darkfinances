@@ -13,6 +13,7 @@ const {
   createTransactionDeletionSaga,
   transactionDeletionFingerprint,
 } = require('../lib/transaction-deletion-saga');
+const { getActualCoordinator } = require('../lib/actual-coordinator');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-delete-callers-'));
 const stateFiles = {
@@ -109,6 +110,14 @@ function latestDeletion() {
     .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)))[0] || null;
 }
 
+function cacheGenerationState() {
+  const health = getActualCoordinator().getHealth();
+  return {
+    generation: health.generation,
+    invalidations: health.stats.invalidations,
+  };
+}
+
 function activeDeletionRecord({
   phase = 'delete_pending',
   accountId = 'account',
@@ -140,6 +149,7 @@ test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 test('direct deletion uses a separate saga and keeps receipt bytes until sync', async () => {
   reset();
+  const cacheBefore = cacheGenerationState();
   const result = await data.deleteTransaction({
     id: manualSplit.id,
     accountId: 'account',
@@ -158,6 +168,10 @@ test('direct deletion uses a separate saga and keeps receipt bytes until sync', 
       reviewState: 0,
     },
   });
+  assert.deepEqual(cacheGenerationState(), {
+    generation: cacheBefore.generation + 1,
+    invalidations: cacheBefore.invalidations + 1,
+  });
   assert.equal(fakeActual.inspect().counts.delete, 1);
   assert.equal(latestDeletion().phase, 'sync_pending');
   assert.equal(readJson(process.env.RECEIPTS_PATH).byTxn[manualSplit.id], undefined);
@@ -168,6 +182,24 @@ test('direct deletion uses a separate saga and keeps receipt bytes until sync', 
   assert.equal(fakeActual.inspect().counts.sync, 1);
   assert.equal(fs.existsSync(path.join(process.env.RECEIPTS_DIR, 'receipt.jpg')), false);
   assert.equal(fs.existsSync(process.env.TRANSACTION_SAGAS_PATH), false);
+});
+
+test('not-found deletion leaves the HTTP cache generation unchanged', async () => {
+  reset([]);
+  const cacheBefore = cacheGenerationState();
+
+  await assert.rejects(
+    data.deleteTransaction({
+      id: 'missing-transaction',
+      accountId: 'account',
+      date: manualSplit.date,
+    }),
+    (error) => error.code === 'NOT_FOUND',
+  );
+
+  assert.deepEqual(cacheGenerationState(), cacheBefore);
+  assert.equal(fakeActual.inspect().counts.delete, 0);
+  assert.equal(Object.keys(deletionState().sagas).length, 0);
 });
 
 test('sync resumes an apply-then-throw deletion before synchronizing', async () => {
@@ -531,6 +563,7 @@ test('imported user deletion is rejected before saga creation', async () => {
 test('malformed sidecar preflight creates no saga and performs no Actual mutation', async () => {
   reset();
   writeJson(process.env.REIMB_LINKS_PATH, { links: null, unrelated: 'preserve' });
+  const cacheBefore = cacheGenerationState();
   await assert.rejects(
     data.deleteTransaction({
       id: manualSplit.id,
@@ -539,6 +572,7 @@ test('malformed sidecar preflight creates no saga and performs no Actual mutatio
     }),
     (error) => error.code === 'JSON_INVALID_SHAPE',
   );
+  assert.deepEqual(cacheGenerationState(), cacheBefore);
   assert.equal(fakeActual.inspect().counts.delete, 0);
   assert.equal(Object.keys(deletionState().sagas).length, 0);
   assert.ok(fs.existsSync(path.join(process.env.RECEIPTS_DIR, 'receipt.jpg')));
