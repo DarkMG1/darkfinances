@@ -277,13 +277,7 @@ async function consumePasskeyChallengeForVerify(req, kind) {
       expose: true,
     });
   }
-  if (!tryConsumePasskeyChallenge({ sessionId: req.sessionID, kind, challenge })) {
-    throw new AppError('Challenge expired or already used', {
-      code: 'PASSKEY_CHALLENGE_EXPIRED',
-      status: 400,
-      expose: true,
-    });
-  }
+  const consumed = tryConsumePasskeyChallenge({ sessionId: req.sessionID, kind, challenge });
   delete req.session[field];
   await new Promise((resolve, reject) => {
     req.session.save((err) => (err ? reject(err) : resolve()));
@@ -295,6 +289,13 @@ async function consumePasskeyChallengeForVerify(req, kind) {
       cause,
     });
   });
+  if (!consumed) {
+    throw new AppError('Challenge expired or already used', {
+      code: 'PASSKEY_CHALLENGE_EXPIRED',
+      status: 400,
+      expose: true,
+    });
+  }
   return challenge;
 }
 
