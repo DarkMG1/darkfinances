@@ -72,7 +72,7 @@ test('rules are bounded, paginated, and stripped to public fields', () => {
     created: '2026-08-01-extra',
     privateField: 'must-not-leak',
   }));
-  writeJson(process.env.RULES_PATH, { rules, unknown: 'preserved-on-write' });
+  writeJson(process.env.RULES_PATH, { rules });
 
   const first = data.getRules({ limit: 100 });
   assert.equal(first.rules.length, 100);
