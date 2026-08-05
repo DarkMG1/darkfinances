@@ -7,6 +7,10 @@ const { controlLayoutForDestination } = require('./restore-control-layout');
 const { isProcessAlive } = require('./restore-instance-lock');
 const { lockPathForLayout } = require('./restore-instance-lock');
 const {
+  hashFileIncrementally,
+  updateHashFromFile,
+} = require('./backup-verify');
+const {
   enumerateWriters,
   loadWriterInventory,
   writersForPhase,
@@ -16,6 +20,10 @@ const { interpretCrontabListResult } = require('./ops-command-runners');
 const DEFAULT_STOP_DEADLINE_MS = 60_000;
 const DEFAULT_VERIFY_POLL_MS = 500;
 const UNKNOWN_STATE = 'unknown';
+const ACTUAL_GENERATION_LEGACY_VERSION = 1;
+const ACTUAL_GENERATION_VERSION = 2;
+const ACTUAL_GENERATION_PREFIX = 'actual-v2-sha256:';
+const EMPTY_CONTENT_SHA256 = crypto.createHash('sha256').digest('hex');
 
 function normalizeState(state) {
   const value = String(state || '').trim().toLowerCase();
@@ -556,41 +564,253 @@ function auditDeploymentDiscovery(context) {
 }
 
 function assertActualGenerationStable(actualDataDir, expectedGeneration, label = 'actual generation') {
-  const current = computeActualDataGeneration(actualDataDir);
+  const version = actualGenerationVersion(expectedGeneration);
+  const current = computeActualDataGeneration(actualDataDir, { version });
   if (current !== expectedGeneration) {
     throw new Error(`${label} drift detected (${expectedGeneration} -> ${current})`);
   }
   return current;
 }
 
-function computeActualDataGeneration(actualDataDir) {
-  if (!actualDataDir || !fs.existsSync(actualDataDir)) return null;
-  const stat = fs.lstatSync(actualDataDir);
-  if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new Error('actual data path must be a real directory');
+function actualGenerationVersion(generation) {
+  if (typeof generation !== 'string' || !generation) {
+    throw new Error('actual data generation must be a non-empty string');
   }
-  const realRoot = fs.realpathSync(actualDataDir);
+  if (/^[a-f0-9]{64}$/.test(generation)) return ACTUAL_GENERATION_LEGACY_VERSION;
+  if (new RegExp(`^${ACTUAL_GENERATION_PREFIX}[a-f0-9]{64}$`).test(generation)) {
+    return ACTUAL_GENERATION_VERSION;
+  }
+  throw new Error('unsupported actual data generation format');
+}
+
+function resolveActualGenerationVersion(options) {
+  const requested = typeof options === 'object' && options !== null
+    ? options.version
+    : options;
+  if (requested == null || requested === ACTUAL_GENERATION_VERSION || requested === 'v2') {
+    return ACTUAL_GENERATION_VERSION;
+  }
+  if (
+    requested === ACTUAL_GENERATION_LEGACY_VERSION
+    || requested === 'v1'
+    || requested === 'legacy'
+  ) {
+    return ACTUAL_GENERATION_LEGACY_VERSION;
+  }
+  throw new Error(`unsupported Actual generation version: ${requested}`);
+}
+
+function normalizedActualPath(components) {
+  if (!Array.isArray(components)) throw new Error('actual data path components must be an array');
+  if (components.length === 0) return '.';
+  return components.map((component) => {
+    if (typeof component !== 'string' || !component || component.includes('\0') || component.includes('/')) {
+      throw new Error('actual data tree contains an invalid path component');
+    }
+    const normalized = component.normalize('NFC');
+    if (!normalized || normalized === '.' || normalized === '..' || normalized.includes('/')) {
+      throw new Error(`actual data tree contains an unsafe normalized path component: ${component}`);
+    }
+    return normalized;
+  }).join('/');
+}
+
+function compareCanonicalPath(left, right) {
+  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
+}
+
+function lengthPrefix(buffer) {
+  const prefix = Buffer.alloc(8);
+  prefix.writeBigUInt64BE(BigInt(buffer.length));
+  return Buffer.concat([prefix, buffer]);
+}
+
+function canonicalActualRecord({ path: relativePath, type, mode, size, contentDigest }) {
+  const fields = [relativePath, type, String(mode), String(size), contentDigest];
+  const body = Buffer.concat(fields.map((field) => lengthPrefix(Buffer.from(field, 'utf8'))));
+  return lengthPrefix(body);
+}
+
+function actualMetadataFieldsEqual(left, right) {
+  return [
+    'dev',
+    'ino',
+    'mode',
+    'nlink',
+    'uid',
+    'gid',
+    'size',
+    'mtimeMs',
+    'ctimeMs',
+  ].every((field) => left[field] === right[field]);
+}
+
+function assertActualMetadataStable(before, after, relativePath) {
+  if (!actualMetadataFieldsEqual(before, after)) {
+    throw new Error(`actual data entry changed while hashing: ${relativePath}`);
+  }
+}
+
+function actualTreeDependencies(options) {
+  const dependencies = typeof options === 'object' && options !== null
+    ? (options.dependencies || {})
+    : {};
+  return {
+    ...dependencies,
+    lstatSync: dependencies.lstatSync || fs.lstatSync,
+    realpathSync: dependencies.realpathSync || fs.realpathSync,
+    readdirSync: dependencies.readdirSync || fs.readdirSync,
+    hashFileIncrementally: dependencies.hashFileIncrementally || hashFileIncrementally,
+    updateHashFromFile: dependencies.updateHashFromFile || updateHashFromFile,
+  };
+}
+
+function assertActualDirectory(stat, relativePath) {
+  if (stat.isSymbolicLink()) {
+    throw new Error(`actual data tree contains symlink: ${relativePath}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`actual data entry has unsupported type: ${relativePath}`);
+  }
+}
+
+function computeLegacyActualDataGeneration(realRoot, dependencies) {
   const hash = crypto.createHash('sha256');
-  const stack = [''];
+  const stack = [{ raw: [], relative: '' }];
   while (stack.length > 0) {
-    const relative = stack.pop();
-    const absolute = relative ? path.join(realRoot, relative) : realRoot;
-    for (const name of fs.readdirSync(absolute).sort()) {
+    const { raw, relative } = stack.pop();
+    const absolute = path.join(realRoot, ...raw);
+    const directoryBefore = dependencies.lstatSync(absolute);
+    assertActualDirectory(directoryBefore, relative || '.');
+    const names = dependencies.readdirSync(absolute).sort();
+    for (const name of names) {
+      const childRaw = [...raw, name];
       const childRelative = relative ? `${relative}/${name}` : name;
-      const childAbsolute = path.join(realRoot, childRelative);
-      const childStat = fs.lstatSync(childAbsolute);
+      const childAbsolute = path.join(realRoot, ...childRaw);
+      const childStat = dependencies.lstatSync(childAbsolute);
       if (childStat.isSymbolicLink()) {
         throw new Error(`actual data tree contains symlink: ${childRelative}`);
       }
       hash.update(childRelative);
       if (childStat.isDirectory()) {
-        stack.push(childRelative);
+        stack.push({ raw: childRaw, relative: childRelative });
       } else if (childStat.isFile()) {
-        hash.update(fs.readFileSync(childAbsolute));
+        const { stat: hashedStat } = dependencies.updateHashFromFile(childAbsolute, hash, dependencies);
+        assertActualMetadataStable(childStat, hashedStat, childRelative);
+      } else {
+        throw new Error(`actual data entry has unsupported type: ${childRelative}`);
       }
     }
+    const directoryAfter = dependencies.lstatSync(absolute);
+    assertActualDirectory(directoryAfter, relative || '.');
+    assertActualMetadataStable(directoryBefore, directoryAfter, relative || '.');
   }
   return hash.digest('hex');
+}
+
+function computeCanonicalActualDataGeneration(realRoot, dependencies) {
+  const records = [];
+  const canonicalPaths = new Map();
+
+  const visit = (rawComponents, normalizedComponents) => {
+    const absolute = path.join(realRoot, ...rawComponents);
+    const relativePath = normalizedActualPath(normalizedComponents);
+    const before = dependencies.lstatSync(absolute);
+    if (before.isSymbolicLink()) {
+      throw new Error(`actual data tree contains symlink: ${relativePath}`);
+    }
+
+    const priorRawPath = canonicalPaths.get(relativePath);
+    const rawPath = rawComponents.join('/');
+    if (priorRawPath !== undefined && priorRawPath !== rawPath) {
+      throw new Error(`actual data tree has normalized path collision: ${relativePath}`);
+    }
+    canonicalPaths.set(relativePath, rawPath);
+
+    if (before.isFile()) {
+      const hashed = dependencies.hashFileIncrementally(absolute, dependencies);
+      assertActualMetadataStable(before, hashed.stat, relativePath);
+      records.push({
+        path: relativePath,
+        type: 'file',
+        mode: hashed.stat.mode & 0o7777,
+        size: hashed.stat.size,
+        contentDigest: hashed.sha256,
+      });
+      return;
+    }
+
+    if (!before.isDirectory()) {
+      throw new Error(`actual data entry has unsupported type: ${relativePath}`);
+    }
+
+    records.push({
+      path: relativePath,
+      type: 'directory',
+      mode: before.mode & 0o7777,
+      size: 0,
+      contentDigest: EMPTY_CONTENT_SHA256,
+    });
+
+    const children = dependencies.readdirSync(absolute).map((name) => ({
+      name,
+      normalized: normalizedActualPath([name]),
+    })).sort((left, right) => compareCanonicalPath(left.normalized, right.normalized));
+    for (let index = 1; index < children.length; index += 1) {
+      if (children[index - 1].normalized === children[index].normalized) {
+        throw new Error(
+          `actual data tree has normalized path collision: ${normalizedActualPath([
+            ...normalizedComponents,
+            children[index].normalized,
+          ])}`,
+        );
+      }
+    }
+    for (const child of children) {
+      visit(
+        [...rawComponents, child.name],
+        [...normalizedComponents, child.normalized],
+      );
+    }
+
+    const after = dependencies.lstatSync(absolute);
+    assertActualDirectory(after, relativePath);
+    assertActualMetadataStable(before, after, relativePath);
+  };
+
+  visit([], []);
+  records.sort((left, right) => compareCanonicalPath(left.path, right.path));
+  const hash = crypto.createHash('sha256');
+  hash.update(lengthPrefix(Buffer.from('darkfinances-actual-data-generation', 'utf8')));
+  hash.update(lengthPrefix(Buffer.from(String(ACTUAL_GENERATION_VERSION), 'utf8')));
+  for (const record of records) hash.update(canonicalActualRecord(record));
+  return `${ACTUAL_GENERATION_PREFIX}${hash.digest('hex')}`;
+}
+
+function computeActualDataGeneration(actualDataDir, options = {}) {
+  if (!actualDataDir || !fs.existsSync(actualDataDir)) return null;
+  const version = resolveActualGenerationVersion(options);
+  const dependencies = actualTreeDependencies(options);
+  const stat = dependencies.lstatSync(actualDataDir);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error('actual data path must be a real directory');
+  }
+  const realRoot = dependencies.realpathSync(actualDataDir);
+  const realStat = dependencies.lstatSync(realRoot);
+  if (!realStat.isDirectory() || realStat.isSymbolicLink()) {
+    throw new Error('actual data path must resolve to a real directory');
+  }
+  if (stat.dev !== realStat.dev || stat.ino !== realStat.ino) {
+    throw new Error('actual data path changed before hashing');
+  }
+  const generation = version === ACTUAL_GENERATION_LEGACY_VERSION
+    ? computeLegacyActualDataGeneration(realRoot, dependencies)
+    : computeCanonicalActualDataGeneration(realRoot, dependencies);
+  const after = dependencies.lstatSync(actualDataDir);
+  if (!after.isDirectory() || after.isSymbolicLink() || !actualMetadataFieldsEqual(stat, after)) {
+    throw new Error('actual data path changed while hashing');
+  }
+  return generation;
 }
 
 module.exports = {
@@ -621,5 +841,11 @@ module.exports = {
   readUserCrontabListing,
   isCrontabCommentOrEmpty,
   assertActualGenerationStable,
+  actualGenerationVersion,
+  ACTUAL_GENERATION_LEGACY_VERSION,
+  ACTUAL_GENERATION_PREFIX,
+  ACTUAL_GENERATION_VERSION,
+  canonicalActualRecord,
   computeActualDataGeneration,
+  normalizedActualPath,
 };

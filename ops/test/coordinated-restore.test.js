@@ -992,3 +992,146 @@ test('coordinated restore restart failure records recovery_required and preserve
   assert.ok(journal.healthResults.length > 0);
   assert.ok(journal.errors.some((entry) => /restart failures/.test(entry.message)));
 });
+
+async function coordinatedSafetyFailureFixture(t, safety) {
+  const root = mkRoot(t, 'df-coordinated-restore-safety-');
+  const dashboard = path.join(root, 'dashboard');
+  dashboardFixture(dashboard);
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const layout = coordinatedLayoutForRoot(coordinatorRoot);
+  const runners = createBackupRunners({ units: defaultActiveUnits() });
+  let thrown;
+  try {
+    await runCoordinatedRestore({
+      archivePath: archive,
+      destinationRoot: dashboard,
+      coordinatorRoot,
+      privateKey: keys.pair.privateKey,
+      releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+      ...restoreOptions({
+        ...process.env,
+        HOME: root,
+        FINANCE_DASHBOARD_DIR: dashboard,
+        DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+        COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+        COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+        COORDINATED_TEST_SKIP_LOCK: '1',
+        FINANCE_API_TOKEN: 'test-token',
+      }, runners),
+      runStagedRestore: (options) => {
+        options.coordinatedSession.onRestoreSafety({
+          ...safety,
+          stagedJournalPath: path.join(dashboard, '.darkfinances-restore', 'journal.json'),
+        });
+        throw new Error('synthetic staged restore failure');
+      },
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown);
+  return {
+    error: thrown,
+    journal: require('../lib/coordinated-run-journal').readRunJournal(layout.journalPath),
+    runners,
+  };
+}
+
+function startedSystemdUnits(runners) {
+  return runners.commands
+    .filter((command) => command[0] === 'systemctl' && command.includes('start'))
+    .map((command) => command.at(-1))
+    .sort();
+}
+
+test('coordinated restore restores exact writer state after harmless pre-mutation failure', async (t) => {
+  const { journal, runners } = await coordinatedSafetyFailureFixture(t, {
+    restartAllowed: true,
+    mutationStatus: 'not_started',
+    stagedPhase: 'failed',
+    reason: 'no destination mutation started',
+  });
+  assert.deepEqual(startedSystemdUnits(runners), [
+    'actual-sync.timer',
+    'finance-dashboard.service',
+  ]);
+  assert.equal(journal.phase, PHASE.FAILED);
+  assert.equal(journal.restartSuppressed, undefined);
+  assert.equal(journal.restoreSafety.mutationStatus, 'not_started');
+});
+
+test('coordinated restore restarts writers after verified rollback', async (t) => {
+  const { journal, runners } = await coordinatedSafetyFailureFixture(t, {
+    restartAllowed: true,
+    mutationStatus: 'rollback_verified',
+    stagedPhase: 'rolled_back',
+    reason: 'pre-restore snapshot rollback was verified',
+  });
+  assert.deepEqual(startedSystemdUnits(runners), [
+    'actual-sync.timer',
+    'finance-dashboard.service',
+  ]);
+  assert.equal(journal.phase, PHASE.FAILED);
+  assert.equal(journal.restoreSafety.mutationStatus, 'rollback_verified');
+});
+
+test('coordinated restore keeps writers quiesced after rollback_failed partial mutation', async (t) => {
+  const { error, journal, runners } = await coordinatedSafetyFailureFixture(t, {
+    restartAllowed: false,
+    mutationStatus: 'unverified_partial_mutation',
+    stagedPhase: 'rollback_failed',
+    reason: 'staged restore is rollback_failed',
+  });
+  assert.deepEqual(startedSystemdUnits(runners), []);
+  assert.equal(journal.phase, PHASE.RECOVERY_REQUIRED);
+  assert.equal(journal.restartSuppressed.mutationStatus, 'unverified_partial_mutation');
+  assert.match(journal.restartSuppressed.requiredAction, /complete staged rollback/);
+  assert.match(journal.restartSuppressed.stagedJournalPath, /\.darkfinances-restore\/journal\.json$/);
+  assert.ok(journal.errors.some((entry) => /writers intentionally remain quiesced/.test(entry.message)));
+  assert.match(error.message, /writers intentionally remain quiesced/);
+});
+
+test('coordinated restore verifies legacy Actual generations before converting health comparison to v2', async (t) => {
+  const root = mkRoot(t, 'df-coordinated-restore-legacy-actual-');
+  const dashboard = path.join(root, 'dashboard');
+  const actualDataDir = path.join(root, 'actual-data');
+  dashboardFixture(dashboard);
+  fs.mkdirSync(actualDataDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(actualDataDir, 'db'), 'legacy data\n', { mode: 0o600 });
+  const { computeActualDataGeneration } = require('../lib/writer-quiescence');
+  const legacyGeneration = computeActualDataGeneration(actualDataDir, { version: 1 });
+  const archive = path.join(root, 'bundle.tgz');
+  buildBackupBundle({ dashboardDir: dashboard, archivePath: archive });
+  const keys = installTestCoordinatorKeys(root);
+  const coordinatorRoot = path.join(root, 'backups');
+  const runners = createBackupRunners({
+    units: defaultActiveUnits(),
+    containers: { actual: 'running' },
+  });
+  const result = await runCoordinatedRestore({
+    archivePath: archive,
+    destinationRoot: dashboard,
+    coordinatorRoot,
+    privateKey: keys.pair.privateKey,
+    releaseManifestDigest: RELEASE_MANIFEST_DIGEST,
+    actualDataGeneration: legacyGeneration,
+    ...restoreOptions({
+      ...process.env,
+      HOME: root,
+      FINANCE_DASHBOARD_DIR: dashboard,
+      DARKFINANCES_BACKUP_DIR: coordinatorRoot,
+      COORDINATED_VERIFY_KEY_PATH: keys.publicPath,
+      COORDINATED_SIGNING_KEY_PATH: keys.privatePath,
+      COORDINATED_TEST_SKIP_LOCK: '1',
+      FINANCE_API_TOKEN: 'test-token',
+      BACKUP_INCLUDE_ACTUAL_DATA: '1',
+      ACTUAL_SERVER_DATA_DIR: actualDataDir,
+    }, runners),
+    runStagedRestore: () => ({ ok: true, phase: 'complete' }),
+  });
+  assert.equal(result.journal.phase, PHASE.COMPLETE);
+  assert.ok(result.journal.healthResults.every((entry) => entry.ok || entry.skipped));
+});

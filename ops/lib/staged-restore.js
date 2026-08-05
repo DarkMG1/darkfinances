@@ -60,6 +60,9 @@ const { assertCoordinatedLockHeld } = require('./coordinated-operation-lock');
 const JOURNAL_KIND = 'darkfinances-staged-restore-journal';
 const JOURNAL_SCHEMA_VERSION = 2;
 const JOURNAL_MAX_BYTES = 512 * 1024;
+const FAILURE_HISTORY_LIMIT = 32;
+const FAILURE_MESSAGE_MAX_BYTES = 1024;
+const FAILURE_STAGE_MAX_BYTES = 64;
 
 const PHASE = Object.freeze({
   INIT: 'init',
@@ -83,12 +86,21 @@ const TERMINAL_FAILURE_PHASES = new Set([
   PHASE.ROLLED_BACK,
 ]);
 
+const MUTATION_STATUS = Object.freeze({
+  NOT_STARTED: 'not_started',
+  UNVERIFIED: 'unverified_partial_mutation',
+  ROLLBACK_VERIFIED: 'rollback_verified',
+  REPLACEMENT_VERIFIED: 'replacement_verified',
+});
+
 function redactPath(input) {
   return String(input).replace(/passkey-credentials\.json[^\n]*/gi, 'passkey-credentials.json [redacted]');
 }
 
-function safeError(error) {
-  return new Error(redactPath(error.message));
+function safeError(error, restartSafety = null) {
+  const redacted = new Error(boundedFailureMessage(error));
+  if (restartSafety) redacted.restoreRestartSafety = restartSafety;
+  return redacted;
 }
 
 function nowIso() {
@@ -186,6 +198,11 @@ function createJournal({
     completedDeletes: [],
     introducedPaths: [],
     rollbackPhase: null,
+    mutationStatus: MUTATION_STATUS.NOT_STARTED,
+    mutationStartedAt: null,
+    mutationVerifiedAt: null,
+    failureHistory: [],
+    failureHistoryDropped: 0,
     error: null,
     report: null,
   };
@@ -196,13 +213,139 @@ function updateJournal(journal, patch) {
   return journal;
 }
 
-function resetSwapProgress(journal) {
+function resetSwapProgress(journal, { clearError = true } = {}) {
   journal.completedSwaps = [];
   journal.completedDeletes = [];
   journal.introducedPaths = [];
   journal.rollbackPhase = null;
-  journal.error = null;
+  if (clearError) journal.error = null;
   return journal;
+}
+
+function truncateUtf8(input, maxBytes) {
+  const text = String(input);
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  const suffix = ' … [truncated]';
+  const budget = maxBytes - Buffer.byteLength(suffix, 'utf8');
+  let used = 0;
+  let truncated = '';
+  for (const character of text) {
+    const bytes = Buffer.byteLength(character, 'utf8');
+    if (used + bytes > budget) break;
+    truncated += character;
+    used += bytes;
+  }
+  return `${truncated}${suffix}`;
+}
+
+function boundedSingleLine(input, maxBytes, fallback) {
+  const raw = String(input ?? fallback).slice(0, maxBytes * 8);
+  const singleLine = redactPath(raw)
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '?')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  return truncateUtf8(singleLine || fallback, maxBytes);
+}
+
+function boundedFailureMessage(error) {
+  const message = error && typeof error === 'object' && 'message' in error
+    ? error.message
+    : error;
+  return boundedSingleLine(message, FAILURE_MESSAGE_MAX_BYTES, 'unknown restore failure');
+}
+
+function boundedFailureStage(stage) {
+  return boundedSingleLine(stage, FAILURE_STAGE_MAX_BYTES, 'unknown');
+}
+
+function normalizeFailureHistoryEntry(entry) {
+  return {
+    at: boundedSingleLine(entry?.at, FAILURE_STAGE_MAX_BYTES, nowIso()),
+    stage: boundedFailureStage(entry?.stage),
+    message: boundedFailureMessage(entry?.message),
+  };
+}
+
+function appendFailureHistory(journal, stage, error) {
+  if (!Array.isArray(journal.failureHistory)) journal.failureHistory = [];
+  journal.failureHistory = journal.failureHistory.map(normalizeFailureHistoryEntry);
+  journal.failureHistory.push({
+    at: nowIso(),
+    stage: boundedFailureStage(stage),
+    message: boundedFailureMessage(error),
+  });
+  const excess = Math.max(0, journal.failureHistory.length - FAILURE_HISTORY_LIMIT);
+  const priorDropped = Number.isSafeInteger(journal.failureHistoryDropped)
+    && journal.failureHistoryDropped >= 0
+    ? journal.failureHistoryDropped
+    : 0;
+  if (excess > 0) journal.failureHistory.splice(0, excess);
+  journal.failureHistoryDropped = Math.min(Number.MAX_SAFE_INTEGER, priorDropped + excess);
+  return journal;
+}
+
+function inferMutationStatus(journal) {
+  if (!journal) return MUTATION_STATUS.NOT_STARTED;
+  if (Object.values(MUTATION_STATUS).includes(journal.mutationStatus)) {
+    return journal.mutationStatus;
+  }
+  if (journal.phase === PHASE.COMPLETE || journal.phase === PHASE.POST_VERIFY_PASSED) {
+    return MUTATION_STATUS.REPLACEMENT_VERIFIED;
+  }
+  if (journal.phase === PHASE.ROLLED_BACK) return MUTATION_STATUS.ROLLBACK_VERIFIED;
+  if (
+    journal.phase === PHASE.ROLLBACK_FAILED
+    || journal.phase === PHASE.ROLLBACK_IN_PROGRESS
+    || journal.phase === PHASE.SWAPPED
+    || journal.phase === PHASE.FAILED
+    || journal.phase === PHASE.SNAPSHOT_CAPTURED
+    || (journal.completedSwaps || []).length > 0
+    || (journal.completedDeletes || []).length > 0
+    || (journal.introducedPaths || []).length > 0
+  ) {
+    return MUTATION_STATUS.UNVERIFIED;
+  }
+  return MUTATION_STATUS.NOT_STARTED;
+}
+
+function stagedRestoreRestartSafety(journal, journalPath = null) {
+  const status = inferMutationStatus(journal);
+  const phase = journal?.phase ?? null;
+  const hasMutationProgress = (journal?.completedSwaps || []).length > 0
+    || (journal?.completedDeletes || []).length > 0
+    || (journal?.introducedPaths || []).length > 0;
+  let restartAllowed = status === MUTATION_STATUS.NOT_STARTED
+    || status === MUTATION_STATUS.ROLLBACK_VERIFIED
+    || status === MUTATION_STATUS.REPLACEMENT_VERIFIED;
+  let reason;
+  if (phase === PHASE.ROLLBACK_FAILED || phase === PHASE.ROLLBACK_IN_PROGRESS) {
+    restartAllowed = false;
+    reason = `staged restore is ${phase}`;
+  } else if (status === MUTATION_STATUS.NOT_STARTED && hasMutationProgress) {
+    restartAllowed = false;
+    reason = 'staged restore journal has mutation progress without a mutation marker';
+  } else if (status === MUTATION_STATUS.UNVERIFIED) {
+    reason = 'destination may contain an unverified partial restore';
+  } else if (status === MUTATION_STATUS.ROLLBACK_VERIFIED) {
+    reason = 'pre-restore snapshot rollback was verified';
+  } else if (status === MUTATION_STATUS.REPLACEMENT_VERIFIED) {
+    reason = 'replacement generation was verified';
+  } else {
+    reason = 'no destination mutation started';
+  }
+  return {
+    restartAllowed,
+    mutationStatus: status,
+    stagedPhase: phase,
+    stagedJournalPath: journalPath,
+    reason,
+  };
+}
+
+function publishRestartSafety(session, journal, journalPath) {
+  const safety = stagedRestoreRestartSafety(journal, journalPath);
+  session?.onRestoreSafety?.(safety);
+  return safety;
 }
 
 function assertJournalMatchesRequest(journal, { archiveSha256, canonicalDestination }) {
@@ -372,6 +515,22 @@ function removePathIfExists(target) {
   else fs.rmSync(target, { force: true });
 }
 
+function markDestinationMutationStarted({
+  journal,
+  journalPath,
+  persist,
+  onSafetyChange,
+}) {
+  if (journal.mutationStatus === MUTATION_STATUS.UNVERIFIED) return;
+  updateJournal(journal, {
+    mutationStatus: MUTATION_STATUS.UNVERIFIED,
+    mutationStartedAt: journal.mutationStartedAt || nowIso(),
+    mutationVerifiedAt: null,
+  });
+  writeJournal(journalPath, journal, persist);
+  onSafetyChange?.();
+}
+
 function swapRuntimeTree({
   destinationRoot,
   stagingRoot,
@@ -384,6 +543,7 @@ function swapRuntimeTree({
   injectFault,
   persist,
   assertMutationGate,
+  onSafetyChange,
 }) {
   if (dryRun) return { completedSwaps: [], completedDeletes: [], introducedPaths: [] };
 
@@ -399,6 +559,12 @@ function swapRuntimeTree({
     if (journal.completedSwaps.includes(relative)) continue;
     injectFault?.('before:swap-file', relative);
     assertMutationGate();
+    markDestinationMutationStarted({
+      journal,
+      journalPath,
+      persist,
+      onSafetyChange,
+    });
     const source = path.join(stagingRoot, relative);
     const destination = path.join(destinationRoot, relative);
     fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
@@ -419,6 +585,12 @@ function swapRuntimeTree({
     if (journal.completedDeletes.includes(relative)) continue;
     injectFault?.('before:delete-stale', relative);
     assertMutationGate();
+    markDestinationMutationStarted({
+      journal,
+      journalPath,
+      persist,
+      onSafetyChange,
+    });
     removePathIfExists(path.join(destinationRoot, relative));
     journal.completedDeletes.push(relative);
     updateJournal(journal, { phase: PHASE.SWAPPED, completedDeletes: [...journal.completedDeletes] });
@@ -531,10 +703,12 @@ function performRollback({
   inventory,
   injectFault,
   persist,
+  onSafetyChange,
 }) {
   const snapshotManifest = readSnapshotManifest(layout.snapshotRoot);
   updateJournal(journal, { phase: PHASE.ROLLBACK_IN_PROGRESS, rollbackPhase: 'start' });
   writeJournal(journalPath, journal, persist);
+  onSafetyChange?.();
   try {
     applySnapshotRollback({
       destinationRoot,
@@ -547,24 +721,33 @@ function performRollback({
         writeJournal(journalPath, journal, persist);
       },
     });
-    resetSwapProgress(journal);
-    updateJournal(journal, { phase: PHASE.ROLLED_BACK, rollbackPhase: 'complete', error: null });
+    resetSwapProgress(journal, { clearError: false });
+    updateJournal(journal, {
+      phase: PHASE.ROLLED_BACK,
+      rollbackPhase: 'complete',
+      mutationStatus: MUTATION_STATUS.ROLLBACK_VERIFIED,
+      mutationVerifiedAt: nowIso(),
+    });
     writeJournal(journalPath, journal, persist);
+    onSafetyChange?.();
     return snapshotManifest;
   } catch (error) {
-    updateJournal(journal, { phase: PHASE.ROLLBACK_FAILED, rollbackPhase: 'failed', error: redactPath(error.message) });
+    appendFailureHistory(journal, 'rollback', error);
+    updateJournal(journal, {
+      phase: PHASE.ROLLBACK_FAILED,
+      rollbackPhase: 'failed',
+      mutationStatus: MUTATION_STATUS.UNVERIFIED,
+      error: boundedFailureMessage(error),
+    });
     writeJournal(journalPath, journal, persist);
+    onSafetyChange?.();
     throw error;
   }
 }
 
 function needsRollbackFirst(journal) {
-  return journal.completedSwaps.length > 0
-    || journal.completedDeletes.length > 0
-    || journal.introducedPaths.length > 0
-    || journal.phase === PHASE.SWAPPED
-    || journal.phase === PHASE.POST_VERIFY_PASSED
-    || journal.phase === PHASE.FAILED
+  const status = inferMutationStatus(journal);
+  return status === MUTATION_STATUS.UNVERIFIED
     || journal.phase === PHASE.ROLLBACK_IN_PROGRESS
     || journal.phase === PHASE.ROLLBACK_FAILED;
 }
@@ -590,6 +773,8 @@ function requireArchive(archivePath) {
 }
 
 function runStagedRestore(options = {}) {
+  const coordinatedSession = options.coordinatedSession || null;
+  publishRestartSafety(coordinatedSession, null, null);
   const archivePath = path.resolve(requireArchive(options.archivePath));
   const archiveSha256 = sha256File(archivePath);
   const requestedDestination = path.resolve(options.destinationRoot);
@@ -661,6 +846,7 @@ function runStagedRestore(options = {}) {
       assertJournalMatchesRequest(journal, { archiveSha256, canonicalDestination });
     }
   }
+  publishRestartSafety(coordinatedSession, journal, layout.journalPath);
 
   restoreLock = acquireRestoreLock({ layout, canonicalDestination, dryRun, env });
 
@@ -674,6 +860,7 @@ function runStagedRestore(options = {}) {
       dryRun: false,
     });
     writeJournal(layout.journalPath, journal, true);
+    publishRestartSafety(coordinatedSession, journal, layout.journalPath);
   } else if (!journal) {
     journal = createJournal({
       restoreId,
@@ -683,26 +870,57 @@ function runStagedRestore(options = {}) {
       layout,
       dryRun: true,
     });
+    publishRestartSafety(coordinatedSession, journal, layout.journalPath);
   } else if (TERMINAL_FAILURE_PHASES.has(journal.phase) || needsRollbackFirst(journal)) {
     if (persist && journal.snapshotDigest && fs.existsSync(layout.snapshotRoot)) {
       const inventory = loadBackupStateInventory();
       if (journal.phase === PHASE.ROLLBACK_FAILED || needsRollbackFirst(journal)) {
-        performRollback({
-          destinationRoot: canonicalDestination,
-          layout,
-          journal,
-          journalPath: layout.journalPath,
-          inventory,
-          injectFault,
-          persist,
-        });
+        try {
+          performRollback({
+            destinationRoot: canonicalDestination,
+            layout,
+            journal,
+            journalPath: layout.journalPath,
+            inventory,
+            injectFault,
+            persist,
+            onSafetyChange: () => publishRestartSafety(
+              coordinatedSession,
+              journal,
+              layout.journalPath,
+            ),
+          });
+        } catch (error) {
+          const safety = publishRestartSafety(coordinatedSession, journal, layout.journalPath);
+          restoreLock?.release();
+          restoreLock = null;
+          throw safeError(error, safety);
+        }
       }
       resetSwapProgress(journal);
-      updateJournal(journal, { phase: PHASE.INIT });
+      updateJournal(journal, {
+        phase: PHASE.INIT,
+        mutationStatus: MUTATION_STATUS.NOT_STARTED,
+        mutationStartedAt: null,
+        mutationVerifiedAt: null,
+        error: null,
+      });
       writeJournal(layout.journalPath, journal, persist);
+      publishRestartSafety(coordinatedSession, journal, layout.journalPath);
       resumeFromJournal = true;
     } else if (needsRollbackFirst(journal)) {
-      throw new Error('restore journal indicates partial mutation but snapshot is missing');
+      const error = new Error('restore journal indicates partial mutation but snapshot is missing');
+      appendFailureHistory(journal, 'resume', error);
+      updateJournal(journal, {
+        phase: PHASE.ROLLBACK_FAILED,
+        mutationStatus: MUTATION_STATUS.UNVERIFIED,
+        error: boundedFailureMessage(error),
+      });
+      writeJournal(layout.journalPath, journal, persist);
+      const safety = publishRestartSafety(coordinatedSession, journal, layout.journalPath);
+      restoreLock?.release();
+      restoreLock = null;
+      throw safeError(error, safety);
     }
   }
 
@@ -970,6 +1188,11 @@ function runStagedRestore(options = {}) {
       injectFault,
       persist: true,
       assertMutationGate,
+      onSafetyChange: () => publishRestartSafety(
+        coordinatedSession,
+        journal,
+        layout.journalPath,
+      ),
     });
     updateJournal(journal, { phase: PHASE.SWAPPED });
     writeJournal(layout.journalPath, journal, true);
@@ -981,8 +1204,13 @@ function runStagedRestore(options = {}) {
       inventory,
       toolingRoot: path.join(extractRoot, 'tooling'),
     });
-    updateJournal(journal, { phase: PHASE.POST_VERIFY_PASSED });
+    updateJournal(journal, {
+      phase: PHASE.POST_VERIFY_PASSED,
+      mutationStatus: MUTATION_STATUS.REPLACEMENT_VERIFIED,
+      mutationVerifiedAt: nowIso(),
+    });
     writeJournal(layout.journalPath, journal, true);
+    publishRestartSafety(coordinatedSession, journal, layout.journalPath);
     injectFault?.('after:post-verify');
 
     const report = {
@@ -1026,9 +1254,15 @@ function runStagedRestore(options = {}) {
       revokeAdmissionToken(coordinatorLayout, admission, 'staged_restore_failed');
     }
     if (persist && journal && journal.phase !== PHASE.COMPLETE) {
-      updateJournal(journal, { phase: PHASE.FAILED, error: redactPath(error.message) });
+      appendFailureHistory(journal, 'restore', error);
+      updateJournal(journal, { phase: PHASE.FAILED, error: boundedFailureMessage(error) });
       writeJournal(layout.journalPath, journal, true);
-      if (journal.snapshotDigest && fs.existsSync(layout.snapshotRoot)) {
+      publishRestartSafety(coordinatedSession, journal, layout.journalPath);
+      if (
+        needsRollbackFirst(journal)
+        && journal.snapshotDigest
+        && fs.existsSync(layout.snapshotRoot)
+      ) {
         try {
           performRollback({
             destinationRoot: canonicalDestination,
@@ -1038,16 +1272,35 @@ function runStagedRestore(options = {}) {
             inventory: loadBackupStateInventory(),
             injectFault,
             persist: true,
+            onSafetyChange: () => publishRestartSafety(
+              coordinatedSession,
+              journal,
+              layout.journalPath,
+            ),
           });
         } catch (rollbackError) {
           if (admission && !admissionConsumed && coordinatorLayout) {
             revokeAdmissionToken(coordinatorLayout, admission, 'rollback_failed');
           }
-          throw safeError(new Error(`${error.message}; rollback failed: ${rollbackError.message}`));
+          const combined = new Error(`${error.message}; rollback failed: ${rollbackError.message}`);
+          const safety = publishRestartSafety(coordinatedSession, journal, layout.journalPath);
+          throw safeError(combined, safety);
         }
+      } else if (needsRollbackFirst(journal)) {
+        const missingSnapshot = new Error('rollback verification unavailable: pre-restore snapshot is missing');
+        appendFailureHistory(journal, 'rollback', missingSnapshot);
+        error = new Error(`${error.message}; ${missingSnapshot.message}`);
+        updateJournal(journal, {
+          phase: PHASE.ROLLBACK_FAILED,
+          mutationStatus: MUTATION_STATUS.UNVERIFIED,
+          error: boundedFailureMessage(error),
+        });
+        writeJournal(layout.journalPath, journal, true);
+        publishRestartSafety(coordinatedSession, journal, layout.journalPath);
       }
     }
-    throw safeError(error);
+    const safety = publishRestartSafety(coordinatedSession, journal, layout.journalPath);
+    throw safeError(error, safety);
   } finally {
     restoreLock?.release();
     if (dryRun && fs.existsSync(workRoot)) fs.rmSync(workRoot, { recursive: true, force: true });
@@ -1058,7 +1311,10 @@ module.exports = {
   JOURNAL_KIND,
   JOURNAL_SCHEMA_VERSION,
   JOURNAL_BASENAME: JOURNAL_FILENAME,
+  FAILURE_HISTORY_LIMIT,
+  FAILURE_MESSAGE_MAX_BYTES,
   PHASE,
+  MUTATION_STATUS,
   runStagedRestore,
   readJournal,
   journalPathForDestination,
@@ -1070,6 +1326,7 @@ module.exports = {
   parseFaultSchedule,
   restoreIdForDestination,
   cleanupControlArtifacts,
+  stagedRestoreRestartSafety,
   performRollback,
   JOURNAL_MAX_BYTES,
 };

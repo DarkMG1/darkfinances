@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const {
   buildManifest,
@@ -12,6 +13,7 @@ const {
   assertLegacyArchivePreflight,
   assertLegacyManifestMatchesArchive,
   sha256File,
+  FILE_HASH_CHUNK_BYTES,
   LEGACY_EMBEDDED_MANIFEST,
 } = require('../lib/backup-verify');
 const { ARCHIVE_MAX_DECLARED_BYTES } = require('../lib/backup-bundle-schema');
@@ -392,4 +394,100 @@ test('backup tar creation paths set COPYFILE_DISABLE=1', () => {
   assert.match(runnersSource, /backupTarEnv\(/);
   const listingSource = fs.readFileSync(path.resolve(__dirname, '..', 'lib', 'backup-bundle-tar-listing.js'), 'utf8');
   assert.match(listingSource, /backupTarEnv\(/);
+});
+
+test('sha256File incrementally hashes a large sparse file with bounded reads', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-sparse-hash-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sparse = path.join(root, 'large-sparse.tgz');
+  const sparseBytes = (FILE_HASH_CHUNK_BYTES * 64) + 17;
+  const descriptor = fs.openSync(sparse, 'w', 0o600);
+  fs.ftruncateSync(descriptor, sparseBytes);
+  fs.closeSync(descriptor);
+
+  let largestRead = 0;
+  let readCalls = 0;
+  const actual = sha256File(sparse, {
+    readSync(fd, buffer, offset, length, position) {
+      largestRead = Math.max(largestRead, length);
+      readCalls += 1;
+      return fs.readSync(fd, buffer, offset, length, position);
+    },
+  });
+
+  const expectedHash = crypto.createHash('sha256');
+  const zeroChunk = Buffer.alloc(FILE_HASH_CHUNK_BYTES);
+  let remaining = sparseBytes;
+  while (remaining > 0) {
+    const length = Math.min(remaining, zeroChunk.length);
+    expectedHash.update(zeroChunk.subarray(0, length));
+    remaining -= length;
+  }
+  assert.equal(actual, expectedHash.digest('hex'));
+  assert.ok(readCalls > 1);
+  assert.ok(largestRead <= FILE_HASH_CHUNK_BYTES);
+});
+
+test('sha256File rejects descriptor size, metadata, and path races', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-hash-races-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const target = path.join(root, 'archive.tgz');
+  fs.writeFileSync(target, 'archive bytes\n', { mode: 0o600 });
+
+  let fstatCalls = 0;
+  assert.throws(
+    () => sha256File(target, {
+      fstatSync(fd) {
+        const stat = fs.fstatSync(fd);
+        fstatCalls += 1;
+        return fstatCalls === 2 ? Object.assign(stat, { size: stat.size + 1 }) : stat;
+      },
+    }),
+    /size changed while it was being read/,
+  );
+
+  fstatCalls = 0;
+  assert.throws(
+    () => sha256File(target, {
+      fstatSync(fd) {
+        const stat = fs.fstatSync(fd);
+        fstatCalls += 1;
+        return fstatCalls === 2 ? Object.assign(stat, { ctimeMs: stat.ctimeMs + 1 }) : stat;
+      },
+    }),
+    /metadata changed while it was being read/,
+  );
+
+  let lstatCalls = 0;
+  assert.throws(
+    () => sha256File(target, {
+      lstatSync(file) {
+        const stat = fs.lstatSync(file);
+        lstatCalls += 1;
+        return lstatCalls === 2 ? Object.assign(stat, { ino: stat.ino + 1 }) : stat;
+      },
+    }),
+    /path changed while it was being read/,
+  );
+});
+
+test('sha256File fails closed on symlinks and missing no-follow support', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-hash-nofollow-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const target = path.join(root, 'archive.tgz');
+  const link = path.join(root, 'archive-link.tgz');
+  fs.writeFileSync(target, 'archive bytes\n', { mode: 0o600 });
+  fs.symlinkSync(target, link);
+
+  assert.throws(() => sha256File(link), /symbolic link/);
+  assert.throws(
+    () => sha256File(target, {
+      constants: {
+        O_RDONLY: fs.constants.O_RDONLY,
+        O_NONBLOCK: fs.constants.O_NONBLOCK,
+        O_NOFOLLOW: 0,
+      },
+    }),
+    /requires O_NOFOLLOW support/,
+  );
 });
