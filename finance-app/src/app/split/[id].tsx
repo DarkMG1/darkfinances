@@ -203,13 +203,10 @@ export default function SplitEditor() {
     return unsub;
   }, [isDirty, mutationLocked, navigation]);
 
-  const allocation = useMemo(
-    () => allocateSplitCents(
-      parentCents,
-      mode,
-      legs.map((leg) => ({ amount: leg.amt, percent: leg.pct })),
-    ),
-    [legs, mode, parentCents],
+  const allocation = allocateSplitCents(
+    parentCents,
+    mode,
+    legs.map((leg) => ({ amount: leg.amt, percent: leg.pct })),
   );
   const auxiliaryRefetchQueries = useMemo(
     () => buildSplitEditorAuxiliaryRefetchQueries({ categories }),
