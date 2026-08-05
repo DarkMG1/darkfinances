@@ -78,7 +78,7 @@ Recommended:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `5007` | Loopback listener port. |
-| `FINANCE_TRUST_PROXY_HOPS` | `0` when unset | Trusted reverse-proxy hop count for `req.ip` and rate limiting (`0` = ignore `X-Forwarded-For`; `1` = one trusted proxy that overwrites/appends the real client address). |
+| `FINANCE_TRUST_PROXY_HOPS` | `0` when unset | Trusted reverse-proxy hop count for `req.ip` and rate limiting (`0` = ignore `X-Forwarded-For`; `1` = one trusted proxy that overwrites the header with the real client address). |
 | `SESSION_DIR` | `finance-dashboard/.sessions` | Persistent file-backed browser sessions. |
 | `FINANCE_TIME_ZONE` | `TZ`, then `America/Los_Angeles` | Timezone for financial date boundaries. |
 | `WEBAUTHN_RP_ID` | Hostname from `PUBLIC_ORIGIN` | Passkey relying-party ID. |
@@ -161,8 +161,8 @@ file can lock browser users out.
   cookies are `SameSite=Lax`, secure outside loopback, and HTTP-only.
 - CORS allows only the configured browser origin; native requests do not need a browser origin.
 - Rate limits key clients by socket address when `FINANCE_TRUST_PROXY_HOPS` is unset or `0`. Set
-  `FINANCE_TRUST_PROXY_HOPS=1` when a trusted HTTPS reverse proxy is the sole ingress and
-  overwrites/appends `X-Forwarded-For` with the real client address.
+  `FINANCE_TRUST_PROXY_HOPS=1` only after a trusted HTTPS reverse proxy is the sole ingress and
+  discards any inbound `X-Forwarded-For` value before overwriting it with the real client address.
 - Every authenticated `/api/v1` write requires a unique `Idempotency-Key`. Completed results replay
   safely; an operation left `started` after a crash remains outcome-unknown and is inspectable at
   `GET /api/v1/operations/:key` rather than being applied twice.
