@@ -79,6 +79,52 @@ test('runner refuses missing FIX_DATA_DIR without sourcing poisoned credentials'
   assert.match(result.stderr, /missing FIX_DATA_DIR/);
 });
 
+test('runner refuses FIX_DATA_DIR beneath a symlinked allowlist root', (t) => {
+  const sandbox = fs.mkdtempSync(
+    path.join(fs.realpathSync(path.resolve(__dirname, '..')), '.run-sh-symlink-root-'),
+  );
+  const home = path.join(sandbox, 'home');
+  const unexpectedRoot = path.join(sandbox, 'unexpected-root');
+  const allowlistRoot = path.join(home, '.cache', 'actual-tools');
+  const dataDir = path.join(allowlistRoot, 'victim');
+  const sentinelPath = path.join(unexpectedRoot, 'victim', 'keep-me');
+  fs.mkdirSync(path.join(home, '.cache'), { recursive: true });
+  fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+  fs.writeFileSync(sentinelPath, 'sentinel\n', { mode: 0o600 });
+  fs.symlinkSync(unexpectedRoot, allowlistRoot);
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+
+  const fixtureInfo = fixture(t, null, { HOME: home });
+  writePoisonedCredentialFiles(fixtureInfo.dir, { dataDir });
+  fs.writeFileSync(path.join(fixtureInfo.dir, 'ok.js'), 'console.log("SHOULD_NOT_RUN");\n');
+  const result = runRunner(fixtureInfo, ['ok.js']);
+
+  assertRejectedWithoutExecution(result);
+  assert.match(result.stderr, /symlink allowlist root/);
+  assert.equal(fs.readFileSync(sentinelPath, 'utf8'), 'sentinel\n');
+});
+
+test('runner refuses a symlink FIX_DATA_DIR', (t) => {
+  const realDataDir = fs.mkdtempSync('/tmp/darkfinances-runner-real-cache-');
+  const dataDir = `${realDataDir}-link`;
+  const sentinelPath = path.join(realDataDir, 'keep-me');
+  fs.writeFileSync(sentinelPath, 'sentinel\n', { mode: 0o600 });
+  fs.symlinkSync(realDataDir, dataDir);
+  t.after(() => {
+    fs.rmSync(dataDir, { force: true });
+    fs.rmSync(realDataDir, { recursive: true, force: true });
+  });
+
+  const fixtureInfo = fixture(t, null);
+  writePoisonedCredentialFiles(fixtureInfo.dir, { dataDir });
+  fs.writeFileSync(path.join(fixtureInfo.dir, 'ok.js'), 'console.log("SHOULD_NOT_RUN");\n');
+  const result = runRunner(fixtureInfo, ['ok.js']);
+
+  assertRejectedWithoutExecution(result);
+  assert.match(result.stderr, /symlink FIX_DATA_DIR/);
+  assert.equal(fs.readFileSync(sentinelPath, 'utf8'), 'sentinel\n');
+});
+
 test('filtered-only output remains successful while script failures propagate', (t) => {
   const dataDir = `/tmp/darkfinances-runner-cache-${process.pid}`;
   const fixtureInfo = fixture(t, dataDir);
@@ -106,6 +152,27 @@ test('runner recreates FIX_DATA_DIR with mode 0700', (t) => {
   fs.writeFileSync(path.join(fixtureInfo.dir, 'touch.js'), 'console.log("ok");\n');
   const result = runRunner(fixtureInfo, ['touch.js']);
   assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(fs.statSync(dataDir).mode & 0o777, 0o700);
+});
+
+test('runner accepts FIX_DATA_DIR beneath a real user cache allowlist root', (t) => {
+  const sandbox = fs.mkdtempSync(
+    path.join(fs.realpathSync(path.resolve(__dirname, '..')), '.run-sh-real-root-'),
+  );
+  const home = path.join(sandbox, 'home');
+  const dataDir = path.join(home, '.cache', 'actual-tools', 'cache');
+  const sentinelPath = path.join(dataDir, 'remove-me');
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(sentinelPath, 'sentinel\n', { mode: 0o600 });
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+
+  const fixtureInfo = fixture(t, null, { HOME: home });
+  fs.writeFileSync(path.join(fixtureInfo.dir, '.actual.env'), `FIX_DATA_DIR=${JSON.stringify(dataDir)}\n`);
+  fs.writeFileSync(path.join(fixtureInfo.dir, 'ok.js'), 'console.log("ok");\n');
+  const result = runRunner(fixtureInfo, ['ok.js']);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(fs.existsSync(sentinelPath), false);
   assert.equal(fs.statSync(dataDir).mode & 0o777, 0o700);
 });
 
