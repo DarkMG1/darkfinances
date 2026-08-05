@@ -24,6 +24,13 @@ test('DELETE journals local apply, sync uncertainty, and status-only recovery', 
     const fs = require('fs');
     const path = require('path');
     const dataPath = require.resolve(path.join(process.env.TEST_DASHBOARD_ROOT, 'dataModule.js'));
+    const {
+      AccountNotFoundError,
+      ImportedTransactionError,
+      SplitLegDeleteError,
+      SplitParentNotFoundError,
+      TransactionNotFoundError,
+    } = require(path.join(process.env.TEST_DASHBOARD_ROOT, 'lib/errors.js'));
     const mark = (value) => fs.appendFileSync(process.env.TEST_EFFECT_MARKER, value + '\\n');
     let currentId = null;
     const mock = new Proxy({
@@ -33,6 +40,16 @@ test('DELETE journals local apply, sync uncertainty, and status-only recovery', 
       assertTransactionMutationAvailable: ({ ids }) => {
         currentId = String(ids[0]);
         mark('preflight:' + currentId);
+      },
+      preflightTransactionDeletion: async ({ id, accountId }) => {
+        currentId = String(id);
+        mark('domain-preflight:' + currentId);
+        if (accountId === 'missing-account') throw new AccountNotFoundError();
+        if (currentId === 'missing-transaction') throw new TransactionNotFoundError();
+        if (currentId === 'imported') throw new ImportedTransactionError();
+        if (currentId === 'split-leg') throw new SplitLegDeleteError();
+        if (currentId === 'split-parent-missing') throw new SplitParentNotFoundError();
+        return { ok: true };
       },
       deleteTransaction: async ({ id }) => {
         currentId = String(id);
@@ -76,6 +93,75 @@ test('DELETE journals local apply, sync uncertainty, and status-only recovery', 
   `,
   });
   const marker = path.join(dir, 'effects.log');
+
+  for (const failure of [
+    {
+      id: 'missing-transaction',
+      accountId: 'account',
+      status: 404,
+      code: 'TRANSACTION_NOT_FOUND',
+      message: 'Transaction not found',
+    },
+    {
+      id: 'imported',
+      accountId: 'account',
+      status: 409,
+      code: 'IMPORTED_TRANSACTION',
+      message: 'Bank-imported transactions can’t be deleted — only ones you added manually.',
+    },
+    {
+      id: 'split-leg',
+      accountId: 'account',
+      status: 400,
+      code: 'INVALID_REQUEST',
+      message: 'Split legs cannot be deleted independently',
+    },
+    {
+      id: 'split-parent-missing',
+      accountId: 'account',
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Split parent not found',
+    },
+    {
+      id: 'account-transaction',
+      accountId: 'missing-account',
+      status: 404,
+      code: 'ACCOUNT_NOT_FOUND',
+      message: 'Account not found',
+    },
+  ]) {
+    const key = `delete-preflight-${failure.id}`;
+    const route = `/api/v1/transactions/${failure.id}?accountId=${failure.accountId}&date=2026-07-10`;
+    const effectsBefore = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : '';
+    let failed = await request(base, route, { method: 'DELETE', key });
+    assert.equal(failed.response.status, failure.status, failure.id);
+    assert.equal(failed.body.code, failure.code, failure.id);
+    assert.equal(failed.body.error, failure.message, failure.id);
+    const effectsAfter = fs.readFileSync(marker, 'utf8');
+    assert.notEqual(effectsAfter, effectsBefore, failure.id);
+    assert.equal(effectsAfter.includes(`local-delete:${failure.id}`), false, failure.id);
+
+    failed = await request(base, route, { method: 'DELETE', key });
+    assert.equal(failed.response.status, failure.status, failure.id);
+    assert.equal(failed.body.code, failure.code, failure.id);
+    assert.equal(fs.readFileSync(marker, 'utf8'), effectsAfter, failure.id);
+
+    const status = await request(base, `/api/v1/operations/${key}`);
+    assert.equal(status.response.status, 200, failure.id);
+    assert.equal(status.body.data.phase, 'failed', failure.id);
+    assert.equal(status.body.data.outcome, 'failed', failure.id);
+    assert.deepEqual(status.body.data.error, {
+      code: failure.code,
+      message: failure.message,
+      status: failure.status,
+    }, failure.id);
+    const record = JSON.parse(
+      fs.readFileSync(path.join(dir, 'operation-journal.json'), 'utf8'),
+    ).operations[key];
+    assert.equal(record.knownBeforeApply, true, failure.id);
+    assert.equal(Object.hasOwn(record, 'localAppliedAt'), false, failure.id);
+  }
 
   const successKey = 'delete-success';
   let result = await request(
@@ -144,8 +230,10 @@ test('DELETE journals local apply, sync uncertainty, and status-only recovery', 
   assert.equal(fs.readFileSync(marker, 'utf8'), effectsBeforeDeleteRetry);
 
   const effects = fs.readFileSync(marker, 'utf8').trim().split('\n');
-  assert.deepEqual(effects.slice(0, 3), [
+  const successStart = effects.indexOf('preflight:success');
+  assert.deepEqual(effects.slice(successStart, successStart + 4), [
     'preflight:success',
+    'domain-preflight:success',
     'local-delete:success',
     'sync:success',
   ]);

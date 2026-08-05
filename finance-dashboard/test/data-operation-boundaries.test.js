@@ -5,7 +5,10 @@ const os = require('os');
 const path = require('path');
 const {
   AccountNotFoundError,
+  ImportedTransactionError,
   KnownPreApplyError,
+  SplitLegDeleteError,
+  SplitParentNotFoundError,
   TransactionNotFoundError,
 } = require('../lib/errors');
 const { STATE_REGISTRY } = require('../lib/state-registry');
@@ -140,6 +143,52 @@ test('transaction lookup distinguishes confirmed absence from transient errors',
       return true;
     },
   );
+});
+
+test('transaction deletion preflight classifies deterministic failures before mutation', async () => {
+  const parent = {
+    id: 'split-parent',
+    date: '2026-07-13',
+    imported_id: null,
+    subtransactions: [{ id: 'split-leg', parent_id: 'split-parent' }],
+  };
+  const leg = { id: 'split-leg', parent_id: 'split-parent' };
+  data.api.getAccounts = async () => [{ id: 'account-id', closed: false }];
+
+  for (const [rows, id, ErrorType] of [
+    [[], 'missing-transaction', TransactionNotFoundError],
+    [[{ id: 'imported', imported_id: 'bank-id' }], 'imported', ImportedTransactionError],
+    [[parent, leg], leg.id, SplitLegDeleteError],
+    [[{ id: 'orphan-leg', parent_id: 'missing-parent' }], 'orphan-leg', SplitParentNotFoundError],
+  ]) {
+    data.api.getTransactions = async () => rows;
+    await assert.rejects(
+      data.preflightTransactionDeletion({
+        id,
+        accountId: 'account-id',
+        date: '2026-07-13',
+      }),
+      (error) => error instanceof ErrorType && error instanceof KnownPreApplyError === false,
+    );
+  }
+
+  data.api.getAccounts = async () => [];
+  await assert.rejects(
+    data.preflightTransactionDeletion({
+      id: 'transaction-id',
+      accountId: 'missing-account',
+      date: '2026-07-13',
+    }),
+    (error) => error instanceof AccountNotFoundError && error instanceof KnownPreApplyError === false,
+  );
+
+  data.api.getAccounts = async () => [{ id: 'account-id', closed: false }];
+  data.api.getTransactions = async () => [{ id: 'manual', imported_id: null }];
+  await assert.doesNotReject(data.preflightTransactionDeletion({
+    id: 'manual',
+    accountId: 'account-id',
+    date: '2026-07-13',
+  }));
 });
 
 test('Splitwise structural account/category writes synchronize with zero transaction counters', async () => {

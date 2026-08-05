@@ -36,7 +36,7 @@ Records without `fingerprintVersion` are compared with the old method/path/`JSON
 ## Failure and replay behavior
 
 - A journal admission write failure prevents handler execution.
-- Only `KnownPreApplyError` before an explicit first-effect boundary becomes terminal `failed`. This marker covers request validation and confirmed receipt account or transaction absence; plain errors, generic `AppError` values, and failures inferred from a status or message remain unknown.
+- Only `KnownPreApplyError` before an explicit first-effect boundary becomes terminal `failed`. This marker covers request validation, confirmed receipt account or transaction absence, and deletion preflight results that prove the account or transaction is absent or the target is an imported transaction, split leg, or orphaned split leg; plain errors, generic `AppError` values, and failures inferred from a status or message remain unknown.
 - Once the effect boundary is crossed, any handler or checkpoint error returns `OUTCOME_UNKNOWN`; the durable nonterminal record blocks another execution.
 - `local_applied` is written immediately after the domain call returns.
 - `sync_unknown` is written before `syncNow`.
