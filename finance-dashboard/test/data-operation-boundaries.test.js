@@ -186,6 +186,7 @@ test('transaction deletion preflight classifies deterministic failures before mu
   data.api.getTransactions = async () => [{
     id: 'manual',
     date: '2026-07-13',
+    amount: -100,
     imported_id: null,
     subtransactions: [],
   }];
