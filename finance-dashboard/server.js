@@ -41,6 +41,7 @@ const {
 } = require('./lib/request-admission');
 const {
   createClientAbortSignal,
+  prepareMutationBodyAdmission,
   withMutationAdmission,
   withOperationStatusAdmission,
   withReadAdmission,
@@ -386,6 +387,23 @@ function rateLimit(name, max, windowMs) {
   };
 }
 
+const loginLimiter = rateLimit('passkey-login', 30, 10 * 60_000);
+const enrollmentLimiter = rateLimit('passkey-enrollment', 10, 10 * 60_000);
+const API_TOKEN = process.env.FINANCE_API_TOKEN || '';
+function tokenOk(presented) {
+  if (!API_TOKEN || !presented) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(API_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function v1Auth(req, res, next) {
+  if (isDemo(req)) return next(); // public sample data only; demoMiddleware handles the response.
+  if (req.session && req.session.authenticated) return next(); // browser (passkey)
+  const headerTok = req.get('X-Finance-Token') || (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (tokenOk(headerTok)) return next(); // native app (token)
+  return sendApiErrorCode(req, res, 'UNAUTHENTICATED');
+}
+
 applyExpressTrustProxy(app, trustProxyConfig);
 app.disable('x-powered-by');
 app.disable('etag');
@@ -447,6 +465,44 @@ app.use((req, res, next) => {
 app.use((req, res, next) => requestClaimsDemo(req)
   ? rateLimit('demo', 240, 60_000)(req, res, next)
   : next());
+app.use((req, res, next) => {
+  if (req.method !== 'POST') return next();
+  if (/^\/auth\/login\/(?:start|finish)\/?$/i.test(req.path)) {
+    return loginLimiter(req, res, next);
+  }
+  if (/^\/auth\/(?:enroll\/authorize|register\/(?:start|finish))\/?$/i.test(req.path)) {
+    return enrollmentLimiter(req, res, next);
+  }
+  return next();
+});
+const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+app.use((req, res, next) => {
+  if (!BODY_METHODS.has(req.method) || !/^\/api(?:\/|$)/i.test(req.path) || isDemo(req)) {
+    return next();
+  }
+  if (isVersionedApiRequest(req)) return v1Auth(req, res, next);
+  return requireAuth(req, res, next);
+});
+app.use(async (req, res, next) => {
+  if (
+    !BODY_METHODS.has(req.method)
+    || !/^\/api(?:\/|$)/i.test(req.path)
+    || isDemo(req)
+    || !findMutationContract(req)
+  ) {
+    return next();
+  }
+  try {
+    await prepareMutationBodyAdmission(req, res, operationJournal, {
+      isDemo,
+      isVersioned: isVersionedApiRequest(req),
+      admission: requestAdmission,
+    });
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+});
 function mayUseReceiptJsonLimit(req) {
   const principal = deriveRequestPrincipal(req, {
     apiToken: process.env.FINANCE_API_TOKEN || '',
@@ -481,12 +537,9 @@ app.get('/auth/status', (req, res) => {
   });
 });
 
-const loginLimiter = rateLimit('passkey-login', 30, 10 * 60_000);
-const enrollmentLimiter = rateLimit('passkey-enrollment', 10, 10 * 60_000);
-
 // First enrollment requires a short-lived out-of-band code. Once one credential
 // exists, further enrollment requires an already-authenticated browser session.
-app.post('/auth/enroll/authorize', enrollmentLimiter, (req, res) => {
+app.post('/auth/enroll/authorize', (req, res) => {
   try {
     const creds = loadCreds();
     if (creds.length > 0) return res.status(409).json({ error: 'A passkey is already registered' });
@@ -503,7 +556,7 @@ app.post('/auth/enroll/authorize', enrollmentLimiter, (req, res) => {
   }
 });
 
-app.post('/auth/register/start', enrollmentLimiter, async (req, res) => {
+app.post('/auth/register/start', async (req, res) => {
   try {
     const creds = loadCreds();
     if (!enrollmentAuthorized(req, creds)) return res.status(403).json({ error: 'Registration closed' });
@@ -524,7 +577,7 @@ app.post('/auth/register/start', enrollmentLimiter, async (req, res) => {
   }
 });
 
-app.post('/auth/register/finish', enrollmentLimiter, async (req, res) => {
+app.post('/auth/register/finish', async (req, res) => {
   let expectedChallenge;
   try {
     expectedChallenge = await consumePasskeyChallengeForVerify(req, 'register');
@@ -591,7 +644,7 @@ app.post('/auth/register/finish', enrollmentLimiter, async (req, res) => {
 });
 
 // Authentication
-app.post('/auth/login/start', loginLimiter, async (req, res) => {
+app.post('/auth/login/start', async (req, res) => {
   try {
     const creds = loadCreds();
     if (!creds.length) return res.status(409).json({ error: 'No passkey is registered' });
@@ -607,7 +660,7 @@ app.post('/auth/login/start', loginLimiter, async (req, res) => {
   }
 });
 
-app.post('/auth/login/finish', loginLimiter, async (req, res) => {
+app.post('/auth/login/finish', async (req, res) => {
   let expectedChallenge;
   try {
     expectedChallenge = await consumePasskeyChallengeForVerify(req, 'login');
@@ -1810,7 +1863,11 @@ const runHandler = (req, res, fn, operation, { signal } = {}) => {
   if (isTestIdentityPing(req)) {
     return fn(req);
   }
-  return withReadAdmission(req, res, actualCoordinator, () => fn(req), { admission: requestAdmission, signal });
+  return withReadAdmission(req, res, actualCoordinator, () => fn(req), {
+    admission: requestAdmission,
+    onCacheHit: fn === resolvers.review ? () => fn(req) : null,
+    signal,
+  });
 };
 async function executeReadWithQueryStats(req, res, fn) {
   const abort = createClientAbortSignal(req, res);
@@ -1975,21 +2032,6 @@ app.delete('/api/goals/:id', raw(deleteGoal));
 app.post('/api/refresh', raw(async () => doRefresh()));
 
 // ---- Versioned API for native clients: session OR bearer token + CORS -------
-const API_TOKEN = process.env.FINANCE_API_TOKEN || '';
-function tokenOk(presented) {
-  if (!API_TOKEN || !presented) return false;
-  const a = Buffer.from(presented);
-  const b = Buffer.from(API_TOKEN);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-function v1Auth(req, res, next) {
-  if (isDemo(req)) return next(); // public sample data only; demoMiddleware handles the response.
-  if (req.session && req.session.authenticated) return next(); // browser (passkey)
-  const headerTok = req.get('X-Finance-Token') || (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-  if (tokenOk(headerTok)) return next(); // native app (token)
-  return sendApiErrorCode(req, res, 'UNAUTHENTICATED');
-}
-
 const v1 = express.Router();
 v1.use((req, res, next) => {
   const origin = req.get('Origin');

@@ -1,6 +1,6 @@
 'use strict';
 
-const { AppError } = require('./errors');
+const { AdmissionUnavailableError, AppError } = require('./errors');
 const { createClientAbortSignal } = require('./client-abort-signal');
 const { deriveRequestPrincipal } = require('./request-principal');
 const {
@@ -9,6 +9,8 @@ const {
 } = require('./admission-route-policy');
 const { getRequestAdmissionController, TRAFFIC } = require('./request-admission');
 const { IDEMPOTENCY_KEY_RE } = require('./operation-journal');
+
+const PRE_BODY_MUTATION_ADMISSION = Symbol('pre-body-mutation-admission');
 
 function assertIdempotencyKeyHeader(req) {
   const key = req.get('Idempotency-Key');
@@ -26,6 +28,124 @@ async function runMutationQueue(mutationQueue, fn) {
   return mutationQueue.run(fn);
 }
 
+function mutationAbortError(endpoint) {
+  return new AdmissionUnavailableError('Client aborted before mutation started', {
+    lane: 'mutation',
+    endpoint,
+  });
+}
+
+function attachPreparedMutationAdmission(req, res, {
+  abort,
+  endpoint,
+  idempotencyKey = null,
+  ticket,
+  versioned,
+}) {
+  const state = {
+    abort,
+    claimed: false,
+    endpoint,
+    idempotencyKey,
+    released: false,
+    ticket,
+    versioned,
+  };
+  const onResponseDone = () => {
+    if (!state.claimed) state.release();
+  };
+  state.release = () => {
+    if (state.released) return;
+    state.released = true;
+    if (typeof res?.off === 'function') {
+      res.off('finish', onResponseDone);
+      res.off('close', onResponseDone);
+    }
+    ticket.release();
+    abort.dispose();
+    if (req[PRE_BODY_MUTATION_ADMISSION] === state) {
+      delete req[PRE_BODY_MUTATION_ADMISSION];
+    }
+  };
+  req[PRE_BODY_MUTATION_ADMISSION] = state;
+  if (typeof res?.on === 'function') {
+    res.on('finish', onResponseDone);
+    res.on('close', onResponseDone);
+  }
+  return state;
+}
+
+function claimPreparedMutationAdmission(req, { versioned, idempotencyKey = null }) {
+  const state = req[PRE_BODY_MUTATION_ADMISSION];
+  if (!state) return null;
+  if (state.versioned !== versioned || (versioned && state.idempotencyKey !== idempotencyKey)) {
+    throw new Error('Prepared mutation admission does not match the executing request');
+  }
+  if (state.claimed) throw new Error('Prepared mutation admission was already claimed');
+  state.claimed = true;
+  return state;
+}
+
+async function runPreparedMutationAdmission(state, mutationQueue, fn) {
+  try {
+    await Promise.resolve();
+    if (state.abort.signal.aborted) throw mutationAbortError(state.endpoint);
+    return await runMutationQueue(mutationQueue, fn);
+  } finally {
+    state.release();
+  }
+}
+
+async function prepareMutationBodyAdmission(req, res, operationJournal, {
+  isDemo,
+  isVersioned = false,
+  admission = getRequestAdmissionController(),
+} = {}) {
+  if (isDemo(req)) return null;
+  if (req[PRE_BODY_MUTATION_ADMISSION]) return req[PRE_BODY_MUTATION_ADMISSION];
+
+  const idempotencyKey = isVersioned ? assertIdempotencyKeyHeader(req) : null;
+  const route = classifyMutationRoute(req);
+  const principal = deriveRequestPrincipal(req);
+  const weight = admission.endpointWeight(route.endpoint);
+  const abort = createClientAbortSignal(req, res);
+  let ticket;
+  try {
+    if (isVersioned) {
+      ({ ticket } = await admission.acquireMutationWithJournalPeek({
+        principal,
+        endpoint: route.endpoint,
+        weight,
+        peekJournal: () => operationJournal.get(idempotencyKey),
+        signal: abort.signal,
+      }));
+    } else {
+      ticket = await admission.acquire({
+        lane: 'mutation',
+        principal,
+        endpoint: route.endpoint,
+        weight,
+        trafficClass: TRAFFIC.ORDINARY,
+        signal: abort.signal,
+      });
+    }
+    if (abort.signal.aborted) {
+      ticket.release();
+      throw mutationAbortError(route.endpoint);
+    }
+    return attachPreparedMutationAdmission(req, res, {
+      abort,
+      endpoint: route.endpoint,
+      idempotencyKey,
+      ticket,
+      versioned: isVersioned,
+    });
+  } catch (error) {
+    abort.dispose();
+    throw error;
+  }
+}
+
 async function withVersionedMutationAdmission(req, res, operationJournal, mutationQueue, fn, {
   isDemo,
   admission = getRequestAdmissionController(),
@@ -33,6 +153,12 @@ async function withVersionedMutationAdmission(req, res, operationJournal, mutati
   if (isDemo(req)) return fn();
 
   const key = assertIdempotencyKeyHeader(req);
+  const prepared = claimPreparedMutationAdmission(req, {
+    versioned: true,
+    idempotencyKey: key,
+  });
+  if (prepared) return runPreparedMutationAdmission(prepared, mutationQueue, fn);
+
   const route = classifyMutationRoute(req);
   const principal = deriveRequestPrincipal(req);
   const weight = admission.endpointWeight(route.endpoint);
@@ -49,11 +175,7 @@ async function withVersionedMutationAdmission(req, res, operationJournal, mutati
     try {
       await Promise.resolve();
       if (abort.signal.aborted) {
-        const { AdmissionUnavailableError } = require('./errors');
-        throw new AdmissionUnavailableError('Client aborted before mutation started', {
-          lane: 'mutation',
-          endpoint: route.endpoint,
-        });
+        throw mutationAbortError(route.endpoint);
       }
       return await runMutationQueue(mutationQueue, fn);
     } finally {
@@ -69,6 +191,9 @@ async function withLegacyMutationAdmission(req, res, mutationQueue, fn, {
   admission = getRequestAdmissionController(),
 } = {}) {
   if (isDemo(req)) return fn();
+
+  const prepared = claimPreparedMutationAdmission(req, { versioned: false });
+  if (prepared) return runPreparedMutationAdmission(prepared, mutationQueue, fn);
 
   const route = classifyMutationRoute(req);
   const principal = deriveRequestPrincipal(req);
@@ -87,11 +212,7 @@ async function withLegacyMutationAdmission(req, res, mutationQueue, fn, {
     try {
       await Promise.resolve();
       if (abort.signal.aborted) {
-        const { AdmissionUnavailableError } = require('./errors');
-        throw new AdmissionUnavailableError('Client aborted before mutation started', {
-          lane: 'mutation',
-          endpoint: route.endpoint,
-        });
+        throw mutationAbortError(route.endpoint);
       }
       return await runMutationQueue(mutationQueue, fn);
     } finally {
@@ -115,6 +236,7 @@ async function withMutationAdmission(req, res, operationJournal, mutationQueue, 
 
 async function withReadAdmission(req, res, actualCoordinator, fn, {
   admission = getRequestAdmissionController(),
+  onCacheHit = null,
   routeSpec = classifyReadRoute(req),
   signal: externalSignal = null,
 } = {}) {
@@ -149,7 +271,7 @@ async function withReadAdmission(req, res, actualCoordinator, fn, {
           signal: abort.signal,
         });
         try {
-          return hit;
+          return onCacheHit ? await onCacheHit(hit) : hit;
         } finally {
           ticket.release();
         }
@@ -214,6 +336,7 @@ async function withOperationStatusAdmission(req, res, mutationQueue, fn, {
 module.exports = {
   assertIdempotencyKeyHeader,
   createClientAbortSignal,
+  prepareMutationBodyAdmission,
   runMutationQueue,
   withLegacyMutationAdmission,
   withMutationAdmission,

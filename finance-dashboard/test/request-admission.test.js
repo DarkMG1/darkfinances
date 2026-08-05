@@ -389,6 +389,144 @@ test('abort removes queued work before start and wait timeout releases capacity'
   assertCountersZero(admission);
 });
 
+test('pre-aborted queued admission rejects promptly without reserving counters', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    maxWaitMs: 5_000,
+    mutationGlobalPending: 2,
+    mutationGlobalRunning: 1,
+    recoveryReserve: 0,
+    controlReserve: 0,
+  }));
+  const running = await admission.acquire({
+    lane: 'mutation',
+    principal: 'session:running',
+    endpoint: 'post /refresh',
+    weight: 1,
+  });
+  const controller = new AbortController();
+  controller.abort();
+
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('pre-aborted admission did not reject promptly')), 100);
+  });
+  try {
+    await assert.rejects(
+      Promise.race([
+        admission.acquire({
+          lane: 'mutation',
+          principal: 'session:queued',
+          endpoint: 'post /refresh',
+          weight: 1,
+          signal: controller.signal,
+        }),
+        timeout,
+      ]),
+      AdmissionUnavailableError,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const whileRunning = admission.getHealth().lanes.mutation;
+  assert.equal(whileRunning.globalPending, 0);
+  assert.equal(whileRunning.globalRunning, 1);
+  assert.equal(whileRunning.waiters, 0);
+  assert.equal(admission.getHealth().stats.waitAborts, 1);
+  running.release();
+  assertCountersZero(admission);
+});
+
+test('weighted queued work cannot exceed per-principal pending capacity', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    mutationGlobalPending: 6,
+    mutationGlobalRunning: 2,
+    mutationPrincipalPending: 3,
+    mutationPrincipalRunning: 2,
+    recoveryReserve: 0,
+    controlReserve: 0,
+    maxPendingDepth: 6,
+  }));
+  const blocker = await admission.acquire({
+    lane: 'mutation',
+    principal: 'session:blocker',
+    endpoint: 'post /refresh',
+    weight: 2,
+  });
+  const queued = admission.acquire({
+    lane: 'mutation',
+    principal: 'session:weighted',
+    endpoint: 'post /refresh',
+    weight: 2,
+  });
+  await Promise.resolve();
+
+  await assert.rejects(
+    admission.acquire({
+      lane: 'mutation',
+      principal: 'session:weighted',
+      endpoint: 'post /refresh',
+      weight: 2,
+    }),
+    AdmissionOverloadedError,
+  );
+  const waiting = admission.getHealth().lanes.mutation;
+  assert.equal(waiting.globalPending, 2);
+  assert.equal(waiting.classPending.ordinary, 2);
+  assert.equal(waiting.waiters, 1);
+
+  blocker.release();
+  const ticket = await queued;
+  ticket.release();
+  assertCountersZero(admission);
+});
+
+test('weighted queued work waits for per-principal running capacity', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    mutationGlobalPending: 8,
+    mutationGlobalRunning: 4,
+    mutationPrincipalPending: 4,
+    mutationPrincipalRunning: 3,
+    recoveryReserve: 0,
+    controlReserve: 0,
+    maxPendingDepth: 8,
+  }));
+  const samePrincipal = await admission.acquire({
+    lane: 'mutation',
+    principal: 'session:weighted',
+    endpoint: 'post /refresh',
+    weight: 2,
+  });
+  const otherPrincipal = await admission.acquire({
+    lane: 'mutation',
+    principal: 'session:other',
+    endpoint: 'post /refresh',
+    weight: 2,
+  });
+  let promoted = false;
+  const queued = admission.acquire({
+    lane: 'mutation',
+    principal: 'session:weighted',
+    endpoint: 'post /refresh',
+    weight: 2,
+  }).then((ticket) => {
+    promoted = true;
+    return ticket;
+  });
+  await Promise.resolve();
+
+  otherPrincipal.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(promoted, false);
+  assert.equal(admission.getHealth().lanes.mutation.globalPending, 2);
+
+  samePrincipal.release();
+  const ticket = await queued;
+  assert.equal(promoted, true);
+  ticket.release();
+  assertCountersZero(admission);
+});
+
 test('control reserve keeps ping responsive while ordinary reads are saturated', async () => {
   const admission = new RequestAdmissionController(tinyConfig({
     readGlobalPending: 4,
@@ -830,6 +968,46 @@ test('cache hit acquires bounded cheap lane instead of bypassing capacity', asyn
   assert.equal(invoked, false);
   assert.equal(admission.getHealth().stats.cacheHitAdmissions, 1);
   assert.equal(admission.getHealth().stats.cheapAdmissions, 1);
+  assertCountersZero(admission);
+});
+
+test('cache-hit postprocessing runs inside bounded cheap admission', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    readGlobalPending: 2,
+    readGlobalRunning: 1,
+    cheapReserve: 1,
+    controlReserve: 0,
+  }));
+  const cached = {
+    tasks: [{ id: 'public-task' }],
+    _allTasks: [{ id: 'private-task' }],
+    _maintenance: { expiredSnoozeKeys: ['private-key'] },
+  };
+  const coordinator = {
+    readCacheEntry() {
+      return cached;
+    },
+  };
+  let postprocessed = 0;
+  const value = await withReadAdmission(
+    mockReq({ path: '/api/v1/review' }),
+    mockRes(),
+    coordinator,
+    async () => {
+      throw new Error('cold resolver should not run');
+    },
+    {
+      admission,
+      onCacheHit: async (hit) => {
+        postprocessed += 1;
+        assert.equal(admission.getHealth().lanes.read.classRunning.cheap, 1);
+        const { _allTasks, _maintenance, ...publicValue } = hit;
+        return publicValue;
+      },
+    },
+  );
+  assert.deepEqual(value, { tasks: [{ id: 'public-task' }] });
+  assert.equal(postprocessed, 1);
   assertCountersZero(admission);
 });
 

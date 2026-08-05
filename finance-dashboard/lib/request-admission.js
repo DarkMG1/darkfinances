@@ -175,13 +175,16 @@ class RequestAdmissionController {
     return classTotal + weight <= classLimit;
   }
 
+  _principalCanAdd(laneState, limits, principal, weight, field) {
+    const bucket = this._getBucket(laneState, principal);
+    const limit = field === 'running' ? limits.principalRunning : limits.principalPending;
+    return (bucket ? bucket[field] : 0) + weight <= limit;
+  }
+
   _canPromoteWaiter(laneState, limits, waiter) {
     const { principal, weight, trafficClass } = waiter;
     if (!this._canAddRunning(laneState, limits, trafficClass, weight)) return false;
-    if (trafficClass === TRAFFIC.ORDINARY) {
-      const bucket = this._getBucket(laneState, principal);
-      if (bucket && bucket.running + weight > limits.principalRunning) return false;
-    }
+    if (!this._principalCanAdd(laneState, limits, principal, weight, 'running')) return false;
     return true;
   }
 
@@ -189,19 +192,16 @@ class RequestAdmissionController {
     if (laneState.globalPending + weight > limits.globalPending) return false;
     if (!this._canAddRunning(laneState, limits, trafficClass, weight)) return false;
     if (!this._canAdmitClass(laneState, limits, trafficClass, weight)) return false;
-    const bucket = this._getBucket(laneState, principal);
-    if (trafficClass === TRAFFIC.ORDINARY) {
-      if (bucket) {
-        if (bucket.pending + weight > limits.principalPending) return false;
-        if (bucket.running + weight > limits.principalRunning) return false;
-      } else if (weight > limits.principalPending || weight > limits.principalRunning) {
-        return false;
-      }
-    } else if (bucket) {
-      if (bucket.pending + weight > limits.principalPending) return false;
-    } else if (weight > limits.principalPending) {
-      return false;
-    }
+    if (!this._principalCanAdd(laneState, limits, principal, weight, 'pending')) return false;
+    if (!this._principalCanAdd(laneState, limits, principal, weight, 'running')) return false;
+    if (laneState.globalPending + laneState.globalRunning + weight > this.config.maxPendingDepth) return false;
+    return true;
+  }
+
+  _canQueue(laneState, limits, principal, weight, trafficClass) {
+    if (laneState.globalPending + weight > limits.globalPending) return false;
+    if (!this._canAdmitClass(laneState, limits, trafficClass, weight)) return false;
+    if (!this._principalCanAdd(laneState, limits, principal, weight, 'pending')) return false;
     if (laneState.globalPending + laneState.globalRunning + weight > this.config.maxPendingDepth) return false;
     return true;
   }
@@ -410,6 +410,15 @@ class RequestAdmissionController {
     const limits = laneLimits(this.config, lane);
     const effectiveWeight = Math.max(1, Math.min(this.config.maxEndpointWeight, weight));
 
+    if (signal?.aborted) {
+      this.stats.waitAborts += 1;
+      throw new AdmissionUnavailableError('Client aborted before admission started', {
+        lane,
+        endpoint,
+        trafficClass,
+      });
+    }
+
     if (trafficClass === TRAFFIC.CONTROL) this.stats.controlAdmissions += 1;
     if (trafficClass === TRAFFIC.CHEAP) this.stats.cheapAdmissions += 1;
     if (lane === 'lightweight') this.stats.lightweightAdmissions += 1;
@@ -420,11 +429,7 @@ class RequestAdmissionController {
       return this._makeTicket(lane, principal, effectiveWeight, endpoint, trafficClass);
     }
 
-    if (!this._canAdmitClass(laneState, limits, trafficClass, effectiveWeight)) {
-      throw this._overloadError(1, { lane, endpoint, trafficClass });
-    }
-
-    if (laneState.globalPending + laneState.globalRunning + effectiveWeight > this.config.maxPendingDepth) {
+    if (!this._canQueue(laneState, limits, principal, effectiveWeight, trafficClass)) {
       throw this._overloadError(1, { lane, endpoint, trafficClass });
     }
 
@@ -469,42 +474,49 @@ class RequestAdmissionController {
       }
     };
 
-    if (signal) {
-      if (signal.aborted) onAbort();
-      else signal.addEventListener('abort', onAbort, { once: true });
-    }
-
     try {
       this._reserve(laneState, principal, effectiveWeight, trafficClass, lane, endpoint);
-      this._enqueueWaiter(laneState, waiter);
-
-      waitTimer = setTimeout(() => {
-        if (aborted) return;
-        if (!this._removeWaiter(laneState, waiter)) return;
-        cleanupTimers();
+      try {
+        this._enqueueWaiter(laneState, waiter);
+      } catch (error) {
         this._releasePending(laneState, principal, effectiveWeight, trafficClass);
-        this.stats.waitTimeouts += 1;
-        deferred.reject(this._overloadError(Math.max(1, Math.ceil(maxWaitMs / 1000)), {
-          lane,
-          endpoint,
-          trafficClass,
-        }));
-      }, maxWaitMs);
-      waitTimer.unref?.();
+        throw error;
+      }
 
-      ageTimer = setInterval(() => {
-        if (aborted) return;
-        if (this.now() - enqueuedAt < this.config.maxPendingAgeMs) return;
-        if (!this._removeWaiter(laneState, waiter)) {
+      if (signal) {
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      }
+
+      if (!aborted) {
+        waitTimer = setTimeout(() => {
+          if (aborted) return;
+          if (!this._removeWaiter(laneState, waiter)) return;
           cleanupTimers();
-          return;
-        }
-        cleanupTimers();
-        this._releasePending(laneState, principal, effectiveWeight, trafficClass);
-        this.stats.pendingAgeTimeouts += 1;
-        deferred.reject(this._overloadError(1, { lane, endpoint, trafficClass }));
-      }, Math.min(250, this.config.maxPendingAgeMs));
-      ageTimer.unref?.();
+          this._releasePending(laneState, principal, effectiveWeight, trafficClass);
+          this.stats.waitTimeouts += 1;
+          deferred.reject(this._overloadError(Math.max(1, Math.ceil(maxWaitMs / 1000)), {
+            lane,
+            endpoint,
+            trafficClass,
+          }));
+        }, maxWaitMs);
+        waitTimer.unref?.();
+
+        ageTimer = setInterval(() => {
+          if (aborted) return;
+          if (this.now() - enqueuedAt < this.config.maxPendingAgeMs) return;
+          if (!this._removeWaiter(laneState, waiter)) {
+            cleanupTimers();
+            return;
+          }
+          cleanupTimers();
+          this._releasePending(laneState, principal, effectiveWeight, trafficClass);
+          this.stats.pendingAgeTimeouts += 1;
+          deferred.reject(this._overloadError(1, { lane, endpoint, trafficClass }));
+        }, Math.min(250, this.config.maxPendingAgeMs));
+        ageTimer.unref?.();
+      }
 
       const admitted = await deferred.promise;
       cleanupTimers();
