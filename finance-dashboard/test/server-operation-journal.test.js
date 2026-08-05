@@ -2,7 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { legacyRequestFingerprint } = require('../lib/operation-journal');
+const {
+  MAX_NONTERMINAL_ENTRIES,
+  legacyRequestFingerprint,
+  requestFingerprint,
+} = require('../lib/operation-journal');
 const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
 
 async function request(base, pathname, options = {}) {
@@ -123,4 +127,75 @@ test('server exposes phase-aware replay and legacy-safe operation status', async
   assert.equal(result.response.status, 409);
   assert.equal(result.body.code, 'OUTCOME_UNKNOWN');
   assert.equal(JSON.parse(fs.readFileSync(reconciliationFile, 'utf8')).enabled, true);
+});
+
+test('server rejects a new key at nonterminal capacity before journal or financial effects', async (t) => {
+  const mutationBody = { enabled: true };
+  const mutationRoute = '/api/v1/reconciliation/enabled';
+  const fingerprint = requestFingerprint({
+    method: 'POST',
+    path: mutationRoute,
+    url: mutationRoute,
+    body: mutationBody,
+  });
+  const existingKey = 'server-capacity-0000';
+  let operationFile;
+  let reconciliationFile;
+  const { base } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-operation-capacity-',
+    prepareDir: (dir) => {
+      operationFile = path.join(dir, 'operation-journal.json');
+      reconciliationFile = path.join(dir, 'reconciliation.json');
+      const timestamp = '2026-08-05T00:00:00.000Z';
+      const operations = {};
+      for (let index = 0; index < MAX_NONTERMINAL_ENTRIES; index += 1) {
+        const key = `server-capacity-${String(index).padStart(4, '0')}`;
+        operations[key] = {
+          key,
+          recordVersion: 2,
+          fingerprint,
+          fingerprintVersion: 2,
+          method: 'POST',
+          route: mutationRoute,
+          status: 'started',
+          phase: 'started',
+          startedAt: timestamp,
+          updatedAt: timestamp,
+        };
+      }
+      fs.writeFileSync(operationFile, JSON.stringify({ schemaVersion: 1, operations }));
+    },
+    extraEnvForDir: (dir) => ({
+      OPERATION_JOURNAL_PATH: path.join(dir, 'operation-journal.json'),
+      RECON_PATH: path.join(dir, 'reconciliation.json'),
+    }),
+  });
+
+  let result = await request(base, `/api/v1/operations/${existingKey}`, {
+    headers: { 'X-Finance-Token': 'test-api-token' },
+  });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.data.phase, 'started');
+  assert.equal(result.body.data.outcome, 'unknown');
+
+  result = await request(base, mutationRoute, mutationOptions(existingKey, mutationBody));
+  assert.equal(result.response.status, 409);
+  assert.equal(result.body.code, 'OUTCOME_UNKNOWN');
+
+  const beforeRejectedRequest = fs.readFileSync(operationFile, 'utf8');
+  const rejectedKey = 'server-capacity-new1';
+  result = await request(base, mutationRoute, mutationOptions(rejectedKey, mutationBody));
+  assert.equal(result.response.status, 503);
+  assert.equal(result.body.code, 'OPERATION_JOURNAL_CAPACITY_EXCEEDED');
+  assert.match(result.body.error, /nonterminal capacity reached/);
+  assert.equal(result.body.requestId?.length > 0, true);
+  assert.equal(fs.existsSync(reconciliationFile), false);
+  assert.equal(fs.readFileSync(operationFile, 'utf8'), beforeRejectedRequest);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(
+      JSON.parse(beforeRejectedRequest).operations,
+      rejectedKey,
+    ),
+    false,
+  );
 });

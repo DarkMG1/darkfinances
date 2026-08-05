@@ -4,11 +4,14 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
+  MAX_NONTERMINAL_ENTRIES,
   MAX_TERMINAL_ENTRIES,
   OperationJournal,
+  OperationJournalCapacityError,
   legacyRequestFingerprint,
   requestFingerprint,
 } = require('../lib/operation-journal');
+const { executeJournaledOperation } = require('../lib/operation-executor');
 
 function fixture(t, options) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-operations-'));
@@ -187,6 +190,82 @@ test('started, local_applied, and sync_unknown survive restart with provisional 
   assert.deepEqual(restarted.status('test-operation-0003').provisionalResult, { deleted: 'txn-1' });
 });
 
+test('nonterminal capacity counts every unresolved phase and rejects a new key without writing', (t) => {
+  const journal = fixture(t, { maxNonterminalEntries: 3 });
+  const req = request();
+  journal.start('capacity-started-01', req);
+  journal.start('capacity-applied-01', req);
+  journal.localApplied('capacity-applied-01', { id: 'applied' });
+  journal.start('capacity-sync-0001', req);
+  journal.localApplied('capacity-sync-0001', { id: 'syncing' });
+  journal.syncUnknown('capacity-sync-0001');
+  const before = fs.readFileSync(journal.file, 'utf8');
+
+  assert.throws(
+    () => journal.start('capacity-rejected-1', req),
+    (error) => {
+      assert.ok(error instanceof OperationJournalCapacityError);
+      assert.equal(error.code, 'OPERATION_JOURNAL_CAPACITY_EXCEEDED');
+      assert.equal(error.status, 503);
+      assert.equal(error.expose, true);
+      assert.equal(error.capacity, 3);
+      assert.equal(error.nonterminalCount, 3);
+      return true;
+    },
+  );
+  assert.equal(journal.get('capacity-rejected-1'), null);
+  assert.equal(fs.readFileSync(journal.file, 'utf8'), before);
+});
+
+test('nonterminal capacity survives restart while existing keys remain replayable and recoverable', (t) => {
+  const journal = fixture(t, { maxNonterminalEntries: 2 });
+  const req = request();
+  journal.start('capacity-recover-01', req);
+  journal.localApplied('capacity-recover-01', { state: 'locally-applied' });
+  journal.start('capacity-existing-1', req);
+
+  const restarted = new OperationJournal(journal.file, { maxNonterminalEntries: 2 });
+  assert.equal(restarted.status('capacity-existing-1').phase, 'started');
+  assert.equal(restarted.start('capacity-existing-1', req).existing.phase, 'started');
+  assert.throws(
+    () => restarted.start('capacity-restart-new', req),
+    (error) => error instanceof OperationJournalCapacityError,
+  );
+
+  restarted.syncUnknown('capacity-recover-01');
+  restarted.complete('capacity-recover-01', { state: 'completed' });
+  const replay = restarted.start('capacity-recover-01', req).existing;
+  assert.equal(replay.phase, 'completed');
+  assert.deepEqual(replay.result, { state: 'completed' });
+  assert.equal(restarted.start('capacity-after-recovery', req).existing, null);
+});
+
+test('capacity rejection occurs before executor handler invocation or effect boundary', async (t) => {
+  const journal = fixture(t, { maxNonterminalEntries: 1 });
+  journal.start('capacity-held-0001', request());
+  const before = fs.readFileSync(journal.file, 'utf8');
+  let handlerRuns = 0;
+
+  await assert.rejects(
+    () => executeJournaledOperation({
+      journal,
+      key: 'capacity-zero-effect',
+      request: request(),
+      handler: async (operation) => {
+        handlerRuns += 1;
+        operation.effectsMayExist();
+        return { ok: true };
+      },
+    }),
+    (error) => error instanceof OperationJournalCapacityError
+      && error.code === 'OPERATION_JOURNAL_CAPACITY_EXCEEDED'
+      && error.status === 503,
+  );
+  assert.equal(handlerRuns, 0);
+  assert.equal(journal.get('capacity-zero-effect'), null);
+  assert.equal(fs.readFileSync(journal.file, 'utf8'), before);
+});
+
 test('legal transitions are forward-only and equivalent repeats are idempotent', (t) => {
   const journal = fixture(t);
   journal.start('test-operation-0004', request());
@@ -312,7 +391,7 @@ test('legacy records cannot be advanced by the new journal', (t) => {
 });
 
 test('pruning keeps 1,000 terminal records and every unresolved record', (t) => {
-  const journal = fixture(t);
+  const journal = fixture(t, { maxNonterminalEntries: 5 });
   const operations = {};
   const unresolved = [
     ['keep-started-01', 'started'],
@@ -346,6 +425,12 @@ test('pruning keeps 1,000 terminal records and every unresolved record', (t) => 
   assert.ok(saved['keep-legacy-fail']);
   assert.equal(saved['terminal-0000'], undefined);
   assert.equal(saved['terminal-0001'], undefined);
+  assert.equal(journal.start('post-prune-capacity-1', request()).existing, null);
+  assert.throws(
+    () => journal.start('post-prune-capacity-2', request()),
+    (error) => error instanceof OperationJournalCapacityError,
+  );
+  assert.equal(MAX_NONTERMINAL_ENTRIES, 1000);
 });
 
 test('malformed journal state is quarantined and fails closed', (t) => {

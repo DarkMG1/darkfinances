@@ -46,6 +46,21 @@ Records without `fingerprintVersion` are compared with the old method/path/`JSON
 - When a mutation uses a durable bulk saga keyed by the same idempotency key, a nonterminal journal record may reconcile to `completed` from independently proven terminal bulk state without re-executing the handler. The same reconciliation path applies to reimbursement-link and repayment-confirmation sagas keyed by the same idempotency key. Reconciliation runs on same-key mutation replay and on `GET /api/v1/operations/:key` under the mutation queue. Fingerprint conflict checking still applies before replay. Terminal proof must match the journal record fingerprint/version (and bound method/route/kind) exactly; internal saga calls without a journal fingerprint never prove. Missing, duplicate, corrupt, `sync_pending`, or `unresolved` saga records never reconcile. Conflicting terminal journal results are never overwritten. Reconciliation write failures remain outcome-unknown and retryable; equivalent retries are idempotent. Versioned mutations serialize journal start, reconciliation, handler work, and completion on the mutation queue. Composed proof resolution tries bulk, then reimbursement-link, then repayment-confirmation in order and accepts the first strictly bound match.
 `GET /api/v1/operations/:key` is authenticated and returns only the stable status view. Legacy ambiguous failures are exposed as `status: "started"`, `phase: "started"`, `outcome: "unknown"`, never as terminal failures.
 
+## Nonterminal capacity and operator recovery
+
+The journal admits at most 1,000 nonterminal records by default. `OperationJournal` can be constructed with a lower or higher positive `maxNonterminalEntries` for a reviewed deployment, but increasing the bound is storage headroom, not outcome recovery. The bound counts every versioned `started`, `local_applied`, and `sync_unknown` record plus every outcome-unknown legacy `started` or `failed` record. Terminal `completed` and known-before-apply `failed` records do not consume nonterminal capacity.
+
+Capacity is checked only for a genuinely new idempotency key, after same-key lookup and fingerprint conflict handling. At capacity, a new key fails with HTTP `503` and stable code `OPERATION_JOURNAL_CAPACITY_EXCEEDED` before a record is created or the mutation handler can cross an effect boundary. Existing-key status, replay, terminal-proof reconciliation, and legal forward transitions remain available. Moving an existing record to a proven terminal state immediately releases one nonterminal slot.
+
+Capacity recovery is evidence-driven:
+
+1. Stop or restrict new mutation traffic and take a verified backup of the journal, relevant saga sidecars, local finance state, and remote/Actual evidence.
+2. Inventory every nonterminal key and determine its effect outcome independently. Use the authenticated status endpoint and supported, fingerprint-bound terminal-proof reconciliation where available.
+3. Preserve any record whose outcome cannot be proven. Do not delete it, relabel it, edit its fingerprint, or retry the financial operation under a new key.
+4. Resume new-key admission only after proven terminal transitions create capacity. If outcomes cannot yet be proven, keep new mutations unavailable or deploy a reviewed capacity increase while reconciliation continues.
+
+There is intentionally no age-based, bulk, or “clear stuck entries” mechanism for nonterminal records. Such cleanup would turn an uncertain financial effect into an apparently new request and could duplicate it.
+
 ## Mutation coverage
 
 `lib/mutation-route-registry.js` is the authoritative inventory of every versioned mutation, its lifecycle class, synchronization requirement, and first-effect boundary. Versioned writes can only be registered through `registerV1Mutation`; coverage tests reject a direct `v1.post`, `v1.put`, `v1.patch`, or `v1.delete` registration and reject registry/registration drift.
@@ -54,7 +69,9 @@ Functions that already hide replacement, deletion, repayment, receipt, or bulk w
 
 ## Pruning
 
-Pruning retains at most 1,000 terminal records, ordered by terminal timestamp and then key. Every unresolved record is retained, including legacy ambiguous failures. Missing or invalid timestamps can only affect ordering among terminal records.
+Pruning retains at most 1,000 terminal records, ordered by terminal timestamp and then key. Every unresolved record is retained, including legacy ambiguous failures, even when the journal is already over its configured nonterminal capacity. Missing or invalid timestamps can only affect ordering among terminal records.
+
+For longer audit retention, archive a verified journal backup with its corresponding finance and saga state in operator-controlled immutable storage before terminal entries age out. Only proven terminal records are eligible for normal pruning; archival is never justification to remove a live nonterminal record.
 
 ## Rollback and deployment
 
