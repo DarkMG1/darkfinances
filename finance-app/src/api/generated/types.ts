@@ -956,16 +956,26 @@ export interface Receipt {
   txnId: string;
   mime: string;
   size: number;
-  ocrText: string;
-  ocrLines: string[];
+  ocrText?: string;
+  ocrLines?: string[];
   amount: number | null;
   date: string | null;
   source: string;
   evidenceStatus: 'needs-review' | 'matched' | 'mismatch' | 'unreadable';
   uploadedAt: string;
 }
+export interface OffsetPagination {
+  limit: number;
+  offset: number;
+  nextOffset: number | null;
+  complete: boolean;
+  total: number;
+}
 export interface Receipts {
   receipts: Receipt[];
+  truncated: boolean;
+  pagination: OffsetPagination;
+  ocrIncluded: boolean;
 }
 
 export interface CreateTransactionInput {
@@ -1061,6 +1071,8 @@ export interface Rule {
 }
 export interface Rules {
   rules: Rule[];
+  truncated: boolean;
+  pagination: OffsetPagination;
   // Read-only built-in merchant catalog applied after your rules.
   catalog?: { label: string; type: string }[];
 }
@@ -1075,6 +1087,8 @@ export interface TripEvent {
 }
 export interface EventsResponse {
   events: TripEvent[];
+  truncated: boolean;
+  pagination: OffsetPagination;
 }
 
 export interface Category {

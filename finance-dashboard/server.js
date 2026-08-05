@@ -701,6 +701,13 @@ function demoMiddleware(v1mode) {
     if (!isDemo(req)) return next();
     if (!v1mode && isVersionedApiPath(req.path)) return next(); // let the v1 router envelope it
     const send = (payload) => res.json(v1mode ? { data: payload } : payload);
+    const sendValidatedList = (schema, label, load) => {
+      try {
+        return send(load(parse(schema, req.query, label)));
+      } catch (error) {
+        return sendApiError(req, res, error);
+      }
+    };
     const p = req.path.replace(/^\/api\/v1\//i, '').replace(/^\/api\//i, '').replace(/^\//, '');
     if (req.method === 'POST' || req.method === 'DELETE') {
       // Public demo writes are intentionally non-persistent. This keeps showcase
@@ -763,8 +770,12 @@ function demoMiddleware(v1mode) {
       res.setHeader('X-Reimbursement-Export-Authoritative', String(payload.totals.authoritative));
       return res.type('application/json').send(stableStringify(payload));
     }
-    if (p === 'events') return send(demo.events());
-    if (p === 'receipts') return send(demo.receipts(req.query.txnId ? String(req.query.txnId) : undefined));
+    if (p === 'events') {
+      return sendValidatedList(schemas.eventsListQuery, 'events list query', (query) => demo.events(query));
+    }
+    if (p === 'receipts') {
+      return sendValidatedList(schemas.receiptsListQuery, 'receipts list query', (query) => demo.receipts(query));
+    }
     const receiptImage = p.match(/^receipts\/([^/]+)\/image$/i);
     if (req.method === 'GET' && receiptImage) {
       let receiptId;
@@ -850,7 +861,8 @@ function demoMiddleware(v1mode) {
         return send({ transactions: r.slice(0, 200), total: r.length, truncated: r.length > 200 });
       }
       case 'tags': return send(demo.tags());
-      case 'rules': return send(demo.rules());
+      case 'rules':
+        return sendValidatedList(schemas.rulesListQuery, 'rules list query', (query) => demo.rules(query));
       case 'manual-assets': return send(demo.manualAssets());
       case 'investments': return send(demo.investments());
       case 'reports': return send(demo.reports());
@@ -1116,7 +1128,10 @@ const resolvers = {
     const key = buildQueryCacheFingerprint({ kind: 'tags', start, end, ...queryFingerprintBase() });
     return cachedActual(key, () => data.getTags({ start: start || undefined, end: end || undefined }), 120);
   },
-  rules: () => cachedLocal('rules', () => Promise.resolve({ ...data.getRules(), catalog: data.getCatalogDisplay() }), 120),
+  rules: (req) => {
+    const query = parse(schemas.rulesListQuery, req.query, 'rules list query');
+    return Promise.resolve({ ...data.getRules(query), catalog: data.getCatalogDisplay() });
+  },
   manualAssets: () => cachedActual('manual-assets', () => Promise.resolve(data.getManualAssets()), 120),
   investments: () => cachedLocal('investments', () => Promise.resolve(data.getInvestments()), 120),
   reports: (req) => cachedActual(`reports-${monthOf(req) || 'current'}`, () => data.getReports({ month: monthOf(req) }), 300),
@@ -1277,7 +1292,10 @@ async function addReceiptH(req, operation) {
     return applyLocal(operation, () => data.addReceipt(receipt));
   }, 'today', 'review-current');
 }
-const receiptsH = (req) => Promise.resolve(data.getReceipts({ txnId: req.query.txnId }));
+const receiptsH = (req) => {
+  const query = parse(schemas.receiptsListQuery, req.query, 'receipts list query');
+  return Promise.resolve(data.getReceipts(query));
+};
 async function deleteReceiptH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'receipt id');
   data.assertReceiptMutationAvailable({ id });
@@ -1395,8 +1413,15 @@ async function syncSharesH(_req, operation) {
     journalBinding: { ...operation.journalBinding, kind: 'splitwise_mirror' },
   }), { kind: 'splitwise_mirror' });
 }
-async function eventsH() {
-  return cachedActual('events', () => data.getEvents(), 60);
+async function eventsH(req) {
+  const query = parse(schemas.eventsListQuery, req.query, 'events list query');
+  const key = buildQueryCacheFingerprint({
+    kind: 'events',
+    limit: query.limit || 50,
+    offset: query.offset || 0,
+    ...queryFingerprintBase(),
+  });
+  return cachedActual(key, () => data.getEvents(query), 60);
 }
 async function saveEventH(req, operation) {
   const event = parse(schemas.event, req.body, 'event');
