@@ -14,6 +14,7 @@ const {
   parseReadyLine,
   waitForChildExit,
 } = require('./helpers/ephemeral-dashboard-server');
+const { pollBackoff } = require('./helpers/test-sync-barriers');
 const {
   loadPasskeyCredentials,
   resetPasskeyTransactionQueues,
@@ -24,7 +25,12 @@ const { resetPasskeyChallengeGuard } = require('../lib/passkey-challenge-guard')
 
 const CREDENTIAL_ID = 'test-credential-id';
 
-function buildPasskeyLiveRoutePreload({ deferVerify = false, authCounter = 1, injectWriteFailure = false } = {}) {
+function buildPasskeyLiveRoutePreload({
+  deferVerify = false,
+  authCounter = 1,
+  injectWriteFailure = false,
+  synchronizeFinishSessionLoads = false,
+} = {}) {
   return `
     'use strict';
     const fs = require('fs');
@@ -43,6 +49,48 @@ function buildPasskeyLiveRoutePreload({ deferVerify = false, authCounter = 1, in
       children: [],
       paths: [],
     };
+    if (${synchronizeFinishSessionLoads ? 'true' : 'false'}) {
+      const sessionLoadGatePath = process.env.PASSKEY_SESSION_LOAD_GATE_PATH;
+      const sessionLoadCapturePath = process.env.PASSKEY_SESSION_LOAD_CAPTURE_PATH;
+      const staleTouchCapturePath = process.env.PASSKEY_STALE_TOUCH_CAPTURE_PATH;
+      const fileStorePath = require.resolve('session-file-store', { paths: [root] });
+      const realFileStoreFactory = require(fileStorePath);
+      require.cache[fileStorePath] = {
+        id: fileStorePath,
+        filename: fileStorePath,
+        loaded: true,
+        exports: (session) => {
+          const FileStore = realFileStoreFactory(session);
+          const realGet = FileStore.prototype.get;
+          const realTouch = FileStore.prototype.touch;
+          let finishLoadsReleased = false;
+          const pendingFinishLoads = [];
+          FileStore.prototype.get = function synchronizedGet(sessionId, callback) {
+            return realGet.call(this, sessionId, (error, value) => {
+              const shouldSynchronize = !finishLoadsReleased
+                && sessionLoadGatePath
+                && fs.existsSync(sessionLoadGatePath)
+                && value?.regChallenge != null;
+              if (!shouldSynchronize) return callback(error, value);
+              pendingFinishLoads.push(() => callback(error, value));
+              if (pendingFinishLoads.length !== 2) return;
+              finishLoadsReleased = true;
+              fs.writeFileSync(sessionLoadCapturePath, '2');
+              for (const release of pendingFinishLoads.splice(0)) release();
+            });
+          };
+          FileStore.prototype.touch = function capturedTouch(sessionId, value, callback) {
+            if (staleTouchCapturePath && value?.regChallenge != null) {
+              fs.writeFileSync(staleTouchCapturePath, 'regChallenge');
+            }
+            return realTouch.call(this, sessionId, value, callback);
+          };
+          return FileStore;
+        },
+        children: [],
+        paths: [],
+      };
+    }
     ${injectWriteFailure ? `
     const originalRename = fs.renameSync;
     fs.renameSync = function patchedRename(...args) {
@@ -126,9 +174,18 @@ async function waitForPersistedSession(sessionDir, setCookieHeader, timeoutMs = 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (fs.existsSync(sessionPath)) return sessionPath;
-    await new Promise((resolve) => setImmediate(resolve));
+    await pollBackoff();
   }
   throw new Error(`session file missing: ${sessionPath}`);
+}
+
+async function waitForFile(filePath, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filePath)) return;
+    await pollBackoff();
+  }
+  throw new Error(`file missing: ${filePath}`);
 }
 
 async function waitForSessionField(sessionDir, setCookieHeader, field, timeoutMs = 5_000) {
@@ -137,7 +194,7 @@ async function waitForSessionField(sessionDir, setCookieHeader, field, timeoutMs
   while (Date.now() < deadline) {
     const session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
     if (session[field] != null) return session[field];
-    await new Promise((resolve) => setImmediate(resolve));
+    await pollBackoff();
   }
   throw new Error(`session field missing: ${field}`);
 }
@@ -146,9 +203,15 @@ async function waitForSessionFieldAbsent(sessionDir, setCookieHeader, field, tim
   const sessionPath = await waitForPersistedSession(sessionDir, setCookieHeader, timeoutMs);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+    let session;
+    try {
+      session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
     if (session[field] == null) return;
-    await new Promise((resolve) => setImmediate(resolve));
+    await pollBackoff();
   }
   throw new Error(`session field still present: ${field}`);
 }
@@ -159,13 +222,19 @@ async function spawnPasskeyServer(t, {
   credsFile = null,
   injectWriteFailure = false,
   extraEnv = {},
+  synchronizeFinishSessionLoads = false,
 } = {}) {
   resetPasskeyChallengeGuard();
   resetWriteGuards();
   resetPasskeyTransactionQueues();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darkfinances-passkey-live-'));
   const preloadPath = path.join(dir, 'passkey-live-preload.js');
-  fs.writeFileSync(preloadPath, buildPasskeyLiveRoutePreload({ deferVerify, authCounter, injectWriteFailure }));
+  fs.writeFileSync(preloadPath, buildPasskeyLiveRoutePreload({
+    deferVerify,
+    authCounter,
+    injectWriteFailure,
+    synchronizeFinishSessionLoads,
+  }));
   const code = 'passkey-live-route-code';
   const logs = { value: '' };
   const credentialsFile = credsFile || path.join(dir, 'passkey-credentials.json');
@@ -179,6 +248,9 @@ async function spawnPasskeyServer(t, {
       extraEnv: {
         PASSKEY_VERIFY_CAPTURE_PATH: path.join(dir, 'verify-capture.json'),
         PASSKEY_VERIFY_GATE_PATH: path.join(dir, 'verify-gate.open'),
+        PASSKEY_SESSION_LOAD_GATE_PATH: path.join(dir, 'session-load.gate'),
+        PASSKEY_SESSION_LOAD_CAPTURE_PATH: path.join(dir, 'session-load.capture'),
+        PASSKEY_STALE_TOUCH_CAPTURE_PATH: path.join(dir, 'stale-touch.capture'),
         PASSKEY_ENROLLMENT_TOKEN_HASH: crypto.createHash('sha256').update(code).digest('hex'),
         PASSKEY_ENROLLMENT_EXPIRES_AT: String(Date.now() + 60_000),
         PASSKEY_CREDENTIALS_FILE: credentialsFile,
@@ -212,6 +284,9 @@ async function spawnPasskeyServer(t, {
     credentialsFile,
     capturePath: path.join(dir, 'verify-capture.json'),
     gatePath: path.join(dir, 'verify-gate.open'),
+    sessionLoadGatePath: path.join(dir, 'session-load.gate'),
+    sessionLoadCapturePath: path.join(dir, 'session-load.capture'),
+    staleTouchCapturePath: path.join(dir, 'stale-touch.capture'),
     logs,
   };
 }
@@ -251,29 +326,46 @@ async function startLogin(base, cookieHeader = '') {
 }
 
 test('parallel register finish requests verify exactly once and clear persisted challenge first', async (t) => {
-  const { base, code, sessionDir, capturePath, gatePath } = await spawnPasskeyServer(t, { deferVerify: true });
+  const {
+    base,
+    code,
+    sessionDir,
+    capturePath,
+    gatePath,
+    sessionLoadGatePath,
+    sessionLoadCapturePath,
+    staleTouchCapturePath,
+  } = await spawnPasskeyServer(t, {
+    deferVerify: true,
+    synchronizeFinishSessionLoads: true,
+  });
   const enrollCookie = await authorizeEnrollment(base, code);
   await waitForPersistedSession(sessionDir, enrollCookie);
   const startCookie = await startRegistration(base, enrollCookie);
   await waitForSessionField(sessionDir, startCookie, 'regChallenge');
 
   const cookie = sessionCookieFromSetCookie(startCookie);
+  fs.writeFileSync(sessionLoadGatePath, 'synchronize');
   const first = fetch(`${base}/auth/register/finish`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },
     body: JSON.stringify({ id: CREDENTIAL_ID, response: { transports: [] } }),
-  });
+  }).then(async (response) => ({ response, text: await response.text() }));
   const second = fetch(`${base}/auth/register/finish`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },
     body: JSON.stringify({ id: CREDENTIAL_ID, response: { transports: [] } }),
-  });
+  }).then(async (response) => ({ response, text: await response.text() }));
 
+  await waitForFile(sessionLoadCapturePath);
+  const duplicate = await Promise.race([first, second]);
+  assert.equal(duplicate.response.status, 400);
+  assert.equal(fs.existsSync(staleTouchCapturePath), false, 'duplicate request touched stale challenge');
   await waitForSessionFieldAbsent(sessionDir, startCookie, 'regChallenge');
   fs.writeFileSync(gatePath, 'release');
-  const [firstRes, secondRes] = await Promise.all([first, second]);
-  const firstText = await firstRes.text();
-  const secondText = await secondRes.text();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  const { response: firstRes, text: firstText } = firstResult;
+  const { response: secondRes, text: secondText } = secondResult;
   assert.equal(firstRes.status === 200 || secondRes.status === 200, true);
   assert.equal(firstRes.status === 400 || secondRes.status === 400, true);
   const capture = JSON.parse(fs.readFileSync(capturePath, 'utf8'));
