@@ -1815,7 +1815,7 @@ function legacySaga(overrides = {}) {
   };
 }
 
-test('schema-v1 active saga without durable identity migrates and fails closed', async () => {
+test('schema-v1 active saga without durable identity remains active in operator-visible recovery errors', async () => {
   resetStores();
   writeJson(process.env.TRANSACTION_SAGAS_PATH, {
     schemaVersion: 1,
@@ -1824,15 +1824,82 @@ test('schema-v1 active saga without durable identity migrates and fails closed',
   const api = durableActual({ rows: [decoy, unrelated] });
   const before = actualMutationCounts(api);
 
-  await recoverTransactionSagas(api);
-  await recoverTransactionSagas(api);
+  const first = await recoverTransactionSagas(api);
+  const second = await recoverTransactionSagas(api);
 
   const saga = readSagaState().sagas.legacy;
   assert.equal(saga.recordVersion, 2);
   assert.equal(saga.phase, 'legacy_unresolved');
   assert.equal(saga.status, 'aborted');
+  assert.equal(saga.lastError.code, 'TRANSACTION_REPLACEMENT_OUTCOME_UNKNOWN');
+  assert.match(saga.lastError.message, /operator repair is required/);
+  for (const result of [first, second]) {
+    assert.equal(result.errors.length, 1);
+    assert.equal(result.errors[0].sagaId, 'legacy');
+    assert.equal(result.errors[0].error.code, 'TRANSACTION_REPLACEMENT_OUTCOME_UNKNOWN');
+    assert.match(result.errors[0].error.message, /exact original transaction is absent/);
+  }
   assert.deepEqual(actualMutationCounts(api), before);
   assert.ok(readStores().receipts.byTxn[original.id]);
+  assert.throws(
+    () => assertTransactionReplacementAvailable({ accountId: 'account', ids: [original.id] }),
+    (error) => error.code === 'TRANSACTION_REPLACEMENT_IN_PROGRESS',
+  );
+});
+
+test('schema-v1 unresolved saga terminalizes without mutation when the exact original is intact', async () => {
+  resetStores();
+  writeJson(process.env.TRANSACTION_SAGAS_PATH, {
+    schemaVersion: 1,
+    sagas: { legacy: legacySaga({ status: 'prepared' }) },
+  });
+  const api = durableActual({ rows: [original, decoy, unrelated] });
+  const mutationCountsBefore = actualMutationCounts(api);
+  const storesBefore = readStores();
+
+  const result = await recoverTransactionSagas(api);
+
+  const saga = readSagaState().sagas.legacy;
+  assert.equal(result.errors.length, 0);
+  assert.equal(saga.phase, 'rolled_back');
+  assert.equal(saga.status, 'recovered');
+  assert.ok(saga.terminalAt);
+  assert.deepEqual(saga.legacyResolution, {
+    outcome: 'original_intact',
+    evidence: 'exact_original_id_and_shape',
+    originalId: original.id,
+  });
+  assert.deepEqual(actualMutationCounts(api), mutationCountsBefore);
+  assert.deepEqual(readStores(), storesBefore);
+  assert.doesNotThrow(() => assertTransactionReplacementAvailable({
+    accountId: 'account',
+    ids: [original.id],
+  }));
+
+  const terminal = JSON.stringify(saga);
+  await recoverTransactionSagas(api);
+  assert.equal(JSON.stringify(readSagaState().sagas.legacy), terminal);
+  assert.deepEqual(actualMutationCounts(api), mutationCountsBefore);
+});
+
+test('schema-v1 unresolved saga does not terminalize a changed original', async () => {
+  resetStores();
+  writeJson(process.env.TRANSACTION_SAGAS_PATH, {
+    schemaVersion: 1,
+    sagas: { legacy: legacySaga({ status: 'prepared' }) },
+  });
+  const changedOriginal = { ...original, notes: 'externally changed after the legacy checkpoint' };
+  const api = durableActual({ rows: [changedOriginal, decoy, unrelated] });
+  const mutationCountsBefore = actualMutationCounts(api);
+  const storesBefore = readStores();
+
+  const result = await recoverTransactionSagas(api);
+
+  assert.equal(readSagaState().sagas.legacy.phase, 'legacy_unresolved');
+  assert.equal(result.errors[0].sagaId, 'legacy');
+  assert.match(result.errors[0].error.message, /exact original transaction changed/);
+  assert.deepEqual(actualMutationCounts(api), mutationCountsBefore);
+  assert.deepEqual(readStores(), storesBefore);
 });
 
 test('schema-v1 completed and recovered records reconcile only exact durable IDs', async (t) => {
