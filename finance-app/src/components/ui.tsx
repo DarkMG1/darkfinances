@@ -91,7 +91,7 @@ export function Avatar({ label, category, size = 38, style }: {
 
 // Canonical list row: avatar + title/subtitle + right value (+ optional chevron).
 // Replaces the bespoke per-screen row styles so every list looks the same.
-export function ListRow({ avatar, title, subtitle, value, valueColor, valueSub, onPress, chevron = true, dim, right, testID }: {
+export function ListRow({ avatar, title, subtitle, value, valueColor, valueSub, onPress, chevron = true, dim, right, testID, accessibilityLabel }: {
   avatar?: React.ReactNode;
   title: string;
   subtitle?: string;
@@ -103,7 +103,9 @@ export function ListRow({ avatar, title, subtitle, value, valueColor, valueSub, 
   dim?: boolean;
   right?: React.ReactNode;
   testID?: string;
+  accessibilityLabel?: string;
 }) {
+  const a11yLabel = accessibilityLabel ?? [title, subtitle, value, valueSub].filter(Boolean).join(', ');
   const inner = (
     <>
       {avatar}
@@ -122,7 +124,7 @@ export function ListRow({ avatar, title, subtitle, value, valueColor, valueSub, 
   );
   if (onPress) {
     return (
-      <Pressable accessibilityRole="button" testID={testID} onPress={onPress} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}>
+      <Pressable accessibilityRole="button" accessibilityLabel={a11yLabel} testID={testID} onPress={onPress} style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}>
         {inner}
       </Pressable>
     );
@@ -225,10 +227,19 @@ export function TagChips({
 }
 
 export function Loading({ text }: { text?: string }) {
+  const label = text?.trim() || 'Loading';
   return (
-    <View style={styles.center}>
-      <ActivityIndicator color={colors.accent} />
-      {text ? <Text style={styles.muted}>{text}</Text> : null}
+    <View
+      style={styles.center}
+      accessible
+      accessibilityRole="progressbar"
+      accessibilityLabel={label}
+      accessibilityState={{ busy: true }}
+      {...visibleStatusLiveRegionProps()}
+    >
+      <AccessibilityAnnouncementEffect message={label} />
+      <ActivityIndicator color={colors.accent} accessibilityElementsHidden importantForAccessibility="no" />
+      {text ? <Text style={styles.muted} accessibilityElementsHidden importantForAccessibility="no">{text}</Text> : null}
     </View>
   );
 }

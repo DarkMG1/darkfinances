@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
-import { FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Stack } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useApplyRules, useCategories, useDeleteRule, useRules, useSaveRule } from '@/api/hooks/finance.hooks';
@@ -88,9 +88,17 @@ export default function Rules() {
 
   const inputLocked = banner.isLocked;
 
-  const remove = (id: string) => {
+  const remove = (id: string, ruleMatch: string) => {
     if (banner.isLocked) return;
-    deleteAction.run({ id });
+    haptics.warning();
+    Alert.alert('Delete rule?', `Remove “${ruleMatch}”? This can’t be undone.`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => deleteAction.run({ id }),
+      },
+    ]);
   };
 
   const list = rules.data?.rules ?? [];
@@ -168,7 +176,7 @@ export default function Rules() {
                 <Text style={styles.ruleMatch} numberOfLines={1}>“{r.match}”</Text>
                 <Text style={styles.ruleCat} numberOfLines={1}>→ {r.categoryName || 'category'}</Text>
               </View>
-              <Pressable testID={`rules-delete-${r.id}`} hitSlop={8} onPress={() => remove(r.id)} disabled={inputLocked} style={({ pressed }) => [pressed && !inputLocked && { opacity: 0.5 }, inputLocked && { opacity: 0.4 }]}>
+              <Pressable testID={`rules-delete-${r.id}`} accessibilityRole="button" accessibilityLabel={`Delete rule matching ${r.match}`} hitSlop={8} onPress={() => remove(r.id, r.match)} disabled={inputLocked} style={({ pressed }) => [pressed && !inputLocked && { opacity: 0.5 }, inputLocked && { opacity: 0.4 }]}>
                 <Text style={styles.del}>Delete</Text>
               </Pressable>
             </View>
