@@ -16,7 +16,7 @@ import { focusManager, QueryClientProvider } from '@tanstack/react-query';
 import { reconcilePendingFinanceOperations } from '@/api/client/requests';
 import { ServerProvider, useServerConfig } from '@/state/server';
 import { FinanceDateProvider } from '@/state/finance-date';
-import { authenticate } from '@/lib/biometric';
+import { authenticate, getBiometricLabel } from '@/lib/biometric';
 import { useAutoUpdate } from '@/lib/auto-update';
 import {
   clearFinanceOperationReconciliationDiagnostic,
@@ -55,13 +55,13 @@ export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
   );
 }
 
-function LockScreen({ onUnlock }: { onUnlock: () => void }) {
+function LockScreen({ biometricLabel, onUnlock }: { biometricLabel: string; onUnlock: () => void }) {
   return (
     <View style={styles.lock}>
       <Text style={styles.lockTitle}>dark<Text style={{ color: colors.accentLight }}>finances</Text></Text>
       <Text style={styles.lockSub}>Locked</Text>
-      <Pressable style={({ pressed }) => [styles.unlockBtn, pressed && { opacity: 0.85 }]} onPress={onUnlock}>
-        <Text style={styles.unlockText}>Unlock with Face ID</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Unlock with ${biometricLabel}`} style={({ pressed }) => [styles.unlockBtn, pressed && { opacity: 0.85 }]} onPress={onUnlock}>
+        <Text style={styles.unlockText}>Unlock with {biometricLabel}</Text>
       </Pressable>
     </View>
   );
@@ -79,12 +79,14 @@ function PrivacyMark() {
 function PrivacyGateOverlay({
   fading,
   fadeKey,
+  biometricLabel,
   showPrivacy,
   onFadeDone,
   onUnlock,
 }: {
   fading: boolean;
   fadeKey: number;
+  biometricLabel: string;
   showPrivacy: boolean;
   onFadeDone: () => void;
   onUnlock: () => void;
@@ -112,7 +114,7 @@ function PrivacyGateOverlay({
       pointerEvents="auto"
       style={[styles.lockOverlay, showPrivacy && styles.privacyCover, animatedStyle]}
     >
-      {showPrivacy ? (fading ? null : <PrivacyMark />) : <LockScreen onUnlock={onUnlock} />}
+      {showPrivacy ? (fading ? null : <PrivacyMark />) : <LockScreen biometricLabel={biometricLabel} onUnlock={onUnlock} />}
     </Reanimated.View>
   );
 }
@@ -124,6 +126,7 @@ function RootNav() {
   const [unlockFadeRunning, setUnlockFadeRunning] = useState(false);
   const [unlockFadeKey, setUnlockFadeKey] = useState(0);
   const [privacyVisible, setPrivacyVisible] = useState(false);
+  const [biometricLabel, setBiometricLabel] = useState('Biometrics');
   const [appActive, setAppActive] = useState(() => AppState.currentState === 'active');
   const appState = useRef<AppStateStatus>(AppState.currentState);
   const authenticating = useRef(false);
@@ -138,6 +141,16 @@ function RootNav() {
     (unlocked && !privacyVisible && !lockFading && !unlockFadeRunning)
   );
   useAutoUpdate(canPromptForUpdate);
+
+  useEffect(() => {
+    let mounted = true;
+    void getBiometricLabel().then((label) => {
+      if (mounted) setBiometricLabel(label);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const reconcileOperations = useCallback(() => {
     if (!ready || !configured || demo) return;
@@ -265,7 +278,7 @@ function RootNav() {
       setAppActive(next === 'active');
 
       // LocalAuthentication briefly moves the app through inactive/active while
-      // Face ID is onscreen, and the final active event can arrive just after
+      // The biometric prompt is onscreen, and the final active event can arrive just after
       // authenticateAsync resolves. Do not relock for biometric-owned transitions.
       if (authenticating.current) {
         return;
@@ -369,6 +382,7 @@ function RootNav() {
         <PrivacyGateOverlay
           fading={unlockFadeRunning}
           fadeKey={unlockFadeKey}
+          biometricLabel={biometricLabel}
           showPrivacy={privacyVisible || lockFading}
           onFadeDone={finishUnlockFade}
           onUnlock={tryUnlock}

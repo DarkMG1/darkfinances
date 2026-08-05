@@ -259,7 +259,7 @@ test('skipped connection save exposes deterministic user-facing message', () => 
   );
   assert.match(
     settingsConnectionSaveSkippedMessage(CONNECTION_SAVE_ACTIONS.FACE_ID),
-    /Face ID lock/,
+    /Biometric lock/,
   );
 });
 
@@ -325,11 +325,12 @@ test('settings profile-changing actions share lease-owned admission guard', () =
   assert.match(source, /saveUrlControl\.visibleLabel/);
   assert.match(source, /testControl\.accessibilityLabel/);
   assert.match(source, /settingsConnectionSaveSkippedMessage/);
-  assert.match(source, /announceConnectionStatus\('Face ID lock not enabled'\)/);
-  assert.match(source, /announceConnectionStatus\(value \? 'Face ID lock enabled'/);
+  assert.match(source, /const biometricLockLabel = `\$\{biometricLabel\} lock`/);
+  assert.match(source, /announceConnectionStatus\(`\$\{biometricLockLabel\} not enabled`\)/);
+  assert.match(source, /announceConnectionStatus\(`\$\{biometricLockLabel\} \$\{value \? 'enabled' : 'disabled'\}`\)/);
   assert.match(source, /CONNECTION_SAVE_ACTIONS\.DISCONNECT/);
   assert.match(source, /CONNECTION_SAVE_ACTIONS\.FACE_ID/);
-  assert.match(source, /await authenticate\('Enable Face ID lock'\)/);
+  assert.match(source, /await authenticate\(`Enable \$\{biometricLockLabel\}`\)/);
   assert.match(source, /await setConfig\(verified\)/);
   assert.match(source, /await clear\(\)/);
   assert.match(source, /disconnectButtonVisibleLabel\(busyOwner\)/);
