@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { mock } = require('node:test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -44,7 +45,7 @@ const {
 } = require('../lib/domain/obligation-graph');
 const { toCents, sumCents } = require('../lib/domain/money');
 const { daysInMonth } = require('../lib/date-only');
-const { getToday, getGoals, saveGoal, getBudgets, getForecast, resetApi } = require('../dataModule');
+const { getToday, getGoals, saveGoal, deleteGoal, getBudgets, getForecast, resetApi } = require('../dataModule');
 const { buildForecastGenericBudgetContext } = require('../lib/domain/cent-allocation');
 
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -304,4 +305,34 @@ test('stale missing linked account edit succeeds and surfaces missing status', a
   assert.equal(saved.ok, true);
   assert.equal(saved.feasibility.accountStatus, 'missing');
   assert.equal(saved.feasibility.feasible, false);
+});
+
+test('frozen-clock goal creates stay distinct, preserve legacy IDs, and delete exactly one', async () => {
+  mock.timers.enable({ apis: ['Date'], now: new Date('2026-07-15T17:01:00-07:00') });
+  try {
+    seedFixture(fixtures.complete.fixture, {
+      goals: [{ id: 'glegacy', name: 'Legacy goal', target: 50, current: 5 }],
+    });
+
+    const updated = await saveGoal({ id: 'glegacy', name: 'Legacy goal updated', target: 75 });
+    const first = await saveGoal({ name: 'First goal', target: 100 });
+    const second = await saveGoal({ name: 'Second goal', target: 200 });
+
+    assert.equal(updated.id, 'glegacy');
+    assert.notEqual(first.id, second.id);
+    assert.match(first.id, /^g_[0-9a-f-]{36}$/);
+    assert.match(second.id, /^g_[0-9a-f-]{36}$/);
+    assert.deepEqual(
+      (await getGoals()).map(({ id }) => id),
+      ['glegacy', first.id, second.id],
+    );
+
+    assert.deepEqual(deleteGoal(first.id), { ok: true });
+    assert.deepEqual(
+      (await getGoals()).map(({ id }) => id),
+      ['glegacy', second.id],
+    );
+  } finally {
+    mock.timers.reset();
+  }
 });

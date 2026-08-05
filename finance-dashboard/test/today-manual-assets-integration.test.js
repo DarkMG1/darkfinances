@@ -102,3 +102,48 @@ test('manual asset save/delete changes Today revision and manualAssetsRevision o
     );
   });
 });
+
+test('frozen-clock $100 and $200 manual asset creates stay distinct and delete exactly one', async () => {
+  await withFinanceAnchor(async () => {
+    writeJson(process.env.MANUAL_ASSETS_PATH, {
+      items: [{
+        id: 'mlegacy',
+        name: 'Legacy asset',
+        value: 50,
+        kind: 'asset',
+        updated: '2026-07-01',
+      }],
+    });
+
+    const updated = saveManualAsset({
+      id: 'mlegacy',
+      name: 'Legacy asset updated',
+      value: 50,
+      kind: 'asset',
+    });
+    const first = saveManualAsset({ name: '$100 asset', value: 100, kind: 'asset' });
+    const second = saveManualAsset({ name: '$200 asset', value: 200, kind: 'asset' });
+
+    assert.equal(updated.id, 'mlegacy');
+    assert.notEqual(first.id, second.id);
+    assert.match(first.id, /^m_[0-9a-f-]{36}$/);
+    assert.match(second.id, /^m_[0-9a-f-]{36}$/);
+    assert.deepEqual(
+      getManualAssets().items.map(({ id, value }) => ({ id, value })),
+      [
+        { id: 'mlegacy', value: 50 },
+        { id: first.id, value: 100 },
+        { id: second.id, value: 200 },
+      ],
+    );
+
+    assert.deepEqual(deleteManualAsset({ id: first.id }), { ok: true, removed: 1 });
+    assert.deepEqual(
+      getManualAssets().items.map(({ id, value }) => ({ id, value })),
+      [
+        { id: 'mlegacy', value: 50 },
+        { id: second.id, value: 200 },
+      ],
+    );
+  });
+});
