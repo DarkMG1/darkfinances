@@ -36,9 +36,11 @@ const RECEIPT_PRELOAD = `
 `;
 
 function largeReceiptJson(txnId) {
+  const payload = Buffer.alloc(DEFAULT_MAX_JSON_BYTES, 0x41);
+  Buffer.from(txnId).copy(payload);
   const png = Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    Buffer.alloc(DEFAULT_MAX_JSON_BYTES, 0x41),
+    payload,
   ]);
   const json = JSON.stringify({
     txnId,
