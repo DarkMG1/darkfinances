@@ -1,5 +1,17 @@
 import { setFinanceTimeZone } from './finance-date.js';
 
+export function mutateFinance(path, { method = 'POST', body } = {}) {
+  const headers = {
+    'Idempotency-Key': globalThis.crypto.randomUUID(),
+    ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+  };
+  return fetch(`/api/v1${path}`, {
+    method,
+    headers,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+}
+
 export async function loadFinanceContext() {
   const response = await fetch('/api/v1/ping');
   if (!response.ok) return;
@@ -21,6 +33,6 @@ export async function loadSection(load, targetIds) {
 }
 
 export async function refreshData() {
-  await fetch('/api/refresh', { method: 'POST' });
+  await mutateFinance('/refresh');
   location.reload();
 }
