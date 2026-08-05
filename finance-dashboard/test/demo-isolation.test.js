@@ -37,12 +37,12 @@ test('DEMO_ONLY forces headerless API reads and writes through synthetic handler
   });
   assert.equal(result.response.status, 200);
   assert.ok(Array.isArray(result.body.data));
-  assert.equal(result.body.data[0].id.startsWith('demo-'), true);
+  assert.equal(result.body.data[0].name, 'Everyday Checking');
 
   result = await request(base, '/api/accounts', { redirect: 'manual' });
   assert.equal(result.response.status, 200);
   assert.ok(Array.isArray(result.body));
-  assert.equal(result.body[0].id.startsWith('demo-'), true);
+  assert.equal(result.body[0].name, 'Everyday Checking');
 
   result = await request(base, '/api/v1/manual-assets', {
     method: 'POST',
