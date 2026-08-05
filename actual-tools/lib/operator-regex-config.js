@@ -4,6 +4,8 @@ const fs = require('fs');
 const safe = require('safe-regex2');
 
 const CONFIG_ERROR_CODE = 'OPERATOR_REGEX_CONFIG_INVALID';
+const CANONICAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const CANONICAL_EVENT_TAG_RE = /^ev-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 const DEFAULT_LIMITS = Object.freeze({
   maxPatternsPerSet: 32,
@@ -27,6 +29,35 @@ class OperatorRegexConfigError extends Error {
 
 function configError(detail) {
   return new OperatorRegexConfigError(`Operator regex configuration is invalid: ${detail}`);
+}
+
+function validateCanonicalCollectionStart(value) {
+  if (typeof value !== 'string' || !CANONICAL_DATE_RE.test(value)) {
+    throw configError('collection rule start must be a canonical YYYY-MM-DD date');
+  }
+  const [year, month, day] = value.split('-').map(Number);
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    probe.getUTCFullYear() !== year
+    || probe.getUTCMonth() !== month - 1
+    || probe.getUTCDate() !== day
+  ) {
+    throw configError('collection rule start must be a valid calendar date');
+  }
+}
+
+function validateCanonicalCollectionTag(value) {
+  if (typeof value !== 'string' || !CANONICAL_EVENT_TAG_RE.test(value)) {
+    throw configError('collection rule tag must be a canonical ev-<slug> tag');
+  }
+}
+
+function collectionRatio(value, field, fallback) {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw configError(`collection rule ${field} must be a finite nonnegative number`);
+  }
+  return value;
 }
 
 function compileValidatedSource(source, flags, { setLabel, index }) {
@@ -167,6 +198,13 @@ function validateCollectionRule(rule, { eventName, limits = DEFAULT_LIMITS } = {
   if (!rule.group || !rule.tag || !rule.start || !rule.debtors) {
     throw configError('collection rule is incomplete');
   }
+  validateCanonicalCollectionStart(rule.start);
+  validateCanonicalCollectionTag(rule.tag);
+  const minRatio = collectionRatio(rule.minRatio, 'minRatio', 0.4);
+  const maxRatio = collectionRatio(rule.maxRatio, 'maxRatio', 1.6);
+  if (minRatio > maxRatio) {
+    throw configError('collection rule minRatio must not exceed maxRatio');
+  }
   if (typeof rule.debtors !== 'object' || Array.isArray(rule.debtors)) {
     throw configError('collection rule debtors must be an object');
   }
@@ -188,10 +226,12 @@ function validateCollectionRule(rule, { eventName, limits = DEFAULT_LIMITS } = {
     compilePatternUnion(debtor.patterns, { setLabel: `debtor ${slug}`, limits });
   }
 
-  if (eventName) {
-    return { ...rule, eventName };
-  }
-  return rule;
+  return {
+    ...rule,
+    minRatio,
+    maxRatio,
+    ...(eventName ? { eventName } : {}),
+  };
 }
 
 function readCollectionRule(config, eventName, options = {}) {

@@ -15,6 +15,7 @@ const {
   loadBuildRulesConfig,
   loadCollectionRule,
   readCollectionRule,
+  validateCollectionRule,
   validatePatternSources,
   validateSkipNames,
 } = require('../lib/operator-regex-config');
@@ -183,6 +184,61 @@ test('collection rule validation rejects incomplete and unsafe debtor patterns',
   );
 });
 
+test('collection rule validation rejects non-finite, negative, reversed, and nonnumeric ratios', () => {
+  const base = {
+    group: '1',
+    tag: 'ev-trip',
+    start: '2026-01-01',
+    debtors: { alex: { patterns: ['\\balex\\b'] } },
+  };
+  for (const patch of [
+    { minRatio: Number.NaN },
+    { minRatio: Number.POSITIVE_INFINITY },
+    { minRatio: -0.01 },
+    { maxRatio: Number.NaN },
+    { maxRatio: Number.NEGATIVE_INFINITY },
+    { maxRatio: -0.01 },
+    { minRatio: '0.4' },
+    { maxRatio: null },
+    { minRatio: 2, maxRatio: 1 },
+  ]) {
+    assert.throws(
+      () => validateCollectionRule({ ...base, ...patch }),
+      (error) => error instanceof OperatorRegexConfigError
+        && /finite nonnegative|minRatio must not exceed maxRatio/.test(error.message),
+      `expected rejection for ${JSON.stringify(patch)}`,
+    );
+  }
+
+  const normalized = validateCollectionRule({ ...base, minRatio: 0, maxRatio: 0 });
+  assert.equal(normalized.minRatio, 0);
+  assert.equal(normalized.maxRatio, 0);
+  const defaults = validateCollectionRule(base);
+  assert.equal(defaults.minRatio, 0.4);
+  assert.equal(defaults.maxRatio, 1.6);
+});
+
+test('collection rule validation requires canonical real dates and event tags', () => {
+  const base = {
+    group: '1',
+    tag: 'ev-trip-2026',
+    start: '2026-01-01',
+    debtors: { alex: { patterns: ['\\balex\\b'] } },
+  };
+  for (const start of ['2026-1-01', '2026-02-30', ' 2026-01-01', 20260101]) {
+    assert.throws(
+      () => validateCollectionRule({ ...base, start }),
+      /collection rule start/,
+    );
+  }
+  for (const tag of ['trip-2026', '#ev-trip-2026', 'ev-Trip-2026', 'ev_trip_2026', 'ev-trip-']) {
+    assert.throws(
+      () => validateCollectionRule({ ...base, tag }),
+      /canonical ev-<slug> tag/,
+    );
+  }
+});
+
 test('compilePatternList returns independent matchers for build-rules skip patterns', () => {
   const patterns = compilePatternList(['custom payment pattern'], { setLabel: 'skipPatterns' });
   assert.equal(patterns.length, 1);
@@ -258,6 +314,35 @@ test('event-collect rejects invalid config before Actual init or Splitwise calls
   assert.match(result.stderr, /Operator regex configuration is invalid/);
   assert.doesNotMatch(result.stderr, /init-should-not-run/);
   assert.doesNotMatch(result.stderr, /splitwise-should-not-run/);
+});
+
+test('event-collect rejects invalid ratios, dates, and tags before external calls', (t) => {
+  for (const patch of [
+    { minRatio: 'NaN' },
+    { minRatio: 2, maxRatio: 1 },
+    { start: '2026-02-30' },
+    { tag: '#ev-trip' },
+  ]) {
+    const configPath = tempConfigFile(t, JSON.stringify({
+      events: {
+        trip: {
+          group: '123',
+          tag: 'ev-trip',
+          start: '2026-01-01',
+          debtors: { alex: { patterns: ['\\balex\\b'] } },
+          ...patch,
+        },
+      },
+    }));
+    const result = runScriptFixture(t, 'event-collect.js', {
+      configPath,
+      env: { COLLECTION_EVENT: 'trip', FIX_DATA_DIR: '/tmp/darkfinances-regex-test' },
+    });
+    assert.notEqual(result.status, 0, JSON.stringify(patch));
+    assert.match(result.stderr, /Operator regex configuration is invalid/);
+    assert.doesNotMatch(result.stderr, /init-should-not-run/);
+    assert.doesNotMatch(result.stderr, /splitwise-should-not-run/);
+  }
 });
 
 test('build-rules rejects invalid skipPatterns before Actual init', (t) => {
