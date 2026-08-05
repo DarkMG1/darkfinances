@@ -172,6 +172,26 @@ test('principal derives from session or token rather than spoofable client metad
   );
 });
 
+test('demo-only API requests always derive the demo principal', () => {
+  const req = mockReq({
+    path: '/api/v1/accounts',
+    session: { authenticated: true },
+    sessionID: 'live-session',
+    get(name) {
+      if (name === 'X-Finance-Token') return 'live-token';
+      return null;
+    },
+  });
+  assert.equal(
+    deriveRequestPrincipal(req, {
+      apiToken: 'live-token',
+      demoOnly: true,
+      selftest: true,
+    }),
+    'demo',
+  );
+});
+
 test('read route policy classifies control, lightweight disk, cacheable, and direct reads', () => {
   assert.equal(classifyReadRoute(mockReq({ path: '/api/v1/ping' })).policy, 'control');
   assert.equal(classifyReadRoute(mockReq({ path: '/api/v1/operations/op-key-12345678' })).policy, 'control');
@@ -517,6 +537,40 @@ test('recovery journal peek uses bounded recovery class and converts to ordinary
     AdmissionOverloadedError,
   );
   running.release();
+  assertCountersZero(admission);
+});
+
+test('empty recovery peek cannot convert beyond ordinary mutation running cap', async () => {
+  const admission = new RequestAdmissionController(tinyConfig({
+    mutationGlobalPending: 3,
+    mutationGlobalRunning: 1,
+    recoveryReserve: 1,
+    controlReserve: 0,
+    maxPendingDepth: 3,
+  }));
+  const ordinary = await admission.acquire({
+    lane: 'mutation',
+    principal: 'session:ordinary',
+    endpoint: 'post /budgets',
+    weight: 1,
+    trafficClass: TRAFFIC.ORDINARY,
+  });
+
+  await assert.rejects(
+    admission.acquireMutationWithJournalPeek({
+      principal: 'session:fresh-key',
+      endpoint: 'post /budgets',
+      weight: 1,
+      peekJournal: () => null,
+    }),
+    AdmissionOverloadedError,
+  );
+
+  const mutation = admission.getHealth().lanes.mutation;
+  assert.equal(mutation.classRunning.ordinary, 1);
+  assert.equal(mutation.classRunning.recovery, 0);
+  assert.equal(mutation.globalRunning, 1);
+  ordinary.release();
   assertCountersZero(admission);
 });
 

@@ -21,6 +21,32 @@ const FACEID_KEY = 'finance_faceid';
 const DEMO_KEY = 'finance_demo';
 const LEGACY_QUERY_CACHE_KEY = 'rq-cache-v2';
 
+type SecureStoreBootAccess = Pick<typeof SecureStore, 'getItemAsync' | 'setItemAsync'>;
+
+export async function loadStoredToken(
+  secureStore: SecureStoreBootAccess = SecureStore,
+): Promise<string | null> {
+  let storedToken: string | null;
+  try {
+    storedToken = await secureStore.getItemAsync(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+
+  if (storedToken) {
+    try {
+      await secureStore.setItemAsync(TOKEN_KEY, storedToken, {
+        keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+      });
+    } catch {
+      // The accessibility rewrite is best-effort. The successful read remains
+      // valid for this boot even if updating the Keychain item fails.
+    }
+  }
+
+  return storedToken;
+}
+
 export interface ServerConfig {
   serverUrl: string | null;
   token: string | null;
@@ -59,20 +85,10 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
         }
       }
       const storedDemo = kv.getBool(DEMO_KEY, false);
-      let storedToken: string | null = null;
       setServerUrl(storedUrl);
       setFaceId(kv.getBool(FACEID_KEY, false));
       setDemo(storedDemo);
-      try {
-        storedToken = await SecureStore.getItemAsync(TOKEN_KEY);
-        if (storedToken) {
-          await SecureStore.setItemAsync(TOKEN_KEY, storedToken, {
-            keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-          });
-        }
-      } catch {
-        storedToken = null;
-      }
+      const storedToken = await loadStoredToken();
       setToken(storedToken);
       setReady(true);
     })();

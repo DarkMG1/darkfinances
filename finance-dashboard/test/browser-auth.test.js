@@ -35,13 +35,14 @@ async function patchSessionAuthenticated(sessionDir, setCookieHeader) {
   fs.writeFileSync(sessionPath, JSON.stringify(session));
 }
 
-async function spawnTestServer(t) {
+async function spawnTestServer(t, extraEnv = {}) {
   const code = 'test-enrollment-code';
   const started = await startEphemeralDashboardServer(t, {
     tempPrefix: 'darkfinances-browser-auth-',
     extraEnvForDir: () => ({
       PASSKEY_ENROLLMENT_TOKEN_HASH: crypto.createHash('sha256').update(code).digest('hex'),
       PASSKEY_ENROLLMENT_EXPIRES_AT: String(Date.now() + 60_000),
+      ...extraEnv,
     }),
   });
   return { ...started, code };
@@ -99,4 +100,32 @@ test('dashboard HTML requires session while demo static assets stay public', asy
     });
     assert.equal(result.response.status, 200, `authenticated ${pathname}`);
   }
+});
+
+test('logout clears the matching cookie and returns 500 when session destruction fails', async (t) => {
+  const { base, code } = await spawnTestServer(t, {
+    TEST_INJECT_SESSION_DESTROY_FAILURE: '1',
+  });
+  const enroll = await request(base, '/auth/enroll/authorize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  });
+  assert.equal(enroll.response.status, 200);
+  const cookie = enroll.response.headers.get('set-cookie').split(';')[0];
+
+  const logout = await request(base, '/auth/logout', {
+    method: 'POST',
+    headers: { Cookie: cookie },
+  });
+  assert.equal(logout.response.status, 500);
+  assert.deepEqual(JSON.parse(logout.body), { error: 'Could not log out' });
+
+  const clearedCookie = logout.response.headers.get('set-cookie');
+  assert.match(clearedCookie, /^connect\.sid=;/);
+  assert.match(clearedCookie, /Path=\//);
+  assert.match(clearedCookie, /Expires=Thu, 01 Jan 1970 00:00:00 GMT/);
+  assert.match(clearedCookie, /HttpOnly/);
+  assert.match(clearedCookie, /SameSite=Lax/);
+  assert.doesNotMatch(clearedCookie, /\bok\b/i);
 });

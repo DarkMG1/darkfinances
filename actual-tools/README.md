@@ -222,7 +222,8 @@ CONFIRM=1 bash run.sh build-rules.js
 ```
 
 The tool requires at least two categorized observations and at least 80% agreement. Customize exclusions
-in private `build-rules-config.json`.
+in private `build-rules-config.json`. Confirmed rule creation is synced before success is reported; API,
+sync, or shutdown failures exit nonzero.
 
 Operator regex configuration (`build-rules-config.json` skip patterns and
 `collection-rules.json` debtor patterns) is validated before any Actual or Splitwise calls:
@@ -254,6 +255,9 @@ COLLECTION_EVENT=trip-2026 CONFIRM=1 bash run.sh event-collect.js
 ```
 
 Transactions outside configured amount ratios are reported for manual review, not changed.
+In confirmed mode, each tagged transaction is synced as a resume checkpoint. If a later item fails, the
+command exits nonzero; rerunning safely skips the already-tagged checkpoints and resumes the remaining
+transactions.
 
 ## Safety model
 

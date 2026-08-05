@@ -46,6 +46,16 @@ function validDateOnly(value) {
 
 const dateOnly = z.string().refine(validDateOnly, 'date must be a real YYYY-MM-DD date');
 const monthOnly = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'month must be YYYY-MM');
+const queryInteger = (min, max, label) => z.union([
+  z.string().regex(/^(0|[1-9]\d*)$/, `${label} must be an integer`),
+  z.number().int(`${label} must be an integer`),
+]).transform(Number).pipe(z.number().int().min(min).max(max));
+const listLimit = queryInteger(1, 100, 'limit');
+const listOffset = queryInteger(0, 1_000_000, 'offset');
+const queryBoolean = z.union([
+  z.boolean(),
+  z.enum(['1', 'true', '0', 'false']),
+]).transform((value) => value === true || value === '1' || value === 'true');
 
 const owesTripEntry = z.object({
   event: z.string().max(200).optional(),
@@ -90,6 +100,20 @@ const schemas = {
   idParam: z.object({ id: identifier }).strict(),
   keyParam: z.object({ key: identifier }).strict(),
   slugParam: z.object({ slug: nonEmpty(80) }).strict(),
+  receiptsListQuery: z.object({
+    txnId: identifier.optional(),
+    limit: listLimit.optional(),
+    offset: listOffset.optional(),
+    includeOcr: queryBoolean.optional(),
+  }).strict(),
+  rulesListQuery: z.object({
+    limit: listLimit.optional(),
+    offset: listOffset.optional(),
+  }).strict(),
+  eventsListQuery: z.object({
+    limit: listLimit.optional(),
+    offset: listOffset.optional(),
+  }).strict(),
 
   createTransaction: z.object({
     accountId: identifier,

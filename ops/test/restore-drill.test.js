@@ -5,8 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { once } = require('node:events');
-const { spawnSync, spawn } = require('child_process');
+const { spawnSync } = require('child_process');
 const { buildBackupBundle } = require('../lib/build-backup-bundle');
 const {
   BINDING_FIELD,
@@ -30,6 +29,7 @@ const {
   LOCK_SCHEMA_VERSION,
   lockPathForLayout,
 } = require('../lib/restore-instance-lock');
+const { acquireCoordinatedLock } = require('../lib/coordinated-operation-lock');
 const { writeProductionDashboard, PRODUCTION_SHAPED } = require('./fixtures/backup-bundle-dashboard-fixtures');
 const { findExecutableInPath } = require('../lib/ops-command-runners');
 
@@ -49,17 +49,29 @@ function stagedRestore(root, destination, archive, options = {}, extra = {}) {
     env: envOverride,
     coordinatorRoot: optionCoordinatorRoot,
     layout: optionLayout,
+    coordinatedSession: optionCoordinatedSession,
     ...restoreOptions
   } = options;
-  return runStagedRestore({
-    archivePath: archive,
-    destinationRoot: destination,
-    env: envOverride ?? ctx.env,
-    runners: optionRunners ?? ctx.runners,
-    coordinatorRoot: optionCoordinatorRoot ?? ctx.coordinatorRoot,
-    layout: optionLayout ?? ctx.layout,
-    ...restoreOptions,
-  });
+  const env = envOverride ?? ctx.env;
+  const coordinatorLayout = optionLayout ?? ctx.layout;
+  const live = restoreOptions.dryRun !== true && restoreOptions.confirm === true;
+  const gate = live
+    ? acquireCoordinatedLock({ layout: coordinatorLayout, operation: 'restore', env })
+    : null;
+  try {
+    return runStagedRestore({
+      archivePath: archive,
+      destinationRoot: destination,
+      env,
+      runners: optionRunners ?? ctx.runners,
+      coordinatorRoot: optionCoordinatorRoot ?? ctx.coordinatorRoot,
+      layout: coordinatorLayout,
+      coordinatedSession: optionCoordinatedSession ?? ctx.coordinatedSession,
+      ...restoreOptions,
+    });
+  } finally {
+    gate?.release();
+  }
 }
 
 function controlJournal(destination) {
@@ -456,7 +468,7 @@ test('permission fault during swap surfaces failure', (t) => {
   );
 });
 
-test('relocated install with no repository restores via bundled tooling only', (t) => {
+test('relocated standalone preview uses bundled tooling without repository access', (t) => {
   const root = mkRoot(t, 'darkfinances-restore-relocated-');
   const dashboard = path.join(root, 'dashboard');
   const destination = path.join(root, 'destination');
@@ -464,19 +476,20 @@ test('relocated install with no repository restores via bundled tooling only', (
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
+  const before = destinationSnapshot(destination);
 
   const relocated = spawnSync('bash', [restoreShell, archive], {
     env: {
       ...restoreDrillContext(root, destination, archive).env,
-      CONFIRM: '1',
       FINANCE_DASHBOARD_DIR: destination,
       DARKFINANCES_REPO_ROOT: path.join(root, 'missing-repo'),
       NODE_PATH: '',
     },
     encoding: 'utf8',
   });
-  assert.equal(relocated.status, 0, relocated.stderr || relocated.stdout);
-  assert.equal(fs.existsSync(path.join(destination, 'account-overrides.json')), true);
+  assert.equal(relocated.status, 2, relocated.stderr || relocated.stdout);
+  assert.match(relocated.stderr, /restore dry-run: ok/);
+  assert.deepEqual(destinationSnapshot(destination), before);
 });
 
 test('restore drill shell wrapper dry-run exits 2 without writes', (t) => {
@@ -694,8 +707,8 @@ test('wrong admission archive binding is rejected before mutation', (t) => {
     () => runStagedRestore({
       archivePath: archive,
       destinationRoot: destination,
-      dryRun: false,
-      confirm: true,
+      dryRun: true,
+      confirm: false,
       env: {
         ...process.env,
         PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
@@ -717,20 +730,16 @@ test('rollback failure leaves recoverable journal and next invocation converges'
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  const faultCtx = restoreDrillContext(root, destination, archive, {
-    RESTORE_FAULT_SCHEDULE: JSON.stringify([
-      { point: 'after:swap-file', detail: 'rules.json', throwError: 'swap interrupt' },
-      { point: 'after:rollback-restore', detail: 'rules.json', throwError: 'rollback interrupt' },
-    ]),
-  });
+  const faultSchedule = JSON.stringify([
+    { point: 'after:swap-file', detail: 'rules.json', throwError: 'swap interrupt' },
+    { point: 'after:rollback-restore', detail: 'rules.json', throwError: 'rollback interrupt' },
+  ]);
   assert.throws(
-    () => runStagedRestore({
-      archivePath: archive,
-      destinationRoot: destination,
+    () => stagedRestore(root, destination, archive, {
       dryRun: false,
       confirm: true,
-      env: faultCtx.env,
-      runners: faultCtx.runners,
+    }, {
+      RESTORE_FAULT_SCHEDULE: faultSchedule,
     }),
     /rollback interrupt/,
   );
@@ -805,7 +814,7 @@ test('pre-swap generation evidence change is rejected', (t) => {
   );
 });
 
-test('shell wrapper resumes interrupted restore without explicit workRoot', (t) => {
+test('shell wrapper refuses standalone live restore before mutation', (t) => {
   const root = mkRoot(t, 'darkfinances-restore-shell-resume-');
   const dashboard = path.join(root, 'dashboard');
   const destination = path.join(root, 'destination');
@@ -813,21 +822,16 @@ test('shell wrapper resumes interrupted restore without explicit workRoot', (t) 
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  const faultEnv = {
-    ...restoreDrillContext(root, destination, archive).env,
-    FINANCE_DASHBOARD_DIR: destination,
-    RESTORE_FAULT_SCHEDULE: JSON.stringify([{ point: 'after:snapshot-capture', throwError: 'shell interrupt' }]),
-  };
-  const first = spawnSync(restoreShell, [archive], { encoding: 'utf8', env: faultEnv });
-  assert.notEqual(first.status, 0, first.stderr);
-  const resumeEnv = {
+  const liveEnv = {
     ...restoreDrillContext(root, destination, archive).env,
     FINANCE_DASHBOARD_DIR: destination,
     CONFIRM: '1',
   };
-  const second = spawnSync(restoreShell, [archive], { encoding: 'utf8', env: resumeEnv });
-  assert.equal(second.status, 0, second.stderr);
-  assert.equal(controlJournal(destination)?.phase, PHASE.COMPLETE);
+  const result = spawnSync(restoreShell, [archive], { encoding: 'utf8', env: liveEnv });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /standalone live restore is refused/);
+  assert.equal(fs.readFileSync(path.join(destination, 'rules.json'), 'utf8'), '[]\n');
+  assert.equal(fs.existsSync(path.join(destination, '.darkfinances-restore')), false);
 });
 
 function completeRestore(root, destination, archive) {
@@ -932,7 +936,7 @@ function isolatedToolPath(root, toolNames) {
   return bin;
 }
 
-test('shell live restore releases lock when writer discovery fails on PATH', (t) => {
+test('standalone live restore refuses before writer discovery or restore lock acquisition', (t) => {
   const root = mkRoot(t, 'darkfinances-restore-lock-writer-fail-');
   const dashboard = path.join(root, 'dashboard');
   const destination = path.join(root, 'destination');
@@ -954,62 +958,38 @@ test('shell live restore releases lock when writer discovery fails on PATH', (t)
         PATH: tarOnlyPath,
       },
     }),
-    /live-quiescent|systemctl unavailable|unknown state/i,
+    /standalone live restore is refused/,
   );
   assert.equal(fs.existsSync(lockPathForLayout(layout)), false);
 });
 
-test('concurrent live restore rejects second invocation while first holds lock', async (t) => {
-  const root = mkRoot(t, 'darkfinances-restore-concurrent-');
+test('writer restart after snapshot is caught at the held swap gate', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-writer-restart-');
   const dashboard = path.join(root, 'dashboard');
   const destination = path.join(root, 'destination');
   writeTerminalSagaDashboard(dashboard);
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
-  const ready = path.join(root, 'child-ready');
-  const release = path.join(root, 'release-child');
-  const baseEnv = restoreDrillContext(root, destination, archive).env;
-  const childEnv = {
-    ...baseEnv,
-    FINANCE_DASHBOARD_DIR: destination,
-    RESTORE_FAULT_SCHEDULE: JSON.stringify([{
-      point: 'after:preflight',
-      createReadyFile: ready,
-      holdUntilFile: release,
-      holdTimeoutMs: 120000,
-    }]),
-  };
-  const child = spawn(process.execPath, [
-    path.join(repoRoot, 'ops/lib/staged-restore-cli.js'),
-    '--confirm',
-    archive,
-  ], { env: childEnv, stdio: 'ignore' });
-  t.after(() => {
-    try { process.kill(child.pid, 'SIGTERM'); } catch { /* ignore */ }
-  });
-  const layout = controlLayoutForDestination(destination);
-  const readyDeadline = Date.now() + 120000;
-  while (!fs.existsSync(ready) && Date.now() < readyDeadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  assert.ok(fs.existsSync(ready), 'first restore should reach preflight hold');
-  assert.ok(fs.existsSync(lockPathForLayout(layout)), 'first restore should hold live lock');
-  const blocked = spawnSync(process.execPath, [
-    path.join(repoRoot, 'ops/lib/staged-restore-cli.js'),
-    '--confirm',
-    archive,
-  ], {
-    encoding: 'utf8',
-    env: {
-      ...baseEnv,
-      FINANCE_DASHBOARD_DIR: destination,
+  const { createMockRunners } = require('./fixtures/coordinated-backup-fixtures');
+  const { quiescedUnits } = require('./fixtures/coordinated-test-helpers');
+  const runners = createMockRunners({ units: quiescedUnits() });
+  assert.throws(() => stagedRestore(root, destination, archive, {
+    dryRun: false,
+    confirm: true,
+    injectFault(point) {
+      if (point === 'after:snapshot-capture') {
+        runners.units.get('actual-sync.timer').active = 'active';
+      }
     },
-  });
-  assert.match(blocked.stderr, /restore already in progress/);
-  fs.writeFileSync(release, 'go\n', { mode: 0o600 });
-  const [exitCode] = await once(child, 'exit');
-  assert.equal(exitCode, 0, blocked.stderr);
+  }, {
+    runners,
+  }), /writer actual-sync\.timer is not live-quiescent/);
+  assert.equal(fs.readFileSync(path.join(destination, 'rules.json'), 'utf8'), '[]\n');
+  const journal = controlJournal(destination);
+  assert.equal(journal.completedSwaps.length, 0);
+  assert.equal(journal.completedDeletes.length, 0);
+  assert.equal(journal.phase, PHASE.ROLLED_BACK);
 });
 
 test('stale dead restore lock is removed and restore proceeds', (t) => {

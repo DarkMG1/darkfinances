@@ -1,6 +1,7 @@
 import { fmtPos, html } from '../format.js';
 import { accounts, goalsData, setGoalsData } from '../state.js';
 import { setHidden } from '../dom.js';
+import { mutateFinance } from '../api.js';
 
 export async function loadGoals() {
   const response = await fetch('/api/goals');
@@ -58,10 +59,8 @@ export async function submitGoal() {
     alert('Enter a name, target > 0, and non-negative allocation.');
     return;
   }
-  await fetch('/api/goals', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, name, target, current, accountId, deadline: deadline || null }),
+  await mutateFinance('/goals', {
+    body: { id, name, target, current, accountId, deadline: deadline || null },
   });
   closeGoalForm();
   await loadGoals();
@@ -70,7 +69,7 @@ export async function submitGoal() {
 export async function deleteGoal() {
   const id = document.getElementById('goalId').value;
   if (!id || !confirm('Delete this goal?')) return;
-  await fetch('/api/goals/' + encodeURIComponent(id), { method: 'DELETE' });
+  await mutateFinance('/goals/' + encodeURIComponent(id), { method: 'DELETE' });
   closeGoalForm();
   await loadGoals();
 }

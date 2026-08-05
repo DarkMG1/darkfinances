@@ -18,7 +18,10 @@ const { pipeline } = require('stream/promises');
 const {
   AccountNotFoundError,
   AppError,
+  ImportedTransactionError,
   KnownPreApplyError,
+  SplitLegDeleteError,
+  SplitParentNotFoundError,
   TransactionNotFoundError,
   classifyError,
 } = require('./lib/errors');
@@ -53,7 +56,7 @@ const {
 } = require('./lib/mutation-route-registry');
 const { parse, schemas } = require('./lib/validation');
 const { createReconnectFreshnessProbeService } = require('./lib/reconnect-freshness-probe');
-const { deriveRequestPrincipal } = require('./lib/request-principal');
+const { deriveRequestPrincipal, requestClaimsDemo } = require('./lib/request-principal');
 const { readReleaseIdentity, verifyDeployedFiles } = require('./lib/release-identity');
 const {
   exportExitCode,
@@ -223,6 +226,14 @@ const publicHostname = (() => {
   try { return new URL(PUBLIC_ORIGIN).hostname; } catch (_) { return ''; }
 })();
 const localOrigin = publicHostname === 'localhost' || publicHostname === '127.0.0.1' || publicHostname === '::1';
+const SESSION_COOKIE_NAME = 'connect.sid';
+const SESSION_COOKIE_ATTRIBUTES = Object.freeze({
+  secure: !localOrigin,
+  httpOnly: true,
+  sameSite: 'lax',
+  path: '/',
+});
+const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 if (!process.env.SESSION_SECRET && !localOrigin) {
   throw new Error('SESSION_SECRET is required for a non-local deployment');
@@ -266,13 +277,7 @@ async function consumePasskeyChallengeForVerify(req, kind) {
       expose: true,
     });
   }
-  if (!tryConsumePasskeyChallenge({ sessionId: req.sessionID, kind, challenge })) {
-    throw new AppError('Challenge expired or already used', {
-      code: 'PASSKEY_CHALLENGE_EXPIRED',
-      status: 400,
-      expose: true,
-    });
-  }
+  const consumed = tryConsumePasskeyChallenge({ sessionId: req.sessionID, kind, challenge });
   delete req.session[field];
   await new Promise((resolve, reject) => {
     req.session.save((err) => (err ? reject(err) : resolve()));
@@ -284,6 +289,13 @@ async function consumePasskeyChallengeForVerify(req, kind) {
       cause,
     });
   });
+  if (!consumed) {
+    throw new AppError('Challenge expired or already used', {
+      code: 'PASSKEY_CHALLENGE_EXPIRED',
+      status: 400,
+      expose: true,
+    });
+  }
   return challenge;
 }
 
@@ -325,10 +337,6 @@ function establishAuthenticatedSession(req, { failureMessage }) {
     });
   });
 }
-function requestClaimsDemo(req) {
-  return req.get('X-Demo-Mode') === '1' || req.query.demo === '1' || req.query.demo === 'true';
-}
-
 function exposeTestServerInstanceId() {
   return process.env.NODE_ENV === 'test' && process.env.TEST_SERVER_INSTANCE_ID
     ? process.env.TEST_SERVER_INSTANCE_ID
@@ -407,19 +415,25 @@ const isReceiptUpload = (req) =>
   req.method === 'POST' && /^\/api(?:\/v1)?\/receipts\/?$/i.test(req.path);
 const defaultJsonMiddleware = boundedJsonMiddleware({ limit: DEFAULT_MAX_JSON_BYTES });
 const receiptJsonMiddleware = boundedJsonMiddleware({ limit: RECEIPT_MAX_JSON_BYTES });
-app.use((req, res, next) => (isReceiptUpload(req) ? receiptJsonMiddleware : defaultJsonMiddleware)(req, res, next));
+const sessionStore = new FileStore({
+  path: SESSION_DIR,
+  ttl: 7 * 24 * 60 * 60,
+  retries: 0,
+  reapInterval: 60 * 60,
+  logFn: (message) => console.error('[session-store]', message),
+});
+if (process.env.NODE_ENV === 'test' && process.env.TEST_INJECT_SESSION_DESTROY_FAILURE === '1') {
+  sessionStore.destroy = (_sessionId, callback) => {
+    queueMicrotask(() => callback(new Error('injected session store destroy failure')));
+  };
+}
 app.use(session({
-  store: new FileStore({
-    path: SESSION_DIR,
-    ttl: 7 * 24 * 60 * 60,
-    retries: 0,
-    reapInterval: 60 * 60,
-    logFn: (message) => console.error('[session-store]', message),
-  }),
+  name: SESSION_COOKIE_NAME,
+  store: sessionStore,
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: !localOrigin, httpOnly: true, maxAge: 7 * 24 * 60 * 60 * 1000, sameSite: 'lax' },
+  cookie: { ...SESSION_COOKIE_ATTRIBUTES, maxAge: SESSION_MAX_AGE_MS },
 }));
 
 app.use((req, res, next) => {
@@ -433,6 +447,21 @@ app.use((req, res, next) => {
 app.use((req, res, next) => requestClaimsDemo(req)
   ? rateLimit('demo', 240, 60_000)(req, res, next)
   : next());
+function mayUseReceiptJsonLimit(req) {
+  const principal = deriveRequestPrincipal(req, {
+    apiToken: process.env.FINANCE_API_TOKEN || '',
+    selftest: SELFTEST,
+  });
+  return principal === 'selftest'
+    || principal === 'token:api'
+    || principal.startsWith('session:');
+}
+app.use((req, res, next) => {
+  const parseJson = isReceiptUpload(req) && mayUseReceiptJsonLimit(req)
+    ? receiptJsonMiddleware
+    : defaultJsonMiddleware;
+  return parseJson(req, res, next);
+});
 
 function requireAuth(req, res, next) {
   if (SELFTEST) return next();
@@ -647,7 +676,11 @@ app.post('/auth/login/finish', loginLimiter, async (req, res) => {
 });
 
 app.post('/auth/logout', (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+  req.session.destroy((error) => {
+    res.clearCookie(SESSION_COOKIE_NAME, SESSION_COOKIE_ATTRIBUTES);
+    if (error) return res.status(500).json({ error: 'Could not log out' });
+    return res.json({ ok: true });
+  });
 });
 
 // All Actual Budget reads/computations live in the shared data module so the web
@@ -658,6 +691,10 @@ const data = require('./dataModule');
 // finances). It never touches Actual; the middleware below short-circuits any
 // request flagged demo (header X-Demo-Mode:1 or ?demo=1) before the resolvers run.
 const demo = require('./demoData');
+const DEMO_RECEIPT_IMAGE = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+);
 function isDemo(req) { return requestClaimsDemo(req); }
 function validateLegacyMutationBoundary(req, res, next) {
   if (!['POST', 'DELETE', 'PATCH'].includes(req.method)) return next();
@@ -679,6 +716,13 @@ function demoMiddleware(v1mode) {
     if (!isDemo(req)) return next();
     if (!v1mode && isVersionedApiPath(req.path)) return next(); // let the v1 router envelope it
     const send = (payload) => res.json(v1mode ? { data: payload } : payload);
+    const sendValidatedList = (schema, label, load) => {
+      try {
+        return send(load(parse(schema, req.query, label)));
+      } catch (error) {
+        return sendApiError(req, res, error);
+      }
+    };
     const p = req.path.replace(/^\/api\/v1\//i, '').replace(/^\/api\//i, '').replace(/^\//, '');
     if (req.method === 'POST' || req.method === 'DELETE') {
       // Public demo writes are intentionally non-persistent. This keeps showcase
@@ -741,10 +785,33 @@ function demoMiddleware(v1mode) {
       res.setHeader('X-Reimbursement-Export-Authoritative', String(payload.totals.authoritative));
       return res.type('application/json').send(stableStringify(payload));
     }
-    if (p === 'events') return send(demo.events());
-    if (p === 'receipts') return send(demo.receipts(req.query.txnId ? String(req.query.txnId) : undefined));
+    if (p === 'events') {
+      return sendValidatedList(schemas.eventsListQuery, 'events list query', (query) => demo.events(query));
+    }
+    if (p === 'receipts') {
+      return sendValidatedList(schemas.receiptsListQuery, 'receipts list query', (query) => demo.receipts(query));
+    }
+    const receiptImage = p.match(/^receipts\/([^/]+)\/image$/i);
+    if (req.method === 'GET' && receiptImage) {
+      let receiptId;
+      try {
+        receiptId = decodeURIComponent(receiptImage[1]);
+      } catch {
+        return sendApiErrorCode(req, res, 'NOT_FOUND');
+      }
+      const exists = demo.receipts().receipts.some((receipt) => receipt.id === receiptId);
+      if (!exists) return sendApiErrorCode(req, res, 'NOT_FOUND');
+      res.type('image/png');
+      res.setHeader('Content-Disposition', 'inline; filename="demo-receipt.png"');
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader('Content-Length', String(DEMO_RECEIPT_IMAGE.length));
+      return res.send(DEMO_RECEIPT_IMAGE);
+    }
     switch (p) {
-      case 'ping': return send({ ok: true, ts: Date.now() });
+      case 'ping': {
+        const testInstanceId = exposeTestServerInstanceId();
+        return send({ ok: true, ts: Date.now(), ...(testInstanceId ? { testInstanceId } : {}) });
+      }
       case 'reconnect-freshness':
         return sendApiError(req, res, new AppError('Reconnect freshness probe is not supported in demo mode', {
           code: 'RECONNECT_FRESHNESS_DEMO_UNSUPPORTED',
@@ -809,7 +876,8 @@ function demoMiddleware(v1mode) {
         return send({ transactions: r.slice(0, 200), total: r.length, truncated: r.length > 200 });
       }
       case 'tags': return send(demo.tags());
-      case 'rules': return send(demo.rules());
+      case 'rules':
+        return sendValidatedList(schemas.rulesListQuery, 'rules list query', (query) => demo.rules(query));
       case 'manual-assets': return send(demo.manualAssets());
       case 'investments': return send(demo.investments());
       case 'reports': return send(demo.reports());
@@ -932,11 +1000,15 @@ async function warmCache() {
 // Session-only gate for the web app + static assets. /api/v1/* runs its own
 // (session-OR-token) auth below so native clients can use a bearer token.
 app.use((req, res, next) => {
+  const legacyDemoApi = /^\/api(?:\/|$)/i.test(req.path)
+    && !isVersionedApiPath(req.path)
+    && isDemo(req);
   if (
     req.path === '/demo'
     || req.path.startsWith('/login')
     || req.path.startsWith('/auth/')
     || isVersionedApiPath(req.path)
+    || legacyDemoApi
     || isPublicBrowserAsset(req.path)
   ) return next();
   requireAuth(req, res, next);
@@ -1071,7 +1143,10 @@ const resolvers = {
     const key = buildQueryCacheFingerprint({ kind: 'tags', start, end, ...queryFingerprintBase() });
     return cachedActual(key, () => data.getTags({ start: start || undefined, end: end || undefined }), 120);
   },
-  rules: () => cachedLocal('rules', () => Promise.resolve({ ...data.getRules(), catalog: data.getCatalogDisplay() }), 120),
+  rules: (req) => {
+    const query = parse(schemas.rulesListQuery, req.query, 'rules list query');
+    return Promise.resolve({ ...data.getRules(query), catalog: data.getCatalogDisplay() });
+  },
   manualAssets: () => cachedActual('manual-assets', () => Promise.resolve(data.getManualAssets()), 120),
   investments: () => cachedLocal('investments', () => Promise.resolve(data.getInvestments()), 120),
   reports: (req) => cachedActual(`reports-${monthOf(req) || 'current'}`, () => data.getReports({ month: monthOf(req) }), 300),
@@ -1232,7 +1307,10 @@ async function addReceiptH(req, operation) {
     return applyLocal(operation, () => data.addReceipt(receipt));
   }, 'today', 'review-current');
 }
-const receiptsH = (req) => Promise.resolve(data.getReceipts({ txnId: req.query.txnId }));
+const receiptsH = (req) => {
+  const query = parse(schemas.receiptsListQuery, req.query, 'receipts list query');
+  return Promise.resolve(data.getReceipts(query));
+};
 async function deleteReceiptH(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'receipt id');
   data.assertReceiptMutationAvailable({ id });
@@ -1278,10 +1356,44 @@ async function sweepReimbH(req, operation) {
   invalidateHttpCache();
   return result;
 }
+function knownDeletePreApplyError(error) {
+  if (error instanceof AccountNotFoundError) {
+    return new KnownPreApplyError('Account not found', {
+      code: 'ACCOUNT_NOT_FOUND',
+      status: 404,
+      cause: error,
+    });
+  }
+  if (error instanceof TransactionNotFoundError) {
+    return new KnownPreApplyError('Transaction not found', {
+      code: 'TRANSACTION_NOT_FOUND',
+      status: 404,
+      cause: error,
+    });
+  }
+  if (
+    error instanceof ImportedTransactionError
+    || error instanceof SplitLegDeleteError
+    || error instanceof SplitParentNotFoundError
+  ) {
+    return new KnownPreApplyError(error.message, {
+      code: error.code,
+      status: error.status,
+      cause: error,
+    });
+  }
+  return null;
+}
 async function deleteTxn(req, operation) {
   const { id } = parse(schemas.idParam, req.params, 'transaction id');
   const { accountId, date } = parse(schemas.deleteTransactionQuery, req.query, 'transaction delete query');
   data.assertTransactionMutationAvailable({ ids: [id] });
+  try {
+    await data.preflightTransactionDeletion({ id, accountId, date });
+  } catch (error) {
+    const knownError = operation && knownDeletePreApplyError(error);
+    throw knownError || error;
+  }
   const result = await applyLocal(operation, () => data.deleteTransaction({ id, accountId, date }));
   await syncAfterLocal(operation); // persist the delete back to the Actual server
   invalidateHttpCache(); // removing a transaction shifts balances/spending/insights
@@ -1316,8 +1428,15 @@ async function syncSharesH(_req, operation) {
     journalBinding: { ...operation.journalBinding, kind: 'splitwise_mirror' },
   }), { kind: 'splitwise_mirror' });
 }
-async function eventsH() {
-  return cachedActual('events', () => data.getEvents(), 60);
+async function eventsH(req) {
+  const query = parse(schemas.eventsListQuery, req.query, 'events list query');
+  const key = buildQueryCacheFingerprint({
+    kind: 'events',
+    limit: query.limit || 50,
+    offset: query.offset || 0,
+    ...queryFingerprintBase(),
+  });
+  return cachedActual(key, () => data.getEvents(query), 60);
 }
 async function saveEventH(req, operation) {
   const event = parse(schemas.event, req.body, 'event');
@@ -2105,6 +2224,8 @@ async function periodicSync() {
 const configuredPort = Number.parseInt(process.env.PORT ?? '', 10);
 const PORT = Number.isInteger(configuredPort) ? configuredPort : 5007;
 const DEMO_ONLY = process.env.DEMO_ONLY === '1';
+const TEST_SKIP_ACTUAL_STARTUP = process.env.NODE_ENV === 'test'
+  && process.env.TEST_SKIP_ACTUAL_STARTUP === '1';
 let periodicSyncTimer;
 const httpServer = app.listen(PORT, '127.0.0.1', () => {
   const boundPort = httpServer.address().port;
@@ -2117,8 +2238,10 @@ const httpServer = app.listen(PORT, '127.0.0.1', () => {
   if (testInstanceId) {
     console.log(`FINANCE_TEST_SERVER_READY ${boundPort} ${testInstanceId}`);
   }
-  if (DEMO_ONLY) {
-    console.log('Demo-only mode enabled; skipping Actual startup sync');
+  if (DEMO_ONLY || TEST_SKIP_ACTUAL_STARTUP) {
+    console.log(DEMO_ONLY
+      ? 'Demo-only mode enabled; skipping Actual startup sync'
+      : 'Test startup sync disabled');
     setInterval(() => {}, 60 * 60 * 1000);
     return;
   }

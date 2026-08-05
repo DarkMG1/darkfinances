@@ -12,7 +12,8 @@ function loadStagedRestore() {
 }
 
 function usage() {
-  console.error('Usage: restore-dashboard-runtime.js [--dry-run|--confirm] <bundle.tgz>');
+  console.error('Usage: restore-dashboard-runtime.js --dry-run <bundle.tgz>');
+  console.error('Live restore must run through restore-coordinated.sh so writer stops remain held through swap.');
   console.error('Environment:');
   console.error('  FINANCE_DASHBOARD_DIR            destination runtime directory');
   console.error('  RESTORE_QUIESCENCE_ADMISSION_PATH path to PR-18 admission token JSON (0600, trusted roots)');

@@ -36,6 +36,11 @@ const {
 } = require('./lib/recurrence');
 const { projectAllocationLedger } = require('./lib/reimbursement-export-ledger');
 const {
+  MAX_LIST_LIMIT,
+  MAX_OCR_LIST_LIMIT,
+  paginateBoundedList,
+} = require('./lib/bounded-list');
+const {
   ACCOUNT_METRIC,
   attachInclusionToAccountRow,
   buildBalanceMetric,
@@ -947,8 +952,23 @@ function review() {
   ].filter(Boolean);
   return { generatedAt: new Date().toISOString(), month: currentMonth(), count: tasks.length, counts: { uncategorized: uncategorized ? 1 : 0, large_charge: large ? 1 : 0, reconciliation: 1 }, tasks };
 }
-function events() { return { events: demoState.events.map((e) => ({ ...e, members: [...e.members] })) }; }
-function rules() { return { rules: demoState.rules.map((r) => ({ ...r })), catalog: [{ label: 'Streaming services', type: 'subscription' }, { label: 'Coffee shops', type: 'merchant' }] }; }
+function events({ limit, offset } = {}) {
+  const page = paginateBoundedList(demoState.events, { limit, offset });
+  return {
+    events: page.items.map((event) => ({ ...event, members: [...event.members] })),
+    truncated: page.truncated,
+    pagination: page.pagination,
+  };
+}
+function rules({ limit, offset } = {}) {
+  const page = paginateBoundedList(demoState.rules, { limit, offset });
+  return {
+    rules: page.items.map((rule) => ({ ...rule })),
+    truncated: page.truncated,
+    pagination: page.pagination,
+    catalog: [{ label: 'Streaming services', type: 'subscription' }, { label: 'Coffee shops', type: 'merchant' }],
+  };
+}
 function merchantHistory({ payee = '', months = 12 } = {}) {
   const m = Math.min(36, Math.max(1, Number(months) || 12));
   const catInfo = demoCategoryInfo();
@@ -989,8 +1009,26 @@ function repaymentSuggestions() {
   return { suggestions, count: suggestions.length, generatedAt: new Date().toISOString(), range: { from: ymd(daysAgo(60)), to: financeAnchor() } };
 }
 
-function receipts(txnId) {
-  return { receipts: demoState.receipts.filter((r) => !txnId || r.txnId === txnId).map((r) => ({ ...r })) };
+function receipts({ txnId, limit, offset, includeOcr = false } = {}) {
+  const matching = demoState.receipts.filter((receipt) => !txnId || receipt.txnId === txnId);
+  const page = paginateBoundedList(
+    matching,
+    { limit, offset },
+    { maxLimit: includeOcr ? MAX_OCR_LIST_LIMIT : MAX_LIST_LIMIT },
+  );
+  return {
+    receipts: page.items.map((receipt) => {
+      const result = { ...receipt };
+      if (!includeOcr) {
+        delete result.ocrText;
+        delete result.ocrLines;
+      }
+      return result;
+    }),
+    truncated: page.truncated,
+    pagination: page.pagination,
+    ocrIncluded: includeOcr,
+  };
 }
 
 function reimbursementExport() {

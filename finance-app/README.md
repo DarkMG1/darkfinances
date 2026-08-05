@@ -1,8 +1,8 @@
 # Finance App
 
 Finance App is the Expo/React Native client for DarkFinances. It presents the authenticated
-`finance-dashboard` API as a native iOS/Android experience with offline-friendly cached reads, biometric
-privacy controls, local notifications, receipt capture, and an optional iOS widget.
+`finance-dashboard` API as a native iOS/Android experience with session-only cached reads, biometric
+privacy controls, local notifications in full builds, receipt capture, and an optional iOS widget.
 
 The app does not connect directly to Actual Budget. All financial reads and writes go through the
 dashboard's versioned `/api/v1` contract.
@@ -225,7 +225,9 @@ The default development demo URL is `http://127.0.0.1:5007`. A build can overrid
 
 - Face ID can lock the UI after a configurable grace period.
 - The iOS privacy shield covers app content immediately when the app leaves the foreground.
-- Financial query caches are scoped to the configured server and cleared on disconnect.
+- Financial query caches are scoped to the configured server, held in memory only, and cleared on
+  disconnect. If connectivity drops, a running session may continue showing data it already loaded
+  with an offline label; there is no durable offline snapshot, and a cold launch requires the server.
 - Pending mutation storage contains digests and lifecycle metadata only, never request bodies, financial
   values, receipt images, credentials, or server URLs.
 - Receipt images are resized and converted on device, then uploaded immediately; they are not retained
@@ -265,8 +267,9 @@ The scheduler handles:
 - Low account balances.
 - New uncategorized transactions.
 
-Notification permissions and native entitlements depend on the build path. The free-sideload build
-removes the push-notification entitlement, but local notification scheduling remains available.
+Notification permissions and native support depend on the build path. The free-sideload build removes
+the notification plugin and reports notifications unavailable, matching the Settings message. Use a
+full release build for local alerts.
 
 ## iOS widget
 

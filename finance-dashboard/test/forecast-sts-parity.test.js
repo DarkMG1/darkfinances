@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { mock } = require('node:test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -34,7 +35,14 @@ const fixtures = require(fixturePath);
 const { getToday, getForecast, resetApi } = require('../dataModule');
 const { SAFE_TO_SPEND_REASON } = require('../lib/safe-to-spend');
 
-test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+test.before(() => {
+  mock.timers.enable({ apis: ['Date'], now: new Date('2026-07-15T17:01:00-07:00') });
+});
+
+test.after(() => {
+  mock.timers.reset();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);

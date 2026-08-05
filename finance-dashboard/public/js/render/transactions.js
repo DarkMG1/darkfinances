@@ -8,6 +8,7 @@ import { loadSpending } from './charts-pages.js';
 import { loadInsights } from './reimbursement.js';
 import { loadBudgets } from './budgets.js';
 import { setHidden } from '../dom.js';
+import { mutateFinance } from '../api.js';
 
 export async function loadTransactions() {
   const { start, end } = monthBounds();
@@ -100,10 +101,8 @@ async function commitCategorize(id, categoryId, sel) {
   if (!categoryId) return;
   sel.disabled = true;
   try {
-    const res = await fetch(`/api/transactions/${encodeURIComponent(id)}/category`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ categoryId, isLeg: false }),
+    const res = await mutateFinance(`/transactions/${encodeURIComponent(id)}/category`, {
+      body: { categoryId, isLeg: false },
     });
     if (!res.ok) throw new Error((await res.json()).error || 'failed');
     await Promise.all([loadTransactions(), loadSpending(), loadInsights(), loadBudgets()]);

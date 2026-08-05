@@ -12,6 +12,15 @@ const API_ERROR_CODES = Object.freeze({
   ADMISSION_UNAVAILABLE: { status: 503, message: 'Service unavailable' },
 });
 
+function redactSensitiveErrorText(value, { maxLength = 4096 } = {}) {
+  return String(value || 'Unknown internal error')
+    .replace(/\bbearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\bauthorization(\s*[:=]\s*)\S+(?:\s+\S+)?/gi, 'Authorization$1[redacted]')
+    .replace(/\b(password|secret|token)(\s*[:=]\s*)\S+/gi, '$1$2[redacted]')
+    .replace(/\/\/[^/@\s]+:[^/@\s]+@/g, '//[redacted]@')
+    .slice(0, maxLength);
+}
+
 function apiErrorBody(error, req) {
   const classified = classifyError(error);
   const body = {
@@ -55,7 +64,10 @@ function sendApiError(req, res, error) {
   if (res.headersSent || res.writableEnded) return res;
   const classified = classifyError(error);
   if (classified.status >= 500) {
-    console.error(`[request:${req.requestId}]`, (error && error.stack) || error);
+    console.error(
+      `[request:${req.requestId}]`,
+      redactSensitiveErrorText((error && error.stack) || error),
+    );
   }
   const payload = apiErrorBody(error, req);
   if (classified.status === 429) {
@@ -90,6 +102,7 @@ module.exports = {
   API_ERROR_CODES,
   apiErrorBody,
   apiErrorMiddleware,
+  redactSensitiveErrorText,
   sendApiError,
   sendApiErrorCode,
 };

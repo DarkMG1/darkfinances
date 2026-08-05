@@ -33,8 +33,8 @@ reverse-proxy settings, and alert delivery before installation.
 - Services run as an unprivileged dedicated user.
 - Actual and Finance Dashboard listen on loopback and are exposed only through a trusted HTTPS reverse
   proxy/private access layer. Set `FINANCE_TRUST_PROXY_HOPS=1` in the dashboard environment so
-  rate limits and forwarded client addresses honor the proxy hop. The trusted proxy must be the sole
-  ingress to Node and must overwrite or append `X-Forwarded-For` with the real client address.
+  rate limits and forwarded client addresses honor the proxy hop, but only after the trusted proxy is
+  the sole ingress to Node and overwrites inbound `X-Forwarded-For` with the validated client address.
 - The repository is deployed as `~/finance-dashboard` and supporting tools as `~/actual-tools`.
 - Service secrets live in `~/.openclaw/finance-dashboard.env` with mode `0600`.
 - User systemd is available and, if needed after logout, lingering is enabled for the service account.
@@ -44,7 +44,8 @@ Adjust the unit files if your layout differs. Do not add secrets directly to uni
 
 ## 1. Deploy Actual Server
 
-The Compose file pins Actual Server to `26.7.0`, matching `finance-dashboard`'s `@actual-app/api`.
+The Compose file pins Actual Server to the `26.7.0` tag and its reviewed multi-platform image digest,
+matching `finance-dashboard`'s `@actual-app/api`.
 
 ```bash
 mkdir -p "$HOME/actual/data"
@@ -56,6 +57,18 @@ docker compose -f "$HOME/actual/compose.yml" ps
 
 The container publishes only `127.0.0.1:5006`. Preserve `$HOME/actual/data` across upgrades and include
 it in your independent Actual backup strategy.
+
+When upgrading, resolve the intended tag directly from the registry and copy the top-level manifest
+digest into the `tag@sha256:...` Compose reference:
+
+```bash
+docker buildx imagetools inspect actualbudget/actual-server:26.7.0
+npm run check:alignment
+npm run check:compose
+```
+
+Review the registry source and digest before committing. The alignment gate requires an exact tag and
+lowercase SHA-256 digest; the Compose gate validates the resulting reference.
 
 Version alignment matters across:
 
@@ -80,6 +93,7 @@ ACTUAL_DATA_DIR=/home/<user>/.cache/actual-dashboard
 FINANCE_API_TOKEN=...
 SESSION_SECRET=...
 PUBLIC_ORIGIN=https://finances.example.com
+# Set only after completing the trust-proxy migration checklist below.
 FINANCE_TRUST_PROXY_HOPS=1
 FINANCE_TIME_ZONE=America/Los_Angeles
 TZ=America/Los_Angeles
@@ -117,13 +131,14 @@ When upgrading to dashboard code with fail-safe trust-proxy defaults (absent
 `FINANCE_TRUST_PROXY_HOPS` defaults to `0`), edit
 `~/.openclaw/finance-dashboard.env` **before** restarting `finance-dashboard.service`:
 
-1. If the dashboard sits behind the normal trusted HTTPS reverse proxy on loopback, add
-   `FINANCE_TRUST_PROXY_HOPS=1`.
-2. Confirm the reverse proxy is the **sole ingress** to `127.0.0.1:5007` and overwrites or appends
-   `X-Forwarded-For` with the real client address. Do not expose Node directly to the internet.
-3. Leave `FINANCE_TRUST_PROXY_HOPS` unset or set it to `0` only when Node is reached without a
+1. Confirm the reverse proxy is the **sole ingress** to `127.0.0.1:5007`. Configure its upstream
+   request to discard any inbound `X-Forwarded-For` value and overwrite it with the validated client
+   address. Do not expose Node directly to the internet.
+2. Confirm there is exactly one trusted proxy hop between the client and Node. Only after step 1 is
+   deployed and verified, add `FINANCE_TRUST_PROXY_HOPS=1`.
+3. Leave `FINANCE_TRUST_PROXY_HOPS` unset or set it to `0` when Node is reached without a
    trusted proxy (direct exposure). This is fail-safe: spoofed `X-Forwarded-For` values are ignored,
-   but all proxied clients may share one rate-limit bucket until step 1 is applied.
+   but all proxied clients may share one rate-limit bucket until steps 1–2 are applied.
 4. Restart the dashboard service after saving the environment file:
 
 ```bash
@@ -133,6 +148,11 @@ journalctl --user -u finance-dashboard.service --since "5 min ago" | rg trust-pr
 
 Look for `[trust-proxy]` in the journal when hops remain at `0` on a non-loopback deployment; that
 warning means per-client rate limits still key on the proxy connection address.
+
+Fail the rollout and restore hops to `0` if Node has a proxy-bypass path, the proxy preserves or
+appends client-supplied forwarding chains, the hop count differs from the topology, a forged
+`X-Forwarded-For` controls Node's observed client address, or separate test clients still collapse to
+the proxy address. Fix and re-verify the proxy before enabling trust.
 
 ## 3. Install the dashboard service
 
@@ -595,7 +615,7 @@ install -m 700 ops/bin/restore-dashboard-runtime.sh \
 
 Preview first (PR-16 archive trust chain, generation-binding validation, preflight space, and
 read-only writer discovery — **not** live all-writer quiescence proof). Default invocation is
-dry-run (`--dry-run`); live swap requires `CONFIRM=1`. `RESTORE_DRY_RUN=1` applies only to
+dry-run (`--dry-run`); this standalone entrypoint is preview-only. `RESTORE_DRY_RUN=1` applies only to
 `restore-coordinated.sh`, not this standalone helper.
 
 ```bash
@@ -605,17 +625,18 @@ RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
 ```
 
 Dry run exits `2` on success. Active writers may appear as warnings only; do not treat a successful
-preview as evidence that production is safe to mutate. Live swap requires PR-18 writer quiescence
-evidence plus `CONFIRM=1`:
+preview as evidence that production is safe to mutate. `CONFIRM=1` is rejected by the standalone
+helper because an admission token alone cannot keep writers stopped through the check-to-swap
+boundary. Run the coordinated helper for a live restore:
 
 ```bash
-RESTORE_QUIESCENCE_ADMISSION_PATH=/path/to/quiescence-admission.json \
-  CONFIRM=1 "$HOME/.local/bin/restore-dashboard-runtime.sh" \
+"$HOME/.local/bin/restore-coordinated.sh" \
   /path/to/dashboard-runtime-backup-bundle-<timestamp>.tgz
 ```
 
 This standalone helper does **not** honor `RESTORE_PRE_QUIESCED` and does not stop/start systemd
-writers itself. Use coordinated restore when you need PR-18 stop/restart orchestration.
+writers itself. Live restore is allowed only inside the coordinated session, which holds its
+exclusive operation gate and re-verifies every writer immediately before each destination mutation.
 
 The helper:
 
@@ -634,19 +655,21 @@ The helper:
   references) against the bound manifest before returning `complete`; destination drift fails closed.
 - Serializes live restores with an atomic `restore.lock` in the control root (`O_EXCL`); concurrent
   invocations fail with `restore already in progress`.
-- Requires a PR-18 quiescence admission token with TTL and bindings to archive SHA-256 and destination path;
-  generation evidence is re-read immediately before the first mutation.
+- Requires the live staged swap to run inside the PR-18 coordinator while its exclusive operation
+  gate is held; the coordinator issues a short-lived admission token bound to the archive and destination.
+  Generation evidence is re-read before snapshot capture, and writer quiescence plus gate ownership
+  are re-verified immediately before each destination mutation.
 - Production restore admission must be supplied via `RESTORE_QUIESCENCE_ADMISSION_PATH` pointing at a
-  mode-`0600` regular file under trusted coordinator roots (owner, symlink, hard-link, and path checks).
+  mode-`0600` regular file under trusted coordinator roots for standalone preview (owner, symlink,
+  hard-link, and path checks). Coordinated live restore writes this trusted token internally.
   Inline JSON/token transport (`RESTORE_QUIESCENCE_ADMISSION_TOKEN`) is rejected for production preview
-  and live swap; live restore (`CONFIRM=1` / `--confirm`, i.e. `dryRun !== true`) always requires the
-  trusted file path even in tests.
+  and live swap.
 - Fsyncs journals (write-temp-then-rename), staged files, and parent directories at mutation boundaries where
   the platform supports it.
-- Refuses restore without a PR-18 quiescence admission token (this script does not stop/start services).
+- Refuses preview without a PR-18 quiescence admission token and refuses standalone live mode.
 - Dry-run uses temporary staging only and must not create the destination tree or persistent control paths.
-- Dry-run writer preview is read-only discovery; live restore re-verifies all inventoried writers
-  immediately before the first destination mutation (`assertAllWritersQuiescentForAdmission`).
+- Dry-run writer preview is read-only discovery and does not prove quiescence. Coordinated live restore
+  re-verifies all inventoried writers at every mutation boundary (`assertAllWritersQuiescentForAdmission`).
 
 Afterward, verify `/api/v1/ping`, browser passkey login, the app, receipts, reimbursements, and
 reconciliation state.

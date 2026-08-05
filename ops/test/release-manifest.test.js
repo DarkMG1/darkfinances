@@ -27,6 +27,8 @@ const { signaturePathFor } = require('../../finance-dashboard/lib/release-signin
 
 const REPOSITORY_ROOT = path.resolve(__dirname, '..', '..');
 const SCRIPT = path.join(REPOSITORY_ROOT, 'scripts', 'release-manifest.js');
+const ACTUAL_SERVER_DIGEST = 'sha256:e18b7fbfec6157a368fad4146563f397502e9da70a120aeaeac63b4977405d1c';
+const ACTUAL_SERVER_IMAGE = `actualbudget/actual-server:26.7.0@${ACTUAL_SERVER_DIGEST}`;
 const CAN_RUN_PUBLISHER_RUNTIME = process.platform === 'darwin'
   && process.arch === 'arm64'
   && fs.existsSync(path.join(REPOSITORY_ROOT, 'ops/publisher-toolchain/node_modules/eas-cli'));
@@ -114,7 +116,7 @@ function createFixtureRepository() {
   write(root, 'ops/actual-compose.yml', [
     'services:',
     '  actual:',
-    '    image: actualbudget/actual-server:26.7.0',
+    `    image: ${ACTUAL_SERVER_IMAGE}`,
     '',
   ].join('\n'));
   write(root, 'finance-dashboard/lib/validation.js', 'module.exports = "validation";\n');
@@ -323,19 +325,19 @@ test('manifest construction fails closed on missing or mismatched Actual version
         write(root, 'ops/actual-compose.yml', [
           'services:',
           '  actual:',
-          '    image: actualbudget/actual-server:latest',
+          '    image: actualbudget/actual-server:26.7.0',
           '',
         ].join('\n'));
       },
-      error: /Actual server image version must be an exact/,
+      error: /exact tag@sha256 digest pin/,
     },
     {
       mutate(root) {
         write(root, 'ops/actual-compose.yml', [
-          '# image: actualbudget/actual-server:26.7.0',
+          `# image: ${ACTUAL_SERVER_IMAGE}`,
           'services:',
           '  actual:',
-          '    image: actualbudget/actual-server:latest',
+          `    image: actualbudget/actual-server:latest@${ACTUAL_SERVER_DIGEST}`,
           '',
         ].join('\n'));
       },
@@ -347,12 +349,12 @@ test('manifest construction fails closed on missing or mismatched Actual version
           'services:',
           '  actual:',
           '    notes: |',
-          '      image: actualbudget/actual-server:26.7.0',
-          '    image: actualbudget/actual-server:latest',
+          `      image: ${ACTUAL_SERVER_IMAGE}`,
+          '    image: actualbudget/actual-server:26.7.0@sha256:abc123',
           '',
         ].join('\n'));
       },
-      error: /Actual server image version must be an exact/,
+      error: /exact tag@sha256 digest pin/,
     },
     {
       mutate(root) {

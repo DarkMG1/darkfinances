@@ -189,6 +189,39 @@ test('browser style policy rejects inline style attributes in HTML and JS templa
   assert.doesNotMatch(loginHtml, /\bstyle\s*=/i);
 });
 
+test('browser goal writes use journaled v1 requests with a fresh UUID per action', async () => {
+  const { elements } = installBrowserGlobals();
+  elements.set('goalsCard', createContainer('div', 'goalsCard'));
+  elements.set('goalModal', createElement('div', 'goalModal'));
+  for (const id of ['goalId', 'goalName', 'goalTarget', 'goalCurrent', 'goalDeadline', 'goalAccount']) {
+    elements.set(id, createElement('input', id));
+  }
+  elements.get('goalName').value = 'Emergency';
+  elements.get('goalTarget').value = '1000';
+  elements.get('goalCurrent').value = '100';
+
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/goals') return { ok: true, json: async () => [] };
+    return { ok: true, json: async () => ({ data: { ok: true } }) };
+  };
+
+  const { submitGoal } = await import(pathToFileURL(path.join(publicRoot, 'js/render/goals.js')).href);
+  await submitGoal();
+  await submitGoal();
+
+  const mutations = calls.filter(({ url }) => url === '/api/v1/goals');
+  assert.equal(mutations.length, 2);
+  const keys = mutations.map(({ options }) => options.headers['Idempotency-Key']);
+  for (const key of keys) {
+    assert.match(key, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  }
+  assert.notEqual(keys[0], keys[1]);
+  assert.equal(mutations[0].options.method, 'POST');
+  assert.equal(mutations[0].options.headers['Content-Type'], 'application/json');
+});
+
 test('browser renderers emit semantic progress, palette classes, and hidden controls', async () => {
   const { elements } = installBrowserGlobals();
   const goalsCard = createContainer('div', 'goalsCard');

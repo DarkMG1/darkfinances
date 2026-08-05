@@ -77,11 +77,15 @@ const money = (cents) => `$${(Number(cents) / 100).toFixed(2)}`;
     }
     const notes = `${String(transaction.notes || '').trim()} #${rule.tag} #${slug}`.trim();
     console.log(`${CONFIRM ? 'TAG' : 'DRY'} ${transaction.date} ${money(transaction.amount)} #${slug}`);
-    if (CONFIRM) await api.updateTransaction(transaction.id, { category: reimbursementId, notes });
+    if (CONFIRM) {
+      await api.updateTransaction(transaction.id, { category: reimbursementId, notes });
+      // Each completed sync is a resume checkpoint: a later failure exits
+      // nonzero, and the next run skips transactions carrying this event tag.
+      await api.sync();
+    }
     received[slug] += transaction.amount;
     tagged++;
   }
-  if (CONFIRM && tagged) await api.sync();
   console.log(`${CONFIRM ? 'APPLIED' : 'DRY-RUN'}: ${tagged} repayment(s); ${review.length} need review`);
   await api.shutdown();
 })().catch(async (error) => {
