@@ -13,7 +13,11 @@ const {
   TransactionNotFoundError,
   classifyError,
 } = require('../lib/errors');
-const { apiErrorBody } = require('../lib/request-envelope');
+const {
+  apiErrorBody,
+  redactSensitiveErrorText,
+  sendApiError,
+} = require('../lib/request-envelope');
 const { RuntimeStateError: RuntimeStoreError } = require('../lib/runtime-state-store');
 
 const req = { requestId: 'req-test-001' };
@@ -122,4 +126,51 @@ test('RuntimeStateError classifies to generic internal message', () => {
   assert.equal(classified.message, GENERIC_INTERNAL_MESSAGE);
   assert.equal(classified.code, 'RUNTIME_STATE_ERROR');
   assert.equal(classified.expose, false);
+});
+
+test('5xx diagnostics redact credentials before logging and stay generic for clients', () => {
+  const sensitive = 'sensitive-value';
+  const error = new Error(
+    `Bearer ${sensitive} Authorization: Basic ${sensitive} `
+    + `password=${sensitive} token=${sensitive} https://user:${sensitive}@example.test/private`,
+  );
+  const response = {
+    headersSent: false,
+    writableEnded: false,
+    statusCode: null,
+    body: null,
+    status(statusCode) {
+      this.statusCode = statusCode;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return this;
+    },
+  };
+  const logged = [];
+  const originalConsoleError = console.error;
+  console.error = (...values) => logged.push(values.join(' '));
+  try {
+    sendApiError(req, response, error);
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(response.statusCode, 500);
+  assert.equal(response.body.error, 'Request failed');
+  assert.equal(response.body.code, GENERIC_INTERNAL_CODE);
+  assert.equal(logged.length, 1);
+  assert.doesNotMatch(logged[0], new RegExp(sensitive));
+  assert.match(logged[0], /Bearer \[redacted\]/);
+  assert.match(logged[0], /Authorization:\s*\[redacted\]/);
+  assert.match(logged[0], /password=\[redacted\]/);
+  assert.match(logged[0], /token=\[redacted\]/);
+  assert.match(logged[0], /https:\/\/\[redacted\]@example\.test/);
+});
+
+test('redacted diagnostics are length bounded', () => {
+  const redacted = redactSensitiveErrorText(`token=sensitive-value ${'x'.repeat(10_000)}`);
+  assert.equal(redacted.length, 4_096);
+  assert.doesNotMatch(redacted, /sensitive-value/);
 });

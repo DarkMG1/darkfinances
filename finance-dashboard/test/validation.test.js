@@ -97,3 +97,41 @@ test('receipt validation permits only bounded raster image types', () => {
   });
   assert.equal(value.mime, 'image/jpeg');
 });
+
+test('bounded list queries coerce supported pagination and OCR values', () => {
+  assert.deepEqual(
+    parse(schemas.receiptsListQuery, {
+      txnId: 'txn-1',
+      limit: '10',
+      offset: '20',
+      includeOcr: 'true',
+    }),
+    { txnId: 'txn-1', limit: 10, offset: 20, includeOcr: true },
+  );
+  assert.deepEqual(
+    parse(schemas.eventsListQuery, { limit: '100', offset: '0' }),
+    { limit: 100, offset: 0 },
+  );
+  assert.deepEqual(
+    parse(schemas.rulesListQuery, { limit: 1, offset: 1_000_000 }),
+    { limit: 1, offset: 1_000_000 },
+  );
+  assert.equal(
+    parse(schemas.receiptsListQuery, { includeOcr: 'false' }).includeOcr,
+    false,
+  );
+});
+
+test('bounded list queries reject oversized, negative, malformed, and unknown values', () => {
+  for (const [schema, value] of [
+    [schemas.receiptsListQuery, { limit: '101' }],
+    [schemas.eventsListQuery, { limit: '0' }],
+    [schemas.rulesListQuery, { offset: '-1' }],
+    [schemas.rulesListQuery, { offset: '1000001' }],
+    [schemas.eventsListQuery, { limit: '1.5' }],
+    [schemas.receiptsListQuery, { includeOcr: 'yes' }],
+    [schemas.eventsListQuery, { unknown: '1' }],
+  ]) {
+    assert.throws(() => parse(schema, value), RequestValidationError);
+  }
+});

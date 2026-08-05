@@ -42,6 +42,7 @@ const DASHBOARD_RUNTIME_FILES = Object.freeze([
   'lib/query-abort-sentinel.js',
   'lib/operation-reconciliation.js',
   'lib/bounded-json.js',
+  'lib/bounded-list.js',
   'lib/browser-static.js',
   'lib/browser-style-policy.js',
   'lib/bounded-ledger-access.js',
