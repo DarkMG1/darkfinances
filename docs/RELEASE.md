@@ -217,13 +217,14 @@ instead.
 - **Coordinated restore preview** (`restore-coordinated.sh --dry-run` or `RESTORE_DRY_RUN=1`): same
   read-only writer boundary checks inside the coordinated session; does not stop services or mutate
   destination bytes. `RESTORE_DRY_RUN` applies only to coordinated restore, not the standalone helper.
-- **Live restore** — standalone: `CONFIRM=1` with a PR-18 quiescence admission token; coordinated:
-  live session without `--dry-run`/`RESTORE_DRY_RUN`. Both paths re-verify **all** inventoried writers
-  with live state checks (`assertAllWritersQuiescentForAdmission`) immediately before the first
-  destination mutation. Stale tokens or post-token writer activity fail closed.
+- **Live restore** — only the coordinated live session (without `--dry-run`/`RESTORE_DRY_RUN`) may
+  swap runtime state. Standalone `CONFIRM=1` is rejected because a token alone cannot hold writer
+  stops across the check-to-swap boundary. The coordinator holds its exclusive operation gate and
+  re-verifies **all** inventoried writers (`assertAllWritersQuiescentForAdmission`) immediately
+  before every destination mutation; post-token writer activity fails closed.
 
-Restore remains `CONFIRM=1` gated. The restore helper does not stop or start services; live swap
-requires writers to already be quiescent or a coordinated restore session that stops them first.
+The standalone restore helper does not stop or start services and remains preview-only. Use
+`restore-coordinated.sh` for live restore, including `RESTORE_PRE_QUIESCED=1` maintenance windows.
 
 ### Restore admission transport migration
 
@@ -242,7 +243,7 @@ Trusted admission file requirements:
 Preview vs live mode is explicit boolean `dryRun` on the restore contract (not `NODE_ENV`):
 
 - **Standalone preview**: default/`--dry-run`; `--dry-run` wins over ambient `CONFIRM=1`
-- **Standalone live**: `--confirm` or `CONFIRM=1` without `--dry-run`
+- **Standalone live**: unsupported; `--confirm` or `CONFIRM=1` fails closed
 - **Coordinated preview**: `restore-coordinated.sh --dry-run` or `RESTORE_DRY_RUN=1` (read-only;
   does not consume admission)
 - **Coordinated live**: neither flag set; admission issued to a trusted path during the session
