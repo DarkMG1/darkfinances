@@ -414,7 +414,6 @@ const isReceiptUpload = (req) =>
   req.method === 'POST' && /^\/api(?:\/v1)?\/receipts\/?$/i.test(req.path);
 const defaultJsonMiddleware = boundedJsonMiddleware({ limit: DEFAULT_MAX_JSON_BYTES });
 const receiptJsonMiddleware = boundedJsonMiddleware({ limit: RECEIPT_MAX_JSON_BYTES });
-app.use((req, res, next) => (isReceiptUpload(req) ? receiptJsonMiddleware : defaultJsonMiddleware)(req, res, next));
 const sessionStore = new FileStore({
   path: SESSION_DIR,
   ttl: 7 * 24 * 60 * 60,
@@ -447,6 +446,21 @@ app.use((req, res, next) => {
 app.use((req, res, next) => requestClaimsDemo(req)
   ? rateLimit('demo', 240, 60_000)(req, res, next)
   : next());
+function mayUseReceiptJsonLimit(req) {
+  const principal = deriveRequestPrincipal(req, {
+    apiToken: process.env.FINANCE_API_TOKEN || '',
+    selftest: SELFTEST,
+  });
+  return principal === 'selftest'
+    || principal === 'token:api'
+    || principal.startsWith('session:');
+}
+app.use((req, res, next) => {
+  const parseJson = isReceiptUpload(req) && mayUseReceiptJsonLimit(req)
+    ? receiptJsonMiddleware
+    : defaultJsonMiddleware;
+  return parseJson(req, res, next);
+});
 
 function requireAuth(req, res, next) {
   if (SELFTEST) return next();
