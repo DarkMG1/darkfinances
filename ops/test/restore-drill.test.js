@@ -468,7 +468,7 @@ test('permission fault during swap surfaces failure', (t) => {
   );
 });
 
-test('relocated install with no repository restores via bundled tooling only', (t) => {
+test('relocated standalone preview uses bundled tooling without repository access', (t) => {
   const root = mkRoot(t, 'darkfinances-restore-relocated-');
   const dashboard = path.join(root, 'dashboard');
   const destination = path.join(root, 'destination');
@@ -476,19 +476,20 @@ test('relocated install with no repository restores via bundled tooling only', (
   const archive = buildBundle(root, dashboard);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
+  const before = destinationSnapshot(destination);
 
   const relocated = spawnSync('bash', [restoreShell, archive], {
     env: {
       ...restoreDrillContext(root, destination, archive).env,
-      CONFIRM: '1',
       FINANCE_DASHBOARD_DIR: destination,
       DARKFINANCES_REPO_ROOT: path.join(root, 'missing-repo'),
       NODE_PATH: '',
     },
     encoding: 'utf8',
   });
-  assert.equal(relocated.status, 0, relocated.stderr || relocated.stdout);
-  assert.equal(fs.existsSync(path.join(destination, 'account-overrides.json')), true);
+  assert.equal(relocated.status, 2, relocated.stderr || relocated.stdout);
+  assert.match(relocated.stderr, /restore dry-run: ok/);
+  assert.deepEqual(destinationSnapshot(destination), before);
 });
 
 test('restore drill shell wrapper dry-run exits 2 without writes', (t) => {

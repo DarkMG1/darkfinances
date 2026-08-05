@@ -448,7 +448,7 @@ test('staged restore CLI rejects CONFIRM=1 with explicit --dry-run', (t) => {
   assert.match(result.stderr, /conflicting restore mode/);
 });
 
-test('restore-dashboard-runtime live CONFIRM=1 rejects inline admission env', (t) => {
+test('restore-dashboard-runtime rejects standalone live mode without exposing inline admission', (t) => {
   const root = mkRoot(t, 'df-admission-shell-inline-');
   const dashboard = path.join(root, 'dashboard');
   const destination = path.join(root, 'destination');
@@ -473,6 +473,6 @@ test('restore-dashboard-runtime live CONFIRM=1 rejects inline admission env', (t
   });
   assert.notEqual(result.status, 0);
   const output = `${result.stderr}\n${result.stdout}`;
-  assert.match(output, /inline quiescence admission transport is not permitted/);
+  assert.match(output, /standalone live restore is refused/);
   assert.equal(output.includes(leakMarker), false);
 });
