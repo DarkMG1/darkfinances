@@ -24,6 +24,9 @@ const OUT_DEFAULT = process.env.VENMO_TRUTH_PATH || path.resolve(__dirname, '..'
 const r2 = (n) => +Number(n).toFixed(2);
 const slugify = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 const firstNameSlug = (full) => slugForName(full) || slugify(String(full || '').trim().split(/\s+/)[0] || full);
+const VALUE_FLAGS = new Set(['me', 'event', 'out']);
+const BOOLEAN_FLAGS = new Set(['dry', 'flip']);
+const UNSAFE_MAP_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function writeJsonAtomic(file, value) {
   const dir = path.dirname(file);
@@ -53,9 +56,34 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
-      if (eq !== -1) flags[a.slice(2, eq)] = a.slice(eq + 1);
-      else { const nx = argv[i + 1]; if (nx && !nx.startsWith('--')) { flags[a.slice(2)] = nx; i++; } else flags[a.slice(2)] = true; }
-    } else pos.push(a);
+      const name = a.slice(2, eq === -1 ? undefined : eq);
+      if (!VALUE_FLAGS.has(name) && !BOOLEAN_FLAGS.has(name)) {
+        throw new Error(`Unknown option --${name || '(empty)'}`);
+      }
+      if (Object.hasOwn(flags, name)) throw new Error(`Option --${name} may only be specified once`);
+      if (BOOLEAN_FLAGS.has(name)) {
+        if (eq !== -1) throw new Error(`Option --${name} does not take a value`);
+        flags[name] = true;
+        continue;
+      }
+      let value;
+      if (eq !== -1) {
+        value = a.slice(eq + 1);
+      } else {
+        const next = argv[i + 1];
+        if (next == null || next.startsWith('-')) throw new Error(`Option --${name} requires a value`);
+        value = next;
+        i++;
+      }
+      if (value === '') throw new Error(`Option --${name} requires a value`);
+      flags[name] = value;
+    } else {
+      if (a.startsWith('-')) throw new Error(`Unknown option ${a}`);
+      pos.push(a);
+    }
+  }
+  if (pos.length !== 1) {
+    throw new Error(pos.length ? 'Exactly one statement CSV is required; extra positional arguments are not allowed' : 'A statement CSV is required');
   }
   return { flags, pos };
 }
@@ -113,6 +141,7 @@ function mergeEvent(existing, eventName, next) {
     .filter((person) => person.owed > 0.005)
     .sort((a, b) => b.owed - a.owed);
   return {
+    ...(existing || {}),
     schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     source: 'venmo-csv',
@@ -130,29 +159,121 @@ function mergeEvent(existing, eventName, next) {
   };
 }
 
-const parseAmount = (s) => {
-  const cleaned = String(s || '').replace(/[^0-9.\-]/g, '');
-  const n = parseFloat(cleaned);
-  return Number.isFinite(n) ? n : 0;
-};
+function parseAmount(value) {
+  const raw = value == null ? '' : String(value).trim();
+  if (!raw) throw new Error('Invalid Venmo amount: value is missing or blank');
+  const match = raw.match(/^([+-])?\s*\$?\s*((?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d{1,2})?|\.\d{1,2})$/);
+  if (!match) throw new Error(`Invalid Venmo amount ${JSON.stringify(raw)}`);
+  const amount = Number(match[2].replaceAll(',', ''));
+  if (!Number.isFinite(amount)) throw new Error(`Invalid Venmo amount ${JSON.stringify(raw)}`);
+  return match[1] === '-' ? -amount : amount;
+}
+
+function validateSidecar(value, label = 'Venmo sidecar', { allowNull = false } = {}) {
+  const invalid = (detail) => {
+    throw new Error(`${label} is invalid: ${detail}`);
+  };
+  const plainObject = (candidate) => (
+    candidate !== null &&
+    typeof candidate === 'object' &&
+    !Array.isArray(candidate) &&
+    (Object.getPrototypeOf(candidate) === Object.prototype || Object.getPrototypeOf(candidate) === null)
+  );
+  const safeMap = (candidate, location) => {
+    if (!plainObject(candidate)) invalid(`${location} must be an object`);
+    for (const key of Object.keys(candidate)) {
+      if (UNSAFE_MAP_KEYS.has(key)) invalid(`${location} contains unsafe key ${key}`);
+    }
+  };
+  const money = (candidate, location, { positive = false } = {}) => {
+    if (!Number.isFinite(candidate) || (positive && candidate <= 0)) {
+      invalid(`${location} must be a ${positive ? 'positive ' : ''}finite number`);
+    }
+    if (Math.abs(candidate * 100 - Math.round(candidate * 100)) > 1e-7) {
+      invalid(`${location} must use whole cents`);
+    }
+  };
+  const optionalString = (owner, key, location, { nonempty = false, timestamp = false } = {}) => {
+    if (!Object.hasOwn(owner, key)) return;
+    const candidate = owner[key];
+    if (typeof candidate !== 'string' || (nonempty && !candidate.trim())) {
+      invalid(`${location} must be ${nonempty ? 'a nonempty string' : 'a string'}`);
+    }
+    if (timestamp && !Number.isFinite(Date.parse(candidate))) invalid(`${location} must be a valid timestamp`);
+  };
+
+  if (value === null && allowNull) return value;
+  if (!plainObject(value)) invalid('root must be an object');
+  for (const key of Object.keys(value)) {
+    if (UNSAFE_MAP_KEYS.has(key)) invalid(`root contains unsafe key ${key}`);
+  }
+  if (value.schemaVersion !== 2) invalid('schemaVersion must be 2');
+  safeMap(value.bySlug, 'bySlug');
+  for (const [slug, entries] of Object.entries(value.bySlug)) {
+    if (!slug.trim() || UNSAFE_MAP_KEYS.has(slug)) invalid(`bySlug contains invalid slug ${JSON.stringify(slug)}`);
+    if (!Array.isArray(entries)) invalid(`bySlug.${slug} must be an array`);
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (!plainObject(entry)) invalid(`bySlug.${slug}[${i}] must be an object`);
+      if (typeof entry.event !== 'string' || !entry.event.trim()) invalid(`bySlug.${slug}[${i}].event must be a nonempty string`);
+      money(entry.amount, `bySlug.${slug}[${i}].amount`, { positive: true });
+    }
+  }
+
+  optionalString(value, 'generatedAt', 'generatedAt', { timestamp: true });
+  optionalString(value, 'source', 'source', { nonempty: true });
+  optionalString(value, 'event', 'event', { nonempty: true });
+
+  if (Object.hasOwn(value, 'people')) {
+    if (!Array.isArray(value.people)) invalid('people must be an array');
+    const seenSlugs = new Set();
+    for (let i = 0; i < value.people.length; i++) {
+      const person = value.people[i];
+      if (!plainObject(person)) invalid(`people[${i}] must be an object`);
+      if (typeof person.slug !== 'string' || !person.slug.trim() || UNSAFE_MAP_KEYS.has(person.slug)) {
+        invalid(`people[${i}].slug must be a safe nonempty string`);
+      }
+      if (seenSlugs.has(person.slug)) invalid(`people contains duplicate slug ${person.slug}`);
+      seenSlugs.add(person.slug);
+      if (typeof person.name !== 'string' || !person.name.trim()) invalid(`people[${i}].name must be a nonempty string`);
+      money(person.owed, `people[${i}].owed`, { positive: true });
+    }
+  }
+
+  if (Object.hasOwn(value, 'imports')) {
+    safeMap(value.imports, 'imports');
+    for (const [event, record] of Object.entries(value.imports)) {
+      if (!event.trim() || UNSAFE_MAP_KEYS.has(event)) invalid(`imports contains invalid event ${JSON.stringify(event)}`);
+      if (!plainObject(record)) invalid(`imports.${event} must be an object`);
+      optionalString(record, 'importedAt', `imports.${event}.importedAt`, { timestamp: true });
+      optionalString(record, 'sourceFile', `imports.${event}.sourceFile`, { nonempty: true });
+      if (Object.hasOwn(record, 'settledNet')) {
+        safeMap(record.settledNet, `imports.${event}.settledNet`);
+        for (const [slug, amount] of Object.entries(record.settledNet)) {
+          if (!slug.trim() || UNSAFE_MAP_KEYS.has(slug)) invalid(`imports.${event}.settledNet contains invalid slug ${JSON.stringify(slug)}`);
+          money(amount, `imports.${event}.settledNet.${slug}`);
+        }
+      }
+    }
+  }
+  return value;
+}
 
 function main() {
   const { flags, pos } = parseArgs(process.argv.slice(2));
   const file = pos[0];
-  const me = (flags.me && flags.me !== true) ? String(flags.me) : '';
-  if (!file || !me) {
-    console.error('Usage: venmo-import.js <statement.csv> --me "Your Full Name" [--event "Name"] [--flip] [--dry] [--out <path>]');
-    process.exit(1);
-  }
+  const me = flags.me ? String(flags.me).trim() : '';
+  if (!me) throw new Error('Option --me requires a nonempty value');
   const text = fs.readFileSync(path.resolve(file), 'utf8');
   const rows = parseCsv(text);
 
   // Find the header row (Venmo prefixes a few account-summary lines first).
   const headerIdx = rows.findIndex((r) => r.some((c) => /datetime/i.test(c)) && r.some((c) => /amount\s*\(total\)/i.test(c)));
-  if (headerIdx === -1) { console.error('Could not find the Venmo column header row (need "Datetime" and "Amount (total)").'); process.exit(1); }
+  if (headerIdx === -1) throw new Error('Could not find the Venmo column header row (need "Datetime" and "Amount (total)").');
   const header = rows[headerIdx].map((h) => h.trim().toLowerCase());
   const col = (re) => header.findIndex((h) => re.test(h));
   const idx = {
+    id: col(/^(?:transaction[\s_-]*)?id$/),
     type: col(/^type$/), status: col(/^status$/), note: col(/^note$/),
     from: col(/^from$/), to: col(/^to$/), amount: col(/amount\s*\(total\)/),
     datetime: col(/datetime/),
@@ -168,23 +289,59 @@ function main() {
   const owed = {};      // slug -> { name, amount }
   const settled = {};   // slug -> net completed (info only)
   let pendingCount = 0;
+  const rowsById = new Map();
+  const idlessRelevantRows = new Set();
 
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i];
+    const rowNumber = i + 1;
     const type = (r[idx.type] || '').trim();
     const status = (r[idx.status] || '').trim();
     const note = (r[idx.note] || '').trim();
     let from = (r[idx.from] || '').trim();
     let to = (r[idx.to] || '').trim();
-    const amount = Math.abs(parseAmount(r[idx.amount]));
-    if (!type || amount === 0) continue;
+    const transactionId = idx.id >= 0 ? (r[idx.id] || '').trim() : '';
+    const rowSignature = JSON.stringify(r);
+    if (transactionId) {
+      if (rowsById.has(transactionId)) {
+        if (rowsById.get(transactionId) === rowSignature) {
+          throw new Error(`Duplicate Venmo transaction ID ${transactionId} on CSV row ${rowNumber}`);
+        }
+        throw new Error(`Conflicting Venmo rows for transaction ID ${transactionId} on CSV row ${rowNumber}`);
+      }
+      rowsById.set(transactionId, rowSignature);
+    }
+    if (!type) continue;
     if (flip) { const t = from; from = to; to = t; }
 
     const isCharge = /charge/i.test(type);
     const isPending = /pending|incomplete/i.test(status);
+    const isComplete = /complete/i.test(status) && !isPending;
+    const pendingCharge = isCharge && isPending && isMe(to) && !isMe(from);
+    const completedOther = isComplete ? (isMe(from) ? to : (isMe(to) ? from : '')) : '';
+    if (!pendingCharge && !completedOther) continue;
+    if (idx.id >= 0 && !transactionId) {
+      throw new Error(`Relevant Venmo row ${rowNumber} is missing a transaction ID`);
+    }
+    const rawAmount = r[idx.amount];
+    let amount;
+    try {
+      amount = Math.abs(parseAmount(rawAmount));
+    } catch (error) {
+      throw new Error(`CSV row ${rowNumber}: ${error.message}`);
+    }
+    if (amount === 0) {
+      throw new Error(`CSV row ${rowNumber}: relevant Venmo amount must be non-zero`);
+    }
+    if (idx.id < 0) {
+      if (idlessRelevantRows.has(rowSignature)) {
+        throw new Error(`Ambiguous duplicate relevant Venmo row ${rowNumber}; export a transaction ID column`);
+      }
+      idlessRelevantRows.add(rowSignature);
+    }
 
     // The durable debt: a pending charge I requested (To == me) => From owes me.
-    if (isCharge && isPending && isMe(to) && !isMe(from)) {
+    if (pendingCharge) {
       const slug = firstNameSlug(from);
       if (!slug) continue;
       owed[slug] = owed[slug] || { name: from, amount: 0 };
@@ -193,13 +350,10 @@ function main() {
       }
       owed[slug].amount = r2(owed[slug].amount + amount);
       pendingCount++;
-    } else if (/complete/i.test(status)) {
+    } else {
       // Completed flow, info-only net per counterparty (from my perspective).
-      const other = isMe(from) ? to : (isMe(to) ? from : '');
-      if (other) {
-        const slug = firstNameSlug(other);
-        settled[slug] = r2((settled[slug] || 0) + (isMe(to) ? amount : -amount));
-      }
+      const slug = firstNameSlug(completedOther);
+      settled[slug] = r2((settled[slug] || 0) + (isMe(to) ? amount : -amount));
     }
   }
 
@@ -228,14 +382,27 @@ function main() {
   if (!people.length) console.log('  (no pending charges found — Venmo debts are only visible while a charge is unpaid)');
 
   if (flags.dry) { console.log('\n--dry: not writing.'); return; }
-  const outPath = (flags.out && flags.out !== true) ? String(flags.out) : OUT_DEFAULT;
+  const outPath = flags.out ? String(flags.out) : OUT_DEFAULT;
   let existing = null;
-  try { existing = JSON.parse(fs.readFileSync(outPath, 'utf8')); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
-  writeJsonAtomic(outPath, mergeEvent(existing, eventName, out));
+  try {
+    existing = JSON.parse(fs.readFileSync(outPath, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw new Error(`Could not load existing Venmo sidecar: ${error.message}`);
+  }
+  validateSidecar(existing, 'Existing Venmo sidecar', { allowNull: true });
+  const nextSidecar = mergeEvent(existing, eventName, out);
+  validateSidecar(nextSidecar, 'Next Venmo sidecar');
+  writeJsonAtomic(outPath, nextSidecar);
   console.log(`\nWrote ${outPath}. Run a dashboard refresh to merge into Who Owes Me.`);
 }
 
-if (require.main === module) main();
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    console.error(`Venmo import failed: ${error.message}`);
+    process.exitCode = 1;
+  }
+}
 
-module.exports = { mergeEvent, parseAmount, parseArgs, parseCsv };
+module.exports = { mergeEvent, parseAmount, parseArgs, parseCsv, validateSidecar };
