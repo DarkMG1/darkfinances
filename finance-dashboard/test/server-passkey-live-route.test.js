@@ -203,7 +203,13 @@ async function waitForSessionFieldAbsent(sessionDir, setCookieHeader, field, tim
   const sessionPath = await waitForPersistedSession(sessionDir, setCookieHeader, timeoutMs);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+    let session;
+    try {
+      session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
     if (session[field] == null) return;
     await pollBackoff();
   }
