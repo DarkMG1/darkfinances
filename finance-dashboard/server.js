@@ -56,7 +56,7 @@ const {
 } = require('./lib/mutation-route-registry');
 const { parse, schemas } = require('./lib/validation');
 const { createReconnectFreshnessProbeService } = require('./lib/reconnect-freshness-probe');
-const { deriveRequestPrincipal } = require('./lib/request-principal');
+const { deriveRequestPrincipal, requestClaimsDemo } = require('./lib/request-principal');
 const { readReleaseIdentity, verifyDeployedFiles } = require('./lib/release-identity');
 const {
   exportExitCode,
@@ -226,6 +226,14 @@ const publicHostname = (() => {
   try { return new URL(PUBLIC_ORIGIN).hostname; } catch (_) { return ''; }
 })();
 const localOrigin = publicHostname === 'localhost' || publicHostname === '127.0.0.1' || publicHostname === '::1';
+const SESSION_COOKIE_NAME = 'connect.sid';
+const SESSION_COOKIE_ATTRIBUTES = Object.freeze({
+  secure: !localOrigin,
+  httpOnly: true,
+  sameSite: 'lax',
+  path: '/',
+});
+const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 if (!process.env.SESSION_SECRET && !localOrigin) {
   throw new Error('SESSION_SECRET is required for a non-local deployment');
@@ -328,10 +336,6 @@ function establishAuthenticatedSession(req, { failureMessage }) {
     });
   });
 }
-function requestClaimsDemo(req) {
-  return req.get('X-Demo-Mode') === '1' || req.query.demo === '1' || req.query.demo === 'true';
-}
-
 function exposeTestServerInstanceId() {
   return process.env.NODE_ENV === 'test' && process.env.TEST_SERVER_INSTANCE_ID
     ? process.env.TEST_SERVER_INSTANCE_ID
@@ -411,18 +415,25 @@ const isReceiptUpload = (req) =>
 const defaultJsonMiddleware = boundedJsonMiddleware({ limit: DEFAULT_MAX_JSON_BYTES });
 const receiptJsonMiddleware = boundedJsonMiddleware({ limit: RECEIPT_MAX_JSON_BYTES });
 app.use((req, res, next) => (isReceiptUpload(req) ? receiptJsonMiddleware : defaultJsonMiddleware)(req, res, next));
+const sessionStore = new FileStore({
+  path: SESSION_DIR,
+  ttl: 7 * 24 * 60 * 60,
+  retries: 0,
+  reapInterval: 60 * 60,
+  logFn: (message) => console.error('[session-store]', message),
+});
+if (process.env.NODE_ENV === 'test' && process.env.TEST_INJECT_SESSION_DESTROY_FAILURE === '1') {
+  sessionStore.destroy = (_sessionId, callback) => {
+    queueMicrotask(() => callback(new Error('injected session store destroy failure')));
+  };
+}
 app.use(session({
-  store: new FileStore({
-    path: SESSION_DIR,
-    ttl: 7 * 24 * 60 * 60,
-    retries: 0,
-    reapInterval: 60 * 60,
-    logFn: (message) => console.error('[session-store]', message),
-  }),
+  name: SESSION_COOKIE_NAME,
+  store: sessionStore,
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: !localOrigin, httpOnly: true, maxAge: 7 * 24 * 60 * 60 * 1000, sameSite: 'lax' },
+  cookie: { ...SESSION_COOKIE_ATTRIBUTES, maxAge: SESSION_MAX_AGE_MS },
 }));
 
 app.use((req, res, next) => {
@@ -650,7 +661,11 @@ app.post('/auth/login/finish', loginLimiter, async (req, res) => {
 });
 
 app.post('/auth/logout', (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+  req.session.destroy((error) => {
+    res.clearCookie(SESSION_COOKIE_NAME, SESSION_COOKIE_ATTRIBUTES);
+    if (error) return res.status(500).json({ error: 'Could not log out' });
+    return res.json({ ok: true });
+  });
 });
 
 // All Actual Budget reads/computations live in the shared data module so the web
@@ -661,6 +676,10 @@ const data = require('./dataModule');
 // finances). It never touches Actual; the middleware below short-circuits any
 // request flagged demo (header X-Demo-Mode:1 or ?demo=1) before the resolvers run.
 const demo = require('./demoData');
+const DEMO_RECEIPT_IMAGE = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+);
 function isDemo(req) { return requestClaimsDemo(req); }
 function validateLegacyMutationBoundary(req, res, next) {
   if (!['POST', 'DELETE', 'PATCH'].includes(req.method)) return next();
@@ -746,8 +765,27 @@ function demoMiddleware(v1mode) {
     }
     if (p === 'events') return send(demo.events());
     if (p === 'receipts') return send(demo.receipts(req.query.txnId ? String(req.query.txnId) : undefined));
+    const receiptImage = p.match(/^receipts\/([^/]+)\/image$/i);
+    if (req.method === 'GET' && receiptImage) {
+      let receiptId;
+      try {
+        receiptId = decodeURIComponent(receiptImage[1]);
+      } catch {
+        return sendApiErrorCode(req, res, 'NOT_FOUND');
+      }
+      const exists = demo.receipts().receipts.some((receipt) => receipt.id === receiptId);
+      if (!exists) return sendApiErrorCode(req, res, 'NOT_FOUND');
+      res.type('image/png');
+      res.setHeader('Content-Disposition', 'inline; filename="demo-receipt.png"');
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader('Content-Length', String(DEMO_RECEIPT_IMAGE.length));
+      return res.send(DEMO_RECEIPT_IMAGE);
+    }
     switch (p) {
-      case 'ping': return send({ ok: true, ts: Date.now() });
+      case 'ping': {
+        const testInstanceId = exposeTestServerInstanceId();
+        return send({ ok: true, ts: Date.now(), ...(testInstanceId ? { testInstanceId } : {}) });
+      }
       case 'reconnect-freshness':
         return sendApiError(req, res, new AppError('Reconnect freshness probe is not supported in demo mode', {
           code: 'RECONNECT_FRESHNESS_DEMO_UNSUPPORTED',
@@ -935,11 +973,15 @@ async function warmCache() {
 // Session-only gate for the web app + static assets. /api/v1/* runs its own
 // (session-OR-token) auth below so native clients can use a bearer token.
 app.use((req, res, next) => {
+  const legacyDemoApi = /^\/api(?:\/|$)/i.test(req.path)
+    && !isVersionedApiPath(req.path)
+    && isDemo(req);
   if (
     req.path === '/demo'
     || req.path.startsWith('/login')
     || req.path.startsWith('/auth/')
     || isVersionedApiPath(req.path)
+    || legacyDemoApi
     || isPublicBrowserAsset(req.path)
   ) return next();
   requireAuth(req, res, next);
@@ -2142,6 +2184,8 @@ async function periodicSync() {
 const configuredPort = Number.parseInt(process.env.PORT ?? '', 10);
 const PORT = Number.isInteger(configuredPort) ? configuredPort : 5007;
 const DEMO_ONLY = process.env.DEMO_ONLY === '1';
+const TEST_SKIP_ACTUAL_STARTUP = process.env.NODE_ENV === 'test'
+  && process.env.TEST_SKIP_ACTUAL_STARTUP === '1';
 let periodicSyncTimer;
 const httpServer = app.listen(PORT, '127.0.0.1', () => {
   const boundPort = httpServer.address().port;
@@ -2154,8 +2198,10 @@ const httpServer = app.listen(PORT, '127.0.0.1', () => {
   if (testInstanceId) {
     console.log(`FINANCE_TEST_SERVER_READY ${boundPort} ${testInstanceId}`);
   }
-  if (DEMO_ONLY) {
-    console.log('Demo-only mode enabled; skipping Actual startup sync');
+  if (DEMO_ONLY || TEST_SKIP_ACTUAL_STARTUP) {
+    console.log(DEMO_ONLY
+      ? 'Demo-only mode enabled; skipping Actual startup sync'
+      : 'Test startup sync disabled');
     setInterval(() => {}, 60 * 60 * 1000);
     return;
   }
