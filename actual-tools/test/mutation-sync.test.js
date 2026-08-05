@@ -77,6 +77,7 @@ module.exports = {
 }
 
 function readCalls(callsPath) {
+  if (!fs.existsSync(callsPath)) return [];
   const text = fs.readFileSync(callsPath, 'utf8').trim();
   return text ? text.split('\n').map((line) => JSON.parse(line)) : [];
 }
