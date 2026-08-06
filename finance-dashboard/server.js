@@ -358,8 +358,16 @@ function enrollmentAuthorized(req, creds) {
 }
 
 const rateBuckets = new Map();
+const APPLIED_RATE_LIMITS = Symbol('applied-rate-limits');
 function rateLimit(name, max, windowMs) {
   return (req, res, next) => {
+    let applied = req[APPLIED_RATE_LIMITS];
+    if (!applied) {
+      applied = new Set();
+      Object.defineProperty(req, APPLIED_RATE_LIMITS, { value: applied });
+    }
+    if (applied.has(name)) return next();
+    applied.add(name);
     const now = Date.now();
     const key = `${name}:${rateLimitClientKey(req, trustProxyConfig.hops)}`;
     let bucket = rateBuckets.get(key);
@@ -539,7 +547,7 @@ app.get('/auth/status', (req, res) => {
 
 // First enrollment requires a short-lived out-of-band code. Once one credential
 // exists, further enrollment requires an already-authenticated browser session.
-app.post('/auth/enroll/authorize', (req, res) => {
+app.post('/auth/enroll/authorize', enrollmentLimiter, (req, res) => {
   try {
     const creds = loadCreds();
     if (creds.length > 0) return res.status(409).json({ error: 'A passkey is already registered' });
@@ -556,7 +564,7 @@ app.post('/auth/enroll/authorize', (req, res) => {
   }
 });
 
-app.post('/auth/register/start', async (req, res) => {
+app.post('/auth/register/start', enrollmentLimiter, async (req, res) => {
   try {
     const creds = loadCreds();
     if (!enrollmentAuthorized(req, creds)) return res.status(403).json({ error: 'Registration closed' });
@@ -577,7 +585,7 @@ app.post('/auth/register/start', async (req, res) => {
   }
 });
 
-app.post('/auth/register/finish', async (req, res) => {
+app.post('/auth/register/finish', enrollmentLimiter, async (req, res) => {
   let expectedChallenge;
   try {
     expectedChallenge = await consumePasskeyChallengeForVerify(req, 'register');
@@ -644,7 +652,7 @@ app.post('/auth/register/finish', async (req, res) => {
 });
 
 // Authentication
-app.post('/auth/login/start', async (req, res) => {
+app.post('/auth/login/start', loginLimiter, async (req, res) => {
   try {
     const creds = loadCreds();
     if (!creds.length) return res.status(409).json({ error: 'No passkey is registered' });
@@ -660,7 +668,7 @@ app.post('/auth/login/start', async (req, res) => {
   }
 });
 
-app.post('/auth/login/finish', async (req, res) => {
+app.post('/auth/login/finish', loginLimiter, async (req, res) => {
   let expectedChallenge;
   try {
     expectedChallenge = await consumePasskeyChallengeForVerify(req, 'login');
