@@ -82,14 +82,6 @@ function updateHashFromFile(file, hash, dependencies = {}) {
   const closeSync = dependencies.closeSync || fs.closeSync;
   const constants = dependencies.constants || fs.constants;
   const resolved = path.resolve(file);
-  let before;
-  try {
-    before = lstatSync(resolved);
-  } catch (error) {
-    if (error.code === 'ENOENT') throw new Error(`hash target not found: ${resolved}`);
-    throw error;
-  }
-  assertHashableRegularFile(before, resolved);
 
   let descriptor;
   try {
@@ -99,12 +91,11 @@ function updateHashFromFile(file, hash, dependencies = {}) {
       if (error.code === 'ELOOP') {
         throw new Error(`refusing to follow symbolic link while hashing: ${resolved}`);
       }
+      if (error.code === 'ENOENT') throw new Error(`hash target not found: ${resolved}`);
       throw error;
     }
     const opened = fstatSync(descriptor);
     assertHashableRegularFile(opened, resolved);
-    assertHashIdentityStable(before, opened, `hash target changed before it could be read: ${resolved}`);
-    assertHashMetadataStable(before, opened, `hash target metadata changed before it could be read: ${resolved}`);
 
     const buffer = Buffer.allocUnsafe(FILE_HASH_CHUNK_BYTES);
     let position = 0;

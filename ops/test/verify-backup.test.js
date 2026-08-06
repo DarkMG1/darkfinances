@@ -458,13 +458,11 @@ test('sha256File rejects descriptor size, metadata, and path races', (t) => {
     /metadata changed while it was being read/,
   );
 
-  let lstatCalls = 0;
   assert.throws(
     () => sha256File(target, {
       lstatSync(file) {
         const stat = fs.lstatSync(file);
-        lstatCalls += 1;
-        return lstatCalls === 2 ? Object.assign(stat, { ino: stat.ino + 1 }) : stat;
+        return Object.assign(stat, { ino: stat.ino + 1 });
       },
     }),
     /path changed while it was being read/,
