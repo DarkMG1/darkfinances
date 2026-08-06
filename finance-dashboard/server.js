@@ -8,6 +8,7 @@ const { resolveSigningPaths, verifySignedManifestFile, requireKeyringPath } = re
 assertProductionRuntimeSafe();
 
 const express = require('express');
+const { rateLimit: createExpressRateLimit } = require('express-rate-limit');
 const NodeCache = require('node-cache');
 const path = require('path');
 const session = require('express-session');
@@ -397,7 +398,6 @@ function rateLimit(name, max, windowMs) {
 
 const loginLimiter = rateLimit('passkey-login', 30, 10 * 60_000);
 const enrollmentLimiter = rateLimit('passkey-enrollment', 10, 10 * 60_000);
-const apiAuthorizationLimiter = rateLimit('api-authorization', 600, 60_000);
 const API_TOKEN = process.env.FINANCE_API_TOKEN || '';
 function tokenOk(presented) {
   if (!API_TOKEN || !presented) return false;
@@ -485,35 +485,57 @@ app.use((req, res, next) => {
   return next();
 });
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-app.use((req, res, next) => { // lgtm[js/missing-rate-limiting] custom limiter is applied before authorization below
-  if (!BODY_METHODS.has(req.method) || !/^\/api(?:\/|$)/i.test(req.path) || isDemo(req)) {
-    return next();
-  }
-  return apiAuthorizationLimiter(req, res, () => {
+const apiAuthorizationLimiter = createExpressRateLimit({
+  windowMs: 60_000,
+  limit: 600,
+  standardHeaders: false,
+  legacyHeaders: false,
+  skip: (req) => !BODY_METHODS.has(req.method)
+    || !/^\/api(?:\/|$)/i.test(req.path)
+    || isDemo(req),
+  handler: (req, res, _next, options) => {
+    const resetAt = req.rateLimit?.resetTime?.getTime();
+    const remainingMs = Number.isFinite(resetAt) ? resetAt - Date.now() : options.windowMs;
+    const retryAfterSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+    const error = new AppError('Too many requests', {
+      code: 'RATE_LIMITED',
+      status: 429,
+      expose: true,
+    });
+    error.retryAfterSeconds = retryAfterSeconds;
+    return sendApiError(req, res, error);
+  },
+});
+app.use(
+  apiAuthorizationLimiter,
+  (req, res, next) => {
+    if (!BODY_METHODS.has(req.method) || !/^\/api(?:\/|$)/i.test(req.path) || isDemo(req)) {
+      return next();
+    }
     if (isVersionedApiRequest(req)) return v1Auth(req, res, next);
     return requireAuth(req, res, next);
-  });
-});
-app.use(async (req, res, next) => { // lgtm[js/missing-rate-limiting] prepareMutationBodyAdmission enforces bounded admission
-  if (
-    !BODY_METHODS.has(req.method)
-    || !/^\/api(?:\/|$)/i.test(req.path)
-    || isDemo(req)
-    || !findMutationContract(req)
-  ) {
-    return next();
-  }
-  try {
-    await prepareMutationBodyAdmission(req, res, operationJournal, {
-      isDemo,
-      isVersioned: isVersionedApiRequest(req),
-      admission: requestAdmission,
-    });
-    return next();
-  } catch (error) {
-    return next(error);
-  }
-});
+  },
+  async (req, res, next) => {
+    if (
+      !BODY_METHODS.has(req.method)
+      || !/^\/api(?:\/|$)/i.test(req.path)
+      || isDemo(req)
+      || !findMutationContract(req)
+    ) {
+      return next();
+    }
+    try {
+      await prepareMutationBodyAdmission(req, res, operationJournal, {
+        isDemo,
+        isVersioned: isVersionedApiRequest(req),
+        admission: requestAdmission,
+      });
+      return next();
+    } catch (error) {
+      return next(error);
+    }
+  },
+);
 function mayUseReceiptJsonLimit(req) {
   const principal = deriveRequestPrincipal(req, {
     apiToken: process.env.FINANCE_API_TOKEN || '',
