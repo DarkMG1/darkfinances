@@ -13,7 +13,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///review
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open
@@ -33,7 +33,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///reconcile
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open
@@ -53,7 +53,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///reimbursement
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open

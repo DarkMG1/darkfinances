@@ -13,7 +13,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open
@@ -37,7 +37,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open
@@ -59,7 +59,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open
@@ -72,7 +72,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///split/tx-60?accountId=acc-credit&date=2026-06-29
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open

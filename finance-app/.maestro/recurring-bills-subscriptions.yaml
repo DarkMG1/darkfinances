@@ -13,7 +13,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///bills
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open
@@ -27,7 +27,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///subscriptions
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open

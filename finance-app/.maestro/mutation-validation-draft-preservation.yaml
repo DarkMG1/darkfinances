@@ -13,7 +13,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///goals
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open

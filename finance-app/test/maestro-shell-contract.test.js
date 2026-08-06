@@ -89,3 +89,30 @@ test('all Maestro flows use strict demo bootstrap before deep links', () => {
     assert.doesNotMatch(source, /id: onboarding-demo-button\s*\n\s*optional: true/, `${name} must require demo bootstrap`);
   }
 });
+
+test('Maestro deep-link prompt guards tolerate iOS quote typography and require Open taps', () => {
+  const maestroDir = path.join(root, '.maestro');
+  const flows = fs.readdirSync(maestroDir).filter((name) => name.endsWith('.yaml'));
+  const promptSelector = 'Open in ["“]Finances["”].*';
+  const tolerantGuard = `visible: '${promptSelector}'`;
+  const literalGuard = `visible: 'Open in "Finances"'`;
+  const requiredHandler = /- runFlow:\n    when:\n      visible: 'Open in \["“\]Finances\["”\]\.\*'\n    commands:\n      - tapOn:\n          text: Open(?!\n          optional: true)/g;
+  let deepLinkCount = 0;
+
+  assert.match('Open in "Finances"?', new RegExp(`^${promptSelector}$`));
+  assert.match('Open in “Finances”?', new RegExp(`^${promptSelector}$`));
+
+  for (const name of flows) {
+    const source = fs.readFileSync(path.join(maestroDir, name), 'utf8');
+    const openLinks = [...source.matchAll(/^- openLink:/gm)].length;
+    const tolerantGuards = source.split(tolerantGuard).length - 1;
+    const requiredHandlers = [...source.matchAll(requiredHandler)].length;
+
+    assert.ok(!source.includes(literalGuard), `${name} must not use the fragile literal prompt guard`);
+    assert.equal(tolerantGuards, openLinks, `${name} must guard every deep link with the typography-tolerant prompt selector`);
+    assert.equal(requiredHandlers, openLinks, `${name} must retain a required Open tap for every prompt guard`);
+    deepLinkCount += openLinks;
+  }
+
+  assert.ok(deepLinkCount > 0, 'expected Maestro deep-link coverage');
+});

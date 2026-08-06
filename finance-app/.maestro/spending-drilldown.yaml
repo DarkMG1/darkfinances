@@ -109,7 +109,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///category/Spending?bucket=spending&start=2026-06-01&end=2026-06-30&label=Jun%202026
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open
@@ -120,7 +120,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///category/Spending?bucket=spending&start=2026-05-01&end=2026-05-31&label=May%202026
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open
@@ -131,7 +131,7 @@ appId: ${MAESTRO_APP_ID}
     link: darkfinances:///spending
 - runFlow:
     when:
-      visible: 'Open in "Finances"'
+      visible: 'Open in ["“]Finances["”].*'
     commands:
       - tapOn:
           text: Open
