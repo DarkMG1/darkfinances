@@ -247,6 +247,50 @@ test('iOS workflows use dynamic simulator, locked expo, metro, DEVICE on Maestro
   assert.match(readWorkflow('ios-pr-smoke.yml'), /push:[\s\S]*branches:[\s\S]*- main/);
 });
 
+test('iOS Maestro workflows pre-approve the app custom scheme and fail closed on verification', () => {
+  const approvalPlist =
+    'approval_plist="$HOME/Library/Developer/CoreSimulator/Devices/$DEVICE/data/Library/Preferences/com.apple.launchservices.schemeapproval.plist"';
+  const approvalKey = 'com.apple.CoreSimulator.CoreSimulatorBridge-->darkfinances';
+
+  for (const [name, testJobName] of [
+    ['ios-pr-smoke.yml', 'ios-simulator-maestro'],
+    ['maestro-full-suite.yml', 'maestro-ios'],
+  ]) {
+    const testJob = readWorkflowJob(name, testJobName);
+    const bundleIdIndex = testJob.indexOf("bundle_id=\"$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier'");
+    const installIndex = testJob.indexOf('xcrun simctl install "$DEVICE" "$app_path"');
+    const approvalIndex = testJob.indexOf('xcrun simctl spawn "$DEVICE" defaults write');
+    const approvalFileIndex = testJob.indexOf('test -f "$approval_plist"');
+    const verificationIndex = testJob.indexOf('approved_bundle_id=');
+    const maestroIndex = testJob.indexOf('bash scripts/run-maestro-ios.sh');
+
+    assert.ok(testJob.includes(approvalPlist), `${name} must use the selected device's approval plist`);
+    assert.ok(
+      testJob.includes(`approval_key='${approvalKey}'`),
+      `${name} must approve the darkfinances scheme for CoreSimulatorBridge`,
+    );
+    assert.match(
+      testJob,
+      /xcrun simctl spawn "\$DEVICE" defaults write \\\n\s+com\.apple\.launchservices\.schemeapproval \\\n\s+"\$approval_key" -string "\$bundle_id"/,
+    );
+    assert.ok(
+      testJob.includes(
+        'approved_bundle_id="$(/usr/libexec/PlistBuddy -c "Print :$approval_key" "$approval_plist")"',
+      ),
+      `${name} must read the stored approval from the selected device`,
+    );
+    assert.match(
+      testJob,
+      /if \[\[ "\$approved_bundle_id" != "\$bundle_id" \]\]; then\n\s+printf 'custom scheme approval verification failed\\n' >&2\n\s+exit 1\n\s+fi/,
+    );
+    assert.ok(bundleIdIndex >= 0 && bundleIdIndex < installIndex);
+    assert.ok(installIndex < approvalIndex);
+    assert.ok(approvalIndex < approvalFileIndex);
+    assert.ok(approvalFileIndex < verificationIndex);
+    assert.ok(verificationIndex < maestroIndex);
+  }
+});
+
 test('iOS build jobs verify CocoaPods while Maestro jobs boot only after their own preflight', () => {
   for (const [name, buildJobName, testJobName] of [
     ['ios-pr-smoke.yml', 'ios-simulator-build', 'ios-simulator-maestro'],

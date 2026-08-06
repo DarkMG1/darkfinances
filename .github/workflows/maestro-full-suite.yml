@@ -326,6 +326,17 @@ jobs:
           bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Info.plist")"
           xcrun simctl bootstatus "$DEVICE" -b
           xcrun simctl install "$DEVICE" "$app_path"
+          approval_plist="$HOME/Library/Developer/CoreSimulator/Devices/$DEVICE/data/Library/Preferences/com.apple.launchservices.schemeapproval.plist"
+          approval_key='com.apple.CoreSimulator.CoreSimulatorBridge-->darkfinances'
+          xcrun simctl spawn "$DEVICE" defaults write \
+            com.apple.launchservices.schemeapproval \
+            "$approval_key" -string "$bundle_id"
+          test -f "$approval_plist"
+          approved_bundle_id="$(/usr/libexec/PlistBuddy -c "Print :$approval_key" "$approval_plist")"
+          if [[ "$approved_bundle_id" != "$bundle_id" ]]; then
+            printf 'custom scheme approval verification failed\n' >&2
+            exit 1
+          fi
           xcrun simctl launch "$DEVICE" "$bundle_id"
           for attempt in $(seq 1 90); do
             if grep -q 'iOS Bundled' build/ci-metro.log; then
