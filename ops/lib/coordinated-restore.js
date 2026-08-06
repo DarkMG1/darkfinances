@@ -25,6 +25,10 @@ const {
   previewQuiescenceForRestore,
   restartWritersByPhase,
   auditDeploymentDiscovery,
+  actualGenerationVersion,
+  ACTUAL_GENERATION_LEGACY_VERSION,
+  assertActualGenerationStable,
+  computeActualDataGeneration,
 } = require('./writer-quiescence');
 const {
   captureDashboardReleaseIdentity,
@@ -105,6 +109,29 @@ async function runCoordinatedRestore(options = {}) {
   let outstandingAdmission = null;
   let admissionConsumed = false;
   const preQuiesced = options.preQuiesced === true || preQuiescedRestoreMode(env);
+  let stagedRestoreAttempted = false;
+  let restoreRestartSafety = {
+    restartAllowed: true,
+    mutationStatus: 'not_started',
+    stagedPhase: null,
+    stagedJournalPath: null,
+    reason: 'staged restore has not started',
+  };
+
+  const recordRestoreRestartSafety = (safety) => {
+    if (!safety || typeof safety.restartAllowed !== 'boolean') return;
+    restoreRestartSafety = {
+      restartAllowed: safety.restartAllowed,
+      mutationStatus: safety.mutationStatus || 'unknown',
+      stagedPhase: safety.stagedPhase || null,
+      stagedJournalPath: safety.stagedJournalPath || null,
+      reason: safety.reason || 'staged restore safety state unavailable',
+    };
+    if (journal && !dryRun) {
+      journal.restoreSafety = restoreRestartSafety;
+      writeRunJournal(layout.journalPath, journal);
+    }
+  };
 
   const revokeOutstandingAdmission = (reasonCode) => {
     if (admissionConsumed || !outstandingAdmission) return;
@@ -246,6 +273,14 @@ async function runCoordinatedRestore(options = {}) {
 
     let stagedRestoreResult = journal.restoreResult || null;
     if (stagedRestoreNeeded) {
+      stagedRestoreAttempted = true;
+      restoreRestartSafety = {
+        restartAllowed: false,
+        mutationStatus: 'unknown',
+        stagedPhase: null,
+        stagedJournalPath: null,
+        reason: 'staged restore did not report whether destination mutation occurred',
+      };
       stagedRestoreResult = (options.runStagedRestore || runStagedRestore)({
         archivePath,
         destinationRoot: dashboardDir,
@@ -277,8 +312,19 @@ async function runCoordinatedRestore(options = {}) {
             admissionConsumed = true;
             outstandingAdmission = null;
           },
+          onRestoreSafety: recordRestoreRestartSafety,
         },
       });
+
+      if (!restoreRestartSafety.restartAllowed && stagedRestoreResult?.phase === 'complete') {
+        recordRestoreRestartSafety({
+          restartAllowed: true,
+          mutationStatus: 'replacement_verified',
+          stagedPhase: 'complete',
+          stagedJournalPath: restoreRestartSafety.stagedJournalPath,
+          reason: 'staged restore completed and verified the replacement generation',
+        });
+      }
 
       journal.phase = PHASE.RESTORE_STAGED;
       journal.restoreResult = stagedRestoreResult;
@@ -296,60 +342,111 @@ async function runCoordinatedRestore(options = {}) {
     };
   } catch (error) {
     primaryError = error;
+    if (error.restoreRestartSafety) {
+      recordRestoreRestartSafety(error.restoreRestartSafety);
+    }
     revokeOutstandingAdmission('restore_failed');
     if (journal && !dryRun) {
       appendJournalError(journal, error.message);
-      journal.phase = interrupted ? PHASE.RECOVERY_REQUIRED : PHASE.FAILED;
+      const unsafeMutation = stagedRestoreAttempted && !restoreRestartSafety.restartAllowed;
+      journal.phase = interrupted || unsafeMutation ? PHASE.RECOVERY_REQUIRED : PHASE.FAILED;
       writeRunJournal(layout.journalPath, journal);
     }
   } finally {
     if (!dryRun && context && snapshotsById.size > 0) {
       revokeOutstandingAdmission('restart_without_consume');
-      const restartResults = await restartAll(context, snapshotsById);
-      if (journal) {
-        journal.restartResults = restartResults;
-        const restartFailures = restartResults.filter((entry) => entry.ok === false);
-        if (restartFailures.length > 0) {
-          const failed = restartFailures.map((entry) => entry.id).join(', ');
-          appendJournalError(journal, `restart failures: ${failed}`);
-          if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
-            journal.phase = PHASE.RECOVERY_REQUIRED;
-          }
-          primaryError = primaryError
-            ? new Error(`${primaryError.message}; restart failures: ${failed}`)
-            : new Error(`restart failures: ${failed}`);
-        } else if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
-          journal.phase = PHASE.RESTART_COMPLETE;
-        }
-        writeRunJournal(layout.journalPath, journal);
-      }
-      const health = await runPostRestartHealthChecks({
-        writers: context.writers,
-        snapshotsById,
-        env,
-        runners,
-        expectedReleaseGeneration: boundDashboardReleaseIdentity,
-        expectedActualGeneration: options.actualDataGeneration ?? journal?.generationBindings?.actualDataGeneration ?? null,
-        actualServerDataDir,
-        timeoutMs: options.healthTimeoutMs,
-        pollMs: options.healthPollMs,
-      });
-      if (journal) {
-        journal.healthResults = health.results;
-        if (!primaryError && health.ok) {
-          journal.phase = PHASE.HEALTH_VERIFIED;
+      const unsafeMutation = stagedRestoreAttempted && !restoreRestartSafety.restartAllowed;
+      if (unsafeMutation) {
+        const journalHint = restoreRestartSafety.stagedJournalPath
+          ? ` Inspect staged restore journal ${restoreRestartSafety.stagedJournalPath}.`
+          : ' Inspect the staged restore control journal.';
+        const suppressionMessage = `writers intentionally remain quiesced: ${restoreRestartSafety.reason}.${journalHint} Verify or complete rollback before restarting writers`;
+        if (journal) {
+          journal.phase = PHASE.RECOVERY_REQUIRED;
+          journal.restoreSafety = restoreRestartSafety;
+          journal.restartResults = [];
+          journal.restartSuppressed = {
+            at: new Date().toISOString(),
+            reason: restoreRestartSafety.reason,
+            mutationStatus: restoreRestartSafety.mutationStatus,
+            stagedJournalPath: restoreRestartSafety.stagedJournalPath,
+            requiredAction: 'verify or complete staged rollback before restarting writers',
+          };
+          appendJournalError(journal, suppressionMessage);
           writeRunJournal(layout.journalPath, journal);
-          journal.phase = PHASE.COMPLETE;
-        } else if (!health.ok) {
-          appendJournalError(journal, 'post-restart health verification failed');
-          if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
-            journal.phase = PHASE.RECOVERY_REQUIRED;
-          }
-          if (!primaryError) {
-            primaryError = new Error('post-restart health verification failed');
+        }
+        primaryError = primaryError
+          ? new Error(`${primaryError.message}; ${suppressionMessage}`)
+          : new Error(suppressionMessage);
+      } else {
+        let expectedActualGeneration = options.actualDataGeneration
+          ?? journal?.generationBindings?.actualDataGeneration
+          ?? null;
+        if (expectedActualGeneration && fs.existsSync(actualServerDataDir)) {
+          try {
+            if (actualGenerationVersion(expectedActualGeneration) === ACTUAL_GENERATION_LEGACY_VERSION) {
+              assertActualGenerationStable(
+                actualServerDataDir,
+                expectedActualGeneration,
+                'legacy Actual data generation before writer restart',
+              );
+              expectedActualGeneration = computeActualDataGeneration(actualServerDataDir);
+            }
+          } catch (error) {
+            if (journal) appendJournalError(journal, error.message);
+            primaryError = primaryError
+              ? new Error(`${primaryError.message}; ${error.message}`)
+              : error;
           }
         }
-        writeRunJournal(layout.journalPath, journal);
+
+        const restartResults = await restartAll(context, snapshotsById);
+        if (journal) {
+          journal.restartResults = restartResults;
+          const restartFailures = restartResults.filter((entry) => entry.ok === false);
+          if (restartFailures.length > 0) {
+            const failed = restartFailures.map((entry) => entry.id).join(', ');
+            appendJournalError(journal, `restart failures: ${failed}`);
+            if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
+              journal.phase = PHASE.RECOVERY_REQUIRED;
+            }
+            primaryError = primaryError
+              ? new Error(`${primaryError.message}; restart failures: ${failed}`)
+              : new Error(`restart failures: ${failed}`);
+          } else if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
+            journal.phase = PHASE.RESTART_COMPLETE;
+          }
+          writeRunJournal(layout.journalPath, journal);
+        }
+
+        const health = await runPostRestartHealthChecks({
+          writers: context.writers,
+          snapshotsById,
+          env,
+          runners,
+          expectedReleaseGeneration: boundDashboardReleaseIdentity,
+          expectedActualGeneration,
+          actualServerDataDir,
+          timeoutMs: options.healthTimeoutMs,
+          pollMs: options.healthPollMs,
+        });
+        if (journal) {
+          journal.healthResults = health.results;
+          if (!primaryError && health.ok) {
+            journal.phase = PHASE.HEALTH_VERIFIED;
+            writeRunJournal(layout.journalPath, journal);
+            journal.phase = PHASE.COMPLETE;
+          } else if (!health.ok) {
+            appendJournalError(journal, 'post-restart health verification failed');
+            if (journal.phase !== PHASE.FAILED && journal.phase !== PHASE.RECOVERY_REQUIRED) {
+              journal.phase = PHASE.RECOVERY_REQUIRED;
+            }
+            if (!primaryError) {
+              primaryError = new Error('post-restart health verification failed');
+            }
+          }
+          writeRunJournal(layout.journalPath, journal);
+        }
       }
     }
     if (lock) lock.release();

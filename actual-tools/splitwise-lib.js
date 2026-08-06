@@ -138,8 +138,17 @@ async function getGroupDebts(groupNameOrId) {
 // per-group balance (get_friends -> friend.groups[].balance). This is authoritative and needs
 // NO reconstruction (positive = they owe me, negative = I owe them). Do NOT recompute this from
 // line items — that produced phantom debts (see CONTEXT §8, 2026-06-29 pairwise-recon lesson).
-// Returns { id, name, owedToMe:[{name,slug,amount}], iOweThem:[...], total, oweTotal }.
+// Returns { id, name, owedToMe:[{id,name,slug,amount}], iOweThem:[...], total, oweTotal }.
 let _cachedFriends = null;
+function stableSplitwiseUserId(value) {
+  const text = String(value ?? '');
+  const id = Number(value);
+  if (!/^\d+$/.test(text) || !Number.isSafeInteger(id) || id <= 0) {
+    throw new Error('Splitwise returned an invalid numeric user id');
+  }
+  return id;
+}
+
 async function getDirectOwed(groupNameOrId) {
   const token = await getToken();
   if (!_cachedGroups) _cachedGroups = (await swApi(token, 'get_groups')).groups;
@@ -161,9 +170,10 @@ async function getDirectOwed(groupNameOrId) {
     if (pair.currency && currency && pair.currency !== currency) throw new Error(`group ${g.name} pairwise balances contain multiple currencies`);
     currency = currency || pair.currency;
     const bal = +pair.amount.toFixed(2);
-    const name = `${f.first_name || ''} ${f.last_name || ''}`.trim();
-    if (bal > 0.005) { owedToMe.push({ name, slug: slugForName(name), amount: bal, currency }); total += bal; }
-    else if (bal < -0.005) { iOweThem.push({ name, slug: slugForName(name), amount: -bal, currency }); oweTotal += -bal; }
+    const id = stableSplitwiseUserId(f.id);
+    const name = `${f.first_name || ''} ${f.last_name || ''}`.trim().replace(/\s+/g, ' ');
+    if (bal > 0.005) { owedToMe.push({ id, name, slug: slugForName(name), amount: bal, currency }); total += bal; }
+    else if (bal < -0.005) { iOweThem.push({ id, name, slug: slugForName(name), amount: -bal, currency }); oweTotal += -bal; }
   }
   owedToMe.sort((a, b) => b.amount - a.amount);
   iOweThem.sort((a, b) => b.amount - a.amount);

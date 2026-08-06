@@ -26,17 +26,25 @@ function buildReceiptImageSource({
   };
 }
 
-async function purgeReceiptImageCaches(imageModule) {
+async function purgeReceiptImageCaches(imageModule, { allowUnsupported = false } = {}) {
   const Image = imageModule ?? require('expo-image').Image;
   const failures = [];
 
   if (typeof Image.clearMemoryCache === 'function') {
-    const memoryOk = await Image.clearMemoryCache();
-    if (memoryOk === false) failures.push('memory');
+    try {
+      const memoryOk = await Image.clearMemoryCache();
+      if (memoryOk === false && !allowUnsupported) failures.push('memory');
+    } catch (error) {
+      if (!allowUnsupported) throw error;
+    }
   }
   if (typeof Image.clearDiskCache === 'function') {
-    const diskOk = await Image.clearDiskCache();
-    if (diskOk === false) failures.push('disk');
+    try {
+      const diskOk = await Image.clearDiskCache();
+      if (diskOk === false && !allowUnsupported) failures.push('disk');
+    } catch (error) {
+      if (!allowUnsupported) throw error;
+    }
   }
 
   if (failures.length) {

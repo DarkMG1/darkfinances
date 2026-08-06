@@ -2,6 +2,7 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+    clearKeychain: true
 - assertVisible:
     id: onboarding-screen
 - tapOn:
@@ -16,10 +17,14 @@ appId: ${MAESTRO_APP_ID}
     id: home-review-banner
 - assertVisible:
     id: review-screen
-- openLink: darkfinances:///
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///
+- runFlow:
+    when:
+      visible: 'Open in ["“]Finances["”].*'
+    commands:
+      - tapOn:
+          text: Open
 - assertVisible:
     id: home-screen
 - scroll
@@ -47,10 +52,14 @@ appId: ${MAESTRO_APP_ID}
     id: home-account-acc-check
 - assertVisible:
     id: account-detail-screen
-- openLink: darkfinances:///
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///
+- runFlow:
+    when:
+      visible: 'Open in ["“]Finances["”].*'
+    commands:
+      - tapOn:
+          text: Open
 - scroll
 - assertVisible:
     id: home-sync-button

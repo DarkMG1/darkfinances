@@ -10,6 +10,7 @@ mkdir -p "$APP_ROOT/build/maestro/screenshots"
 MAESTRO_ARTIFACT_DIR="${MAESTRO_ARTIFACT_DIR:-$APP_ROOT/build/maestro/results}"
 mkdir -p "$MAESTRO_ARTIFACT_DIR"
 maestro_command=(
+  "--device=$DEVICE"
   test
   "--test-output-dir=$MAESTRO_ARTIFACT_DIR"
   "--debug-output=$MAESTRO_ARTIFACT_DIR"

@@ -17,6 +17,17 @@ const CONFIG_PATH = process.env.COLLECTION_RULES_PATH || path.join(__dirname, 'c
 const DATA_DIR = process.env.FIX_DATA_DIR || process.env.ACTUAL_DATA_DIR;
 const money = (cents) => `$${(Number(cents) / 100).toFixed(2)}`;
 
+function paymentNotes(transaction, leaf = transaction) {
+  const parentNotes = String(transaction.notes || '').trim();
+  const leafNotes = leaf === transaction ? '' : String(leaf.notes || '').trim();
+  return [parentNotes, leafNotes].filter(Boolean).join(' ');
+}
+
+function hasCanonicalTag(notes, tag) {
+  return (String(notes || '').match(/#[a-z0-9_-]+/gi) || [])
+    .some((value) => value.slice(1).toLowerCase() === tag);
+}
+
 (async () => {
   if (!EVENT) throw new Error('COLLECTION_EVENT is required');
   const rule = loadCollectionRule(CONFIG_PATH, EVENT);
@@ -48,34 +59,59 @@ const money = (cents) => `$${(Number(cents) / 100).toFixed(2)}`;
   }
 
   const received = Object.fromEntries(Object.keys(debtors).map((slug) => [slug, 0]));
+  const review = [];
+  const matchingDebtors = (label) => Object.entries(debtors)
+    .filter(([, debtor]) => debtor.regex.test(label));
+  const addReview = (transaction, leaf, matches, reason) => {
+    const slugs = matches.map(([slug]) => slug);
+    const item = {
+      id: leaf.id || transaction.id,
+      date: leaf.date || transaction.date,
+      amount: leaf.amount,
+      slugs,
+      reason,
+    };
+    review.push(item);
+    const identities = slugs.length ? ` (${slugs.map((slug) => `#${slug}`).join(', ')})` : '';
+    console.log(`REVIEW ${item.date} ${money(item.amount)} ${reason}${identities}`);
+  };
+
   for (const transaction of rows) {
     const leaves = transaction.subtransactions?.length ? transaction.subtransactions : [transaction];
     for (const leaf of leaves) {
-      const notes = leaf.notes || transaction.notes || '';
-      if (!(leaf.amount > 0) || !notes.includes(`#${rule.tag}`)) continue;
+      const notes = paymentNotes(transaction, leaf);
+      if (!(leaf.amount > 0) || !hasCanonicalTag(notes, rule.tag)) continue;
       const label = `${payeeNames[transaction.payee] || transaction.imported_payee || ''} ${notes}`;
-      for (const [slug, debtor] of Object.entries(debtors)) if (debtor.regex.test(label)) received[slug] += leaf.amount;
+      const matches = matchingDebtors(label);
+      if (matches.length !== 1) {
+        addReview(transaction, leaf, matches, matches.length ? 'multiple-debtors' : 'no-debtor');
+        continue;
+      }
+      received[matches[0][0]] += leaf.amount;
     }
   }
 
-  const low = Number(rule.minRatio ?? 0.4);
-  const high = Number(rule.maxRatio ?? 1.6);
+  const low = rule.minRatio;
+  const high = rule.maxRatio;
   let tagged = 0;
-  const review = [];
   for (const transaction of rows) {
     if (transaction.date < rule.start || transaction.amount <= 0 || transaction.subtransactions?.length) continue;
-    if (String(transaction.notes || '').includes(`#${rule.tag}`)) continue;
-    const label = `${payeeNames[transaction.payee] || transaction.imported_payee || ''} ${transaction.notes || ''}`;
-    const match = Object.entries(debtors).find(([, debtor]) => debtor.regex.test(label));
-    if (!match) continue;
-    const [slug, debtor] = match;
+    const transactionNotes = paymentNotes(transaction);
+    if (hasCanonicalTag(transactionNotes, rule.tag)) continue;
+    const label = `${payeeNames[transaction.payee] || transaction.imported_payee || ''} ${transactionNotes}`;
+    const matches = matchingDebtors(label);
+    if (matches.length !== 1) {
+      addReview(transaction, transaction, matches, matches.length ? 'multiple-debtors' : 'no-debtor');
+      continue;
+    }
+    const [slug, debtor] = matches[0];
     const remaining = Math.max(0, debtor.expectedCents - received[slug]);
     const baseline = remaining || debtor.expectedCents;
     if (!(baseline > 0) || transaction.amount < baseline * low || transaction.amount > baseline * high) {
-      review.push({ id: transaction.id, date: transaction.date, amount: transaction.amount, slug });
+      addReview(transaction, transaction, matches, 'amount-out-of-range');
       continue;
     }
-    const notes = `${String(transaction.notes || '').trim()} #${rule.tag} #${slug}`.trim();
+    const notes = `${transactionNotes} #${rule.tag} #${slug}`.trim();
     console.log(`${CONFIRM ? 'TAG' : 'DRY'} ${transaction.date} ${money(transaction.amount)} #${slug}`);
     if (CONFIRM) {
       await api.updateTransaction(transaction.id, { category: reimbursementId, notes });

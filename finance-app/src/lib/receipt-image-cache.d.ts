@@ -21,4 +21,6 @@ export declare function buildReceiptImageSource(input: {
 export declare function purgeReceiptImageCaches(imageModule?: {
   clearMemoryCache?: () => Promise<boolean>;
   clearDiskCache?: () => Promise<boolean>;
+}, options?: {
+  allowUnsupported?: boolean;
 }): Promise<void>;

@@ -28,9 +28,24 @@ function record(name, details = {}) {
   );
 }
 
-const query = {};
-for (const method of ['filter', 'select', 'options', 'limit']) {
-  query[method] = () => query;
+function makeQuery() {
+  const query = { pageLimit: null, pageOffset: 0, pageOrder: null };
+  for (const method of ['filter', 'select', 'options']) {
+    query[method] = () => query;
+  }
+  query.limit = (value) => {
+    query.pageLimit = value;
+    return query;
+  };
+  query.offset = (value) => {
+    query.pageOffset = value;
+    return query;
+  };
+  query.orderBy = (value) => {
+    query.pageOrder = value;
+    return query;
+  };
+  return query;
 }
 
 module.exports = {
@@ -38,17 +53,24 @@ module.exports = {
   downloadBudget: async () => record('downloadBudget'),
   getCategoryGroups: async () => [{
     name: 'Expenses',
-    categories: [{ id: 'reimbursement', name: 'Reimbursement' }],
+    categories: [
+      { id: 'reimbursement', name: 'Reimbursement' },
+      { id: 'contrary', name: 'Contrary' },
+    ],
   }],
-  getPayees: async () => [
-    { id: 'payee-1', name: 'Alex payment' },
-    { id: 'payee-2', name: 'Second merchant' },
-  ],
+  getPayees: async () => process.env.MOCK_PAYEES_JSON
+    ? JSON.parse(process.env.MOCK_PAYEES_JSON)
+    : [
+      { id: 'payee-1', name: 'Alex payment' },
+      { id: 'payee-2', name: 'Second merchant' },
+    ],
   getAccounts: async () => [{ id: 'account-1', closed: false, offbudget: false }],
-  getTransactions: async () => [
-    { id: 'transaction-1', date: '2026-07-01', amount: 1000, payee: 'payee-1', notes: '' },
-    { id: 'transaction-2', date: '2026-07-02', amount: 1000, payee: 'payee-1', notes: '' },
-  ],
+  getTransactions: async () => process.env.MOCK_TRANSACTIONS_JSON
+    ? JSON.parse(process.env.MOCK_TRANSACTIONS_JSON)
+    : [
+      { id: 'transaction-1', date: '2026-07-01', amount: 1000, payee: 'payee-1', notes: '' },
+      { id: 'transaction-2', date: '2026-07-02', amount: 1000, payee: 'payee-1', notes: '' },
+    ],
   updateTransaction: async (id, patch) => {
     updateCalls++;
     record('updateTransaction', { id, patch });
@@ -57,15 +79,34 @@ module.exports = {
     }
   },
   getRules: async () => [],
-  q: () => query,
-  runQuery: async () => ({
-    data: [
-      { payee: 'payee-1', category: 'reimbursement' },
-      { payee: 'payee-1', category: 'reimbursement' },
-      { payee: 'payee-2', category: 'reimbursement' },
-      { payee: 'payee-2', category: 'reimbursement' },
-    ],
-  }),
+  q: () => makeQuery(),
+  runQuery: async (query) => {
+    const offset = query.pageOffset || 0;
+    const limit = query.pageLimit || 100000;
+    record('runQuery', { offset, limit, orderBy: query.pageOrder });
+    if (process.env.MOCK_BUILD_HISTORY === 'contrary-after-prefix') {
+      const total = 125000;
+      const end = Math.min(total, offset + limit);
+      return {
+        data: Array.from({ length: Math.max(0, end - offset) }, (_, itemOffset) => {
+          const index = offset + itemOffset;
+          return {
+            id: \`transaction-\${String(index).padStart(6, '0')}\`,
+            payee: 'payee-1',
+            category: index < 80000 ? 'reimbursement' : 'contrary',
+          };
+        }),
+      };
+    }
+    return {
+      data: [
+        { id: 'transaction-1', payee: 'payee-1', category: 'reimbursement' },
+        { id: 'transaction-2', payee: 'payee-1', category: 'reimbursement' },
+        { id: 'transaction-3', payee: 'payee-2', category: 'reimbursement' },
+        { id: 'transaction-4', payee: 'payee-2', category: 'reimbursement' },
+      ],
+    };
+  },
   createRule: async (rule) => record('createRule', { payee: rule.conditions[0].value }),
   sync: async () => {
     record('sync');
@@ -82,7 +123,15 @@ function readCalls(callsPath) {
   return text ? text.split('\n').map((line) => JSON.parse(line)) : [];
 }
 
-function runMutationTool(t, scriptName, { fail = '' } = {}) {
+function runMutationTool(t, scriptName, {
+  fail = '',
+  confirm = true,
+  eventRule,
+  eventTransactions,
+  eventPayees,
+  eventDebts,
+  buildHistory = '',
+} = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'actual-tools-mutation-sync-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   fs.copyFileSync(path.join(toolsRoot, scriptName), path.join(dir, scriptName));
@@ -91,10 +140,11 @@ function runMutationTool(t, scriptName, { fail = '' } = {}) {
 
   const env = {
     ...process.env,
-    CONFIRM: '1',
+    CONFIRM: confirm ? '1' : '0',
     FIX_DATA_DIR: path.join(dir, 'actual-data'),
     MOCK_CALLS_PATH: path.join(dir, 'calls.jsonl'),
     MOCK_FAIL: fail,
+    MOCK_BUILD_HISTORY: buildHistory,
     NODE_PATH: [
       path.join(toolsRoot, 'node_modules'),
       path.join(toolsRoot, '..', 'node_modules'),
@@ -102,26 +152,30 @@ function runMutationTool(t, scriptName, { fail = '' } = {}) {
   };
 
   if (scriptName === 'event-collect.js') {
+    const rule = eventRule || {
+      group: '123',
+      tag: 'ev-trip',
+      start: '2026-01-01',
+      debtors: { alex: { patterns: ['\\balex\\b'] } },
+    };
     const configPath = path.join(dir, 'collection-rules.json');
     fs.writeFileSync(configPath, JSON.stringify({
       events: {
-        trip: {
-          group: '123',
-          tag: 'ev-trip',
-          start: '2026-01-01',
-          debtors: { alex: { patterns: ['\\balex\\b'] } },
-        },
+        trip: rule,
       },
     }));
+    const routedDebts = eventDebts || [{ slug: 'alex', amount: 20 }];
     fs.writeFileSync(path.join(dir, 'splitwise-lib.js'), `
 module.exports = {
   getGroupDebts: async () => ({
-    owedToMe: [{ slug: 'alex', amount: 20 }],
+    owedToMe: ${JSON.stringify(routedDebts)},
   }),
 };
 `);
     env.COLLECTION_EVENT = 'trip';
     env.COLLECTION_RULES_PATH = configPath;
+    if (eventTransactions) env.MOCK_TRANSACTIONS_JSON = JSON.stringify(eventTransactions);
+    if (eventPayees) env.MOCK_PAYEES_JSON = JSON.stringify(eventPayees);
   } else {
     const configPath = path.join(dir, 'build-rules-config.json');
     fs.writeFileSync(configPath, JSON.stringify({ skipPatterns: ['fixture-never-matches'] }));
@@ -169,6 +223,87 @@ test('event-collect exits nonzero after a mid-loop fault with prior work synced'
   assert.doesNotMatch(result.stdout, /APPLIED/);
 });
 
+test('event-collect sends zero and multiple debtor matches to review without mutation', (t) => {
+  const { result, calls } = runMutationTool(t, 'event-collect.js', {
+    eventRule: {
+      group: '123',
+      tag: 'ev-trip',
+      start: '2026-01-01',
+      debtors: {
+        alex: { patterns: ['\\balex\\b'] },
+        sam: { patterns: ['\\bshared\\b'] },
+      },
+    },
+    eventPayees: [
+      { id: 'ambiguous', name: 'Alex shared payment' },
+      { id: 'unmatched', name: 'Unknown payment' },
+    ],
+    eventTransactions: [
+      { id: 'ambiguous-payment', date: '2026-07-01', amount: 1000, payee: 'ambiguous', notes: '' },
+      { id: 'unmatched-payment', date: '2026-07-02', amount: 1000, payee: 'unmatched', notes: '' },
+    ],
+    eventDebts: [
+      { slug: 'alex', amount: 10 },
+      { slug: 'sam', amount: 10 },
+    ],
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(mutationCallNames(calls), ['shutdown']);
+  assert.match(result.stdout, /multiple-debtors/);
+  assert.match(result.stdout, /no-debtor/);
+  assert.match(result.stdout, /APPLIED: 0 repayment\(s\); 2 need review/);
+});
+
+test('event-collect does not credit an existing tagged payment to overlapping debtors', (t) => {
+  const { result, calls } = runMutationTool(t, 'event-collect.js', {
+    eventRule: {
+      group: '123',
+      tag: 'ev-trip',
+      start: '2026-01-01',
+      debtors: {
+        alex: { patterns: ['\\balex\\b'] },
+        sam: { patterns: ['\\bshared\\b'] },
+      },
+    },
+    eventPayees: [
+      { id: 'shared', name: 'Alex shared payment' },
+      { id: 'alex-only', name: 'Alex payment' },
+    ],
+    eventTransactions: [
+      {
+        id: 'existing-tagged',
+        date: '2026-07-01',
+        amount: 1000,
+        payee: 'shared',
+        notes: '#ev-trip',
+      },
+      {
+        id: 'new-alex-payment',
+        date: '2026-07-02',
+        amount: 2000,
+        payee: 'alex-only',
+        notes: '',
+      },
+    ],
+    eventDebts: [
+      { slug: 'alex', amount: 20 },
+      { slug: 'sam', amount: 10 },
+    ],
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(mutationCallNames(calls), [
+    'updateTransaction',
+    'sync',
+    'shutdown',
+  ]);
+  const update = calls.find((call) => call.name === 'updateTransaction');
+  assert.equal(update.id, 'new-alex-payment');
+  assert.match(result.stdout, /multiple-debtors/);
+  assert.match(result.stdout, /APPLIED: 1 repayment\(s\); 1 need review/);
+});
+
 test('build-rules syncs confirmed rule creation before reporting success', (t) => {
   const { result, calls } = runMutationTool(t, 'build-rules.js');
 
@@ -194,4 +329,41 @@ test('build-rules exits nonzero and shuts down when sync fails', (t) => {
     'shutdown',
   ]);
   assert.doesNotMatch(result.stdout, /APPLIED/);
+});
+
+test('build-rules includes 25k contrary rows beyond an 80k/20k first page', (t) => {
+  const { result, calls } = runMutationTool(t, 'build-rules.js', {
+    buildHistory: 'contrary-after-prefix',
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(
+    calls.filter((call) => call.name === 'runQuery').map(({ offset, limit, orderBy }) => ({
+      offset,
+      limit,
+      orderBy,
+    })),
+    [
+      { offset: 0, limit: 100000, orderBy: { id: 'asc' } },
+      { offset: 100000, limit: 100000, orderBy: { id: 'asc' } },
+    ],
+  );
+  assert.deepEqual(mutationCallNames(calls), ['shutdown']);
+  assert.match(result.stdout, /Scanned complete paginated history: 125000 transaction\(s\)/);
+  assert.match(result.stdout, /Proposed 0 payee->category rules/);
+  assert.match(result.stdout, /APPLIED — created 0 rules/);
+});
+
+test('build-rules dry-run reports the complete 80k/20k plus 25k contrary history', (t) => {
+  const { result, calls } = runMutationTool(t, 'build-rules.js', {
+    confirm: false,
+    buildHistory: 'contrary-after-prefix',
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(calls.filter((call) => call.name === 'runQuery').length, 2);
+  assert.deepEqual(mutationCallNames(calls), ['shutdown']);
+  assert.match(result.stdout, /Scanned complete paginated history: 125000 transaction\(s\)/);
+  assert.match(result.stdout, /Proposed 0 payee->category rules/);
+  assert.match(result.stdout, /DRY-RUN — no rules created/);
 });

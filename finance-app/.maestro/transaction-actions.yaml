@@ -2,16 +2,21 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+    clearKeychain: true
 - assertVisible:
     id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
 - assertVisible:
     id: home-screen
-- openLink: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
+- runFlow:
+    when:
+      visible: 'Open in ["“]Finances["”].*'
+    commands:
+      - tapOn:
+          text: Open
 - assertVisible:
     id: transaction-detail-screen
 - tapOn:
@@ -28,10 +33,14 @@ appId: ${MAESTRO_APP_ID}
     id: transaction-category-sheet
 - tapOn:
     point: 50%,20%
-- openLink: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
+- runFlow:
+    when:
+      visible: 'Open in ["“]Finances["”].*'
+    commands:
+      - tapOn:
+          text: Open
 - assertVisible:
     id: transaction-detail-screen
 - tapOn:
@@ -46,19 +55,27 @@ appId: ${MAESTRO_APP_ID}
     id: transaction-tag-add-button
 - tapOn:
     point: 50%,20%
-- openLink: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///transaction/tx-60?payee=Amazon&amount=-64.3&date=2026-06-29&accountId=acc-credit&category=Shopping&categoryId=cat-shopping&isLeg=0&parentId=&cleared=1&imported=1
+- runFlow:
+    when:
+      visible: 'Open in ["“]Finances["”].*'
+    commands:
+      - tapOn:
+          text: Open
 - assertVisible:
     id: transaction-detail-screen
 - scroll
 - assertVisible:
     id: transaction-split-row
-- openLink: darkfinances:///split/tx-60?accountId=acc-credit&date=2026-06-29
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///split/tx-60?accountId=acc-credit&date=2026-06-29
+- runFlow:
+    when:
+      visible: 'Open in ["“]Finances["”].*'
+    commands:
+      - tapOn:
+          text: Open
 - extendedWaitUntil:
     visible:
       id: split-editor-screen

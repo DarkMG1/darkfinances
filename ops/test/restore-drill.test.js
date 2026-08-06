@@ -21,7 +21,10 @@ const { buildSnapshotManifest } = require('../lib/restore-snapshot');
 const {
   runStagedRestore,
   PHASE,
+  MUTATION_STATUS,
   readJournal,
+  FAILURE_HISTORY_LIMIT,
+  FAILURE_MESSAGE_MAX_BYTES,
   JOURNAL_MAX_BYTES,
 } = require('../lib/staged-restore');
 const {
@@ -77,6 +80,19 @@ function stagedRestore(root, destination, archive, options = {}, extra = {}) {
 function controlJournal(destination) {
   const layout = controlLayoutForDestination(destination);
   return readJournal(layout.journalPath);
+}
+
+function captureThrownError(callback, expected) {
+  let captured;
+  assert.throws(() => {
+    try {
+      callback();
+    } catch (error) {
+      captured = error;
+      throw error;
+    }
+  }, expected);
+  return captured;
 }
 
 function buildBundle(root, dashboardDir, provenance = {}, options = {}) {
@@ -362,7 +378,7 @@ test('interruption after snapshot capture can resume via fixed control journal w
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
 
-  assert.throws(
+  const restoreError = captureThrownError(
     () => stagedRestore(root, destination, archive, {dryRun: false,
       confirm: true,
           }, {
@@ -370,6 +386,8 @@ test('interruption after snapshot capture can resume via fixed control journal w
       }),
     /interrupt/,
   );
+  assert.equal(restoreError.restoreRestartSafety.restartAllowed, true);
+  assert.equal(restoreError.restoreRestartSafety.mutationStatus, MUTATION_STATUS.NOT_STARTED);
 
   const resumed = stagedRestore(root, destination, archive, {dryRun: false, confirm: true,
   });
@@ -397,7 +415,7 @@ test('interruption during swap rolls back entire prior generation byte-for-byte'
   const originalRules = fs.readFileSync(path.join(destination, 'rules.json'), 'utf8');
   const beforeManifest = buildSnapshotManifest(destination, require('../lib/backup-bundle-inventory').loadBackupStateInventory());
 
-  assert.throws(
+  const restoreError = captureThrownError(
     () => stagedRestore(root, destination, archive, {dryRun: false,
       confirm: true,
           }, {
@@ -409,6 +427,12 @@ test('interruption during swap rolls back entire prior generation byte-for-byte'
   assert.equal(fs.readFileSync(path.join(destination, 'rules.json'), 'utf8'), originalRules);
   const afterManifest = buildSnapshotManifest(destination, require('../lib/backup-bundle-inventory').loadBackupStateInventory());
   assert.equal(afterManifest.digest, beforeManifest.digest);
+  assert.equal(restoreError.restoreRestartSafety.restartAllowed, true);
+  assert.equal(restoreError.restoreRestartSafety.mutationStatus, MUTATION_STATUS.ROLLBACK_VERIFIED);
+  const journal = controlJournal(destination);
+  assert.equal(journal.phase, PHASE.ROLLED_BACK);
+  assert.equal(journal.mutationStatus, MUTATION_STATUS.ROLLBACK_VERIFIED);
+  assert.ok(journal.failureHistory.some((entry) => /swap interrupt/.test(entry.message)));
 });
 
 test('sparse destination rollback removes introduced files and restores prior bytes', (t) => {
@@ -734,7 +758,7 @@ test('rollback failure leaves recoverable journal and next invocation converges'
     { point: 'after:swap-file', detail: 'rules.json', throwError: 'swap interrupt' },
     { point: 'after:rollback-restore', detail: 'rules.json', throwError: 'rollback interrupt' },
   ]);
-  assert.throws(
+  const restoreError = captureThrownError(
     () => stagedRestore(root, destination, archive, {
       dryRun: false,
       confirm: true,
@@ -745,10 +769,87 @@ test('rollback failure leaves recoverable journal and next invocation converges'
   );
   const failedJournal = controlJournal(destination);
   assert.equal(failedJournal.phase, PHASE.ROLLBACK_FAILED);
+  assert.equal(failedJournal.mutationStatus, MUTATION_STATUS.UNVERIFIED);
   assert.ok(failedJournal.completedSwaps.length > 0);
+  assert.equal(restoreError.restoreRestartSafety.restartAllowed, false);
+  assert.equal(restoreError.restoreRestartSafety.stagedPhase, PHASE.ROLLBACK_FAILED);
+  assert.ok(failedJournal.failureHistory.some((entry) => /swap interrupt/.test(entry.message)));
+  assert.ok(failedJournal.failureHistory.some((entry) => /rollback interrupt/.test(entry.message)));
 
   const resumed = stagedRestore(root, destination, archive, { dryRun: false, confirm: true });
   assert.equal(resumed.phase, PHASE.COMPLETE);
+});
+
+test('repeated rollback failures retain a bounded readable actionable journal', (t) => {
+  const root = mkRoot(t, 'darkfinances-restore-rollback-history-');
+  const dashboard = path.join(root, 'dashboard');
+  const destination = path.join(root, 'destination');
+  writeTerminalSagaDashboard(dashboard);
+  const archive = buildBundle(root, dashboard);
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(destination, 'rules.json'), '[]\n', { mode: 0o600 });
+
+  captureThrownError(
+    () => stagedRestore(root, destination, archive, {
+      dryRun: false,
+      confirm: true,
+      injectFault(point, detail) {
+        if (point === 'after:swap-file' && detail === 'rules.json') {
+          throw new Error('initial swap failure');
+        }
+        if (point === 'after:rollback-restore' && detail === 'rules.json') {
+          throw new Error('initial rollback failure');
+        }
+      },
+    }),
+    /initial rollback failure/,
+  );
+
+  const retryCount = FAILURE_HISTORY_LIMIT + 7;
+  const oversizedDetail = 'x'.repeat(FAILURE_MESSAGE_MAX_BYTES * 3);
+  let latestError;
+  for (let attempt = 0; attempt < retryCount; attempt += 1) {
+    latestError = captureThrownError(
+      () => stagedRestore(root, destination, archive, {
+        dryRun: false,
+        confirm: true,
+        injectFault(point, detail) {
+          if (point === 'after:rollback-restore' && detail === 'rules.json') {
+            throw new Error(
+              `retry rollback failure ${attempt}\n`
+              + 'passkey-credentials.json /private/credential-material\n'
+              + oversizedDetail,
+            );
+          }
+        },
+      }),
+      new RegExp(`retry rollback failure ${attempt}`),
+    );
+  }
+
+  const layout = controlLayoutForDestination(destination);
+  const journalStat = fs.statSync(layout.journalPath);
+  assert.ok(journalStat.size < JOURNAL_MAX_BYTES);
+  const journal = readJournal(layout.journalPath);
+  assert.equal(journal.failureHistory.length, FAILURE_HISTORY_LIMIT);
+  assert.equal(
+    journal.failureHistoryDropped,
+    retryCount + 2 - FAILURE_HISTORY_LIMIT,
+  );
+  assert.equal(journal.phase, PHASE.ROLLBACK_FAILED);
+  assert.equal(journal.mutationStatus, MUTATION_STATUS.UNVERIFIED);
+  assert.equal(latestError.restoreRestartSafety.restartAllowed, false);
+  assert.equal(latestError.restoreRestartSafety.stagedPhase, PHASE.ROLLBACK_FAILED);
+
+  const newest = journal.failureHistory.at(-1);
+  assert.equal(newest.stage, 'rollback');
+  assert.match(newest.message, new RegExp(`retry rollback failure ${retryCount - 1}`));
+  assert.match(newest.message, /passkey-credentials\.json \[redacted\]/);
+  assert.match(newest.message, /\[truncated\]$/);
+  assert.doesNotMatch(newest.message, /[\r\n\u2028\u2029]/);
+  assert.doesNotMatch(newest.message, /private\/credential-material/);
+  assert.ok(Buffer.byteLength(newest.message, 'utf8') <= FAILURE_MESSAGE_MAX_BYTES);
+  assert.equal(journal.error, newest.message);
 });
 
 test('COMPLETE cleanup retains journal only and removes work and snapshot trees', (t) => {
@@ -989,7 +1090,9 @@ test('writer restart after snapshot is caught at the held swap gate', (t) => {
   const journal = controlJournal(destination);
   assert.equal(journal.completedSwaps.length, 0);
   assert.equal(journal.completedDeletes.length, 0);
-  assert.equal(journal.phase, PHASE.ROLLED_BACK);
+  assert.equal(journal.phase, PHASE.FAILED);
+  assert.equal(journal.mutationStatus, MUTATION_STATUS.NOT_STARTED);
+  assert.equal(journal.failureHistory.at(-1).stage, 'restore');
 });
 
 test('stale dead restore lock is removed and restore proceeds', (t) => {

@@ -8,6 +8,7 @@ const OUTER_SCHEMA_VERSION = 1;
 const OPERATION_RECORD_VERSION = 2;
 const FINGERPRINT_VERSION = 2;
 const MAX_TERMINAL_ENTRIES = 1000;
+const MAX_NONTERMINAL_ENTRIES = 1000;
 const KEY_RE = /^[A-Za-z0-9._:-]{8,128}$/;
 const HASH_RE = /^[a-f0-9]{64}$/;
 const PHASES = Object.freeze({
@@ -239,6 +240,19 @@ function transitionError(message, code = 'OPERATION_TRANSITION_INVALID') {
   });
 }
 
+class OperationJournalCapacityError extends AppError {
+  constructor(capacity, nonterminalCount) {
+    super('Operation journal nonterminal capacity reached; reconcile existing operations before starting new work', {
+      code: 'OPERATION_JOURNAL_CAPACITY_EXCEEDED',
+      status: 503,
+      expose: true,
+    });
+    this.name = 'OperationJournalCapacityError';
+    this.capacity = capacity;
+    this.nonterminalCount = nonterminalCount;
+  }
+}
+
 function sanitizeError(error) {
   const rawCode = String(error?.code || 'OPERATION_FAILED').toUpperCase();
   const code = rawCode.replace(/[^A-Z0-9_:-]/g, '_').slice(0, 64) || 'OPERATION_FAILED';
@@ -294,6 +308,10 @@ function isTerminal(operation) {
   return isCompleted(operation) || isKnownFailed(operation);
 }
 
+function countNonterminalOperations(operations) {
+  return Object.values(operations).filter((operation) => !isTerminal(operation)).length;
+}
+
 function terminalTime(operation) {
   const parsed = Date.parse(operation.completedAt || operation.updatedAt || operation.startedAt || '');
   return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
@@ -317,11 +335,16 @@ class OperationJournal {
     readState = readJsonFile,
     writeState = writeJsonFile,
     now = () => new Date().toISOString(),
+    maxNonterminalEntries = MAX_NONTERMINAL_ENTRIES,
   } = {}) {
+    if (!Number.isSafeInteger(maxNonterminalEntries) || maxNonterminalEntries < 1) {
+      throw new TypeError('maxNonterminalEntries must be a positive safe integer');
+    }
     this.file = file;
     this.readState = readState;
     this.writeState = writeState;
     this.now = now;
+    this.maxNonterminalEntries = maxNonterminalEntries;
   }
 
   read() {
@@ -369,6 +392,10 @@ class OperationJournal {
         method: existing.method,
         route: existing.route,
       };
+    }
+    const nonterminalCount = countNonterminalOperations(state.operations);
+    if (nonterminalCount >= this.maxNonterminalEntries) {
+      throw new OperationJournalCapacityError(this.maxNonterminalEntries, nonterminalCount);
     }
     const normalized = normalizedRequest(request);
     const fingerprint = requestFingerprint(request);
@@ -605,9 +632,11 @@ class OperationJournal {
 module.exports = {
   FINGERPRINT_VERSION,
   IDEMPOTENCY_KEY_RE: KEY_RE,
+  MAX_NONTERMINAL_ENTRIES,
   MAX_TERMINAL_ENTRIES,
   OPERATION_RECORD_VERSION,
   OperationJournal,
+  OperationJournalCapacityError,
   PHASES,
   canonicalJson,
   canonicalPath,

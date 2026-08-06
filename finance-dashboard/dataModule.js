@@ -347,6 +347,20 @@ const readJsonSafe = (p, fallback, validate) => {
 };
 const writeJsonSafe = (p, obj) => writeRuntimeStateByPath(p, obj);
 
+function uniqueSidecarId(prefix, records) {
+  const existingIds = new Set(
+    records
+      .map((record) => record?.id)
+      .filter((id) => id != null)
+      .map(String),
+  );
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const id = `${prefix}_${crypto.randomUUID()}`;
+    if (!existingIds.has(id)) return id;
+  }
+  throw new Error(`unable to generate unique ${prefix} id`);
+}
+
 const config = {
   dataDir: process.env.ACTUAL_DATA_DIR || '/tmp/actual-dashboard-cache',
   serverURL: process.env.ACTUAL_SERVER_URL,
@@ -1145,7 +1159,7 @@ function saveManualAsset({ id, name, value, kind } = {}) {
     const item = store.items.find((i) => i.id === id);
     Object.assign(item, { name: nm, value: val, kind: k, updated: now });
   } else {
-    id = 'm' + Date.now().toString(36);
+    id = uniqueSidecarId('m', store.items);
     store.items.push({ id, name: nm, value: val, kind: k, updated: now });
   }
   writeJsonSafe(MANUAL_ASSETS_PATH, store);
@@ -6247,25 +6261,27 @@ async function saveRule({ match, categoryId, categoryName } = {}, {
 } = {}) {
   const m = (match || '').trim();
   if (!m || !categoryId) throw new Error('match and categoryId required');
-  const store = readRules();
-  if (!store || !Array.isArray(store.rules)) throw new Error('invalid rules store');
-  const id = 'r' + Date.now().toString(36);
-  const rule = { id, match: m, categoryId, categoryName: categoryName || '', created: todayYMD() };
-  const result = await withApi((api) => getBulkOperationSagaManager().run(api, {
-    kind: 'rules_save',
-    operationKey,
-    journalBinding,
-    params: { rule },
-    faultInjector,
-    deferSync: !sync,
-  }), { mode: 'write' });
-  if (result.status === 'unresolved') {
-    throw new Error(`rule save outcome unresolved (${result.auditOutcome?.failed || 0} failed item(s))`);
-  }
-  if (result.failed) {
-    throw new Error(`rule save failed for ${result.failed} item(s)`);
-  }
-  return { ok: result.ok, needsSync: result.needsSync, id: result.id || id, applied: result.applied, status: result.status, auditOutcome: result.auditOutcome };
+  return withApi(async (api) => {
+    const store = readRules();
+    if (!store || !Array.isArray(store.rules)) throw new Error('invalid rules store');
+    const id = uniqueSidecarId('r', store.rules);
+    const rule = { id, match: m, categoryId, categoryName: categoryName || '', created: todayYMD() };
+    const result = await getBulkOperationSagaManager().run(api, {
+      kind: 'rules_save',
+      operationKey,
+      journalBinding,
+      params: { rule },
+      faultInjector,
+      deferSync: !sync,
+    });
+    if (result.status === 'unresolved') {
+      throw new Error(`rule save outcome unresolved (${result.auditOutcome?.failed || 0} failed item(s))`);
+    }
+    if (result.failed) {
+      throw new Error(`rule save failed for ${result.failed} item(s)`);
+    }
+    return { ok: result.ok, needsSync: result.needsSync, id: result.id || id, applied: result.applied, status: result.status, auditOutcome: result.auditOutcome };
+  }, { mode: 'write' });
 }
 
 function deleteRule({ id } = {}) {
@@ -6730,7 +6746,7 @@ async function saveGoal(goal = {}) {
         goals.push(normalized);
       }
     } else {
-      normalized.id = 'g' + Date.now().toString(36);
+      normalized.id = uniqueSidecarId('g', goals);
       if (normalized.current === undefined) normalized.current = 0;
       goals.push(normalized);
     }

@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { mock } = require('node:test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -98,6 +99,47 @@ test('saveRule refuses owned transactions via bulk admission', async () => {
     data.saveRule({ match: 'Merchant', categoryId: 'category-new' }, { sync: false }),
     (error) => error.code === 'TRANSACTION_DELETION_IN_PROGRESS',
   );
+});
+
+test('frozen-clock rule creates stay distinct, preserve legacy IDs, and delete exactly one', async () => {
+  mock.timers.enable({ apis: ['Date'], now: new Date('2026-07-15T17:01:00-07:00') });
+  try {
+    reset([]);
+    writeJson(process.env.RULES_PATH, {
+      rules: [{
+        id: 'rlegacy',
+        match: 'Legacy merchant',
+        categoryId: 'category',
+        categoryName: 'Dining',
+        created: '2026-07-01',
+      }],
+    });
+
+    const first = await data.saveRule(
+      { match: 'First merchant', categoryId: 'category', categoryName: 'Dining' },
+      { sync: false },
+    );
+    const second = await data.saveRule(
+      { match: 'Second merchant', categoryId: 'category', categoryName: 'Dining' },
+      { sync: false },
+    );
+
+    assert.notEqual(first.id, second.id);
+    assert.match(first.id, /^r_[0-9a-f-]{36}$/);
+    assert.match(second.id, /^r_[0-9a-f-]{36}$/);
+    assert.deepEqual(
+      data.getRules().rules.map(({ id }) => id),
+      ['rlegacy', first.id, second.id],
+    );
+
+    assert.deepEqual(data.deleteRule({ id: first.id }), { ok: true, removed: 1 });
+    assert.deepEqual(
+      data.getRules().rules.map(({ id }) => id),
+      ['rlegacy', second.id],
+    );
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test('phantom dry-run remains effect-free', async () => {

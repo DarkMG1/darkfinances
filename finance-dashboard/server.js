@@ -8,6 +8,7 @@ const { resolveSigningPaths, verifySignedManifestFile, requireKeyringPath } = re
 assertProductionRuntimeSafe();
 
 const express = require('express');
+const { rateLimit: createExpressRateLimit } = require('express-rate-limit');
 const NodeCache = require('node-cache');
 const path = require('path');
 const session = require('express-session');
@@ -41,6 +42,7 @@ const {
 } = require('./lib/request-admission');
 const {
   createClientAbortSignal,
+  prepareMutationBodyAdmission,
   withMutationAdmission,
   withOperationStatusAdmission,
   withReadAdmission,
@@ -357,8 +359,16 @@ function enrollmentAuthorized(req, creds) {
 }
 
 const rateBuckets = new Map();
+const APPLIED_RATE_LIMITS = Symbol('applied-rate-limits');
 function rateLimit(name, max, windowMs) {
   return (req, res, next) => {
+    let applied = req[APPLIED_RATE_LIMITS];
+    if (!applied) {
+      applied = new Set();
+      Object.defineProperty(req, APPLIED_RATE_LIMITS, { value: applied });
+    }
+    if (applied.has(name)) return next();
+    applied.add(name);
     const now = Date.now();
     const key = `${name}:${rateLimitClientKey(req, trustProxyConfig.hops)}`;
     let bucket = rateBuckets.get(key);
@@ -384,6 +394,42 @@ function rateLimit(name, max, windowMs) {
     }
     return next();
   };
+}
+
+function createPasskeyRateLimiter(limit, windowMs) {
+  const appliedMarker = Symbol('passkey-rate-limit-applied');
+  return createExpressRateLimit({
+    windowMs,
+    limit,
+    standardHeaders: false,
+    legacyHeaders: false,
+    skip: (req) => {
+      if (req.method !== 'POST') return true;
+      if (req[appliedMarker]) return true;
+      Object.defineProperty(req, appliedMarker, { value: true });
+      return false;
+    },
+    handler: (_req, res, _next, options) => {
+      res.set('Retry-After', String(Math.max(1, Math.ceil(options.windowMs / 1000))));
+      return res.status(429).json({ error: 'Too many requests' });
+    },
+  });
+}
+const loginLimiter = createPasskeyRateLimiter(30, 10 * 60_000);
+const enrollmentLimiter = createPasskeyRateLimiter(10, 10 * 60_000);
+const API_TOKEN = process.env.FINANCE_API_TOKEN || '';
+function tokenOk(presented) {
+  if (!API_TOKEN || !presented) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(API_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function v1Auth(req, res, next) {
+  if (isDemo(req)) return next(); // public sample data only; demoMiddleware handles the response.
+  if (req.session && req.session.authenticated) return next(); // browser (passkey)
+  const headerTok = req.get('X-Finance-Token') || (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (tokenOk(headerTok)) return next(); // native app (token)
+  return sendApiErrorCode(req, res, 'UNAUTHENTICATED');
 }
 
 applyExpressTrustProxy(app, trustProxyConfig);
@@ -447,6 +493,63 @@ app.use((req, res, next) => {
 app.use((req, res, next) => requestClaimsDemo(req)
   ? rateLimit('demo', 240, 60_000)(req, res, next)
   : next());
+app.use(['/auth/login/start', '/auth/login/finish'], loginLimiter);
+app.use(
+  ['/auth/enroll/authorize', '/auth/register/start', '/auth/register/finish'],
+  enrollmentLimiter,
+);
+const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const apiAuthorizationLimiter = createExpressRateLimit({
+  windowMs: 60_000,
+  limit: 600,
+  standardHeaders: false,
+  legacyHeaders: false,
+  skip: (req) => !BODY_METHODS.has(req.method)
+    || !/^\/api(?:\/|$)/i.test(req.path)
+    || isDemo(req),
+  handler: (req, res, _next, options) => {
+    const resetAt = req.rateLimit?.resetTime?.getTime();
+    const remainingMs = Number.isFinite(resetAt) ? resetAt - Date.now() : options.windowMs;
+    const retryAfterSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+    const error = new AppError('Too many requests', {
+      code: 'RATE_LIMITED',
+      status: 429,
+      expose: true,
+    });
+    error.retryAfterSeconds = retryAfterSeconds;
+    return sendApiError(req, res, error);
+  },
+});
+app.use(
+  apiAuthorizationLimiter,
+  (req, res, next) => {
+    if (!BODY_METHODS.has(req.method) || !/^\/api(?:\/|$)/i.test(req.path) || isDemo(req)) {
+      return next();
+    }
+    if (isVersionedApiRequest(req)) return v1Auth(req, res, next);
+    return requireAuth(req, res, next);
+  },
+  async (req, res, next) => {
+    if (
+      !BODY_METHODS.has(req.method)
+      || !/^\/api(?:\/|$)/i.test(req.path)
+      || isDemo(req)
+      || !findMutationContract(req)
+    ) {
+      return next();
+    }
+    try {
+      await prepareMutationBodyAdmission(req, res, operationJournal, {
+        isDemo,
+        isVersioned: isVersionedApiRequest(req),
+        admission: requestAdmission,
+      });
+      return next();
+    } catch (error) {
+      return next(error);
+    }
+  },
+);
 function mayUseReceiptJsonLimit(req) {
   const principal = deriveRequestPrincipal(req, {
     apiToken: process.env.FINANCE_API_TOKEN || '',
@@ -480,9 +583,6 @@ app.get('/auth/status', (req, res) => {
     enrollmentAvailable: creds.length === 0 && enrollmentAvailable(),
   });
 });
-
-const loginLimiter = rateLimit('passkey-login', 30, 10 * 60_000);
-const enrollmentLimiter = rateLimit('passkey-enrollment', 10, 10 * 60_000);
 
 // First enrollment requires a short-lived out-of-band code. Once one credential
 // exists, further enrollment requires an already-authenticated browser session.
@@ -1810,7 +1910,11 @@ const runHandler = (req, res, fn, operation, { signal } = {}) => {
   if (isTestIdentityPing(req)) {
     return fn(req);
   }
-  return withReadAdmission(req, res, actualCoordinator, () => fn(req), { admission: requestAdmission, signal });
+  return withReadAdmission(req, res, actualCoordinator, () => fn(req), {
+    admission: requestAdmission,
+    onCacheHit: fn === resolvers.review ? () => fn(req) : null,
+    signal,
+  });
 };
 async function executeReadWithQueryStats(req, res, fn) {
   const abort = createClientAbortSignal(req, res);
@@ -1975,21 +2079,6 @@ app.delete('/api/goals/:id', raw(deleteGoal));
 app.post('/api/refresh', raw(async () => doRefresh()));
 
 // ---- Versioned API for native clients: session OR bearer token + CORS -------
-const API_TOKEN = process.env.FINANCE_API_TOKEN || '';
-function tokenOk(presented) {
-  if (!API_TOKEN || !presented) return false;
-  const a = Buffer.from(presented);
-  const b = Buffer.from(API_TOKEN);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-function v1Auth(req, res, next) {
-  if (isDemo(req)) return next(); // public sample data only; demoMiddleware handles the response.
-  if (req.session && req.session.authenticated) return next(); // browser (passkey)
-  const headerTok = req.get('X-Finance-Token') || (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-  if (tokenOk(headerTok)) return next(); // native app (token)
-  return sendApiErrorCode(req, res, 'UNAUTHENTICATED');
-}
-
 const v1 = express.Router();
 v1.use((req, res, next) => {
   const origin = req.get('Origin');

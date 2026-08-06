@@ -28,9 +28,13 @@ function createClassList(backing = new Set()) {
 function createContainer(tag, id) {
   const node = createElement(tag, id);
   let html = '';
+  const queryCache = new Map();
   Object.defineProperty(node, 'innerHTML', {
     get() { return html; },
-    set(value) { html = value; },
+    set(value) {
+      html = value;
+      queryCache.clear();
+    },
   });
   node.querySelectorAll = (selector) => {
     if (selector === '[data-goal-index]') {
@@ -46,6 +50,24 @@ function createContainer(tag, id) {
       }));
     }
     if (selector === '[data-categorize-index]') return [];
+    if (selector === '[data-sub-key]') {
+      if (!queryCache.has(selector)) {
+        const buttons = [...html.matchAll(/<button\b([^>]*)>/g)].flatMap((match) => {
+          const attrs = Object.fromEntries(
+            [...match[1].matchAll(/\b(data-[a-z-]+)="([^"]*)"/g)]
+              .map((attribute) => [attribute[1], attribute[2]]),
+          );
+          if (!attrs['data-sub-key']) return [];
+          const button = createElement('button');
+          button.dataset.subKey = attrs['data-sub-key'];
+          if (attrs['data-sub-status']) button.dataset.subStatus = attrs['data-sub-status'];
+          if (attrs['data-sub-hidden']) button.dataset.subHidden = attrs['data-sub-hidden'];
+          return [button];
+        });
+        queryCache.set(selector, buttons);
+      }
+      return queryCache.get(selector);
+    }
     return [];
   };
   return node;
@@ -109,9 +131,38 @@ function createElement(tag, id) {
   return node;
 }
 
+function createMemoryStorage() {
+  const values = new Map();
+  return {
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null;
+    },
+    setItem(key, value) {
+      values.set(key, String(value));
+    },
+    removeItem(key) {
+      values.delete(key);
+    },
+    clear() {
+      values.clear();
+    },
+  };
+}
+
+function jsonResponse(status, payload) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => payload,
+  };
+}
+
 function installBrowserGlobals() {
   const elements = new Map();
   const bodyClasses = new Set();
+  const storage = createMemoryStorage();
+  const alerts = [];
+  let reloads = 0;
   const document = {
     body: { classList: createClassList(bodyClasses) },
     querySelectorAll(selector) {
@@ -125,8 +176,8 @@ function installBrowserGlobals() {
   };
   globalThis.document = document;
   globalThis.window = globalThis;
-  globalThis.location = { pathname: '/', reload() {} };
-  globalThis.localStorage = { getItem: () => null, setItem() {} };
+  globalThis.location = { pathname: '/', reload() { reloads += 1; } };
+  globalThis.localStorage = storage;
   globalThis.fetch = async () => ({ ok: true, json: async () => ({}) });
   globalThis.Chart = class Chart {
     constructor() {}
@@ -134,10 +185,16 @@ function installBrowserGlobals() {
     destroy() {}
   };
   globalThis.navigator = { credentials: { get: async () => ({}), create: async () => ({}) } };
-  globalThis.alert = () => {};
+  globalThis.alert = (message) => alerts.push(String(message));
   globalThis.confirm = () => true;
   globalThis.console = { error() {}, log() {} };
-  return { document, elements };
+  return {
+    alerts,
+    document,
+    elements,
+    reloads: () => reloads,
+    storage,
+  };
 }
 
 function assertNoInlineStyleMarkup(markup, label) {
@@ -220,6 +277,424 @@ test('browser goal writes use journaled v1 requests with a fresh UUID per action
   assert.notEqual(keys[0], keys[1]);
   assert.equal(mutations[0].options.method, 'POST');
   assert.equal(mutations[0].options.headers['Content-Type'], 'application/json');
+});
+
+test('browser operation lifecycle recovers response loss by status and gives later intent a new key', async () => {
+  const { storage } = installBrowserGlobals();
+  const {
+    BROWSER_OPERATION_STORAGE_KEY,
+    mutateFinance,
+  } = await import(pathToFileURL(path.join(publicRoot, 'js/api.js')).href);
+  const body = {
+    name: 'private-goal-marker',
+    target: 987654321.125,
+    current: 123456789.875,
+  };
+  const mutationKeys = [];
+  const statusKeys = [];
+  let statusChecks = 0;
+  globalThis.fetch = async (url, options = {}) => {
+    if (url === '/api/v1/goals?mode=replace') {
+      const key = options.headers['Idempotency-Key'];
+      mutationKeys.push(key);
+      if (mutationKeys.length === 1) throw new Error('response lost');
+      return jsonResponse(200, {
+        data: { saved: true },
+        operation: { key, replayed: false },
+      });
+    }
+    if (url.startsWith('/api/v1/operations/')) {
+      const key = decodeURIComponent(url.slice('/api/v1/operations/'.length));
+      statusKeys.push(key);
+      statusChecks += 1;
+      if (statusChecks === 1) {
+        return jsonResponse(200, {
+          data: { key, status: 'started', phase: 'started', outcome: 'unknown' },
+        });
+      }
+      return jsonResponse(200, {
+        data: {
+          key,
+          status: 'completed',
+          phase: 'completed',
+          outcome: 'completed',
+          result: { recovered: true },
+        },
+      });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  await assert.rejects(
+    mutateFinance('/goals?mode=replace', { body }),
+    (error) => error.code === 'OUTCOME_UNKNOWN'
+      && error.requiresIdempotencyKeyReuse === true,
+  );
+
+  const rawPending = storage.getItem(BROWSER_OPERATION_STORAGE_KEY);
+  const pending = JSON.parse(rawPending);
+  const records = Object.values(pending.operations);
+  assert.equal(records.length, 1);
+  assert.deepEqual(Object.keys(records[0]).sort(), [
+    'createdAt',
+    'dispatchStartedAt',
+    'fingerprint',
+    'key',
+    'outcomeUnknownAt',
+    'state',
+    'updatedAt',
+    'version',
+  ]);
+  assert.match(records[0].fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(records[0].key, mutationKeys[0]);
+  assert.equal(records[0].state, 'outcome_unknown');
+  assert.ok(records[0].createdAt <= records[0].dispatchStartedAt);
+  assert.ok(records[0].dispatchStartedAt <= records[0].outcomeUnknownAt);
+  assert.ok(records[0].outcomeUnknownAt <= records[0].updatedAt);
+  for (const forbidden of [
+    '/api/v1',
+    'goals',
+    'mode=replace',
+    'private-goal-marker',
+    '987654321.125',
+    '123456789.875',
+  ]) {
+    assert.equal(rawPending.includes(forbidden), false, `pending state must not persist ${forbidden}`);
+  }
+
+  const recovered = await mutateFinance('/goals?mode=replace', { body });
+  assert.equal(recovered.ok, true);
+  assert.deepEqual((await recovered.json()).data, { recovered: true });
+  assert.equal(mutationKeys.length, 1);
+  assert.deepEqual(statusKeys, [mutationKeys[0], mutationKeys[0]]);
+  assert.deepEqual(
+    JSON.parse(storage.getItem(BROWSER_OPERATION_STORAGE_KEY)).operations,
+    {},
+  );
+
+  await mutateFinance('/goals?mode=replace', { body });
+  assert.equal(mutationKeys.length, 2);
+  assert.notEqual(mutationKeys[1], mutationKeys[0]);
+  assert.equal(statusKeys.length, 2);
+});
+
+test('browser admission and capacity responses preserve a prepared key for user retry', async (t) => {
+  for (const fixture of [
+    {
+      name: 'journal capacity 503',
+      status: 503,
+      code: 'OPERATION_JOURNAL_CAPACITY_EXCEEDED',
+      message: 'Operation journal nonterminal capacity reached',
+    },
+    {
+      name: 'admission 429 without key-reuse metadata',
+      status: 429,
+      code: 'ADMISSION_OVERLOADED',
+      message: 'Too many requests',
+    },
+  ]) {
+    await t.test(fixture.name, async () => {
+      const { storage } = installBrowserGlobals();
+      const {
+        BROWSER_OPERATION_STORAGE_KEY,
+        mutateFinance,
+      } = await import(pathToFileURL(path.join(publicRoot, 'js/api.js')).href);
+      const mutationKeys = [];
+      let statusPolls = 0;
+      globalThis.fetch = async (url, options = {}) => {
+        if (url === '/api/v1/refresh') {
+          const key = options.headers['Idempotency-Key'];
+          mutationKeys.push(key);
+          if (mutationKeys.length === 1) {
+            return jsonResponse(fixture.status, {
+              error: fixture.message,
+              code: fixture.code,
+            });
+          }
+          return jsonResponse(200, {
+            data: { refreshed: true },
+            operation: { key, replayed: false },
+          });
+        }
+        if (url.startsWith('/api/v1/operations/')) {
+          statusPolls += 1;
+          return jsonResponse(404, {
+            error: 'Operation not found',
+            code: 'OPERATION_NOT_FOUND',
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      };
+
+      await assert.rejects(
+        mutateFinance('/refresh'),
+        (error) => error.status === fixture.status
+          && error.code === fixture.code
+          && error.requiresIdempotencyKeyReuse === true,
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(mutationKeys.length, 1);
+      assert.equal(statusPolls, 0);
+
+      const records = Object.values(
+        JSON.parse(storage.getItem(BROWSER_OPERATION_STORAGE_KEY)).operations,
+      );
+      assert.equal(records.length, 1);
+      assert.equal(records[0].state, 'prepared');
+      assert.equal(records[0].key, mutationKeys[0]);
+      assert.equal(Object.hasOwn(records[0], 'dispatchStartedAt'), false);
+      assert.equal(Object.hasOwn(records[0], 'outcomeUnknownAt'), false);
+
+      const retried = await mutateFinance('/refresh');
+      assert.equal(retried.ok, true);
+      assert.equal(mutationKeys.length, 2);
+      assert.equal(mutationKeys[1], mutationKeys[0]);
+      assert.equal(statusPolls, 0);
+      assert.deepEqual(
+        JSON.parse(storage.getItem(BROWSER_OPERATION_STORAGE_KEY)).operations,
+        {},
+      );
+    });
+  }
+});
+
+test('malformed 503 remains uncertain and is never treated as safe admission rejection', async () => {
+  const { storage } = installBrowserGlobals();
+  const {
+    BROWSER_OPERATION_STORAGE_KEY,
+    mutateFinance,
+  } = await import(pathToFileURL(path.join(publicRoot, 'js/api.js')).href);
+  let mutationCalls = 0;
+  let statusPolls = 0;
+  globalThis.fetch = async (url) => {
+    if (url === '/api/v1/refresh') {
+      mutationCalls += 1;
+      return jsonResponse(503, { error: 'Malformed service response without a code' });
+    }
+    if (url.startsWith('/api/v1/operations/')) {
+      statusPolls += 1;
+      const key = decodeURIComponent(url.slice('/api/v1/operations/'.length));
+      return jsonResponse(200, {
+        data: { key, status: 'started', phase: 'started', outcome: 'unknown' },
+      });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  await assert.rejects(mutateFinance('/refresh'), (error) => error.code === 'OUTCOME_UNKNOWN');
+  assert.equal(mutationCalls, 1);
+  assert.equal(statusPolls, 1);
+  const records = Object.values(
+    JSON.parse(storage.getItem(BROWSER_OPERATION_STORAGE_KEY)).operations,
+  );
+  assert.equal(records.length, 1);
+  assert.equal(records[0].state, 'outcome_unknown');
+});
+
+test('browser operation lifecycle clears a failed terminal status and returns its envelope error', async () => {
+  const { storage } = installBrowserGlobals();
+  const {
+    BROWSER_OPERATION_STORAGE_KEY,
+    mutateFinance,
+  } = await import(pathToFileURL(path.join(publicRoot, 'js/api.js')).href);
+  let mutationCalls = 0;
+  globalThis.fetch = async (url, options = {}) => {
+    if (url === '/api/v1/goals') {
+      mutationCalls += 1;
+      return jsonResponse(409, {
+        error: 'The request outcome is unknown',
+        code: 'OUTCOME_UNKNOWN',
+      });
+    }
+    if (url.startsWith('/api/v1/operations/')) {
+      const key = decodeURIComponent(url.slice('/api/v1/operations/'.length));
+      assert.equal(key.length > 0, true);
+      return jsonResponse(200, {
+        data: {
+          key,
+          status: 'failed',
+          phase: 'failed',
+          outcome: 'failed',
+          error: {
+            status: 422,
+            code: 'INVALID_GOAL',
+            message: 'Goal input is invalid',
+          },
+        },
+      });
+    }
+    throw new Error(`Unexpected request: ${url} ${options.method || 'GET'}`);
+  };
+
+  await assert.rejects(
+    mutateFinance('/goals', { body: { name: 'invalid', target: -1 } }),
+    (error) => error.status === 422
+      && error.code === 'INVALID_GOAL'
+      && error.message === 'Goal input is invalid',
+  );
+  assert.equal(mutationCalls, 1);
+  assert.deepEqual(
+    JSON.parse(storage.getItem(BROWSER_OPERATION_STORAGE_KEY)).operations,
+    {},
+  );
+});
+
+test('unknown operation status retains one key and never automatically replays the write', async () => {
+  const { storage } = installBrowserGlobals();
+  const {
+    BROWSER_OPERATION_STORAGE_KEY,
+    mutateFinance,
+  } = await import(pathToFileURL(path.join(publicRoot, 'js/api.js')).href);
+  const statusKeys = [];
+  let mutationCalls = 0;
+  globalThis.fetch = async (url, options = {}) => {
+    if (url === '/api/v1/refresh') {
+      mutationCalls += 1;
+      return jsonResponse(409, {
+        error: 'The request outcome is unknown',
+        code: 'OUTCOME_UNKNOWN',
+      });
+    }
+    if (url.startsWith('/api/v1/operations/')) {
+      const key = decodeURIComponent(url.slice('/api/v1/operations/'.length));
+      statusKeys.push(key);
+      if (statusKeys.length === 1) {
+        return jsonResponse(200, {
+          data: { key, status: 'started', phase: 'sync_unknown', outcome: 'unknown' },
+        });
+      }
+      return jsonResponse(404, {
+        error: 'Operation not found',
+        code: 'OPERATION_NOT_FOUND',
+      });
+    }
+    throw new Error(`Unexpected request: ${url} ${options.method || 'GET'}`);
+  };
+
+  await assert.rejects(mutateFinance('/refresh'), (error) => error.code === 'OUTCOME_UNKNOWN');
+  await assert.rejects(mutateFinance('/refresh'), (error) => error.code === 'OUTCOME_UNKNOWN');
+  assert.equal(mutationCalls, 1);
+  assert.equal(statusKeys.length, 2);
+  assert.equal(statusKeys[1], statusKeys[0]);
+  const records = Object.values(
+    JSON.parse(storage.getItem(BROWSER_OPERATION_STORAGE_KEY)).operations,
+  );
+  assert.equal(records.length, 1);
+  assert.equal(records[0].key, statusKeys[0]);
+  assert.equal(records[0].state, 'outcome_unknown');
+});
+
+test('goal and refresh callers keep UI state on terminal and unresolved mutation failures', async () => {
+  let globals = installBrowserGlobals();
+  globals.elements.set('goalsCard', createContainer('div', 'goalsCard'));
+  globals.elements.set('goalModal', createElement('div', 'goalModal'));
+  globals.elements.get('goalModal').classList.add('open');
+  for (const id of ['goalId', 'goalName', 'goalTarget', 'goalCurrent', 'goalDeadline', 'goalAccount']) {
+    globals.elements.set(id, createElement('input', id));
+  }
+  globals.elements.get('goalName').value = 'Emergency';
+  globals.elements.get('goalTarget').value = '1000';
+  globals.elements.get('goalCurrent').value = '100';
+  let goalLoads = 0;
+  globalThis.fetch = async (url) => {
+    if (url === '/api/v1/goals') {
+      return jsonResponse(422, {
+        error: 'Goal input is invalid',
+        code: 'INVALID_GOAL',
+      });
+    }
+    if (url === '/api/goals') {
+      goalLoads += 1;
+      return jsonResponse(200, []);
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  const { submitGoal } = await import(pathToFileURL(path.join(publicRoot, 'js/render/goals.js')).href);
+  await assert.rejects(submitGoal(), (error) => error.code === 'INVALID_GOAL');
+  assert.equal(globals.elements.get('goalModal').classList.contains('open'), true);
+  assert.equal(goalLoads, 0);
+  assert.match(globals.alerts[0], /Goal update failed: Goal input is invalid/);
+
+  globals = installBrowserGlobals();
+  let statusKey;
+  globalThis.fetch = async (url, options = {}) => {
+    if (url === '/api/v1/refresh') {
+      statusKey = options.headers['Idempotency-Key'];
+      throw new Error('response lost');
+    }
+    if (url.startsWith('/api/v1/operations/')) {
+      assert.equal(decodeURIComponent(url.slice('/api/v1/operations/'.length)), statusKey);
+      return jsonResponse(200, {
+        data: { key: statusKey, status: 'started', phase: 'started', outcome: 'unknown' },
+      });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const { refreshData } = await import(pathToFileURL(path.join(publicRoot, 'js/api.js')).href);
+  await assert.rejects(refreshData(), (error) => error.code === 'OUTCOME_UNKNOWN');
+  assert.equal(globals.reloads(), 0);
+});
+
+test('recurring caller does not refresh cards after an unresolved write', async () => {
+  const { alerts, elements } = installBrowserGlobals();
+  const recurringCard = createContainer('div', 'recurringCard');
+  elements.set('recurringCard', recurringCard);
+  elements.set('subSummary', createElement('div', 'subSummary'));
+  let recurringLoads = 0;
+  let billLoads = 0;
+  let resolveMutation;
+  const mutationStarted = new Promise((resolve) => {
+    resolveMutation = resolve;
+  });
+  globalThis.fetch = async (url) => {
+    if (url === '/api/recurring') {
+      recurringLoads += 1;
+      return jsonResponse(200, {
+        count: 1,
+        activeCount: 1,
+        monthlyTotal: 10,
+        annualTotal: 120,
+        items: [{
+          key: 'coffee',
+          payee: 'Coffee',
+          category: 'Food',
+          cadence: 'monthly',
+          amount: 10,
+          status: 'active',
+          occurrences: 2,
+        }],
+      });
+    }
+    if (url === '/api/bills') {
+      billLoads += 1;
+      return jsonResponse(200, { count: 0, bills: [] });
+    }
+    if (url === '/api/v1/recurring/coffee/override') {
+      resolveMutation();
+      return jsonResponse(409, {
+        error: 'The request outcome is unknown',
+        code: 'OUTCOME_UNKNOWN',
+      });
+    }
+    if (url.startsWith('/api/v1/operations/')) {
+      const key = decodeURIComponent(url.slice('/api/v1/operations/'.length));
+      return jsonResponse(200, {
+        data: { key, status: 'started', phase: 'local_applied', outcome: 'unknown' },
+      });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  const { loadRecurring } = await import(pathToFileURL(path.join(publicRoot, 'js/render/recurring.js')).href);
+  await loadRecurring();
+  const [cancelButton] = recurringCard.querySelectorAll('[data-sub-key]');
+  cancelButton.click();
+  await mutationStarted;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(recurringLoads, 1);
+  assert.equal(billLoads, 0);
+  assert.match(alerts[0], /Recurring update failed: Request outcome is unknown/);
 });
 
 test('browser renderers emit semantic progress, palette classes, and hidden controls', async () => {

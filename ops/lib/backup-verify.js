@@ -21,13 +21,135 @@ const STATE_SCHEMA_VERSION = 1;
 const SIDECAR_FILES = sidecarFilenames();
 const LEGACY_EMBEDDED_MANIFEST = '.backup-manifest.json';
 const LEGACY_SIDECAR_ONLY_FIELDS = Object.freeze([]);
+const FILE_HASH_CHUNK_BYTES = 1024 * 1024;
 
 function sha256Buffer(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
-function sha256File(file) {
-  return sha256Buffer(fs.readFileSync(file));
+function hashOpenFlags(constants = fs.constants) {
+  if (!constants.O_NOFOLLOW) {
+    throw new Error('descriptor hashing requires O_NOFOLLOW support on this platform');
+  }
+  return constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK || 0);
+}
+
+function assertHashableRegularFile(stat, resolved) {
+  if (stat.isSymbolicLink()) {
+    throw new Error(`refusing to hash symbolic link: ${resolved}`);
+  }
+  if (!stat.isFile()) {
+    throw new Error(`hash target must be a regular file: ${resolved}`);
+  }
+  if (!Number.isSafeInteger(stat.size) || stat.size < 0) {
+    throw new Error(`hash target size is out of bounds: ${resolved}`);
+  }
+}
+
+function sameStatField(left, right, field) {
+  return left[field] === right[field];
+}
+
+function assertHashIdentityStable(left, right, message) {
+  for (const field of ['dev', 'ino', 'size']) {
+    if (!sameStatField(left, right, field)) throw new Error(message);
+  }
+}
+
+function assertHashMetadataStable(left, right, message) {
+  for (const field of ['mode', 'nlink', 'uid', 'gid', 'mtimeMs', 'ctimeMs']) {
+    if (!sameStatField(left, right, field)) throw new Error(message);
+  }
+}
+
+function closeHashDescriptor(closeSync, descriptor) {
+  if (descriptor === undefined) return;
+  try {
+    closeSync(descriptor);
+  } catch {
+    // Preserve the primary trust failure.
+  }
+}
+
+function updateHashFromFile(file, hash, dependencies = {}) {
+  if (!hash || typeof hash.update !== 'function') {
+    throw new Error('descriptor hashing requires a hash with update()');
+  }
+  const lstatSync = dependencies.lstatSync || fs.lstatSync;
+  const openSync = dependencies.openSync || fs.openSync;
+  const fstatSync = dependencies.fstatSync || fs.fstatSync;
+  const readSync = dependencies.readSync || fs.readSync;
+  const closeSync = dependencies.closeSync || fs.closeSync;
+  const constants = dependencies.constants || fs.constants;
+  const resolved = path.resolve(file);
+
+  let descriptor;
+  try {
+    try {
+      descriptor = openSync(resolved, hashOpenFlags(constants));
+    } catch (error) {
+      if (error.code === 'ELOOP') {
+        throw new Error(`refusing to follow symbolic link while hashing: ${resolved}`);
+      }
+      if (error.code === 'ENOENT') throw new Error(`hash target not found: ${resolved}`);
+      throw error;
+    }
+    const opened = fstatSync(descriptor);
+    assertHashableRegularFile(opened, resolved);
+
+    const buffer = Buffer.allocUnsafe(FILE_HASH_CHUNK_BYTES);
+    let position = 0;
+    while (position < opened.size) {
+      const requested = Math.min(buffer.length, opened.size - position);
+      const bytesRead = readSync(descriptor, buffer, 0, requested, position);
+      if (!Number.isInteger(bytesRead) || bytesRead <= 0 || bytesRead > requested) {
+        throw new Error(`hash target size changed while it was being read: ${resolved}`);
+      }
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+
+    const afterDescriptor = fstatSync(descriptor);
+    assertHashableRegularFile(afterDescriptor, resolved);
+    assertHashIdentityStable(opened, afterDescriptor, `hash target size changed while it was being read: ${resolved}`);
+    assertHashMetadataStable(opened, afterDescriptor, `hash target metadata changed while it was being read: ${resolved}`);
+
+    let afterPath;
+    try {
+      afterPath = lstatSync(resolved);
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        throw new Error(`hash target path changed while it was being read: ${resolved}`);
+      }
+      throw error;
+    }
+    assertHashableRegularFile(afterPath, resolved);
+    assertHashIdentityStable(afterDescriptor, afterPath, `hash target path changed while it was being read: ${resolved}`);
+    assertHashMetadataStable(afterDescriptor, afterPath, `hash target path metadata changed while it was being read: ${resolved}`);
+
+    closeHashDescriptor(closeSync, descriptor);
+    descriptor = undefined;
+    return { resolved, stat: afterDescriptor };
+  } catch (error) {
+    closeHashDescriptor(closeSync, descriptor);
+    descriptor = undefined;
+    throw error;
+  }
+}
+
+function hashFileIncrementally(file, dependencies = {}) {
+  const createHash = dependencies.createHash || crypto.createHash;
+  const hash = createHash('sha256');
+  const { resolved, stat } = updateHashFromFile(file, hash, dependencies);
+  return {
+    resolved,
+    stat,
+    sha256: hash.digest('hex'),
+  };
+}
+
+function sha256File(file, dependencies = {}) {
+  return hashFileIncrementally(file, dependencies).sha256;
 }
 
 function gitCommit() {
@@ -344,11 +466,15 @@ module.exports = {
   STATE_SCHEMA_VERSION,
   LEGACY_EMBEDDED_MANIFEST,
   LEGACY_SIDECAR_ONLY_FIELDS,
+  FILE_HASH_CHUNK_BYTES,
   buildManifest,
   validateSidecar,
   validateReceiptReferences,
   verifyArchive,
+  hashFileIncrementally,
+  hashOpenFlags,
   sha256File,
+  updateHashFromFile,
   assertLegacyArchivePreflight,
   assertLegacyManifestMatchesArchive,
   legacyExpectedMembers,

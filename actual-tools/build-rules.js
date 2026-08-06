@@ -8,6 +8,7 @@ const {
   loadBuildRulesConfig,
 } = require('./lib/operator-regex-config');
 const CONFIRM = process.env.CONFIRM === '1';
+const HISTORY_PAGE_SIZE = 100000;
 
 // Payees we never want to auto-categorize (money movement / ambiguous)
 const SKIP_GROUPS = new Set(['Money Movement', 'Income']);
@@ -41,25 +42,35 @@ const SKIP_GROUPS = new Set(['Money Movement', 'Income']);
   const rulePayees = new Set();
   for (const r of rules) for (const c of (r.conditions || [])) if (c.field === 'payee') rulePayees.add(c.value);
 
-  // pull all categorized, non-split, non-transfer txns
-  const { data } = await runQuery(
-    q('transactions')
-      .filter({ category: { $ne: null }, is_parent: false, transfer_id: null })
-      .select(['payee', 'category'])
-      .options({ splits: 'inline' })
-      .limit(100000)
-  );
-
-  // tally category usage per payee
+  // Tally all categorized, non-split, non-transfer transactions. The Actual
+  // query result is bounded, so a full first page is not evidence of completion.
+  // A unique ordering plus offset makes every subsequent page deterministic.
   const tally = {}; // payeeId -> {catId: count, total}
-  for (const t of data) {
-    if (!t.payee || !t.category) continue;
-    if (isTransfer[t.payee]) continue;
-    const info = catInfo[t.category];
-    if (!info || SKIP_GROUPS.has(info.group)) continue;
-    tally[t.payee] = tally[t.payee] || { counts: {}, total: 0 };
-    tally[t.payee].counts[t.category] = (tally[t.payee].counts[t.category] || 0) + 1;
-    tally[t.payee].total++;
+  let historyRows = 0;
+  for (let offset = 0; ; offset += HISTORY_PAGE_SIZE) {
+    const result = await runQuery(
+      q('transactions')
+        .filter({ category: { $ne: null }, is_parent: false, transfer_id: null })
+        .select(['id', 'payee', 'category'])
+        .orderBy({ id: 'asc' })
+        .options({ splits: 'inline' })
+        .limit(HISTORY_PAGE_SIZE)
+        .offset(offset)
+    );
+    if (!Array.isArray(result?.data) || result.data.length > HISTORY_PAGE_SIZE) {
+      throw new Error('Historical transaction scan was incomplete');
+    }
+    for (const t of result.data) {
+      if (!t.payee || !t.category) continue;
+      if (isTransfer[t.payee]) continue;
+      const info = catInfo[t.category];
+      if (!info || SKIP_GROUPS.has(info.group)) continue;
+      tally[t.payee] = tally[t.payee] || { counts: {}, total: 0 };
+      tally[t.payee].counts[t.category] = (tally[t.payee].counts[t.category] || 0) + 1;
+      tally[t.payee].total++;
+    }
+    historyRows += result.data.length;
+    if (result.data.length < HISTORY_PAGE_SIZE) break;
   }
 
   // decide dominant category per payee: >=2 txns and >=80% agreement
@@ -76,6 +87,7 @@ const SKIP_GROUPS = new Set(['Money Movement', 'Income']);
   }
   proposals.sort((a, b) => b.total - a.total);
 
+  console.log(`Scanned complete paginated history: ${historyRows} transaction(s).`);
   console.log(`Proposed ${proposals.length} payee->category rules (>=2 txns, >=80% agreement, excl. transfers/money-movement/income):\n`);
   for (const p of proposals) {
     console.log(`  ${p.name.padEnd(34)} -> ${p.catName.padEnd(13)} (${p.n}/${p.total})`);

@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 const { RequestValidationError } = require('../lib/errors');
 const { parse, schemas } = require('../lib/validation');
 const {
@@ -10,6 +12,42 @@ const {
   stripBase64Envelope,
 } = require('../lib/receipt-limits');
 const { PayloadTooLargeError } = require('../lib/bounded-json');
+const { startEphemeralDashboardServer } = require('./helpers/ephemeral-dashboard-server');
+
+const BOUNDARY_PRELOAD = `
+  const path = require('path');
+  const root = process.env.TEST_DASHBOARD_ROOT;
+  const dataPath = require.resolve(path.join(root, 'dataModule.js'));
+  const real = require(dataPath);
+  require.cache[dataPath] = {
+    id: dataPath,
+    filename: dataPath,
+    loaded: true,
+    exports: new Proxy(real, {
+      get(target, property) {
+        if (property === 'initApi') return async () => ({ ok: true });
+        if (property === 'shutdownApi') return async () => ({ ok: true });
+        if (property === 'getHealth') return () => ({ ready: true });
+        return target[property];
+      },
+    }),
+    children: [],
+    paths: [],
+  };
+`;
+
+async function postRaw(base, pathname, key, body) {
+  const response = await fetch(`${base}${pathname}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': key,
+      'X-Finance-Token': 'test-api-token',
+    },
+    body,
+  });
+  return { response, body: await response.json() };
+}
 
 test('encoded max uses 4 * ceil(decoded/3)', () => {
   assert.equal(RECEIPT_MAX_BASE64_CHARS, Math.ceil(RECEIPT_MAX_DECODED_BYTES / 3) * 4);
@@ -104,4 +142,45 @@ test('real dataModule money path rejects unknown owes-config fields', () => {
     () => parse(schemas.owesConfig, { expected: { trip: { alex: 100 } }, surprise: true }),
     RequestValidationError,
   );
+});
+
+test('pre-body admission preserves parser versus journaled validation boundaries', async (t) => {
+  const { base, dir } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-pre-body-validation-boundary-',
+    preloadBody: BOUNDARY_PRELOAD,
+  });
+  const malformedKey = 'boundary-malformed-json';
+  const validationKey = 'boundary-schema-invalid';
+
+  const malformed = await postRaw(base, '/api/v1/budgets', malformedKey, '{');
+  assert.equal(malformed.response.status, 400);
+  assert.equal(malformed.body.code, 'INVALID_REQUEST');
+
+  const invalidBody = JSON.stringify({
+    month: 'not-a-month',
+    categoryId: 'category-id',
+    amount: 10,
+  });
+  const invalid = await postRaw(base, '/api/v1/budgets', validationKey, invalidBody);
+  assert.equal(invalid.response.status, 400);
+  assert.equal(invalid.body.code, 'INVALID_REQUEST');
+  const replay = await postRaw(base, '/api/v1/budgets', validationKey, invalidBody);
+  assert.equal(replay.response.status, 400);
+  assert.equal(replay.body.code, 'INVALID_REQUEST');
+
+  const healthResponse = await fetch(`${base}/api/v1/ping`, {
+    headers: { 'X-Finance-Token': 'test-api-token' },
+  });
+  const health = await healthResponse.json();
+  assert.equal(healthResponse.status, 200);
+  assert.equal(health.data.requestAdmission.lanes.mutation.globalPending, 0);
+  assert.equal(health.data.requestAdmission.lanes.mutation.globalRunning, 0);
+  assert.equal(health.data.requestAdmission.lanes.mutation.waiters, 0);
+
+  const journalPath = path.join(dir, 'operation-journal.json');
+  const operations = JSON.parse(fs.readFileSync(journalPath, 'utf8')).operations;
+  assert.equal(operations[malformedKey], undefined);
+  assert.equal(operations[validationKey].status, 'failed');
+  assert.equal(operations[validationKey].phase, 'failed');
+  assert.equal(operations[validationKey].knownBeforeApply, true);
 });

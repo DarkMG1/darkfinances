@@ -2,16 +2,21 @@ appId: ${MAESTRO_APP_ID}
 ---
 - launchApp:
     clearState: true
+    clearKeychain: true
 - assertVisible:
     id: onboarding-screen
 - tapOn:
     id: onboarding-demo-button
 - assertVisible:
     id: home-screen
-- openLink: darkfinances:///review
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///review
+- runFlow:
+    when:
+      visible: 'Open in ["“]Finances["”].*'
+    commands:
+      - tapOn:
+          text: Open
 - assertVisible:
     id: review-screen
 - assertVisible:
@@ -24,10 +29,14 @@ appId: ${MAESTRO_APP_ID}
     id: review-task-review-large
 - assertVisible:
     id: transaction-detail-screen
-- openLink: darkfinances:///reconcile
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///reconcile
+- runFlow:
+    when:
+      visible: 'Open in ["“]Finances["”].*'
+    commands:
+      - tapOn:
+          text: Open
 - assertVisible:
     id: reconcile-screen
 - assertVisible:
@@ -40,10 +49,14 @@ appId: ${MAESTRO_APP_ID}
     id: reconcile-prev-month
 - assertVisible:
     id: reconcile-screen
-- openLink: darkfinances:///reimbursement
-- tapOn:
-    text: Open
-    optional: true
+- openLink:
+    link: darkfinances:///reimbursement
+- runFlow:
+    when:
+      visible: 'Open in ["“]Finances["”].*'
+    commands:
+      - tapOn:
+          text: Open
 - assertVisible:
     id: reimbursement-screen
 - assertVisible:

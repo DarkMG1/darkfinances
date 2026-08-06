@@ -221,9 +221,10 @@ Apply only after reviewing every proposal:
 CONFIRM=1 bash run.sh build-rules.js
 ```
 
-The tool requires at least two categorized observations and at least 80% agreement. Customize exclusions
-in private `build-rules-config.json`. Confirmed rule creation is synced before success is reported; API,
-sync, or shutdown failures exit nonzero.
+The tool requires at least two categorized observations and at least 80% agreement. It scans categorized
+history in deterministic, `id`-ordered pages; a full 100,000-row page is not treated as complete.
+Customize exclusions in private `build-rules-config.json`. Confirmed rule creation is synced before
+success is reported; API, sync, or shutdown failures exit nonzero.
 
 Operator regex configuration (`build-rules-config.json` skip patterns and
 `collection-rules.json` debtor patterns) is validated before any Actual or Splitwise calls:
@@ -254,10 +255,13 @@ Apply:
 COLLECTION_EVENT=trip-2026 CONFIRM=1 bash run.sh event-collect.js
 ```
 
-Transactions outside configured amount ratios are reported for manual review, not changed.
-In confirmed mode, each tagged transaction is synced as a resume checkpoint. If a later item fails, the
-command exits nonzero; rerunning safely skips the already-tagged checkpoints and resumes the remaining
-transactions.
+Collection rules require a canonical `YYYY-MM-DD` start, an `ev-<slug>` tag, and finite nonnegative
+amount ratios with `minRatio <= maxRatio`. A payment must match exactly one configured debtor. Payments
+with no identity match, overlapping identity matches, or amounts outside configured ratios are reported
+for manual review and are not changed; ambiguous existing tagged payments are not credited to any
+debtor. In confirmed mode, each tagged transaction is synced as a resume checkpoint. If a later item
+fails, the command exits nonzero; rerunning safely skips the already-tagged checkpoints and resumes the
+remaining transactions.
 
 ## Safety model
 

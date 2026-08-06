@@ -1,4 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { Platform } from 'react-native';
 import {
   clearFinanceOperationReconciliationDiagnostic,
   prepareFinanceOperationProfilePurge,
@@ -28,7 +29,9 @@ export async function purgeFinanceProfile(
   scope: string | undefined,
   operationScope: string | null,
 ): Promise<void> {
-  await purgeReceiptImageCaches();
+  // expo-image reports cache clearing as unsupported on web. Receipt sources
+  // remain isolated there by server scope plus monotonic profile generation.
+  await purgeReceiptImageCaches(undefined, { allowUnsupported: Platform.OS === 'web' });
   prepareFinanceOperationProfilePurge(operationScope);
   purgeMutationFormDrafts(operationScope ?? undefined);
   purgeProfileGeneration(scope);
