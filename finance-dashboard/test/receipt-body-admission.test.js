@@ -288,6 +288,23 @@ test('live API authentication, OPTIONS, and passkey rate checks precede body buf
   assert.deepEqual(rateLimited.body, { error: 'Too many requests' });
 });
 
+test('live API authorization attempts are rate-limited before body buffering', async (t) => {
+  const { base } = await startEphemeralDashboardServer(t, {
+    tempPrefix: 'darkfinances-live-api-auth-rate-',
+  });
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    const response = await fetch(`${base}/api/v1/refresh`, { method: 'POST' });
+    assert.equal(response.status, 401, `authorization attempt ${attempt + 1}`);
+    await response.arrayBuffer();
+  }
+  const rateLimited = await incompleteBodyResponse(base, '/api/v1/refresh', {
+    declaredBytes: DEFAULT_MAX_JSON_BYTES,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  assert.equal(rateLimited.response.statusCode, 429);
+  assert.equal(rateLimited.body.code, 'RATE_LIMITED');
+});
+
 test('authenticated large receipt buffering waits behind bounded pre-body admission', async (t) => {
   const { base, markerPath } = await startEphemeralDashboardServer(t, {
     tempPrefix: 'darkfinances-receipt-pre-body-gate-',

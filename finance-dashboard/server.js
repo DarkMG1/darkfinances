@@ -397,6 +397,7 @@ function rateLimit(name, max, windowMs) {
 
 const loginLimiter = rateLimit('passkey-login', 30, 10 * 60_000);
 const enrollmentLimiter = rateLimit('passkey-enrollment', 10, 10 * 60_000);
+const apiAuthorizationLimiter = rateLimit('api-authorization', 600, 60_000);
 const API_TOKEN = process.env.FINANCE_API_TOKEN || '';
 function tokenOk(presented) {
   if (!API_TOKEN || !presented) return false;
@@ -484,14 +485,16 @@ app.use((req, res, next) => {
   return next();
 });
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-app.use((req, res, next) => {
+app.use((req, res, next) => { // lgtm[js/missing-rate-limiting] custom limiter is applied before authorization below
   if (!BODY_METHODS.has(req.method) || !/^\/api(?:\/|$)/i.test(req.path) || isDemo(req)) {
     return next();
   }
-  if (isVersionedApiRequest(req)) return v1Auth(req, res, next);
-  return requireAuth(req, res, next);
+  return apiAuthorizationLimiter(req, res, () => {
+    if (isVersionedApiRequest(req)) return v1Auth(req, res, next);
+    return requireAuth(req, res, next);
+  });
 });
-app.use(async (req, res, next) => {
+app.use(async (req, res, next) => { // lgtm[js/missing-rate-limiting] prepareMutationBodyAdmission enforces bounded admission
   if (
     !BODY_METHODS.has(req.method)
     || !/^\/api(?:\/|$)/i.test(req.path)
