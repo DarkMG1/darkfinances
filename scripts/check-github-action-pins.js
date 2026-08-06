@@ -174,7 +174,8 @@ function defaultLsRemote(repoUrl, ref) {
 
 function verifyUpstreamPins(manifest, lsRemote = defaultLsRemote) {
   for (const entry of manifest.values()) {
-    const repoUrl = `https://github.com/${entry.id}.git`;
+    const repositoryId = entry.id.split('/').slice(0, 2).join('/');
+    const repoUrl = `https://github.com/${repositoryId}.git`;
     const tagRef = `refs/tags/${entry.releaseTag}`;
     let remoteSha = null;
     try {
