@@ -396,8 +396,27 @@ function rateLimit(name, max, windowMs) {
   };
 }
 
-const loginLimiter = rateLimit('passkey-login', 30, 10 * 60_000);
-const enrollmentLimiter = rateLimit('passkey-enrollment', 10, 10 * 60_000);
+function createPasskeyRateLimiter(limit, windowMs) {
+  const appliedMarker = Symbol('passkey-rate-limit-applied');
+  return createExpressRateLimit({
+    windowMs,
+    limit,
+    standardHeaders: false,
+    legacyHeaders: false,
+    skip: (req) => {
+      if (req.method !== 'POST') return true;
+      if (req[appliedMarker]) return true;
+      Object.defineProperty(req, appliedMarker, { value: true });
+      return false;
+    },
+    handler: (_req, res, _next, options) => {
+      res.set('Retry-After', String(Math.max(1, Math.ceil(options.windowMs / 1000))));
+      return res.status(429).json({ error: 'Too many requests' });
+    },
+  });
+}
+const loginLimiter = createPasskeyRateLimiter(30, 10 * 60_000);
+const enrollmentLimiter = createPasskeyRateLimiter(10, 10 * 60_000);
 const API_TOKEN = process.env.FINANCE_API_TOKEN || '';
 function tokenOk(presented) {
   if (!API_TOKEN || !presented) return false;
@@ -474,16 +493,11 @@ app.use((req, res, next) => {
 app.use((req, res, next) => requestClaimsDemo(req)
   ? rateLimit('demo', 240, 60_000)(req, res, next)
   : next());
-app.use((req, res, next) => {
-  if (req.method !== 'POST') return next();
-  if (/^\/auth\/login\/(?:start|finish)\/?$/i.test(req.path)) {
-    return loginLimiter(req, res, next);
-  }
-  if (/^\/auth\/(?:enroll\/authorize|register\/(?:start|finish))\/?$/i.test(req.path)) {
-    return enrollmentLimiter(req, res, next);
-  }
-  return next();
-});
+app.use(['/auth/login/start', '/auth/login/finish'], loginLimiter);
+app.use(
+  ['/auth/enroll/authorize', '/auth/register/start', '/auth/register/finish'],
+  enrollmentLimiter,
+);
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const apiAuthorizationLimiter = createExpressRateLimit({
   windowMs: 60_000,
