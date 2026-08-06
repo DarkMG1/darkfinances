@@ -90,6 +90,19 @@ test('all Maestro flows use strict demo bootstrap before deep links', () => {
   }
 });
 
+test('all Maestro flows wait for onboarding through cold Metro startup', () => {
+  const maestroDir = path.join(root, '.maestro');
+  const flows = fs.readdirSync(maestroDir).filter((name) => name.endsWith('.yaml'));
+  const startupWait = /- launchApp:\n    clearState: true\n    clearKeychain: true\n- extendedWaitUntil:\n    visible:\n      id: onboarding-screen\n    timeout: 60000/;
+  const immediateAssertion = /- launchApp:\n    clearState: true\n    clearKeychain: true\n- assertVisible:\n    id: onboarding-screen/;
+
+  for (const name of flows) {
+    const source = fs.readFileSync(path.join(maestroDir, name), 'utf8');
+    assert.match(source, startupWait, `${name} must tolerate a cold Metro bundle before onboarding`);
+    assert.doesNotMatch(source, immediateAssertion, `${name} must not race Metro with an immediate assertion`);
+  }
+});
+
 test('Maestro deep-link prompt guards tolerate iOS quote typography and require Open taps', () => {
   const maestroDir = path.join(root, '.maestro');
   const flows = fs.readdirSync(maestroDir).filter((name) => name.endsWith('.yaml'));

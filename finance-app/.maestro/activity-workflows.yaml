@@ -3,8 +3,10 @@ appId: ${MAESTRO_APP_ID}
 - launchApp:
     clearState: true
     clearKeychain: true
-- assertVisible:
-    id: onboarding-screen
+- extendedWaitUntil:
+    visible:
+      id: onboarding-screen
+    timeout: 60000
 - tapOn:
     id: onboarding-demo-button
 - assertVisible:

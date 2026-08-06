@@ -24,7 +24,7 @@ grouping, screenshots, and troubleshooting.
 
 When adding a flow:
 
-1. Launch with both `clearState: true` and `clearKeychain: true` so SecureStore credentials cannot leak between flows.
+1. Launch with both `clearState: true` and `clearKeychain: true` so SecureStore credentials cannot leak between flows, then use `extendedWaitUntil` with a 60-second timeout for `onboarding-screen` so cold Metro bundles cannot race the first assertion.
 2. Use `home-tab`, `spending-tab`, `activity-tab`, and `settings-tab` for top-level navigation.
 3. For an unavoidable nested-route deep link, conditionally handle iOS's `Open in "Finances"` prompt with `runFlow`; the `tapOn: Open` command inside the condition must remain required.
 4. Prefer stable `testID` selectors for other navigation and major controls.
