@@ -215,6 +215,17 @@ test('path-filtered native workflows trigger on supply-chain checker and policy 
   }
 });
 
+test('CodeQL workflow publishes security and quality analysis for pull requests and main', () => {
+  const workflow = readWorkflow('codeql.yml');
+  assert.match(workflow, /push:[\s\S]*branches:[\s\S]*- main/);
+  assert.match(workflow, /pull_request:/);
+  assert.match(workflow, /security-events:\s*write/);
+  assert.match(workflow, /github\/codeql-action\/init@[a-f0-9]{40}/);
+  assert.match(workflow, /github\/codeql-action\/analyze@[a-f0-9]{40}/);
+  assert.match(workflow, /languages:\s*javascript-typescript/);
+  assert.match(workflow, /queries:\s*security-and-quality/);
+});
+
 test('iOS workflows use dynamic simulator, locked expo, metro, DEVICE on Maestro, and GITHUB_PATH wiring', () => {
   for (const [name, testJobName] of [
     ['ios-pr-smoke.yml', 'ios-simulator-maestro'],
