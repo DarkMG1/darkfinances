@@ -32,7 +32,13 @@
       "provenance": "https://github.com/actions/upload-artifact/releases/tag/v4.6.2"
     },
     {
-      "id": "github/codeql-action",
+      "id": "github/codeql-action/analyze",
+      "releaseTag": "v4.37.6",
+      "sha": "5595ccaf912efad79be6eef63a5619ff05969be3",
+      "provenance": "https://github.com/github/codeql-action/releases/tag/v4.37.6"
+    },
+    {
+      "id": "github/codeql-action/init",
       "releaseTag": "v4.37.6",
       "sha": "5595ccaf912efad79be6eef63a5619ff05969be3",
       "provenance": "https://github.com/github/codeql-action/releases/tag/v4.37.6"

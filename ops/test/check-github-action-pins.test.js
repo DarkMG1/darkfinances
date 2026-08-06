@@ -139,10 +139,17 @@ test('verifyUpstreamPins detects manifest/upstream mismatch via DI lsRemote', ()
 
 test('verifyUpstreamPins accepts matching upstream tag refs', () => {
   const manifest = parseManifest(path.join(repositoryRoot, 'ops/toolchain/github-action-pins.json'));
+  const requestedRepos = [];
   assert.doesNotThrow(() => verifyUpstreamPins(manifest, (repoUrl, ref) => {
-    const entry = [...manifest.values()].find((item) => repoUrl.includes(item.id));
+    requestedRepos.push(repoUrl);
+    const entry = [...manifest.values()].find((item) => {
+      const repositoryId = item.id.split('/').slice(0, 2).join('/');
+      return repoUrl.includes(repositoryId);
+    });
     return entry.sha;
   }));
+  assert.ok(requestedRepos.includes('https://github.com/github/codeql-action.git'));
+  assert.equal(requestedRepos.some((repoUrl) => /codeql-action\/(?:init|analyze)\.git/.test(repoUrl)), false);
 });
 
 test('repository workflows contain only manifest-pinned external actions', () => {
