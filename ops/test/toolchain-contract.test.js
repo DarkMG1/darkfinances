@@ -204,6 +204,7 @@ test('repository workflows using npm are fully enumerated for bootstrap enforcem
   assert.deepEqual(workflowFiles.map((file) => path.basename(file)).sort(), [
     'android-compile-smoke.yml',
     'ci.yml',
+    'codeql.yml',
     'ios-pr-smoke.yml',
     'maestro-full-suite.yml',
     'shutdown-stress.yml',
